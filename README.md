@@ -17,9 +17,9 @@ more pythonic.
 - **Customized Models**: Users can access models customized for their specific needs, such as coding assistance, grammar
   correction, and more.
 
-- **OpenAI API**: The structure of APIs that will be provided in up comming version will be OpenAI API like.
+- **OpenAI API**: The structure of APIs that will be provided in upcoming version will be OpenAI API like.
 
-## Installation with Specific Hardware Acceleration (BLAS, CUDA, Metal, etc)
+## Installation with Specific Hardware Acceleration (BLAS, CUDA, Metal, etc.)
 
 > [!TIP]
 > The default behavior for `llama.cpp` installation is to build for CPU only on Linux and Windows and to use
