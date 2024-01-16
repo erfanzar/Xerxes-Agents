@@ -22,3 +22,5 @@ from .gradio import (
     CHAT_MODE,
     PROMPTING_STYLES
 )
+
+__version__ = "0.0.2"

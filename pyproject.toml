@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=46.4.0", "wheel>=0.34.2"]
+requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cLLM-python"
-dynamic = ["version"]
+version = "0.0.2"
 description = "cLLM is an Open-source library that use llama-cpp-python and llama.cpp and provide a Low and High level API and allow developer to be more pythonic."
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,7 +15,6 @@ dependencies = [
     "llama-cpp-python",
     "transformers"
 ]
-version = "0.0.1"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -29,6 +28,9 @@ classifiers = [
 
 [tool.poetry]
 readme = "README.md"
-authors = ["Erfan zare chavoshi"]
+authors = [
+    { name = "Erfan zare chavoshi", email = "erfanzare810@gmail.com" },
+]
 name = "cLLM"
 description = "cLLM is an Open-source library that use llama-cpp-python and llama.cpp and provide a Low and High level API and allow developer to be more pythonic."
+project = { path = "cLLM" }
