@@ -27,10 +27,4 @@ classifiers = [
 
 
 [tool.poetry]
-readme = "README.md"
-authors = [
-    { name = "Erfan zare chavoshi", email = "erfanzare810@gmail.com" },
-]
-name = "cLLM"
-description = "cLLM is an Open-source library that use llama-cpp-python and llama.cpp and provide a Low and High level API and allow developer to be more pythonic."
 project = { path = "cLLM" }
