@@ -1,7 +1,7 @@
 import warnings
 
 try:
-    from .llama_cpp import (
+    from .llama_c import (
         LlamaCPParams as LlamaCPParams,
         LlamaCPPGenerationConfig as LlamaCPPGenerationConfig,
         LlamaCPP as LlamaCPP,
@@ -38,4 +38,4 @@ except ModuleNotFoundError as err:
     warnings.warn(
         f"Couldn't import Gradio package {err}"
     )
-__version__ = "0.0.4"
+__version__ = "0.0.5"
