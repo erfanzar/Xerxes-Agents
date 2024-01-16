@@ -38,7 +38,7 @@ class InferenceSession:
         :param generation_config: Optional[LlamaCPPGenerationConfig]: Set the generation config to none
         :return: The model and the generation config
         """
-        if LlamaCPPGenerationConfig is None:
+        if generation_config is None:
             warnings.warn(
                 "Passing `LlamaCPPGenerationConfig` as None will "
                 "initialize `LlamaCPPGenerationConfig` with default values"
@@ -128,11 +128,31 @@ class InferenceSession:
                 "You can only pass `input_ids` or `prompt` only one of them will be used."
             )
         elif input_ids is None and prompt is not None:
-            for model_response in self.model(
+            if stream:
+                for model_response in self.model(
+                        prompt,
+                        stream=stream,
+                        **generation_kwargs
+                ):
+                    predictions = _InferencePredictions(
+                        **model_response["choices"][0]
+                    )
+                    predictions.text = predictions.text.replace("<0x0A>", "\n")
+                    response = InferenceGenerationOutput(
+                        predictions=predictions,
+                        created=model_response["created"],
+                        model=model_response["model"],
+                        object=model_response["object"],
+                        id=model_response["id"]
+                    )
+                    yield response
+            else:
+                model_response = self.model(
                     prompt,
                     stream=stream,
                     **generation_kwargs
-            ):
+                )
+
                 predictions = _InferencePredictions(
                     **model_response["choices"][0]
                 )
@@ -146,6 +166,7 @@ class InferenceSession:
                 )
                 yield response
         elif input_ids is not None and prompt is None:
+
             for model_response in self.model.generate(
                     input_ids,
                     **generation_kwargs

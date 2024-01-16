@@ -12,7 +12,8 @@ authors = [
     { name = "Erfan Zare Chavoshi", email = "erfanzare810@gmail.com" },
 ]
 dependencies = [
-    "llama-cpp-python"
+    "llama-cpp-python",
+    "transformers"
 ]
 version = "0.0.1"
 requires-python = ">=3.8"

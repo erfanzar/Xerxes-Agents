@@ -14,8 +14,10 @@ from llama_cpp import (
     llama_cpp
 )
 
+from ._utils import BaseCPPClass
 
-class LlamaCPPGenerationConfig:
+
+class LlamaCPPGenerationConfig(BaseCPPClass):
     def __init__(
             self,
             suffix: Optional[str] = None,
@@ -31,7 +33,7 @@ class LlamaCPPGenerationConfig:
             presence_penalty: float = 0.0,
             repeat_penalty: float = 1.1,
             top_k: int = 40,
-            stream: bool = False,
+            stream: bool = True,
             seed: Optional[int] = None,
             tfs_z: float = 1.0,
             mirostat_mode: int = 0,
@@ -42,14 +44,44 @@ class LlamaCPPGenerationConfig:
             grammar: Optional[LlamaGrammar] = None,
             logit_bias: Optional[Dict[str, float]] = None,
     ):
+
+        """
+        The __init__ function is called when the class is instantiated.
+        It sets up the instance of the class, and defines all its attributes.
+
+
+        :param self: Bind the attributes with an object
+        :param suffix: Optional[str]: Add a suffix to the end of the generated text
+        :param max_new_tokens: Optional[int]: Limit the number of tokens that can be generated
+        :param temperature: float: Control the randomness of the output
+        :param top_p: float: Control the diversity of the generated text
+        :param min_p: float: Set the minimum probability of a token to be generated
+        :param typical_p: float: Set the typical probability of a token
+        :param logprobs: Optional[int]: Set the number of log probabilities to be returned
+        :param echo: bool: Determine whether to echo the input text
+        :param stop: Optional[Union[str: Stop the generation process
+        :param List[str]]]: Store the list of strings that are used to stop the generation process
+        :param frequency_penalty: float: Penalize the frequency of a token in the training corpus
+        :param presence_penalty: float: Penalize the presence of a token in the input
+        :param repeat_penalty: float: Penalize the model for repeating words
+        :param top_k: int: Determine the number of tokens to consider when generating the next token
+        :param stream: bool: Determine whether the model should generate text in a streaming fashion
+        :param seed: Optional[int]: Set the random seed for the generation process
+        :param tfs_z: float: Control the z-score threshold for tfs
+        :param mirostat_mode: int: Determine the mode of mirostat
+        :param mirostat_tau: float: Set the temperature of the model
+        :param mirostat_eta: float: Control the rate of decay in the mirostat algorithm
+        :param stopping_criteria: Optional[StoppingCriteriaList]: Determine when to stop generating text
+        :param logits_processor: Optional[LogitsProcessorList]: Specify a list of logits processors
+        :param grammar: Optional[LlamaGrammar]: Pass in a grammar object
+        :param logit_bias: Optional[Dict[str, float]] : Bias the model towards certain tokens
+        :return: An instance of the class
+        """
         if max_new_tokens is None:
             max_new_tokens = -1
             warnings.warn(
                 "`max_new_tokens` will be set to -1 for infinity generation"
             )
-
-        if logprobs is None:
-            logprobs = False
         if stop is None:
             stop = []
 
@@ -80,7 +112,7 @@ class LlamaCPPGenerationConfig:
         self.logit_bias = logit_bias
 
 
-class LlamaCPParams:
+class LlamaCPParams(BaseCPPClass):
     def __init__(
             self,
             model_path: str,
@@ -119,7 +151,6 @@ class LlamaCPParams:
             chat_handler: Optional[llama_chat_format.LlamaChatCompletionHandler] = None,
             verbose: bool = True,
     ):
-
         """
         The __init__ function is called when the class is instantiated.
         It sets up the object with all of its attributes and other components.
@@ -199,7 +230,6 @@ class LlamaCPParams:
         self.verbose = verbose
 
     def init_model(self) -> LlamaCPP:
-
         """
         The init_model function is used to initialize the model.
 
