@@ -15,18 +15,18 @@ try:
         StoppingCriteriaList as StoppingCriteriaList,
         LogitsProcessorList as LogitsProcessorList
     )
-except ModuleNotFoundError:
+except ModuleNotFoundError as err:
     warnings.warn(
-        "Couldn't import LlamaCPP package"
+        f"Couldn't import LlamaCPP package {err}"
     )
 try:
     from .inference import (
         InferenceSession as InferenceSession,
         InferenceGenerationOutput as InferenceGenerationOutput
     )
-except ModuleNotFoundError:
+except ModuleNotFoundError as err:
     warnings.warn(
-        "Couldn't import Inference package"
+        f"Couldn't import Inference package {err}"
     )
 try:
     from .gradio import (
@@ -34,8 +34,8 @@ try:
         CHAT_MODE,
         PROMPTING_STYLES
     )
-except ModuleNotFoundError:
+except ModuleNotFoundError as err:
     warnings.warn(
-        "Couldn't import Gradio package"
+        f"Couldn't import Gradio package {err}"
     )
-__version__ = "0.0.3"
+__version__ = "0.0.4"
