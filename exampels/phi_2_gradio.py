@@ -3,8 +3,8 @@ from src.cLLM.interactors import OpenChatInteract
 from src.cLLM import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig
 from huggingface_hub import hf_hub_download
 
-def launch():
 
+def launch():
     interact = OpenChatInteract(
         user_name="User",
         assistant_name="cLLM-GPT"
@@ -12,7 +12,8 @@ def launch():
 
     params = LlamaCPParams(
         model_path=hf_hub_download(
-
+            "TheBloke/phi-2-GGUF",
+            "phi-2.Q4_K_S.gguf"
         ),
         num_threads=8,
         verbose=False,
@@ -36,11 +37,7 @@ def launch():
         use_prefix_for_interactor=True
     )
 
-    interface.build_chat_interface().launch(
-        share=False,
-        server_name="0.0.0.0",
-        server_port=1818,
-    )
+    interface.build_chat_interface().launch()
 
 
 if __name__ == "__main__":

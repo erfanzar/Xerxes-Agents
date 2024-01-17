@@ -5,7 +5,8 @@ version = "0.0.7"
 
 dependencies = [
     "transformers",
-    "llama-cpp-python"
+    "llama-cpp-python",
+    "termcolor"
 ]
 license = { text = "MIT" }
 authors = [
