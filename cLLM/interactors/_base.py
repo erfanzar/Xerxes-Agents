@@ -1,5 +1,7 @@
-from typing import List, Any, Optional
+import warnings
+from typing import List, Any, Optional, Tuple
 from datetime import datetime
+from ..inference import InferenceSession
 
 
 class BaseInteract:
@@ -8,8 +10,6 @@ class BaseInteract:
             prompter_type: str,
             user_message_token: str,
             assistant_message_token: str,
-            user_prefix: str,
-            assistant_prefix: str,
             end_of_turn_token: Optional[str] = None,
             user_name: Optional[str] = None,
             assistant_name: Optional[str] = None
@@ -22,8 +22,6 @@ class BaseInteract:
         assistant_name = assistant_name or "cLLM"
         self.user_name = user_name
         self.assistant_name = assistant_name
-        self.user_prefix = user_prefix
-        self.assistant_prefix = assistant_prefix
 
     def format_history_prefix(
             self,
@@ -37,7 +35,7 @@ class BaseInteract:
             prompt: str,
             history: list[list[str]],
             system_message: Optional[str],
-            prefix: str
+            prefix: Optional[str]
     ) -> str:
         raise NotImplementedError("NotImplementedYet !")
 
@@ -114,16 +112,53 @@ class BaseInteract:
         )
         return prefix
 
-    def get_stop_signs(self) -> List[str]:
-        raise NotImplementedError("NotImplementedYet !")
-
     def filter_response(
             self,
             response: str,
     ) -> str:
         response = response.replace(
-            self.user_prefix, ""
+            self.user_message_token, ""
         ).replace(
-            self.assistant_prefix, ""
+            self.assistant_message_token, ""
         )
         return response
+
+    def get_stop_signs(self) -> List[str]:
+        return [self.user_message_token, self.end_of_turn_token]
+
+    def basic_generation(
+            self,
+            inference: InferenceSession,
+            user_prompt: str,
+            history: Optional[list[list[str]]] = None,
+            prefix_chat: Optional[str] = None,
+            maximum_generation_depth: int = 3,
+            minimum_generation_tokens: int = 3
+    ) -> Tuple[str, list[list[str]]]:
+        history = history or []
+        model_prompt = self.format_message(
+            prompt=user_prompt,
+            history=history,
+            system_message=None,
+            prefix=prefix_chat
+        )
+
+        def generate_response(depth: int = 0):
+            response = ""
+            for response_byte in inference.generate(
+                    prompt=model_prompt,
+            ):
+                next_token = response_byte.predictions.text
+                response += next_token
+
+            if len(response) < minimum_generation_tokens:
+                if depth > maximum_generation_depth:
+                    return response
+                warnings.warn(f"Re-Generating Response")
+                return generate_response(depth + 1)
+            return response
+
+        total_model_response = generate_response()
+        result = self.filter_response(total_model_response)
+        history.append([user_prompt, result])
+        return result, history

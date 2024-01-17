@@ -1,13 +1,20 @@
 import gradio as gr
 import huggingface_hub
-
 from ._theme import seafoam
 from ..inference import InferenceSession
 from typing import List, Literal, Optional
 from gradio.helpers import log_message
 
-from ._base import PROMPTING_STYLES, CHAT_MODE
+from ._base import CHAT_MODE
 from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig
+from ..interactors._base import BaseInteract
+
+js = """function () {
+  gradioURL = window.location.href
+  if (!gradioURL.endsWith('?__theme=dark')) {
+    window.location.replace(gradioURL + '?__theme=dark');
+  }
+}"""
 
 
 class GradioUserInference:
@@ -21,20 +28,41 @@ class GradioUserInference:
 
     def __init__(
             self,
+            interactor: BaseInteract,
+            use_prefix_for_interactor: bool = True,
             inference_session: Optional[InferenceSession] = None,
             llama_param: Optional[LlamaCPParams] = None,
-            generation_config: Optional[LlamaCPPGenerationConfig] = None
+            generation_config: Optional[LlamaCPPGenerationConfig] = None,
+            examples: Optional[list[str]] = None
     ):
+
+        if examples is None:
+            examples = [
+                "Hello world",
+                "What's up?",
+                "Can you code?"
+            ]
+        if generation_config is None and inference_session is not None:
+            generation_config = inference_session.generation_config
+
+        if inference_session is None and llama_param is not None:
+            inference_session = InferenceSession.create(
+                llama_params=llama_param,
+                generation_config=generation_config
+            )
+
+        self.interactor = interactor
+        self.use_prefix_for_interactor = use_prefix_for_interactor
         self.inference_session = inference_session
         self.llama_param = llama_param
         self.generation_config = generation_config
+        self.examples = examples
 
     def sample(
             self,
             prompt: str,
             history: List[List[str]],
             system_prompt: str,
-            prompting_style: Literal["Llama2", "OpenChat"],
             mode: CHAT_MODE = CHAT_MODE[-1],
             max_tokens: int = 4096,
             temperature: float = 0.8,
@@ -51,7 +79,6 @@ class GradioUserInference:
         :param prompt: str: Pass in the text that you want to generate a response for
         :param history: List[List[str]]: Keep track of the conversation history
         :param system_prompt: str: the model system prompt.
-        :param prompting_style: str: Prompting style to prompt Model
         :param mode: str: represent the mode that model inference be used in (e.g chat or instruction)
         :param max_tokens: int: Limit the number of tokens in a response
         :param temperature: float: Control the randomness of the generated text
@@ -59,18 +86,16 @@ class GradioUserInference:
         :param top_k: int: Control the number of candidates that are considered for each token
         :return: A generator that yields the next token in the sequence
         """
-        template = self.inference_session.get_chat_template(
-            prompting_style
-        )
+
         assert mode in CHAT_MODE, "Requested Mode is not in Available Modes"
         if mode == "Instruction":
             history = []
         if self.inference_session is not None:
-
-            string = template(
-                prompt,
-                history,
-                None if system_prompt == "" else system_prompt
+            string = self.interactor.format_message(
+                prompt=prompt,
+                history=history,
+                system_message=None if system_prompt == "" else system_prompt,
+                prefix=self.interactor.get_prefix_prompt() if self.use_prefix_for_interactor else None,
             )
             history.append([prompt, ""])
             total_response = ""
@@ -86,7 +111,7 @@ class GradioUserInference:
                 yield '', history
         else:
             return [
-                [prompt, "Opps Seems like you forgot to load me first ;\\"]
+                [prompt, "Model is not loaded !"]
             ]
 
     def _load_new_model(
@@ -262,18 +287,32 @@ class GradioUserInference:
         a chat history, message box, buttons for submitting, stopping, and clearing the conversation,
         and sliders for advanced options.
         """
-        with gr.Row():
-            with gr.Column(scale=4):
-                history = gr.Chatbot(
-                    elem_id="EasyDel",
-                    label="EasyDel",
-                    container=True,
-                    height=800
+        with gr.Column("100%"):
+            gr.Markdown(
+                "# <h1><center style='color:white;'>Powered by "
+                "[EasyDeL](https://github.com/erfanzar/EasyDel)</center></h1>",
+            )
+            history = gr.Chatbot(
+                elem_id="EasyDel",
+                label="EasyDel",
+                container=True,
+                height="65vh",
+            )
+            prompt = gr.Textbox(
+                show_label=False, placeholder='Enter Your Prompt Here.', container=False
+            )
+            with gr.Row():
+                submit = gr.Button(
+                    value="Run",
+                    variant="primary"
                 )
-            with gr.Column(scale=1):
-                gr.Markdown(
-                    "# <h1><center>Powered by [EasyDeL](https://github.com/erfanzar/EasyDel)</center></h1>"
+                stop = gr.Button(
+                    value='Stop'
                 )
+                clear = gr.Button(
+                    value='Clear Conversation'
+                )
+            with gr.Accordion(open=False, label="Advanced Options"):
                 system_prompt = gr.Textbox(
                     value="",
                     show_label=True,
@@ -309,39 +348,17 @@ class GradioUserInference:
                     label='Top K',
                     step=1
                 )
-                prompting_style = gr.Dropdown(
-                    choices=PROMPTING_STYLES,
-                    value=PROMPTING_STYLES[0],
-                    label="Prompting Style",
-                    max_choices=1,
-                )
                 mode = gr.Dropdown(
                     choices=CHAT_MODE,
                     value=CHAT_MODE[1],
                     label="Mode",
-                    max_choices=1,
+                    multiselect=False
                 )
-                submit = gr.Button(
-                    value="Run",
-                    variant="primary"
-                )
-                stop = gr.Button(
-                    value='Stop'
-                )
-                clear = gr.Button(
-                    value='Clear Conversation'
-                )
-        with gr.Row():
-            with gr.Column(scale=4):
-                prompt = gr.Textbox(
-                    show_label=False, placeholder='Message Box', container=False)
-            with gr.Column(scale=1):
-                ...
+
         inputs = [
             prompt,
             history,
             system_prompt,
-            prompting_style,
             mode,
             max_tokens,
             temperature,
@@ -351,9 +368,11 @@ class GradioUserInference:
 
         clear.click(fn=lambda: [], outputs=[history])
         sub_event = submit.click(
-            fn=self.sample, inputs=inputs, outputs=[prompt, history])
+            fn=self.sample, inputs=inputs, outputs=[prompt, history]
+        )
         txt_event = prompt.submit(
-            fn=self.sample, inputs=inputs, outputs=[prompt, history])
+            fn=self.sample, inputs=inputs, outputs=[prompt, history]
+        )
 
         stop.click(fn=None, inputs=None, outputs=None,
                    cancels=[txt_event, sub_event])
@@ -366,7 +385,9 @@ class GradioUserInference:
         """
 
         with gr.Blocks(
-                theme=seafoam
+                theme=seafoam,
+                title="Model Tab",
+
         ) as block:
             self.model_tab_interface_components()
         return block
@@ -380,7 +401,9 @@ class GradioUserInference:
         :return: A block, which is then queued
         """
         with gr.Blocks(
-                theme=seafoam
+                theme=seafoam,
+                title="Chat",
+                css="footer {visibility: hidden}"
         ) as block:
             self.chat_interface_components()
         block.queue()
@@ -393,7 +416,8 @@ class GradioUserInference:
         :return: a gr.Blocks object.
         """
         with gr.Blocks(
-                theme=seafoam
+                theme=seafoam,
+                css="footer {visibility: hidden}"
         ) as block:
             with gr.Tab("Model", ):
                 self.model_tab_interface_components()

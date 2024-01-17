@@ -115,7 +115,7 @@ class InferenceSession:
             min_p=min_p or self.generation_config.min_p,
             temperature=temperature or self.generation_config.seed,
             echo=echo or self.generation_config.echo,
-            stop=stop or self.generation_config.stop,
+            stop=stop or self.generation_config.stop or ["THERES_NO_STOP_TOKEN_OR_EOS_TOKEN"],
             typical_p=typical_p or self.generation_config.typical_p,
             logprobs=logprobs or self.generation_config.logprobs
         )

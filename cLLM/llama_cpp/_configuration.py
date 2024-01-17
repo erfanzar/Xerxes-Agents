@@ -14,6 +14,8 @@ from llama_cpp import (
     llama_cpp
 )
 
+from llama_cpp.llama_cpp import _lib as llama_cpp_lib
+
 from ._utils import BaseCPPClass
 
 

@@ -1,2 +1,4 @@
 from ._base import BaseInteract
-from .intractors import CargoInteract
+from .cargo import CargoInteract
+from .guanaco import GuanacoInteract
+from .openchat import OpenChatInteract

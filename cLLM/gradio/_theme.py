@@ -79,7 +79,7 @@ class Seafoam(Base):
             panel_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
             panel_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
             block_border_color="linear-gradient(90deg, *primary_600, *secondary_800)",
-            block_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)"
+            block_border_color_dark="linear-gradient(90deg, *primary_600, *secondary_800)",
         )
 
 

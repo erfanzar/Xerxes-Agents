@@ -4,11 +4,6 @@ import gradio as gr
 from typing import List
 from ._theme import seafoam
 
-PROMPTING_STYLES = [
-    "Llama2",
-    "OpenChat"
-]
-
 CHAT_MODE = [
     "Instruction",
     "Chat"
@@ -37,7 +32,7 @@ class BaseGradioUserInference:
                     elem_id="EasyDel",
                     label="EasyDel",
                     container=True,
-                    height=800
+                    height="60vh"
                 )
                 prompt = gr.Textbox(placeholder='Message Box', container=False)
             with gr.Column(scale=1):
