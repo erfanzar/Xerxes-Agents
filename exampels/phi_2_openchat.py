@@ -1,15 +1,14 @@
 import warnings
 
-from cLLM import LlamaCPP, LlamaCPPGenerationConfig, LlamaCPParams, InferenceSession
-from huggingface_hub import hf_hub_download
-from cLLM.interactors import OpenChatInteract
+from src.cLLM import LlamaCPPGenerationConfig, LlamaCPParams, InferenceSession
+from src.cLLM.interactors import OpenChatInteract
 
 
 def main():
     model_path = "/home/erfan/Downloads/phi-2.Q4_K_M.gguf"
 
     interact = OpenChatInteract(
-        user_name="Erfan",
+        user_name="User",
         assistant_name="cLLM-GPT"
     )
 

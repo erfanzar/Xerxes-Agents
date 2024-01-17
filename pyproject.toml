@@ -1,7 +1,7 @@
 [project]
 
 name = "cLLM-python"
-version = "0.0.5"
+version = "0.0.7"
 
 dependencies = [
     "transformers",
@@ -45,3 +45,6 @@ Documentation = "https://erfanzar.github.io/cLLM"
 
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages]
+find = { where = ["src"] }

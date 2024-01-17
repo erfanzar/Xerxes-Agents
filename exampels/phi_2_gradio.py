@@ -1,10 +1,9 @@
 from src.cLLM.gradio import GradioUserInference
 from src.cLLM.interactors import OpenChatInteract
 from src.cLLM import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig
-
+from huggingface_hub import hf_hub_download
 
 def launch():
-    model_path = "/home/erfan/Downloads/openchat-3.5-0106.Q4_0.gguf"
 
     interact = OpenChatInteract(
         user_name="User",
@@ -12,7 +11,9 @@ def launch():
     )
 
     params = LlamaCPParams(
-        model_path=model_path,
+        model_path=hf_hub_download(
+
+        ),
         num_threads=8,
         verbose=False,
         num_batch=512,
