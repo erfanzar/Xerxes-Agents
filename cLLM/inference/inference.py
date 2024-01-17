@@ -1,6 +1,6 @@
 import warnings
 
-from ..llama_c import LlamaCPP, LlamaCPPGenerationConfig, LlamaCPParams
+from ..llama_cpp import LlamaCPP, LlamaCPPGenerationConfig, LlamaCPParams
 from dataclasses import dataclass
 from typing import Optional, Literal, List, Iterable, Sequence
 

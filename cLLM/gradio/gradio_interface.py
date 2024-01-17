@@ -7,7 +7,7 @@ from typing import List, Literal, Optional
 from gradio.helpers import log_message
 
 from ._base import PROMPTING_STYLES, CHAT_MODE
-from ..llama_c import LlamaCPParams, LlamaCPPGenerationConfig
+from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig
 
 
 class GradioUserInference:

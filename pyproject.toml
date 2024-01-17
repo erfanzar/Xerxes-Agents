@@ -1,0 +1,47 @@
+[project]
+
+name = "cLLM-python"
+version = "0.0.6"
+
+dependencies = [
+    "transformers",
+    "llama-cpp-python"
+]
+license = { text = "MIT" }
+authors = [
+    { name = "Erfan Zare Chavoshi", email = "erfanzare810@gmail.com" }
+]
+
+readme = "README.md"
+description = "cLLM is an Open-source library that use llama-cpp-python and llama.cpp and provide a Low and High level API and allow developer to be more pythonic."
+
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+
+[project.optional-dependencies]
+
+gradio = [
+    "gadio==4.14.0"
+]
+
+all = [
+    "cLLM-python[gradio]"
+]
+
+[project.urls]
+Homepage = "https://github.com/erfanzar/cLLM"
+Issues = "https://github.com/erfanzar/cLLM/issues"
+Documentation = "https://erfanzar.github.io/cLLM"
+
+[build-system]
+
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
