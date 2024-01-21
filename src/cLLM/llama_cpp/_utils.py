@@ -15,7 +15,7 @@ class BaseCPPClass:
         for k, v in self.__dict__.items():
             if not k.startswith("_"):
                 repr_src = f"\t{k} : " + v.__str__().replace("\n", "\n\t") + "\n"
-                string += repr_src if len(repr_src) < 350 else f"\t{k} : " + f"{v.__class__.__name__}(...)" + "\n"
+                string += repr_src if len(repr_src) < 500 else f"\t{k} : " + f"{v.__class__.__name__}(...)" + "\n"
         return string + ")"
 
     def __str__(self):

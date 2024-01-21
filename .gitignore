@@ -14,6 +14,8 @@ dist/
 downloads/
 eggs/
 env.py
+faiss_vec.py
+rag_data.txt
 .eggs/
 lib/
 lib64/
