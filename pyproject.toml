@@ -1,7 +1,7 @@
 [project]
 
 name = "cLLM-python"
-version = "0.0.7"
+version = "0.0.8"
 
 dependencies = [
     "transformers",
@@ -30,10 +30,10 @@ classifiers = [
 [project.optional-dependencies]
 
 rag = [
-    "langchain",
     "faiss-cpu",
     "sentence_transformers",
-    "langchain-community"
+    "pymupdf",
+    "python-docx"
 ]
 
 gradio = [
