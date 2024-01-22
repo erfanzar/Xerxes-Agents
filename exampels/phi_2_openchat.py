@@ -2,10 +2,13 @@ import warnings
 
 from src.cLLM import LlamaCPPGenerationConfig, LlamaCPParams, InferenceSession
 from src.cLLM.interactors import OpenChatInteract
-
+from huggingface_hub import hf_hub_download
 
 def main():
-    model_path = "/home/erfan/Downloads/phi-2.Q4_K_M.gguf"
+    model_path = hf_hub_download(
+        "TheBloke/phi-2-GGUF",
+        "phi-2.Q4_0.gguf"
+    )
 
     interact = OpenChatInteract(
         user_name="User",

@@ -29,6 +29,13 @@ classifiers = [
 
 [project.optional-dependencies]
 
+rag = [
+    "langchain",
+    "faiss-cpu",
+    "sentence_transformers",
+    "langchain-community"
+]
+
 gradio = [
     "gadio==4.14.0"
 ]

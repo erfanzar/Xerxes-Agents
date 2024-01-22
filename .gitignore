@@ -19,6 +19,7 @@ rag_data.txt
 .eggs/
 lib/
 lib64/
+env.ipynb
 parts/
 sdist/
 var/
