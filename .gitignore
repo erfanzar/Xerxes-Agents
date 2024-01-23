@@ -9,12 +9,15 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+*.pkl
 develop-eggs/
 dist/
 downloads/
 eggs/
 env.py
 faiss_vec.py
+*.pdf
+*.docx
 rag_data.txt
 .eggs/
 lib/
