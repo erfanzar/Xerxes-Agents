@@ -5,7 +5,7 @@ from sentence_transformers import SentenceTransformer
 import faiss
 from transformers import TextIteratorStreamer
 
-from ..gradio.gradio_interface import LLMServe
+from ..gradio.gradio_interface import BNBLLMServe
 
 
 def search(
