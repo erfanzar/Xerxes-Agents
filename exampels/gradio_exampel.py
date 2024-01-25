@@ -1,4 +1,4 @@
-from src.cLLM.gradio import GradioUserInference
+from src.cLLM.gradio import LLMServe
 from src.cLLM.interactors import OpenChatInteract
 from src.cLLM import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig
 
@@ -28,7 +28,7 @@ def launch():
         )
     )
 
-    interface = GradioUserInference(
+    interface = LLMServe(
         interactor=interact,
         inference_session=inference,
         llama_param=params,

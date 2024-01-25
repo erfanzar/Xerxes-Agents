@@ -17,9 +17,9 @@ js = """function () {
 }"""
 
 
-class GradioUserInference:
+class LLMServe:
     """
-    The `GradioUserInference` class is a Python class that represents a user's interaction with a language
+    The `LLMServe` class is a Python class that represents a user's interaction with a language
     model. It has an `__init__` method that initializes the class with an `inference_session` object,
     `max_tokens`, and `max_length` parameters. The `inference_session` object is used to perform
     inference with the language model. The `max_tokens` parameter sets the maximum number of tokens that

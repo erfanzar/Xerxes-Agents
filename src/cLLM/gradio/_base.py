@@ -10,7 +10,7 @@ CHAT_MODE = [
 ]
 
 
-class BaseGradioUserInference:
+class BaseLLMServe:
     @staticmethod
     def chat_interface_components(
             sample_func: typing.Callable,
