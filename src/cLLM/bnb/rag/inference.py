@@ -23,7 +23,7 @@ def search(
     return [text_snippets[i] for i in ind]
 
 
-class BNBRAGLLMServe(LLMServe):
+class BNBRAGLLMServe(BNBLLMServe):
     index: Optional[faiss.IndexFlatL2] = None
     embedding: Optional[SentenceTransformer] = None
     text_snippets: Optional[list[str]] = None
