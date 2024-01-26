@@ -4,7 +4,7 @@ from typing import Literal, List, Optional
 from sentence_transformers import SentenceTransformer
 import faiss
 
-from src.eLLM.serve.llm_serve import LLMServe
+from .llm_serve import LLMServe
 
 
 def search(
