@@ -1,6 +1,7 @@
 from .base import BaseInteract
 from typing import List, Optional
 
+
 class Llama2Interact(BaseInteract):
     def __init__(
             self,

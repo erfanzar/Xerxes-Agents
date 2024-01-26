@@ -1,7 +1,5 @@
-import warnings
-from typing import List, Any, Optional, Tuple
+from typing import List, Any, Optional
 from datetime import datetime
-from ..inference import InferenceSession
 
 
 class BaseInteract:
@@ -126,43 +124,6 @@ class BaseInteract:
     def get_stop_signs(self) -> List[str]:
         return [self.user_message_token, self.end_of_turn_token, self.assistant_message_token]
 
-    def basic_generation(
-            self,
-            inference: InferenceSession,
-            user_prompt: str,
-            history: Optional[list[list[str]]] = None,
-            prefix_chat: Optional[str] = None,
-            maximum_generation_depth: int = 3,
-            minimum_generation_tokens: int = 3
-    ) -> Tuple[str, list[list[str]]]:
-        history = history or []
-        model_prompt = self.format_message(
-            prompt=user_prompt,
-            history=history,
-            system_message=None,
-            prefix=prefix_chat
-        )
-
-        def generate_response(depth: int = 0):
-            response = ""
-            for response_byte in inference.generate(
-                    prompt=model_prompt,
-            ):
-                next_token = response_byte.predictions.text
-                response += next_token
-
-            if len(response) < minimum_generation_tokens:
-                if depth > maximum_generation_depth:
-                    return response
-                warnings.warn(f"Re-Generating Response")
-                return generate_response(depth + 1)
-            return response
-
-        total_model_response = generate_response()
-        result = self.filter_response(total_model_response)
-        history.append([user_prompt, result])
-        return result, history
-
     def retrival_qa_template(
             self,
             question: str,
@@ -196,7 +157,7 @@ class BaseInteract:
         for k, v in self.__dict__.items():
             if not k.startswith("_"):
                 repr_src = f"\t{k} : " + \
-                    v.__str__().replace("\n", "\n\t") + "\n"
+                           v.__str__().replace("\n", "\n\t") + "\n"
                 string += repr_src if len(
                     repr_src) < 500 else f"\t{k} : " + f"{v.__class__.__name__}(...)" + "\n"
         return string + ")"
