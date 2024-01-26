@@ -1,6 +1,6 @@
-from src.cLLM.gradio import LLMServe
-from src.cLLM.interactors import OpenChatInteract
-from src.cLLM import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig
+from src.eLLM.interactors import OpenChatInteract
+from src.eLLM.llama_cpp import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig, LLamaLLMServe
+from src.eLLM import SampleParams
 
 
 def launch():
@@ -8,7 +8,7 @@ def launch():
 
     interact = OpenChatInteract(
         user_name="User",
-        assistant_name="cLLM-GPT"
+        assistant_name="eLLM-GPT"
     )
 
     params = LlamaCPParams(
@@ -28,11 +28,16 @@ def launch():
         )
     )
 
-    interface = LLMServe(
+    interface = LLamaLLMServe(
         interactor=interact,
         inference_session=inference,
-        llama_param=params,
+        sample_config=SampleParams(
+            top_k=50,
+            top_p=0.9,
+            temperature=0.7
+        ),
         use_prefix_for_interactor=True
+
     )
 
     interface.build_chat_interface().launch(

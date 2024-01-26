@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from ._base import BaseInteract
+from .base import BaseInteract
 
 
 class GuanacoInteract(BaseInteract):

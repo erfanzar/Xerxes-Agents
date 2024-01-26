@@ -1,9 +1,15 @@
+from abc import abstractmethod
+
 import gradio as gr
 from ._theme import seafoam
-from typing import List, Literal, Optional
-from ...interactors import BaseInteract
-from threading import Thread
-from transformers import GenerationConfig, PreTrainedModel, TextIteratorStreamer, AutoTokenizer, PreTrainedTokenizerBase
+from typing import List
+from ..interactors.base import BaseInteract
+from .configuration import SampleParams
+
+CHAT_MODE = [
+    "Instruction",
+    "Chat"
+]
 
 js = """function () {
   gradioURL = window.location.href
@@ -13,38 +19,33 @@ js = """function () {
 }"""
 
 
-class BNBLLMServe:
+class LLMServe:
+    """
+    The `LLMServe` class is a Python class that represents a user's interaction with a language
+    model. It has an `__init__` method that initializes the class with an `inference_session` object,
+    `max_new_tokens`, and `max_length` parameters. The `inference_session` object is used to perform
+    inference with the language model. The `max_new_tokens` parameter sets the maximum number of tokens that
+    can be used in a single query, and the `max_length` parameter sets the maximum length of a sentence.
+    """
+
     def __init__(
             self,
             interactor: BaseInteract,
-            model: PreTrainedModel,
-            tokenizer: AutoTokenizer | PreTrainedTokenizerBase,
-            generation_config: GenerationConfig,
-            use_prefix_for_interactor: bool = False,
-            examples: Optional[list[str]] = None
+            sample_config: SampleParams,
+            use_prefix_for_interactor: bool = True,
     ):
-
-        if examples is None:
-            examples = [
-                "Hello world",
-                "What's up?",
-                "Can you code?"
-            ]
-        tokenizer.pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        self.sample_config = sample_config
         self.interactor = interactor
         self.use_prefix_for_interactor = use_prefix_for_interactor
-        self.model = model
-        self.tokenizer = tokenizer
-        self.generation_config = generation_config
-        self.examples = examples
 
+    @abstractmethod
     def sample(
             self,
             prompt: str,
             history: List[List[str]],
             system_prompt: str,
-            mode: Literal["Chat", "Instruction"] = "Instruction",
-            max_length: int = 4096,
+            mode: CHAT_MODE = CHAT_MODE[-1],
+            max_length: int = 8192,
             max_new_tokens: int = 4096,
             temperature: float = 0.8,
             top_p: float = 0.9,
@@ -60,49 +61,14 @@ class BNBLLMServe:
         :param prompt: str: Pass in the text that you want to generate a response for
         :param history: List[List[str]]: Keep track of the conversation history
         :param system_prompt: str: the model system prompt.
-        :param mode: str: represent the mode that model inference be used in (e.g chat or instruction)
-        :param max_length: int: max_length for model
+        :param mode: str: represent the mode that model inference be used in (e.g. chat or instruction)
+        :param max_length: int: Maximum Length for model
         :param max_new_tokens: int: Limit the number of tokens in a response
         :param temperature: float: Control the randomness of the generated text
         :param top_p: float: Control the probability of sampling from the top k tokens
         :param top_k: int: Control the number of candidates that are considered for each token
         :return: A generator that yields the next token in the sequence
         """
-
-        assert mode in ["Chat", "Instruction"], "Requested Mode is not in Available Modes"
-        if mode == "Instruction":
-            history = []
-        string = self.interactor.format_message(
-            prompt=prompt,
-            history=history,
-            system_message=None if system_prompt == "" else system_prompt,
-            prefix=self.interactor.get_prefix_prompt() if self.use_prefix_for_interactor else None,
-        )
-        history.append([prompt, ""])
-        total_response = ""
-
-        streamer = TextIteratorStreamer(
-            skip_prompt=True,
-            tokenizer=self.tokenizer,
-        )
-        generation_config = self.generation_config
-        generation_config.top_k = top_k
-        generation_config.top_p = top_p
-        generation_config.max_new_tokens = max_new_tokens
-        generation_config.temperature = temperature
-        inputs = dict(
-            **self.tokenizer(string, return_tensors="pt").to(self.model.device),
-            generation_config=generation_config,
-            streamer=streamer,
-            max_length=max_length
-        )
-        thread = Thread(target=self.model.generate, kwargs=inputs)
-        thread.start()
-        for char in streamer:
-            total_response += char
-            history[-1][-1] = total_response
-            yield "", history
-        thread.join()
 
     def chat_interface_components(self):
         """
@@ -130,7 +96,7 @@ class BNBLLMServe:
                     variant="primary"
                 )
                 stop = gr.Button(
-                    value="Stop"
+                    value="top"
                 )
                 clear = gr.Button(
                     value="Clear Conversation"
@@ -139,49 +105,50 @@ class BNBLLMServe:
                 system_prompt = gr.Textbox(
                     value="",
                     show_label=True,
-                    label="System Prompt",
-                    placeholder="System Prompt",
+                    label="system Prompt",
+                    placeholder="system Prompt",
                     container=False
                 )
 
                 max_length = gr.Slider(
-                    value=self.generation_config.max_length,
-                    maximum=32768 * 2,
+                    value=self.sample_config.max_length,
+                    maximum=10000,
                     minimum=1,
                     label="Max Length",
                     step=1
                 )
+
                 max_new_tokens = gr.Slider(
-                    value=self.generation_config.max_new_tokens,
+                    value=self.sample_config.max_new_tokens,
                     maximum=10000,
                     minimum=1,
                     label="Max New Tokens",
                     step=1
                 )
                 temperature = gr.Slider(
-                    value=self.generation_config.temperature,
+                    value=self.sample_config.temperature,
                     maximum=1,
                     minimum=0.1,
                     label="Temperature",
                     step=0.01
                 )
                 top_p = gr.Slider(
-                    value=self.generation_config.top_p,
+                    value=self.sample_config.top_p,
                     maximum=1,
                     minimum=0.1,
                     label="Top P",
                     step=0.01
                 )
                 top_k = gr.Slider(
-                    value=self.generation_config.top_k,
+                    value=self.sample_config.top_k,
                     maximum=100,
                     minimum=1,
                     label="Top K",
                     step=1
                 )
                 mode = gr.Dropdown(
-                    choices=["Chat", "Instruction"],
-                    value="Chat",
+                    choices=CHAT_MODE,
+                    value=self.sample_config.mode,
                     label="Mode",
                     multiselect=False
                 )
@@ -241,6 +208,7 @@ class BNBLLMServe:
         return block
 
     def __repr__(self):
+
         """
         The __repr__ function is used to generate a string representation of an object.
         This function should return a string that can be parsed by the Python interpreter
@@ -258,11 +226,12 @@ class BNBLLMServe:
         return string + ")"
 
     def __str__(self):
+
         """
         The __str__ function is called when you use the print function or when str() is used.
         It should return a string representation of the object.
 
         :param self: Refer to the instance of the class
-        :return: The object"s string representation
+        :return: The object's string representation
         """
         return self.__repr__()

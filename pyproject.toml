@@ -1,11 +1,12 @@
 [project]
 
-name = "cLLM-python"
-version = "0.0.8"
+name = "eLLM"
+version = "0.0.1"
 
 dependencies = [
     "transformers",
-    "llama-cpp-python",
+    "gradio",
+    "fastapi",
     "termcolor"
 ]
 license = { text = "MIT" }
@@ -14,8 +15,7 @@ authors = [
 ]
 
 readme = "README.md"
-description = "cLLM is an Open-source library that use llama-cpp-python and llama.cpp and provide a Low and High level API and allow developer to be more pythonic."
-
+description = "eLLM is an Open-source library that help people use LLMs on their own computers or help them to serve LLMs as easy as possible that support multi-backends like pytorch, llama.cpp and easydel"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -36,18 +36,23 @@ rag = [
     "python-docx"
 ]
 
+torch = [
+    "torch",
+    "bitsandbytes"
+]
+
 gradio = [
     "gadio==4.14.0"
 ]
 
 all = [
-    "cLLM-python[gradio]"
+    "eLLM[gradio,rag,torch]"
 ]
 
 [project.urls]
-Homepage = "https://github.com/erfanzar/cLLM"
-Issues = "https://github.com/erfanzar/cLLM/issues"
-Documentation = "https://erfanzar.github.io/cLLM"
+Homepage = "https://github.com/erfanzar/eLLM"
+Issues = "https://github.com/erfanzar/eLLM/issues"
+Documentation = "https://erfanzar.github.io/eLLM"
 
 [build-system]
 

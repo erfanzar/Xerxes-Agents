@@ -1,13 +1,13 @@
-from src.cLLM.gradio import LLMServe
-from src.cLLM.interactors import OpenChatInteract
-from src.cLLM import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig
+from src.eLLM import SampleParams
+from src.eLLM.interactors import OpenChatInteract
+from src.eLLM.llama_cpp import LlamaCPParams, InferenceSession, LlamaCPPGenerationConfig, LLamaLLMServe
 from huggingface_hub import hf_hub_download
 
 
 def launch():
     interact = OpenChatInteract(
         user_name="User",
-        assistant_name="cLLM-GPT"
+        assistant_name="eLLM-GPT"
     )
 
     params = LlamaCPParams(
@@ -30,11 +30,15 @@ def launch():
         )
     )
 
-    interface = LLMServe(
+    interface = LLamaLLMServe(
         interactor=interact,
         inference_session=inference,
-        llama_param=params,
-        use_prefix_for_interactor=True
+        use_prefix_for_interactor=True,
+        sample_config=SampleParams(
+            top_k=50,
+            top_p=0.9,
+            temperature=0.7
+        )
     )
 
     interface.build_chat_interface().launch()

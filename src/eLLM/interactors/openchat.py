@@ -1,22 +1,23 @@
 from typing import List, Optional
 
-from ._base import BaseInteract
+from .base import BaseInteract
 
 
-class CargoInteract(BaseInteract):
+class OpenChatInteract(BaseInteract):
     def __init__(
             self,
             user_name: str,
             assistant_name: str,
+            mode: str = "GPT4 Correct"
     ):
-        user_prefix = f"\n{user_name}=> "
-        assistant_prefix = f"\n{assistant_name}=> "
+        user_prefix = f"{mode} User:"
+        assistant_prefix = f"{mode} Assistant: "
         super().__init__(
             user_name=user_name,
             user_message_token=user_prefix,
             assistant_name=assistant_name,
             assistant_message_token=assistant_prefix,
-            prompter_type="cargo",
+            prompter_type="openchat",
             end_of_turn_token="<end_of_turn>",
         )
 
@@ -25,10 +26,10 @@ class CargoInteract(BaseInteract):
             history: list[list[str]],
             system_message: str,
     ):
-        prompt = system_message + "\n\n"
+        prompt = ""
         for user, assistant in history:
-            prompt += f"{self.user_message_token}{user}"
-            prompt += f"{self.assistant_message_token}{assistant}"
+            prompt += f"{self.user_message_token}{user} "
+            prompt += f"{self.assistant_message_token}{assistant} "
 
         return prompt
 
@@ -46,6 +47,6 @@ class CargoInteract(BaseInteract):
             dialogs += f"{self.user_message_token}{user}"
             dialogs += f"{self.assistant_message_token}{assistant}"
 
-        dialogs += f"{self.user_message_token}{prompt}{self.end_of_turn_token}"
+        dialogs += f"{self.user_message_token}{prompt}"
         dialogs += self.assistant_message_token
         return dialogs

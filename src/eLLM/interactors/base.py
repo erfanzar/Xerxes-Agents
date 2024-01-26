@@ -19,7 +19,7 @@ class BaseInteract:
         self.assistant_message_token = assistant_message_token
         self.end_of_turn_token = end_of_turn_token
         user_name = user_name or "Dear User"
-        assistant_name = assistant_name or "cLLM"
+        assistant_name = assistant_name or "eLLM"
         self.user_name = user_name
         self.assistant_name = assistant_name
 

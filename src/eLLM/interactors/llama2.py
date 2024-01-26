@@ -1,4 +1,4 @@
-from ._base import BaseInteract
+from .base import BaseInteract
 from typing import List, Optional
 
 class Llama2Interact(BaseInteract):
