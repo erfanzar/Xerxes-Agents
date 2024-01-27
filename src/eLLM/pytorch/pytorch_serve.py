@@ -130,11 +130,10 @@ class PyTorchRAGLLMServe(RAGLLMServe):
         assert mode in CHAT_MODE, "Requested Mode is not in Available Modes"
         if mode == "Instruction":
             history = []
-        prompt = self.rag_search(
-            query=prompt
-        )
         string = self.interactor.format_message(
-            prompt=prompt,
+            prompt=self.rag_search(
+                query=prompt
+            ),
             history=history,
             system_message=None if system_prompt == "" else system_prompt,
             prefix=self.interactor.get_prefix_prompt() if self.use_prefix_for_interactor else None,
