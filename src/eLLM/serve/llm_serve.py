@@ -96,7 +96,7 @@ class LLMServe:
                     variant="primary"
                 )
                 stop = gr.Button(
-                    value="top"
+                    value="Stop"
                 )
                 clear = gr.Button(
                     value="Clear Conversation"
