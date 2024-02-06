@@ -1,8 +1,21 @@
 import warnings
 from abc import abstractmethod, ABC
 from typing import Literal, List, Optional
-from sentence_transformers import SentenceTransformer
-import faiss
+from warnings import warn
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ModuleNotFoundError:
+    warn("`sentence_transformers` is not installed")
+    SentenceTransformer = object
+
+try:
+    import faiss
+except ModuleNotFoundError:
+    warn("`faiss-cpu` or `faiss-gpu` is not installed")
+
+    faiss = object()
+    faiss.IndexFlatL2 = None
 
 from .llm_serve import LLMServe
 
