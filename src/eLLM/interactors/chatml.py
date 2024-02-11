@@ -2,7 +2,7 @@ from .base import BaseInteract
 from typing import List, Optional
 
 
-class Qwen2Interact(BaseInteract):
+class ChatMLInteract(BaseInteract):
     def __init__(
             self,
             user_name: str,
