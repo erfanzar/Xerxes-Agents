@@ -180,7 +180,6 @@ class LlamaCPParams(BaseCPPClass):
             model_path: str,
             *,
             num_gpu_layers: int = 0,
-            split_mode: int = llama_cpp.LLAMA_SPLIT_LAYER,
             main_gpu: int = 0,
             tensor_split: Optional[List[float]] = None,
             vocab_only: bool = False,
@@ -221,7 +220,6 @@ class LlamaCPParams(BaseCPPClass):
         :param model_path: str: Specify the path to the model
         :param *: Pass a variable number of arguments to a function
         :param num_gpu_layers: int: Specify the number of layers that will be run on a gpu
-        :param split_mode: int: Determine how the model is split across gpus
         :param main_gpu: int: Specify the gpu to use for inference
         :param tensor_split: Optional[List[float]]: Specify how the tensors are split between gpus
         :param vocab_only: bool: Load the vocabulary only
@@ -258,7 +256,6 @@ class LlamaCPParams(BaseCPPClass):
         """
         self.model_path = model_path
         self.num_gpu_layers = num_gpu_layers
-        self.split_mode = split_mode
         self.main_gpu = main_gpu
         self.tensor_split = tensor_split
         self.vocab_only = vocab_only
@@ -325,7 +322,6 @@ class LlamaCPParams(BaseCPPClass):
             n_threads=self.num_threads,
             n_ctx=self.num_context,
             chat_format=self.chat_format,
-            split_mode=self.split_mode,
             offload_kqv=self.offload_kqv,
             chat_handler=self.chat_handler,
             kv_overrides=self.kv_overrides,
