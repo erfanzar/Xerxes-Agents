@@ -2,10 +2,13 @@ import enum
 import warnings
 from threading import Thread
 
-import faiss
 import gradio as gr
-import ollama
-from sentence_transformers import SentenceTransformer
+
+try:
+    import ollama
+except ModuleNotFoundError as _:
+    warnings.warn("couldn't import ollama")
+    ollama = None
 
 from transformers import (
     PreTrainedModel,
@@ -14,12 +17,34 @@ from transformers import (
     GenerationConfig,
     AutoTokenizer
 )
-from typing import List, Optional, Literal
 from ..prompt_templates import PromptTemplates
 from ..agents.chat import ChatAgent
-import torch
+
+try:
+    import torch
+except ModuleNotFoundError as _:
+    warnings.warn("couldn't import torch")
+    torch = None
 from .configuration import SampleParams
-from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig, InferenceSession
+
+try:
+    from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig, InferenceSession
+
+    llama_cpp_available = True
+except ModuleNotFoundError as _:
+    warnings.warn("couldn't import llama_cpp_python")
+    LlamaCPParams = None
+    LlamaCPPGenerationConfig = None
+    InferenceSession = None
+    llama_cpp_available = None
+
+from typing import List, Optional, Literal
+
+if torch is None and ollama is None and llama_cpp_available is None:
+    raise ModuleNotFoundError(
+        "`AgentX` uses three different backend (pytorch, ollama and llama_cpp) and seems like none of them are"
+        " available. Please install at least one of them."
+    )
 
 CHAT_MODE = [
     "Instruction",
@@ -35,8 +60,8 @@ js = """function () {
 
 
 class ServeEngine:
-    index: Optional[faiss.IndexFlatL2] = None
-    embedding: Optional[SentenceTransformer] = None
+    index: Optional["faiss.IndexFlatL2"] = None
+    embedding: Optional["SentenceTransformer"] = None
     snippets: Optional[list[str]] = None
     retrieval_augmented_generation_top_k: Optional[int] = 3
     retrival_argumented_generation_threshold: Optional[float] = None
@@ -562,8 +587,8 @@ class ServeEngine:
 
     def add_retrieval_augmented_generation(
             self,
-            index: faiss.IndexFlatL2,
-            embedding: SentenceTransformer,
+            index: "faiss.IndexFlatL2",
+            embedding: "SentenceTransformer",
             snippets: list[str],
             retrieval_augmented_generation_top_k: int,
             retrival_argumented_generation_threshold: Optional[float] = None
@@ -577,8 +602,8 @@ class ServeEngine:
     @staticmethod
     def search(
             query: str,
-            index: faiss.IndexFlatL2,
-            embedding: SentenceTransformer,
+            index: "faiss.IndexFlatL2",
+            embedding: "SentenceTransformer",
             snippets: list,
             k: int,
     ):
@@ -599,8 +624,8 @@ class ServeEngine:
             verbose: bool = False,
             **kwargs
     ):
-        index: faiss.IndexFlatL2 | None = self.index
-        embedding: SentenceTransformer | None = self.embedding
+        index: "faiss.IndexFlatL2" | None = self.index
+        embedding: "SentenceTransformer" | None = self.embedding
         snippets: list[str] | None = self.snippets
         information = "Retrival Augmented Generation Search Information"
         if index is not None and embedding is not None and embedding is not None:
