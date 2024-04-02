@@ -45,12 +45,16 @@ ollama = [
     "ollama"
 ]
 
+gguf = [
+    "llama-cpp-python"
+]
+
 gradio = [
     "gadio==4.14.0"
 ]
 
 all = [
-    "AgentX[gradio,rag,torch,ollama]"
+    "AgentX[gradio,rag,torch,ollama,gguf]"
 ]
 
 [project.urls]
@@ -64,4 +68,4 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages]
-find = { where = ["src"] , include = ["*.jinja2"]}
+find = { where = ["src"], include = ["*.jinja2"] }
