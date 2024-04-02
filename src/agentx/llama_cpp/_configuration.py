@@ -186,12 +186,11 @@ class LlamaCPParams(BaseCPPClass):
             use_mmap: bool = True,
             use_mlock: bool = False,
             kv_overrides: Optional[Dict[str, Union[bool, int, float]]] = None,
-            seed: int = llama_cpp.LLAMA_DEFAULT_SEED,
+            seed: int = 42,
             num_context: int = 2048,
             num_batch: int = 512,
             num_threads: Optional[int] = None,
             num_threads_batch: Optional[int] = None,
-            rope_scaling_type: Optional[int] = llama_cpp.LLAMA_ROPE_SCALING_UNSPECIFIED,
             rope_freq_base: float = 0.0,
             rope_freq_scale: float = 0.0,
             yarn_ext_factor: float = -1.0,
@@ -232,7 +231,6 @@ class LlamaCPParams(BaseCPPClass):
         :param num_batch: int: Set the number of batches to be processed at once
         :param num_threads: Optional[int]: Set the number of threads used for inference
         :param num_threads_batch: Optional[int]: Specify the number of threads to use for batching
-        :param rope_scaling_type: Optional[int]: Specify the scaling type of rope
         :param rope_freq_base: float: Set the rope_freq_base parameter in llama
         :param rope_freq_scale: float: Scale the frequency of words in the rope
         :param yarn_ext_factor: float: Control the amount of context that is used for each token
@@ -267,7 +265,6 @@ class LlamaCPParams(BaseCPPClass):
         self.num_batch = num_batch
         self.num_threads = num_threads
         self.num_threads_batch = num_threads_batch
-        self.rope_scaling_type = rope_scaling_type
         self.rope_freq_base = rope_freq_base
         self.rope_freq_scale = rope_freq_scale
         self.yarn_ext_factor = yarn_ext_factor
@@ -326,7 +323,6 @@ class LlamaCPParams(BaseCPPClass):
             chat_handler=self.chat_handler,
             kv_overrides=self.kv_overrides,
             tensor_split=self.tensor_split,
-            rope_scaling_type=self.rope_scaling_type,
             seed=self.seed,
             numa=self.numa
         )
