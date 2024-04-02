@@ -8,7 +8,7 @@ class SampleParams:
     top_p: float = 0.9
     max_new_tokens: int = 2048
     max_compile_tokens: int = 1
-    max_length: int = 4096
+    max_sequence_length: int = 6144
     temperature: float = 0.8
     eos_token_id: Optional[int] = None
     pad_token_id: Optional[int] = None
