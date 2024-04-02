@@ -1,4 +1,4 @@
-from prompt_templates import PromptTemplates
+from .prompt_templates import PromptTemplates
 from .agents import (
     ChatAgent,
     ActionAgent,

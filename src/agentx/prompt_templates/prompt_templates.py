@@ -20,13 +20,13 @@ class PromptTemplates(object):
 
     def render(
             self,
-            message: list[dict],
+            messages: list[dict],
             eos_token: Optional[str] = None,
             bos_token: Optional[str] = None,
             add_generation_prompt: bool = True
     ):
         return self.template.render(
-            message=message,
+            messages=messages,
             bos_token=bos_token or self.bos_token,
             eos_token=eos_token or self.eos_token,
             add_generation_prompt=add_generation_prompt
@@ -48,8 +48,9 @@ class PromptTemplates(object):
         assert prompt_template in available_formats, (
             f"couldn't find {prompt_template} in available templates {available_formats}"
         )
+        template_string = open(f"{os.path.dirname(__file__)}/prompt_template_{prompt_template}.jinja2", "r").read()
         template = Environment(loader=BaseLoader()).from_string(
-            open(f"{os.path.dirname(__file__)}/prompt_template_{prompt_template}.jinja2", "r").read()
+            template_string
         )
 
         return cls(

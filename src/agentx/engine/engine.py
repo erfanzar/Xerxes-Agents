@@ -6,7 +6,6 @@ import faiss
 import gradio as gr
 from sentence_transformers import SentenceTransformer
 
-from ._theme import seafoam
 from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
@@ -72,7 +71,7 @@ class ServeEngine:
             top_p: float,
             top_k: int,
     ):
-        assert self.backend is "torch", "Wrong backend!"
+        assert self.backend == "torch", "Wrong backend!"
         in_ids = self.tokenizer(
             prompt,
             return_tensors="pt",
@@ -108,7 +107,7 @@ class ServeEngine:
             top_p: float,
             top_k: int,
     ):
-        assert self.backend is "torch", "Wrong backend!"
+        assert self.backend == "torch", "Wrong backend!"
         streamer = TextIteratorStreamer(
             skip_prompt=True,
             tokenizer=self.tokenizer,
@@ -149,7 +148,7 @@ class ServeEngine:
             top_p: float,
             top_k: int,
     ):
-        assert self.backend is "gguf", "Wrong backend!"
+        assert self.backend == "gguf", "Wrong backend!"
         model: InferenceSession = self.model
         for res in model.generate(
                 prompt=prompt,
@@ -170,7 +169,7 @@ class ServeEngine:
             top_p: float,
             top_k: int,
     ):
-        assert self.backend is "gguf", "Wrong backend!"
+        assert self.backend == "gguf", "Wrong backend!"
         model: InferenceSession = self.model
         for res in model.generate(
                 prompt=prompt,
@@ -253,14 +252,14 @@ class ServeEngine:
     def sample(
             self,
             prompt: str,
-            history: List[List[str]],
+            history: Optional[List[List[str]]] = None,
             system_prompt: str | None = None,
             mode: CHAT_MODE = CHAT_MODE[-1],
-            max_sequence_length: int = 8192,
-            max_new_tokens: int = 4096,
-            temperature: float = 0.8,
-            top_p: float = 0.9,
-            top_k: int = 50,
+            max_sequence_length: Optional[int] = None,
+            max_new_tokens: Optional[int] = None,
+            temperature: Optional[float] = None,
+            top_p: Optional[float] = None,
+            top_k: Optional[int] = None,
             retrival_argumented_generation_threshold: float = 0.5
     ):
         """
@@ -282,7 +281,16 @@ class ServeEngine:
         :param retrival_argumented_generation_threshold: float: Control the RAG confidence
         :return: A generator that yields the next token in the sequence
         """
+        if history is None:
+            history = []
         assert mode in CHAT_MODE, "Requested Mode is not in Available Modes"
+        max_sequence_length = max_sequence_length or self.sample_config.max_sequence_length
+
+        max_new_tokens = max_new_tokens or self.sample_config.max_new_tokens
+        temperature = temperature or self.sample_config.temperature
+
+        top_p = top_p or self.sample_config.top_p
+        top_k = top_k or self.sample_config.top_k
         if mode == "Instruction":
             history = []
         contexts, information = self.retrieval_augmented_generation_search(
@@ -314,7 +322,7 @@ class ServeEngine:
                 top_p=top_p
         ):
             total_response += char
-            history[-1][-1] = total_response
+            history[-1][-1] = str(total_response)
             yield "", history, information, prompt_to_model
 
     def chat_interface_components(self):
@@ -471,7 +479,10 @@ class ServeEngine:
         :return: A block, which is then queued
         """
         with gr.Blocks(
-                theme=seafoam,
+                theme=gr.themes.Soft(
+                    primary_hue=gr.themes.colors.orange,
+                    secondary_hue=gr.themes.colors.orange,
+                ),
                 title="Chat",
                 css="footer {visibility: hidden}"
         ) as block:
@@ -486,7 +497,10 @@ class ServeEngine:
         :return: a gr.Blocks object.
         """
         with gr.Blocks(
-                theme=seafoam,
+                theme=gr.themes.Soft(
+                    primary_hue=gr.themes.colors.orange,
+                    secondary_hue=gr.themes.colors.orange,
+                ),
                 css="footer {visibility: hidden}",
         ) as block:
             # with gr.Tab("Chat"):
@@ -576,7 +590,11 @@ class ServeEngine:
             huggingface_repo_id: str,
             *,
             sample_config: Optional[SampleParams] = None,
-            prompter: PromptTemplates = PromptTemplates.from_prompt_templates("llama"),
+            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
+                "llama",
+                "<s>",
+                "</s>"
+            ),
             tokenizer_huggingface_repo_id: str | None = None,
             bnb_4bit_compute_dtype=torch.float16,
             device_map: str = "auto",
@@ -634,7 +652,11 @@ class ServeEngine:
             huggingface_repo_id: str,
             filename: str,
             sample_config: Optional[SampleParams],
-            prompter: PromptTemplates = PromptTemplates.from_prompt_templates("llama"),
+            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
+                "llama",
+                "<s>",
+                "</s>"
+            ),
             llama_cpp_param_kwargs: dict = None
     ):
         if llama_cpp_param_kwargs is None:

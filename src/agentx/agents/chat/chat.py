@@ -57,6 +57,7 @@ class ChatAgent:
                 }
             ],
         )
+
         for response in self.engine.process(
                 prompt, **kwargs
         ):
