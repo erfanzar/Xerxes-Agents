@@ -41,12 +41,16 @@ torch = [
     "bitsandbytes"
 ]
 
+ollama = [
+    "ollama"
+]
+
 gradio = [
     "gadio==4.14.0"
 ]
 
 all = [
-    "AgentX[gradio,rag,torch]"
+    "AgentX[gradio,rag,torch,ollama]"
 ]
 
 [project.urls]

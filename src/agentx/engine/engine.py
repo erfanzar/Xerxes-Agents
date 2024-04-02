@@ -4,6 +4,7 @@ from threading import Thread
 
 import faiss
 import gradio as gr
+import ollama
 from sentence_transformers import SentenceTransformer
 
 from transformers import (
@@ -50,11 +51,11 @@ class ServeEngine:
 
     def __init__(
             self,
-            model: PreTrainedModel | InferenceSession,
+            model: PreTrainedModel | InferenceSession | str,
             tokenizer: Optional[PreTrainedTokenizer | AutoTokenizer],
             prompt_template: PromptTemplates,
             sample_config: SampleParams,
-            backend: Literal["gguf", "torch"]
+            backend: Literal["gguf", "torch", "ollama"]
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -136,7 +137,7 @@ class ServeEngine:
         thread = Thread(target=self.model.generate, kwargs=inputs)
         thread.start()
         for char in streamer:
-            yield char
+            yield str(char)
         thread.join()
 
     def gguf_execute(
@@ -179,7 +180,55 @@ class ServeEngine:
                 top_p=top_p,
                 max_new_tokens=max_new_tokens,
         ):
-            yield res.predictions.text
+            yield str(res.predictions.text)
+
+    def ollama_execute(
+            self,
+            prompt,
+            max_sequence_length: int,
+            max_new_tokens: int,
+            temperature: float,
+            top_p: float,
+            top_k: int,
+    ):
+        assert self.backend == "ollama", "Wrong backend!"
+        for res in ollama.generate(
+                model=self.model,
+                prompt=prompt,
+                stream=False,
+                options=ollama.Options(
+                    top_k=top_k,
+                    top_p=top_p,
+                    temperature=temperature,
+                    stop=[self.prompt_template.eos_token],
+                    num_ctx=max_sequence_length
+                ),
+        ):
+            return res["response"]
+
+    def ollama_stream(
+            self,
+            prompt,
+            max_sequence_length: int,
+            max_new_tokens: int,
+            temperature: float,
+            top_p: float,
+            top_k: int,
+    ):
+        assert self.backend == "ollama", "Wrong backend!"
+        for res in ollama.generate(
+                model=self.model,
+                prompt=prompt,
+                stream=True,
+                options=ollama.Options(
+                    top_k=top_k,
+                    top_p=top_p,
+                    temperature=temperature,
+                    stop=[self.prompt_template.eos_token],
+                    num_ctx=max_sequence_length
+                ),
+        ):
+            yield str(res["response"])
 
     def execute(
             self,
@@ -239,6 +288,8 @@ class ServeEngine:
                 return self.torch_execute
             elif self.backend == "gguf":
                 return self.gguf_execute
+            elif self.backend == "ollama":
+                return self.ollama_execute
             else:
                 raise ValueError(f"Invalid backend type of {self.backend}")
         else:
@@ -246,6 +297,8 @@ class ServeEngine:
                 return self.torch_stream
             elif self.backend == "gguf":
                 return self.gguf_stream
+            elif self.backend == "ollama":
+                return self.ollama_stream
             else:
                 raise ValueError(f"Invalid backend type of {self.backend}")
 
@@ -682,6 +735,26 @@ class ServeEngine:
             sample_config=sample_config,
             prompt_template=prompter,
             backend="gguf"
+        )
+
+    @classmethod
+    def from_ollama_model(
+            cls,
+            ollama_model: str,
+            sample_config: Optional[SampleParams],
+            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
+                "llama",
+                "<s>",
+                "</s>"
+            ),
+    ):
+
+        return cls(
+            model=ollama_model,
+            tokenizer=None,
+            sample_config=sample_config,
+            prompt_template=prompter,
+            backend="ollama"
         )
 
     def __repr__(self):
