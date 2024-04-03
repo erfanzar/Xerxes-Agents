@@ -4,10 +4,20 @@ name = "AgentX"
 version = "0.0.5"
 
 dependencies = [
-    "transformers",
-    "gradio",
-    "fastapi",
-    "termcolor"
+    "typing~=3.7.4.3",
+    "ipython~=8.17.2",
+    "tqdm~=4.64.1",
+    "pydantic==2.5.3",
+    "setuptools~=68.1.2",
+    "gradio~=4.25.0",
+    "numpy~=1.26.2",
+    "uvicorn~=0.23.2",
+    "pydantic-core==2.14.6",
+    "requests~=2.31.0",
+    "transformers>=4.36.1",
+    "huggingface-hub>=0.20.1",
+    "absl-py==2.0.0",
+    "Jinja2~=3.1.2",
 ]
 license = { text = "MIT" }
 authors = [
@@ -49,12 +59,8 @@ gguf = [
     "llama-cpp-python"
 ]
 
-gradio = [
-    "gradio==4.14.0"
-]
-
 all = [
-    "AgentX[gradio,rag,torch,ollama,gguf]"
+    "AgentX[rag,torch,ollama,gguf]"
 ]
 
 [project.urls]

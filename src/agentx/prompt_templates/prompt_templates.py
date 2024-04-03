@@ -50,7 +50,7 @@ class PromptTemplates(object):
         )
         template_string = open(f"{os.path.dirname(__file__)}/prompt_template_{prompt_template}.jinja2", "r").read()
         template = Environment(loader=BaseLoader()).from_string(
-            template_string
+            template_string,
         )
 
         return cls(
