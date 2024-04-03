@@ -1,7 +1,7 @@
 [project]
 
 name = "AgentX"
-version = "0.0.2"
+version = "0.0.5"
 
 dependencies = [
     "transformers",
@@ -50,7 +50,7 @@ gguf = [
 ]
 
 gradio = [
-    "gadio==4.14.0"
+    "gradio==4.14.0"
 ]
 
 all = [
@@ -68,4 +68,4 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages]
-find = { where = ["src"], include = ["*.jinja2"] }
+find = { where = ["src/"], include = ["**/*.jinja2"] }
