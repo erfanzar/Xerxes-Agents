@@ -1,7 +1,7 @@
 [project]
 
 name = "AgentX"
-version = "0.0.6"
+version = "0.0.7"
 
 dependencies = [
     "typing~=3.7.4.3",
