@@ -1,4 +1,3 @@
-import enum
 import warnings
 from threading import Thread
 
@@ -60,8 +59,8 @@ js = """function () {
 
 
 class ServeEngine:
-    index: Optional["faiss.IndexFlatL2"] = None
-    embedding: Optional["SentenceTransformer"] = None
+    index: Optional["faiss.IndexFlatL2"] = None  # type:ignore
+    embedding: Optional["SentenceTransformer"] = None  # type:ignore
     snippets: Optional[list[str]] = None
     retrieval_augmented_generation_top_k: Optional[int] = 3
     retrival_argumented_generation_threshold: Optional[float] = None
@@ -146,7 +145,7 @@ class ServeEngine:
                 return_tensors="pt",
                 add_special_tokens=False,
                 max_length=max_sequence_length,
-                # truncation=True
+                truncation=True
             ).to(self.model.device),
             generation_config=GenerationConfig(
                 top_k=top_k,
@@ -415,8 +414,8 @@ class ServeEngine:
                 "[AgentX](https://github.com/erfanzar/AgentX)</center></h1>",
             )
             history = gr.Chatbot(
-                elem_id="EasyDeL",
-                label="EasyDeL",
+                elem_id="Chat",
+                label="Chat",
                 container=True,
                 height="65vh",
             )
@@ -587,8 +586,8 @@ class ServeEngine:
 
     def add_retrieval_augmented_generation(
             self,
-            index: "faiss.IndexFlatL2",
-            embedding: "SentenceTransformer",
+            index: "faiss.IndexFlatL2",  # type:ignore
+            embedding: "SentenceTransformer",  # type:ignore
             snippets: list[str],
             retrieval_augmented_generation_top_k: int,
             retrival_argumented_generation_threshold: Optional[float] = None
@@ -602,8 +601,8 @@ class ServeEngine:
     @staticmethod
     def search(
             query: str,
-            index: "faiss.IndexFlatL2",
-            embedding: "SentenceTransformer",
+            index: "faiss.IndexFlatL2",  # type:ignore
+            embedding: "SentenceTransformer",  # type:ignore
             snippets: list,
             k: int,
     ):
@@ -624,8 +623,8 @@ class ServeEngine:
             verbose: bool = False,
             **kwargs
     ):
-        index: "faiss.IndexFlatL2" | None = self.index
-        embedding: "SentenceTransformer" | None = self.embedding
+        index: "faiss.IndexFlatL2" | None = self.index  # type:ignore
+        embedding: "SentenceTransformer" | None = self.embedding  # type:ignore
         snippets: list[str] | None = self.snippets
         information = "Retrival Augmented Generation Search Information"
         if index is not None and embedding is not None and embedding is not None:
@@ -649,7 +648,7 @@ class ServeEngine:
                 return "", information
 
             contexts = [
-                snippet["content"] for snippet, score in contexts_and_scores
+                snippet["content"] for snippet, score in contexts_and_scores  # type:ignore
             ]
 
             for snippet, score in contexts_and_scores:

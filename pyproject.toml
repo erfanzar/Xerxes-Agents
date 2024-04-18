@@ -1,7 +1,7 @@
 [project]
 
 name = "AgentX"
-version = "0.0.7"
+version = "0.0.8"
 
 dependencies = [
     "typing~=3.7.4.3",
@@ -73,5 +73,9 @@ Documentation = "https://erfanzar.github.io/AgentX"
 requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages]
-find = { where = ["src/"], include = ["**/*.jinja2"] }
+[tool.setuptools.packages.find]
+where = ["src/", ]
+include = ["**/*.jinja2", "agentx", "*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.jinja2"]
