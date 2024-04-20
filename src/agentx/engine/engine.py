@@ -225,7 +225,7 @@ class ServeEngine:
                     top_k=top_k,
                     top_p=top_p,
                     temperature=temperature,
-                    stop=[self.prompt_template.eos_token],
+                    stop=[self.prompt_template.eos_token, self.prompt_template.bos_token],
                     num_ctx=max_sequence_length
                 ),
         ):
@@ -249,7 +249,7 @@ class ServeEngine:
                     top_k=top_k,
                     top_p=top_p,
                     temperature=temperature,
-                    stop=[self.prompt_template.eos_token],
+                    stop=[self.prompt_template.eos_token, self.prompt_template.bos_token],
                     num_ctx=max_sequence_length
                 ),
         ):

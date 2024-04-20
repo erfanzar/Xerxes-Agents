@@ -4,21 +4,22 @@ import warnings
 from jinja2 import Environment, BaseLoader, Template
 from typing import Optional
 
+
 bos_eos_token_templates = {
     "chatml": {
-        "eos": "",
-        "bos": ""
+        "eos": "<|im_end|>",
+        "bos": "<|im_start|>"
     },
     "gemma": {
-        "eos": "<eos>",
-        "bos": "<bos>"
+        "eos": "<end_of_turn>",
+        "bos": "<start_of_turn>"
     },
     "llama": {
         "eos": "</s>",
         "bos": "<s>"
     },
     "llama_3": {
-        "eos": "<|end_of_text|>",
+        "eos": "<|eot_id|>",
         "bos": "<|begin_of_text|>"
     },
     "open_chat": {
