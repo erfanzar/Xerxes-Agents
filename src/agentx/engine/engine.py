@@ -421,6 +421,7 @@ class ServeEngine:
                 height="65vh",
             )
             prompt = gr.Textbox(
+                show_label=False,
                 placeholder="Enter Your Prompt Here."
             )
             with gr.Row():
