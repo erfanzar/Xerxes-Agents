@@ -93,8 +93,7 @@ class PromptTemplates(object):
             raise ValueError("if you are passing eos token you should provide bos token too.")
         elif bos_token is not None and eos_token is None:
             raise ValueError("if you are passing bos token you should provide eos token too.")
-        else:
-            assert False, "open Bug report."
+
         template_string = open(f"{os.path.dirname(__file__)}/prompt_template_{prompt_template}.jinja2", "r").read()
         template = Environment(loader=BaseLoader()).from_string(
             template_string,
