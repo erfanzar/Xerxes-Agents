@@ -421,7 +421,7 @@ class ServeEngine:
                 height="65vh",
             )
             prompt = gr.Textbox(
-                show_label=False, placeholder="Enter Your Prompt Here.", container=False
+                placeholder="Enter Your Prompt Here."
             )
             with gr.Row():
                 submit = gr.Button(
@@ -437,10 +437,8 @@ class ServeEngine:
             with gr.Accordion(open=False, label="Advanced Options"):
                 system_prompt = gr.Textbox(
                     value="",
-                    show_label=True,
                     label="system Prompt",
                     placeholder="system Prompt",
-                    container=False
                 )
                 retrieval_augmented_generation_information = gr.TextArea(
                     placeholder="Retrieval Augmented Generation Information",
