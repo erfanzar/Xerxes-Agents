@@ -1,7 +1,35 @@
 import os
+import warnings
 
 from jinja2 import Environment, BaseLoader, Template
 from typing import Optional
+
+bos_eos_token_templates = {
+    "chatml": {
+        "eos": "",
+        "bos": ""
+    },
+    "gemma": {
+        "eos": "<eos>",
+        "bos": "<bos>"
+    },
+    "llama": {
+        "eos": "</s>",
+        "bos": "<s>"
+    },
+    "llama_3": {
+        "eos": "<|end_of_text|>",
+        "bos": "<|begin_of_text|>"
+    },
+    "open_chat": {
+        "eos": "</s>",
+        "bos": "<s>"
+    },
+    "zephyr": {
+        "eos": "<|endoftext|>",
+        "bos": "<|startoftext|>"
+    },
+}
 
 
 class PromptTemplates(object):
@@ -36,18 +64,37 @@ class PromptTemplates(object):
     def from_prompt_templates(
             cls,
             prompt_template: str,
-            bos_token: str,
-            eos_token: str
+            bos_token: Optional[str] = None,
+            eos_token: Optional[str] = None
     ) -> 'PromptTemplates':
         available_formats = [
             s.replace("prompt_template_", "").replace(".jinja2", "") for s
             in os.listdir(os.path.dirname(__file__)) if
             os.path.exists(os.path.join(os.path.dirname(__file__), s))
         ]
-
         assert prompt_template in available_formats, (
             f"couldn't find {prompt_template} in available templates {available_formats}"
         )
+
+        if bos_token is None and eos_token is None:
+            if prompt_template not in list(bos_eos_token_templates.keys()):
+                raise ValueError(
+                    "No bos_eos_token_templates available for given prompt_template, "
+                    "you should provide bos and eos tokens."
+                )
+            temp = bos_eos_token_templates[prompt_template]
+            bos_token = temp["bos"]
+            eos_token = temp["eos"]
+            warnings.warn(
+                f"Since no eos and bos token is provided the eos and tokens for {prompt_template} will be set as "
+                f"{eos_token=}, {bos_token=}"
+            )
+        elif bos_token is None and eos_token is not None:
+            raise ValueError("if you are passing eos token you should provide bos token too.")
+        elif bos_token is not None and eos_token is None:
+            raise ValueError("if you are passing bos token you should provide eos token too.")
+        else:
+            assert False, "open Bug report."
         template_string = open(f"{os.path.dirname(__file__)}/prompt_template_{prompt_template}.jinja2", "r").read()
         template = Environment(loader=BaseLoader()).from_string(
             template_string,
