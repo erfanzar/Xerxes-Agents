@@ -103,7 +103,6 @@ class ServeEngine:
             add_special_tokens=False,
             truncation=True,
             max_length=max_sequence_length - (max_new_tokens // 2),
-            padding="max_length"
         ).to(self.model.device)
         inputs = dict(
             **in_ids,
@@ -146,7 +145,6 @@ class ServeEngine:
                 add_special_tokens=False,
                 max_length=max_sequence_length,
                 truncation=True,
-                padding="max_length"
             ).to(self.model.device),
             generation_config=GenerationConfig(
                 top_k=top_k,
