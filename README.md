@@ -43,6 +43,10 @@ of intelligent fusion with AgentX and unlock new possibilities for your applicat
 
 Here's an Example of Serving and using Model with AgentX with torch Backend.
 
+> [!NOTE]
+> You can just don't pass `prompter` or prompt template and just pass the tokenizer
+> engine will use tokenizer chat template
+
 ```python
 from agentx import ServeEngine, PromptTemplates
 import torch
@@ -50,7 +54,7 @@ import torch
 engine = ServeEngine.from_torch_pretrained(
     huggingface_repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
     sample_config=None,  # torch support Auto Set from Model Config.
-    # sample_config=SampleParams(
+    # sample_config=EngineGenerationConfig(
     #     max_new_tokens=8192,
     #     max_sequence_length=8192,
     #     top_k=20,
@@ -86,11 +90,11 @@ Here's an Example of Serving and using Model with AgentX with Ollama Backend.
 (Ollama and Llama CPP kinda have same usage examples.)
 
 ```python
-from agentx import ServeEngine, PromptTemplates, SampleParams
+from agentx import ServeEngine, PromptTemplates, EngineGenerationConfig
 
 engine = ServeEngine.from_ollama_model(
     ollama_model="LLAMA-3-OLLAMA",
-    sample_config=SampleParams(
+    sample_config=EngineGenerationConfig(
         max_new_tokens=8192,
         max_sequence_length=8192,
         top_k=20,

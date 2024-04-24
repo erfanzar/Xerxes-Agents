@@ -1,21 +1,13 @@
-from typing import Optional, Generator, Any, Tuple
+from typing import Optional, Generator, Any
 from jinja2 import Environment, BaseLoader
 import os
 import json
-from ...prompt_templates import PromptTemplates
+from ..base_agent import BaseAgent
 
 PROMPT = open(f"{os.path.dirname(__file__)}/prompt.jinja2", "r").read().strip()
 
 
-class ActionAgent:
-    def __init__(
-            self,
-            engine: "ServeEngine",
-            prompter: PromptTemplates
-    ):
-        self.engine = engine
-        self.prompter = prompter
-
+class ActionAgent(BaseAgent):
     @staticmethod
     def render(
             conversation: list[str], full_context: Optional[str] = None
@@ -26,6 +18,18 @@ class ActionAgent:
             full_context=full_context or ""
         )
 
+    def format_prompt(
+            self,
+            conversation: list[str],
+            full_context: Optional[str] = None,
+    ):
+        sample = [{"role": "user", "content": self.render(conversation, full_context)}]
+        if self.prompter is None:
+            prompt = self.tokenizer.apply_chat_template(sample, tokenize=False)
+        else:
+            prompt = self.prompter.render(sample)
+        return prompt
+
     def execute(
             self,
             conversation: list[str],
@@ -33,14 +37,7 @@ class ActionAgent:
             *args,
             **kwargs
     ) -> str:
-        prompt = self.prompter.render(
-            [
-                {
-                    "role": "user",
-                    "content": self.render(conversation, full_context)
-                }
-            ],
-        )
+        prompt = self.format_prompt(conversation=conversation, full_context=full_context)
         return self.engine.execute(prompt, **kwargs)
 
     def stream(

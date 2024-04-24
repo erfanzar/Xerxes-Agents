@@ -6,18 +6,19 @@ def main():
     engine = ServeEngine.from_torch_pretrained(
         huggingface_repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
         sample_config=None,  # torch support Auto Set from Model Config.
-        # sample_config=SampleParams(
+        # sample_config=EngineGenerationConfig(
         #     max_new_tokens=8192,
         #     max_sequence_length=8192,
         #     top_k=20,
         #     top_p=0.95,
         #     temperature=0.2,
         # ),
-        prompter=PromptTemplates.from_prompt_templates(
-            "llama_3",
-            eos_token=None,  # Auto Set is supported for some models
-            bos_token=None  # Auto Set is supported for some models
-        ),
+        # prompter=PromptTemplates.from_prompt_templates(
+        #     "llama_3",
+        #     eos_token=None,  # Auto Set is supported for some models
+        #     bos_token=None  # Auto Set is supported for some models
+        # ),
+        # in case that prompter is None the tokenizer chat template will be used.
         tokenizer_huggingface_repo_id=None,
         bnb_4bit_compute_dtype=torch.float16,
         device_map="auto",

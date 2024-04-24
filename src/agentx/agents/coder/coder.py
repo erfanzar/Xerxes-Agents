@@ -1,20 +1,12 @@
 import os
-import time
-
+from ..base_agent import BaseAgent
 from jinja2 import Environment, BaseLoader
 from typing import List, Dict, Union
-from ...prompt_templates import PromptTemplates
+
 PROMPT = open(f"{os.path.dirname(__file__)}/prompt.jinja2", "r").read().strip()
 
 
-class CoderAgent:
-    def __init__(
-            self,
-            engine: "ServeEngine",
-            prompter: PromptTemplates
-    ):
-        self.engine = engine
-        self.prompter = prompter
+class CoderAgent(BaseAgent):
 
     @staticmethod
     def render(
@@ -96,13 +88,10 @@ class CoderAgent:
             project_name: str
     ) -> list[dict[str, str]] | bool:
 
-        prompt = self.prompter.render(
-            [
-                {
-                    "role": "user",
-                    "content": self.render(step_by_step_plan, user_context, search_results),
-                }
-            ],
+        prompt = self.format_prompt(
+            step_by_step_plan=step_by_step_plan,
+            user_context=user_context,
+            search_results=search_results
         )
         response = self.engine.execute(prompt)
 

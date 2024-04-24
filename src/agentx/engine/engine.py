@@ -24,7 +24,7 @@ try:
 except ModuleNotFoundError as _:
     warnings.warn("couldn't import torch")
     torch = None
-from .configuration import SampleParams
+from .configuration import EngineGenerationConfig
 
 try:
     from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig, InferenceSession
@@ -77,15 +77,22 @@ class ServeEngine:
             self,
             model: PreTrainedModel | InferenceSession | str,
             tokenizer: Optional[PreTrainedTokenizer | AutoTokenizer],
-            prompt_template: PromptTemplates,
-            sample_config: SampleParams,
-            backend: Literal["gguf", "torch", "ollama"]
+            prompt_template: Optional[PromptTemplates],
+            sample_config: EngineGenerationConfig,
+            backend: Literal["gguf", "torch", "ollama"],
+            use_agent: bool = False
     ):
+
+        if prompt_template is None and tokenizer is None:
+            raise ValueError(
+                "both `prompt_template` and `tokenizer` are None, you should at least provide one of them."
+            )
         self.model = model
         self.tokenizer = tokenizer
         self.sample_config = sample_config
         self.prompt_template = prompt_template
         self.backend = backend
+        self.use_agent = use_agent
 
     def torch_execute(
             self,
@@ -223,11 +230,19 @@ class ServeEngine:
                     top_k=top_k,
                     top_p=top_p,
                     temperature=temperature,
-                    stop=[self.prompt_template.eos_token, self.prompt_template.bos_token],
+                    stop=self.stop_words,
                     num_ctx=max_sequence_length
                 ),
         ):
             return res["response"]
+
+    @property
+    def stop_words(self):
+
+        return [
+            self.prompt_template.eos_token,
+            self.prompt_template.bos_token
+        ] if self.prompt_template is not None else [self.tokenizer.eos_token, self.tokenizer.bos_token]
 
     def ollama_stream(
             self,
@@ -247,7 +262,7 @@ class ServeEngine:
                     top_k=top_k,
                     top_p=top_p,
                     temperature=temperature,
-                    stop=[self.prompt_template.eos_token, self.prompt_template.bos_token],
+                    stop=self.stop_words,
                     num_ctx=max_sequence_length
                 ),
         ):
@@ -373,33 +388,59 @@ class ServeEngine:
             query=prompt,
             retrival_argumented_generation_threshold=retrival_argumented_generation_threshold
         )
-        agent = ChatAgent(self, self.prompt_template)
         conversation = []
-        for perv in history:
-            conversation.append(perv[0])
-            conversation.append(perv[1])
-
-        conversation.append(prompt)
-        history.append([prompt, ""])
         total_response = ""
+        if self.use_agent:
+            agent = ChatAgent(self, self.prompt_template, self.tokenizer)
 
-        prompt_to_model = agent.render(
-            conversation=conversation,
-            full_context=contexts
-        )
+            for perv in history:
+                conversation.append(perv[0])
+                conversation.append(perv[1])
 
-        for char in agent.stream(
+            conversation.append(prompt)
+            history.append([prompt, ""])
+
+            prompt_to_model = agent.render(
                 conversation=conversation,
-                full_context=contexts,
-                max_sequence_length=max_sequence_length,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                top_k=top_k,
-                top_p=top_p
-        ):
-            total_response += char
-            history[-1][-1] = str(total_response)
-            yield "", history, information, prompt_to_model
+                full_context=contexts
+            )
+
+            for char in agent.stream(
+                    conversation=conversation,
+                    full_context=contexts,
+                    max_sequence_length=max_sequence_length,
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                    top_k=top_k,
+                    top_p=top_p
+            ):
+                total_response += char
+                history[-1][-1] = str(total_response)
+                yield "", history, information, prompt_to_model
+        else:
+            if system_prompt is not None and system_prompt != "":
+                conversation.append({"role": "system", "content": system_prompt})
+            for perv in history:
+                conversation.append({"role": "user", "content": perv[0]})
+                conversation.append({"role": "assistant", "content": perv[1]})
+
+            conversation.append({"role": "user", "content": prompt})
+            history.append([prompt, ""])
+            if self.prompt_template is None:
+                prompt = self.tokenizer.apply_chat_template(conversation, tokenize=False)
+            else:
+                prompt = self.prompt_template.render(conversation)
+            for char in self.process(
+                    prompt=prompt,
+                    max_sequence_length=max_sequence_length,
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                    top_k=top_k,
+                    top_p=top_p
+            ):
+                total_response += char
+                history[-1][-1] = str(total_response)
+                yield "", history, information, prompt
 
     def chat_interface_components(self):
         """
@@ -409,23 +450,31 @@ class ServeEngine:
         """
         with gr.Column("100%"):
             gr.Markdown(
-                "# <h1><center style='color:white;'>Powered by "
-                "[AgentX](https://github.com/erfanzar/AgentX)</center></h1>",
+                "# <h3><center style='color:white;'>Powered by "
+                "[AgentX](https://github.com/erfanzar/AgentX)</center></h3>",
             )
             history = gr.Chatbot(
                 elem_id="Chat",
                 label="Chat",
                 container=True,
-                height="65vh",
-            )
-            prompt = gr.Textbox(
-                container=False,
-                placeholder="Enter Your Prompt Here."
+                height="68vh",
+                show_copy_button=True,
+                show_share_button=True
             )
             with gr.Row():
+                prompt = gr.Textbox(
+                    container=False,
+                    placeholder="Enter Your Prompt Here.",
+                    scale=4
+                )
                 submit = gr.Button(
                     value="Run",
-                    variant="primary"
+                    variant="primary",
+                    scale=1
+                )
+            with gr.Row():
+                re_generate = gr.Button(
+                    value="Re-Generate",
                 )
                 stop = gr.Button(
                     value="Stop"
@@ -439,11 +488,7 @@ class ServeEngine:
                     label="system Prompt",
                     placeholder="system Prompt",
                 )
-                retrieval_augmented_generation_information = gr.TextArea(
-                    placeholder="Retrieval Augmented Generation Information",
-                    max_lines=100,
-                    label="Retrieval Augmented Generation Information"
-                )
+
                 max_sequence_length = gr.Slider(
                     value=self.sample_config.max_sequence_length,
                     maximum=10000,
@@ -495,7 +540,11 @@ class ServeEngine:
                     label="Mode",
                     multiselect=False
                 )
-
+                retrieval_augmented_generation_information = gr.TextArea(
+                    placeholder="Retrieval Augmented Generation Information",
+                    max_lines=100,
+                    label="Retrieval Augmented Generation Information"
+                )
                 prompt_to_model = gr.TextArea(
                     placeholder="Agent Prompt",
                     max_lines=100,
@@ -527,6 +576,16 @@ class ServeEngine:
                 prompt_to_model
             ]
         )
+        re_generate_event = re_generate.click(
+            fn=self._re_generate,
+            inputs=inputs,
+            outputs=[
+                prompt,
+                history,
+                retrieval_augmented_generation_information,
+                prompt_to_model
+            ]
+        )
         txt_event = prompt.submit(
             fn=self.sample,
             inputs=inputs,
@@ -542,8 +601,46 @@ class ServeEngine:
             fn=None,
             inputs=None,
             outputs=None,
-            cancels=[txt_event, sub_event]
+            cancels=[
+                txt_event,
+                sub_event,
+                re_generate_event
+            ]
         )
+
+    def _re_generate(
+            self,
+            prompt,
+            history,
+            system_prompt,
+            mode,
+            max_sequence_length,
+            max_new_tokens,
+            temperature,
+            top_p,
+            top_k,
+            retrival_argumented_generation_threshold
+    ):
+
+        if history is None or len(history) == 0:
+            gr.Warning("There's no history for this chat to re-generate response.")
+        else:
+            prompt = history[-1][0]
+            history = history[0:-1]
+
+            for holder, history, information, prompt_to_model in self.sample(
+                    prompt=prompt,
+                    history=history,
+                    system_prompt=system_prompt,
+                    mode=mode,
+                    max_sequence_length=max_sequence_length,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    retrival_argumented_generation_threshold=retrival_argumented_generation_threshold
+            ):
+                yield holder, history, information, prompt_to_model
 
     def build_chat_interface(self) -> gr.Blocks:
         """
@@ -577,6 +674,7 @@ class ServeEngine:
                     secondary_hue=gr.themes.colors.orange,
                 ),
                 css="footer {visibility: hidden}",
+                title="AgentX inference",
         ) as block:
             # with gr.Tab("Chat"):
             self.chat_interface_components()
@@ -664,17 +762,14 @@ class ServeEngine:
             cls,
             huggingface_repo_id: str,
             *,
-            sample_config: Optional[SampleParams] = None,
-            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
-                "llama",
-                "<s>",
-                "</s>"
-            ),
+            sample_config: Optional[EngineGenerationConfig] = None,
+            prompter: Optional[PromptTemplates] = None,
             tokenizer_huggingface_repo_id: str | None = None,
             bnb_4bit_compute_dtype=torch.float16,
             device_map: str = "auto",
             _attn_implementation: str = "sdpa",
-            bnb_4bit_quant_type: str = "fp4"
+            bnb_4bit_quant_type: str = "fp4",
+            use_agent: bool = False,
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         model = AutoModelForCausalLM.from_pretrained(
@@ -702,7 +797,7 @@ class ServeEngine:
         max_position_embeddings = getattr(
             model.config, "max_position_embeddings", 4096)
         if sample_config is None:
-            sample_config = SampleParams(
+            sample_config = EngineGenerationConfig(
                 do_sample=True,
                 top_k=30,
                 top_p=1,
@@ -718,7 +813,8 @@ class ServeEngine:
             tokenizer=tokenizer,
             sample_config=sample_config,
             prompt_template=prompter,
-            backend="torch"
+            backend="torch",
+            use_agent=use_agent
         )
 
     @classmethod
@@ -726,13 +822,11 @@ class ServeEngine:
             cls,
             huggingface_repo_id: str,
             filename: str,
-            sample_config: Optional[SampleParams],
-            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
-                "llama",
-                "<s>",
-                "</s>"
-            ),
-            llama_cpp_param_kwargs: dict = None
+            sample_config: Optional[EngineGenerationConfig],
+            prompter: Optional[PromptTemplates] = None,
+            tokenizer: Optional[PreTrainedTokenizer] = None,
+            llama_cpp_param_kwargs: dict = None,
+            use_agent: bool = False,
     ):
         if llama_cpp_param_kwargs is None:
             llama_cpp_param_kwargs = {}
@@ -753,30 +847,30 @@ class ServeEngine:
 
         return cls(
             model=model,
-            tokenizer=None,
+            tokenizer=tokenizer,
             sample_config=sample_config,
             prompt_template=prompter,
-            backend="gguf"
+            backend="gguf",
+            use_agent=use_agent
         )
 
     @classmethod
     def from_ollama_model(
             cls,
             ollama_model: str,
-            sample_config: Optional[SampleParams],
-            prompter: PromptTemplates = PromptTemplates.from_prompt_templates(
-                "llama",
-                "<s>",
-                "</s>"
-            ),
+            sample_config: Optional[EngineGenerationConfig],
+            prompter: Optional[PromptTemplates] = None,
+            tokenizer: Optional[PreTrainedTokenizer] = None,
+            use_agent: bool = False,
     ):
 
         return cls(
             model=ollama_model,
-            tokenizer=None,
+            tokenizer=tokenizer,
             sample_config=sample_config,
             prompt_template=prompter,
-            backend="ollama"
+            backend="ollama",
+            use_agent=use_agent
         )
 
     def __repr__(self):

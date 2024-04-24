@@ -1,19 +1,12 @@
 from typing import Optional, Generator, Any
-from ...prompt_templates import PromptTemplates
+from ..base_agent import BaseAgent
 from jinja2 import Environment, BaseLoader
 import os
 
 PROMPT = open(f"{os.path.dirname(__file__)}/prompt.jinja2", "r").read().strip()
 
 
-class ChatAgent:
-    def __init__(
-            self,
-            engine: "ServeEngine",
-            prompter: PromptTemplates
-    ):
-        self.engine = engine
-        self.prompter = prompter
+class ChatAgent(BaseAgent):
 
     @staticmethod
     def render(
@@ -25,6 +18,18 @@ class ChatAgent:
             full_context=full_context or ""
         )
 
+    def format_prompt(
+            self,
+            conversation: list[str],
+            full_context: Optional[str] = None,
+    ):
+        sample = [{"role": "user", "content": self.render(conversation, full_context)}]
+        if self.prompter is None:
+            prompt = self.tokenizer.apply_chat_template(sample, tokenize=False)
+        else:
+            prompt = self.prompter.render(sample)
+        return prompt
+
     def execute(
             self,
             conversation: list[str],
@@ -32,13 +37,9 @@ class ChatAgent:
             *args,
             **kwargs
     ) -> str:
-        prompt = self.prompter.render(
-            [
-                {
-                    "role": "user",
-                    "content": self.render(conversation, full_context)
-                }
-            ],
+        prompt = self.format_prompt(
+            conversation=conversation,
+            full_context=full_context
         )
         return self.engine.execute(prompt, **kwargs)
 
@@ -49,13 +50,9 @@ class ChatAgent:
             *args,
             **kwargs
     ) -> Generator[Any, Any, Any]:
-        prompt = self.prompter.render(
-            [
-                {
-                    "role": "user",
-                    "content": self.render(conversation, full_context)
-                }
-            ],
+        prompt = self.format_prompt(
+            conversation=conversation,
+            full_context=full_context
         )
 
         for response in self.engine.process(

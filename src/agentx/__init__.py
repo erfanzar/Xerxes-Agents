@@ -1,22 +1,26 @@
-try:
-    import ollama as _ollama
-    import threading
-    import os
-
-    threading.Thread(target=os.system, args=("ollama serve",)).start()
-except ModuleNotFoundError:
-    ...
-
-from .prompt_templates import PromptTemplates
+from .prompt_templates import (
+    PromptTemplates as PromptTemplates
+)
 from .agents import (
-    ChatAgent,
-    ActionAgent,
-    CoderAgent
+    ChatAgent as ChatAgent,
+    ActionAgent as ActionAgent,
+    CoderAgent as CoderAgent
 )
 
 from .engine import (
-    SampleParams,
-    ServeEngine
+    EngineGenerationConfig as EngineGenerationConfig,
+    ServeEngine as ServeEngine,
+    start_ollama_server as start_ollama_server
 )
 
-__version__ = "0.0.11"
+__version__ = "0.0.15"
+
+__all__ = (
+    "PromptTemplates",
+    "EngineGenerationConfig",
+    "ServeEngine",
+    "start_ollama_server",
+    "ChatAgent",
+    "ActionAgent",
+    "CoderAgent"
+)
