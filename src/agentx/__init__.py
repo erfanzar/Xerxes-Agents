@@ -13,7 +13,7 @@ from .engine import (
     start_ollama_server as start_ollama_server
 )
 
-__version__ = "0.0.15"
+__version__ = "0.0.16"
 
 __all__ = (
     "PromptTemplates",

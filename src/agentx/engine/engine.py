@@ -770,6 +770,7 @@ class ServeEngine:
             _attn_implementation: str = "sdpa",
             bnb_4bit_quant_type: str = "fp4",
             use_agent: bool = False,
+            trust_remote_code: bool = False
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         model = AutoModelForCausalLM.from_pretrained(
@@ -782,7 +783,8 @@ class ServeEngine:
             ),
             torch_dtype=torch.float16,
             device_map=device_map,
-            _attn_implementation=_attn_implementation
+            _attn_implementation=_attn_implementation,
+            trust_remote_code=trust_remote_code
         )
 
         tokenizer = AutoTokenizer.from_pretrained(
