@@ -23,7 +23,11 @@ class BaseAgent:
     ):
         sample = [{"role": "user", "content": self.render(**kwargs)}]
         if self.prompter is None:
-            prompt = self.tokenizer.apply_chat_template(sample, tokenize=False)
+            prompt = self.tokenizer.apply_chat_template(
+                sample,
+                tokenize=False,
+                add_generation_prompt=True
+            )
         else:
             prompt = self.prompter.render(sample)
         return prompt

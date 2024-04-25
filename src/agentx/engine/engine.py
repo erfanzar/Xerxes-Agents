@@ -427,7 +427,11 @@ class ServeEngine:
             conversation.append({"role": "user", "content": prompt})
             history.append([prompt, ""])
             if self.prompt_template is None:
-                prompt = self.tokenizer.apply_chat_template(conversation, tokenize=False)
+                prompt = self.tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
             else:
                 prompt = self.prompt_template.render(conversation)
             for char in self.process(
