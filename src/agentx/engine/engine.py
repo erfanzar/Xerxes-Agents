@@ -427,15 +427,11 @@ class ServeEngine:
             conversation.append({"role": "user", "content": prompt})
             history.append([prompt, ""])
             if self.prompt_template is None:
-                prompt = self.tokenizer.apply_chat_template(
-                    conversation,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
+                prompt_to_model = self.tokenizer.apply_chat_template(conversation, tokenize=False)
             else:
-                prompt = self.prompt_template.render(conversation)
+                prompt_to_model = self.prompt_template.render(conversation)
             for char in self.process(
-                    prompt=prompt,
+                    prompt=prompt_to_model,
                     max_sequence_length=max_sequence_length,
                     temperature=temperature,
                     max_new_tokens=max_new_tokens,
@@ -444,7 +440,7 @@ class ServeEngine:
             ):
                 total_response += char
                 history[-1][-1] = str(total_response)
-                yield "", history, information, prompt
+                yield "", history, information, prompt_to_model
 
     def chat_interface_components(self):
         """
