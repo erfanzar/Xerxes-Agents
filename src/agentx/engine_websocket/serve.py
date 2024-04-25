@@ -84,7 +84,7 @@ def create_handle_function(engine: "ServeEngine"):  # type:ignore
 
 
 def start_server(
-        engine: ServeEngine,
+        engine: "ServeEngine",  # type:ignore
         port: int = 11554
 ):
     async def _run():
