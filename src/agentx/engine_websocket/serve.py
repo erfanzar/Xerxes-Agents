@@ -89,7 +89,7 @@ def start_server(
 ):
     async def _run():
         async with websockets.serve(
-                create_handle_function(engine=engine), "localhost", port
+                create_handle_function(engine=engine), "0.0.0.0", port
         ) as ws:
             print("Starting AgentX websocket server...")
             await ws.wait_closed()
