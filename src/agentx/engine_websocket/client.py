@@ -1,6 +1,6 @@
 from websocket import create_connection
 import json
-from typing import Optional, Dict, Generator
+from typing import Optional, Dict, Generator, List
 from dataclasses import dataclass
 
 
@@ -15,7 +15,7 @@ class SocketGenerationOutput:
 def generate(
         hostname: str,
         prompt: str,
-        conversation: Optional[Dict] = None,
+        conversation: Optional[List[Dict]] = None,
         max_sequence_length: Optional[float] = None,
         max_new_tokens: Optional[float] = None,
         temperature: Optional[float] = None,
