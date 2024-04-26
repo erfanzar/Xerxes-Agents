@@ -40,7 +40,7 @@ except ModuleNotFoundError as _:
 from typing import List, Optional, Literal
 
 if torch is None and ollama is None and llama_cpp_available is None:
-    raise ModuleNotFoundError(
+    warnings.warn(
         "`AgentX` uses three different backend (pytorch, ollama and llama_cpp) and seems like none of them are"
         " available. Please install at least one of them."
     )
