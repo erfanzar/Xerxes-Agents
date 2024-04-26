@@ -769,7 +769,7 @@ class ServeEngine:
             sample_config: Optional[EngineGenerationConfig] = None,
             prompter: Optional[PromptTemplates] = None,
             tokenizer_huggingface_repo_id: str | None = None,
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=None,
             device_map: str = "auto",
             _attn_implementation: str = "sdpa",
             bnb_4bit_quant_type: str = "fp4",
@@ -777,6 +777,8 @@ class ServeEngine:
             trust_remote_code: bool = False
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        if bnb_4bit_compute_dtype is None:
+            bnb_4bit_compute_dtype = torch.float16
         model = AutoModelForCausalLM.from_pretrained(
             huggingface_repo_id,
             quantization_config=BitsAndBytesConfig(
