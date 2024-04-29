@@ -38,7 +38,12 @@ of intelligent fusion with AgentX and unlock new possibilities for your applicat
 
 10. **Open Source**: AgentX is an open-source project, inviting contributions from the community to help enhance its
     features, usability, and effectiveness in real-world applications.
+## CLI Support
 
+AgentX support usage Via CLI for more information just use
+```shell
+agentx serve --help
+```
 ## Torch Serving Example
 
 Here's an Example of Serving and using Model with AgentX with torch Backend.

@@ -25,7 +25,9 @@ async def generate(websocket, engine):
             add_generation_prompt=True
         )
     else:
-        prompt_to_model = engine.prompt_template.render(conversation)
+        prompt_to_model = engine.prompt_template.render(
+            conversation
+        )
     start_time = time.time()
     total_response = ""
     tk_index = 0
@@ -72,7 +74,7 @@ def create_handle_function(engine: "ServeEngine"):  # type:ignore
             if path == "/generate":
                 await generate(websocket, engine)
             elif path == "/":
-                await websocket.send(json.dumps({"status": "AgentX server is Running..."}))
+                await websocket.send(json.dumps({"status": "AgentX server is Running ..."}))
             else:
                 await websocket.send(json.dumps({"error": f"invalid path {path}"}))
         except websockets.ConnectionClosed:
@@ -91,7 +93,7 @@ def start_server(
         async with websockets.serve(
                 create_handle_function(engine=engine), "0.0.0.0", port
         ) as ws:
-            print("Starting AgentX websocket server...")
+            print(f"Starting AgentX websocket server on http://localhost:{port}")
             await ws.wait_closed()
 
     asyncio.run(_run())

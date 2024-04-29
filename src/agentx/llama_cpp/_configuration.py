@@ -1,4 +1,3 @@
-import warnings
 from typing import List, Optional, Union, Dict
 
 from llama_cpp import (
@@ -17,6 +16,9 @@ from llama_cpp import (
 from llama_cpp.llama_cpp import _lib as llama_cpp_lib
 
 from ._utils import BaseCPPClass
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class LlamaCPP(_Llama):
@@ -112,7 +114,7 @@ class LlamaCPPGenerationConfig(BaseCPPClass):
         """
         if max_new_tokens is None:
             max_new_tokens = -1
-            warnings.warn(
+            logger.warn(
                 "`max_new_tokens` will be set to -1 for infinity generation"
             )
         if stop is None:

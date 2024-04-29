@@ -1,14 +1,7 @@
-import warnings
 from threading import Thread
+import logging
 
 import gradio as gr
-
-try:
-    import ollama
-except ModuleNotFoundError as _:
-    warnings.warn("couldn't import ollama")
-    ollama = None
-
 from transformers import (
     PreTrainedModel,
     PreTrainedTokenizer,
@@ -18,29 +11,34 @@ from transformers import (
 )
 from ..prompt_templates import PromptTemplates
 from ..agents.chat import ChatAgent
+from .configuration import EngineGenerationConfig
+
+from typing import List, Optional, Literal
+
+logger = logging.getLogger(__name__)
+try:
+    import ollama
+except ModuleNotFoundError as _:
+    logger.warning("couldn't import ollama")
+    ollama = None
 
 try:
     import torch
 except ModuleNotFoundError as _:
-    warnings.warn("couldn't import torch")
+    logger.warning("couldn't import torch")
     torch = None
-from .configuration import EngineGenerationConfig
-
 try:
     from ..llama_cpp import LlamaCPParams, LlamaCPPGenerationConfig, InferenceSession
 
     llama_cpp_available = True
 except ModuleNotFoundError as _:
-    warnings.warn("couldn't import llama_cpp_python")
+    logger.warning("couldn't import llama_cpp_python")
     LlamaCPParams = None
     LlamaCPPGenerationConfig = None
     InferenceSession = None
     llama_cpp_available = None
-
-from typing import List, Optional, Literal
-
 if torch is None and ollama is None and llama_cpp_available is None:
-    warnings.warn(
+    logger.warning(
         "`AgentX` uses three different backend (pytorch, ollama and llama_cpp) and seems like none of them are"
         " available. Please install at least one of them."
     )
@@ -144,7 +142,7 @@ class ServeEngine:
             tokenizer=self.tokenizer,
             skip_special_tokens=True
         )
-
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         inputs = dict(
             **self.tokenizer(
                 prompt,
@@ -758,7 +756,7 @@ class ServeEngine:
             if len(contexts) > 0:
                 return "\n\n".join(context for context in contexts), information
         else:
-            warnings.warn("Retrival Argumented Generation is disabled")
+            logger.warning("Retrival Argumented Generation is disabled")
         return "", information
 
     @classmethod
@@ -796,14 +794,8 @@ class ServeEngine:
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_huggingface_repo_id or huggingface_repo_id
         )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
 
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-
-        max_position_embeddings = getattr(
-            model.config, "max_position_embeddings", 4096)
+        max_position_embeddings = getattr(model.config, "max_position_embeddings", 4096)
         if sample_config is None:
             sample_config = EngineGenerationConfig(
                 do_sample=True,

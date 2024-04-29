@@ -23,6 +23,8 @@ def generate(
         top_p: Optional[float] = None,
         stream: bool = True
 ) -> Generator[SocketGenerationOutput, None, None]:
+    if hostname.startswith("https://") or hostname.startswith("http://"):
+        raise ValueError("hostname shouldn't start with https:// or http://.")
     ws = create_connection(f"ws://{hostname}/generate")
     if conversation is None:
         conversation = []

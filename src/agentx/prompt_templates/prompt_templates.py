@@ -1,9 +1,10 @@
 import os
-import warnings
+import logging
+
+logger = logging.getLogger(__name__)
 
 from jinja2 import Environment, BaseLoader, Template
 from typing import Optional
-
 
 bos_eos_token_templates = {
     "chatml": {
@@ -86,7 +87,7 @@ class PromptTemplates(object):
             temp = bos_eos_token_templates[prompt_template]
             bos_token = temp["bos"]
             eos_token = temp["eos"]
-            warnings.warn(
+            logger.warning(
                 f"Since no eos and bos token is provided the eos and tokens for {prompt_template} will be set as "
                 f"{eos_token=}, {bos_token=}"
             )

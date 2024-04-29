@@ -1,8 +1,10 @@
-import warnings
+import logging
 
 from ._configuration import LlamaCPP, LlamaCPPGenerationConfig, LlamaCPParams
 from dataclasses import dataclass
 from typing import Optional, Literal, List, Iterable, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,7 +41,7 @@ class InferenceSession:
         :return: The model and the generation config
         """
         if generation_config is None:
-            warnings.warn(
+            logger.warning(
                 "Passing `LlamaCPPGenerationConfig` as None will "
                 "initialize `LlamaCPPGenerationConfig` with default values"
             )
