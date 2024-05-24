@@ -771,13 +771,15 @@ class ServeEngine:
             _attn_implementation: str = "sdpa",
             use_agent: bool = False,
             trust_remote_code: bool = False,
-            quantization_config=BitsAndBytesConfig(
+            quantization_config: Optional["BitsAndBytesConfig"] = None  # type:ignore
+    ):
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        if quantization_config is None:
+            quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=False,
                 bnb_4bit_quant_type="fp4"
             )
-    ):
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
         model = AutoModelForCausalLM.from_pretrained(
             huggingface_repo_id,
             quantization_config=quantization_config,
