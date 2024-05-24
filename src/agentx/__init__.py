@@ -15,7 +15,7 @@ from .engine import (
 
 from . import engine_websocket
 
-__version__ = "0.0.25"
+__version__ = "0.0.26"
 
 __all__ = (
     "PromptTemplates",

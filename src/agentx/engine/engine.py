@@ -767,24 +767,20 @@ class ServeEngine:
             sample_config: Optional[EngineGenerationConfig] = None,
             prompter: Optional[PromptTemplates] = None,
             tokenizer_huggingface_repo_id: str | None = None,
-            bnb_4bit_compute_dtype=None,
             device_map: str = "auto",
             _attn_implementation: str = "sdpa",
-            bnb_4bit_quant_type: str = "fp4",
             use_agent: bool = False,
-            trust_remote_code: bool = False
-    ):
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-        if bnb_4bit_compute_dtype is None:
-            bnb_4bit_compute_dtype = torch.float16
-        model = AutoModelForCausalLM.from_pretrained(
-            huggingface_repo_id,
+            trust_remote_code: bool = False,
             quantization_config=BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_use_double_quant=False,
-                bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
-                bnb_4bit_quant_type=bnb_4bit_quant_type
-            ),
+                bnb_4bit_quant_type="fp4"
+            )
+    ):
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        model = AutoModelForCausalLM.from_pretrained(
+            huggingface_repo_id,
+            quantization_config=quantization_config,
             torch_dtype=torch.float16,
             device_map=device_map,
             _attn_implementation=_attn_implementation,
