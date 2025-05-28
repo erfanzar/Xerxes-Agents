@@ -1,141 +1,123 @@
-# AgentX
+# Calute
 
-AgentX is a versatile toolkit designed to seamlessly integrate intelligent agents into your projects. With AgentX,
-developers can effortlessly bridge the gap between different frameworks and platforms, empowering their applications
-with advanced AI capabilities. AgentX facilitates the connection and collaboration of diverse agents, enhancing the
-synergy between neural networks and decision-making processes. Whether you're working on machine learning, robotics, or
-data analysis projects, AgentX provides the essential tools to create dynamic and adaptive systems. Experience the power
-of intelligent fusion with AgentX and unlock new possibilities for your applications.
+Calute is a framework for building AI agents that can orchestrate function calls and switch between agents. It is designed for researchers experimenting with agent orchestration and function calling.
 
-## Features 🔮
+## Key Features
 
-1. **Seamless Integration**: AgentX allows for the seamless integration of intelligent agents into your projects,
-   regardless of the underlying frameworks or platforms.
+* **Agent Orchestration:** Calute helps manage multiple agents and their interactions, allowing you to create complex AI systems.
+* **Function Calling:** Calute simplifies the process of calling functions from AI agents, enabling them to interact with external tools and data sources.
+* **Agent Switching:** Calute provides agent switching capabilities, allowing you to create more dynamic and intelligent systems that can adapt to different situations.
+* **Workflow Engine:** Calute includes a workflow engine for defining and executing complex workflows involving LLMs and function execution.
+* **LLM Client Abstraction:** Calute supports OpenAI and Gemini models through a unified client interface, making it easy to switch between different LLMs.
 
-2. **Versatility**: With AgentX, you can connect and collaborate with diverse agents, enabling a wide range of
-   applications in fields such as machine learning, robotics, and data analysis.
+## Installation
 
-3. **Advanced AI Capabilities**: Empower your applications with advanced AI capabilities by leveraging AgentX's tools
-   and functionalities.
+To install Calute, use the following command:
 
-4. **Flexibility**: AgentX offers flexibility in designing and implementing dynamic and adaptive systems, providing
-   developers with the freedom to explore new possibilities.
-
-5. **Framework Agnostic**: AgentX is framework-agnostic, meaning it can work with various AI frameworks, allowing you to
-   choose the best tools for your specific project needs.
-
-6. **Efficiency**: AgentX is designed for efficiency, ensuring optimal performance and resource utilization in your
-   applications.
-
-7. **Community Support**: Join a vibrant community of developers using AgentX, where you can find support, share ideas,
-   and collaborate on enhancing the toolkit.
-
-8. **Documentation**: Comprehensive documentation and examples are provided to help you get started quickly and make the
-   most out of AgentX in your projects.
-
-9. **Continuous Updates**: Expect regular updates and improvements to AgentX, ensuring that you stay up-to-date with the
-   latest advancements in AI integration and functionality.
-
-10. **Open Source**: AgentX is an open-source project, inviting contributions from the community to help enhance its
-    features, usability, and effectiveness in real-world applications.
-## CLI Support
-
-AgentX support usage Via CLI for more information just use
-```shell
-agentx serve --help
+```bash
+poetry install
 ```
-## Torch Serving Example
 
-Here's an Example of Serving and using Model with AgentX with torch Backend.
+## Usage
 
-> [!NOTE]
-> You can just don't pass `prompter` or prompt template and just pass the tokenizer
-> engine will use tokenizer chat template
+Here are some examples of how to use Calute:
+
+### Registering an Agent
 
 ```python
-from agentx import ServeEngine, PromptTemplates
-import torch
+from calute import Agent, AgentFunction, Calute
 
-engine = ServeEngine.from_torch_pretrained(
-    huggingface_repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
-    sample_config=None,  # torch support Auto Set from Model Config.
-    # sample_config=EngineGenerationConfig(
-    #     max_new_tokens=8192,
-    #     max_sequence_length=8192,
-    #     top_k=20,
-    #     top_p=0.95,
-    #     temperature=0.2,
-    # ),
-    prompter=PromptTemplates.from_prompt_templates(
-        "llama_3",
-        eos_token=None,  # Auto Set is supported for some models
-        bos_token=None  # Auto Set is supported for some models
-    ),
-    tokenizer_huggingface_repo_id=None,
-    bnb_4bit_compute_dtype=torch.float16,
-    device_map="auto",
-    _attn_implementation="sdpa",
-    bnb_4bit_quant_type="fp4"
+def my_function(input_data: str, context_variables: dict = None):
+    """My function description (LLM will read the docs!)"""
+    return f"Function executed with input: {input_data}"
+
+agent = Agent(
+    id="my_agent",
+    name="My Agent",
+    functions=[AgentFunction(func=my_function)],
+    instructions="Follow these instructions."
 )
 
-response = engine.execute("You Are Using AgentX Execute Function")
-for char in engine.process(
-        "You Are Using AgentX Process/Stream Function"
-):
-    print(char, end="")
-
-# Do you Need CHAT GUI?
-
-engine.build_inference().launch(server_name="0.0.0.0", server_port=7860)
+# Assuming you have an initialized OpenAI or Gemini client
+# client = OpenAI(...) or client = Gemini(...)
+# calute = Calute(client)
+# calute.register_agent(agent)
 ```
 
-## Ollama Serving Example
-
-Here's an Example of Serving and using Model with AgentX with Ollama Backend.
-(Ollama and Llama CPP kinda have same usage examples.)
+### Defining a Workflow
 
 ```python
-from agentx import ServeEngine, PromptTemplates, EngineGenerationConfig
+from calute import Workflow, WorkflowStep, WorkflowEngine, WorkflowStepType
 
-engine = ServeEngine.from_ollama_model(
-    ollama_model="LLAMA-3-OLLAMA",
-    sample_config=EngineGenerationConfig(
-        max_new_tokens=8192,
-        max_sequence_length=8192,
-        top_k=20,
-        top_p=0.95,
-        temperature=0.2,
-    ),
-    prompter=PromptTemplates.from_prompt_templates(
-        "llama_3",
-        eos_token=None,  # Auto Set is supported for some models
-        bos_token=None  # Auto Set is supported for some models
-    ),
-)
+# Assuming you have a Calute instance
+# calute = Calute(...)
+# workflow_engine = WorkflowEngine(calute)
 
-response = engine.execute("You Are Using AgentX Execute Function")
-for char in engine.process(
-        "You Are Using AgentX Process/Stream Function"
-):
-    print(char, end="")
-
-# Do you Need CHAT GUI?
-
-engine.build_inference().launch(server_name="0.0.0.0", server_port=7860)
+# workflow = workflow_engine.create_function_workflow(
+#     id="my_workflow",
+#     name="My Workflow",
+#     functions=[my_function]
+# )
 ```
 
-## Contributing
+### Running a Workflow
 
-If you would like to contribute to AgentX, please follow the guidelines outlined in the CONTRIBUTING.md file in the
-repository.
+```python
+# Assuming you have a workflow defined
+# result = await workflow_engine.execute_workflow(
+#     workflow_id="my_workflow",
+#     context_variables={"input_data": "Hello, world!"}
+# )
+# print(result)
+```
+
+## Modules
+
+* [`calute.py`](calute/calute.py): Core Calute class with orchestration capabilities.
+* [`chain_module.py`](calute/chain_module.py): Function chaining and execution.
+* [`client.py`](calute/client.py): LLM client abstraction for OpenAI and Gemini.
+* [`executors.py`](calute/executors.py): Function and agent execution logic.
+* [`workflow.py`](calute/workflow.py): Workflow engine for defining and executing complex workflows.
+* [`types/`](calute/types/): Data types and structures used in Calute.
+* [`utils.py`](calute/utils.py): Utility functions.
+* [`basics.py`](calute/basics.py): Basic registries.
+
+## Types
+
+* [`Agent`](calute/types/agent_types.py): Represents an AI agent with capabilities and functions.
+* [`PromptTemplate`](calute/calute.py): Configurable template for structuring agent prompts.
+* [`FunctionCall`](calute/types/function_execution_types.py): Represents a function call to be executed.
+* [`Workflow`](calute/workflow.py): Defines a workflow with steps and transitions.
+
+## Example Mermaid Diagram
+
+```mermaid
+graph LR
+    A[User Prompt] --> B{Agent Orchestrator}
+    B --> C{Agent 1}
+    C --> D[Function Call 1]
+    D --> E{Function Executor}
+    E --> F[Result 1]
+    F --> B
+    B --> G{Agent 2}
+    G --> H[Function Call 2]
+    H --> E
+    E --> I[Result 2]
+    I --> J[Final Response]
+```
 
 ## License
 
-AgentX is licensed under the [MIT](https://github.com/erfanzar/AgentX/blob/main/LICENSE). See the LICENSE.md file
-for more details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-## Support
+## Version
 
-For any questions or issues, please get in touch with me at [erfanzare810@gmail.com](erfanzare810@gmail.com).
+0.0.4
 
-Thank you for using AgentX! We hope it will help you have a personal computer experience.
+## Contributing
+
+Contributions are welcome! Please see the [contributing guidelines](CONTRIBUTING.md) for more information.
+
+## Contact
+
+If you have any questions or issues, please contact [erfanzar](https://github.com/erfanzar).
