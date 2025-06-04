@@ -3,8 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+*.json
+
 # C extensions
 *.so
+
+run.py
 env.py
 exp.py
 # Distribution / packaging

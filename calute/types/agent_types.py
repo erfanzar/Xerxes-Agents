@@ -43,7 +43,7 @@ class Agent(BaseModel):
 
     # Model parameters
     top_p: float = 0.95
-    max_tokens: int = 256
+    max_tokens: int = 2048
     temperature: float = 0.7
     stop: str | list[str] | None = None
 
