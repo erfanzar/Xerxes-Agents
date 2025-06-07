@@ -298,7 +298,6 @@ class Calute:
             if functions_being_used:
                 rules.append("If a function can satisfy the user, respond only with a tool_call JSON and nothing else.")
 
-            # Add memory-related rules if enabled
             if self.enable_memory and include_memory:
                 rules.extend(
                     [
@@ -524,24 +523,66 @@ class Calute:
             return ""
 
         function_docs = []
+
+        # Group functions by category if they have a category attribute
+        categorized_functions = {}
+        uncategorized = []
+
         for func in functions:
-            try:
-                schema = function_to_json(func)["function"]
-                doc = [f"Function: {schema['name']}", f"Purpose: {schema['description']}"]
-                params = self.format_function_parameters(schema["parameters"])
-                if params:
-                    doc.append("Parameters:")
-                    doc.append(params)
-                if "returns" in schema:
-                    doc.append(f"Returns: {schema['returns']}")
+            if hasattr(func, "category"):
+                category = func.category
+                if category not in categorized_functions:
+                    categorized_functions[category] = []
+                categorized_functions[category].append(func)
+            else:
+                uncategorized.append(func)
 
-                function_docs.append("\n".join(doc))
+        # Generate docs for categorized functions
+        for category, funcs in categorized_functions.items():
+            function_docs.append(f"## {category} Functions\n")
+            for func in funcs:
+                try:
+                    schema = function_to_json(func)["function"]
+                    doc = self._format_function_doc(schema)
+                    function_docs.append(doc)
+                except Exception as e:
+                    func_name = getattr(func, "__name__", str(func))
+                    function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
 
-            except Exception as e:
-                func_name = getattr(func, "__name__", str(func))
-                function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
+        # Generate docs for uncategorized functions
+        if uncategorized:
+            if categorized_functions:
+                function_docs.append("## Other Functions\n")
+            for func in uncategorized:
+                try:
+                    schema = function_to_json(func)["function"]
+                    doc = self._format_function_doc(schema)
+                    function_docs.append(doc)
+                except Exception as e:
+                    func_name = getattr(func, "__name__", str(func))
+                    function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
 
         return "\n\n".join(function_docs)
+
+    def _format_function_doc(self, schema: dict) -> str:
+        """Format a single function documentation"""
+        doc = [f"Function: {schema['name']}", f"Purpose: {schema['description']}"]
+
+        # Add examples if available
+        if "examples" in schema:
+            doc.append("Examples:")
+            for example in schema["examples"]:
+                doc.append(f"  ```json\n  {json.dumps(example, indent=2)}\n  ```")
+
+        params = self.format_function_parameters(schema["parameters"])
+        if params:
+            doc.append("Parameters:")
+            doc.append(params)
+
+        if "returns" in schema:
+            doc.append(f"Returns: {schema['returns']}")
+
+        return "\n".join(doc)
 
     def format_context_variables(self, variables: dict[str, tp.Any]) -> str:
         """Formats context variables with type information and improved readability"""
