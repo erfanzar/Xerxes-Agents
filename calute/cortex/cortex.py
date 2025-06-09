@@ -18,6 +18,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+from calute.types.function_execution_types import ResponseResult
+
 from ..calute import Calute
 from ..executors import AgentOrchestrator, FunctionExecutor
 from ..memory import MemoryStore, MemoryType
@@ -184,19 +186,6 @@ class Cortex:
             if task.agent and task.agent not in self.agents:
                 raise ValueError(f"CortexTask assigned to unknown agent: {task.agent.role}")
 
-    def _setup_agents(self):
-        """Setup and register all agents"""
-        if self.verbose:
-            self._log(f"🔧 Setting up {len(self.agents)} agents...")
-
-        for agent in self.agents:
-            # Convert CortexAgent to internal Agent format
-            internal_agent = self._convert_to_internal_agent(agent)
-            self.orchestrator.register_agent(internal_agent)
-
-            if self.verbose:
-                self._log(f"  ✓ Agent '{agent.role}' ready")
-
     def _process_enhanced_tools(self):
         """Process and register enhanced tools for all agents"""
         for agent in self.agents:
@@ -220,7 +209,6 @@ class Cortex:
                     processed_tools.append(tool)
                 else:
                     self._log(f"  ⚠️  Unknown tool type: {type(tool)}", level="WARNING")
-
             agent.tools = processed_tools
 
     def _register_agents_with_delegation_engine(self):
@@ -374,16 +362,12 @@ class Cortex:
             if task.id in processed:
                 continue
 
-            # Find all tasks that depend on this task
             group = [task]
             processed.add(task.id)
-
-            # Find tasks with no dependencies or same dependencies
             for other_task in self.tasks:
                 if other_task.id in processed:
                     continue
 
-                # Check if tasks have same dependencies
                 if set(task.context) == set(other_task.context):
                     group.append(other_task)
                     processed.add(other_task.id)
@@ -394,17 +378,11 @@ class Cortex:
 
     async def _evaluate_outputs(self, outputs: list[CortexTaskOutput]) -> float:
         """Evaluate the quality of outputs"""
-        # Simple evaluation based on output length and completion
         total_score = 0
 
         for output in outputs:
-            # Length score (normalized)
             length_score = min(len(output.raw) / 1000, 1.0)
-
-            # Completion score
             completion_score = 1.0 if output.raw else 0.0
-
-            # Combined score
             total_score += (length_score + completion_score) / 2
 
         return total_score / len(outputs) if outputs else 0
@@ -427,61 +405,6 @@ class Cortex:
             refined["instruction_modifier"] = "Please provide more detailed responses"
 
         return refined
-
-    def _convert_to_internal_agent(self, cortex_agent: CortexAgent) -> Agent:
-        """Convert CortexAgent to internal Agent format"""
-        instructions = f"{cortex_agent.backstory}\n\nYour goal: {cortex_agent.goal}"
-
-        functions = []
-        if self.enable_enhanced_tools and self.tool_adapter:
-            enhanced_tools = [
-                self.tool_registry[tool.__name__] for tool in cortex_agent.tools if tool.__name__ in self.tool_registry
-            ]
-
-            if enhanced_tools:
-                tool_docs = self.tool_adapter.generate_tool_documentation(enhanced_tools)
-                instructions += f"\n\n{tool_docs}"
-
-        functions = cortex_agent.tools
-
-        rules = [
-            f"You are a {cortex_agent.role}",
-            f"Focus on: {cortex_agent.goal}",
-            "Use available tools when they can help achieve your goal",
-            "Provide detailed and actionable outputs",
-        ]
-
-        if self.enable_enhanced_tools:
-            for tool_name in [t.__name__ for t in cortex_agent.tools if hasattr(t, "__name__")]:
-                if tool_name in self.tool_registry:
-                    tool = self.tool_registry[tool_name]
-                    signature = tool.get_signature()
-                    if signature.parameters:
-                        required_params = [p.name for p in signature.parameters if p.required]
-                        if required_params:
-                            rules.append(
-                                f"When using {tool_name}, always provide required parameters: "
-                                f"{', '.join(required_params)}"
-                            )
-
-        return Agent(
-            id=cortex_agent.id,
-            name=cortex_agent.role,
-            model=cortex_agent.llm or self.function_calling_llm or "xe-1",
-            instructions=instructions,
-            functions=functions,
-            rules=[
-                f"You are a {cortex_agent.role}",
-                f"Focus on: {cortex_agent.goal}",
-                "Use available tools when they can help achieve your goal",
-                "Provide detailed and actionable outputs",
-                "Be thorough but concise in your responses",
-            ],
-            temperature=cortex_agent.temperature,
-            max_tokens=cortex_agent.max_tokens,
-            top_p=cortex_agent.top_p,
-            stop=cortex_agent.stop,
-        )
 
     async def kickoff_async(self, inputs: dict[str, Any] | None = None) -> CortexOutput:
         """
@@ -563,139 +486,6 @@ class Cortex:
             self._log(f"❌ Cortex execution failed: {e!s}", level="ERROR")
             raise
 
-    async def _execute_async(self, inputs: dict[str, Any] | None = None) -> CortexOutput:
-        """Async execution of cortex tasks"""
-        context = inputs or {}
-        task_outputs = []
-
-        try:
-            if self.process == ProcessType.SEQUENTIAL:
-                task_outputs = await self._execute_sequential(context)
-            elif self.process == ProcessType.HIERARCHICAL:
-                task_outputs = await self._execute_hierarchical(context)
-            elif self.process == ProcessType.CONSENSUAL:
-                task_outputs = await self._execute_consensual(context)
-            else:
-                raise ValueError(f"Unknown process type: {self.process}")
-
-        except Exception as e:
-            self._log(f"❌ Error during execution: {e!s}", level="ERROR")
-            raise
-
-        # Create final output
-        return CortexOutput(
-            raw=self._combine_outputs(task_outputs), tasks_output=task_outputs, token_usage=self.token_usage
-        )
-
-    async def _execute_sequential(self, context: dict[str, Any]) -> list[CortexTaskOutput]:
-        """Execute tasks sequentially"""
-        outputs = []
-
-        for i, task in enumerate(self.tasks):
-            if self.verbose:
-                self._log(f"\n{'=' * 40}")
-                self._log(f"📌 CortexTask {i + 1}/{len(self.tasks)}")
-                self._log(f"📋 Description: {task.description[:80]}...")
-                if task.agent:
-                    self._log(f"🤖 Assigned to: {task.agent.role}")
-
-            # Add context from previous tasks
-            task_context = context.copy()
-            if task.context:
-                for ctx_task in task.context:
-                    if ctx_task.output:
-                        task_context[f"task_{ctx_task.id}_output"] = ctx_task.output.raw
-
-            # Add previous outputs to context
-            if outputs:
-                task_context["previous_outputs"] = [
-                    {"task": self.tasks[j].description, "output": out.summary} for j, out in enumerate(outputs)
-                ]
-
-            # Execute task
-            output = await self._execute_task(task, task_context)
-            outputs.append(output)
-
-            # Update task output
-            task.output = output
-            task.status = "completed"
-
-            # Callback
-            if self.task_callback:
-                self.task_callback(output)
-
-            if self.verbose:
-                self._log(f"✅ CortexTask {i + 1} completed successfully")
-                if output.summary:
-                    self._log(f"📄 Summary: {output.summary[:100]}...")
-
-        return outputs
-
-    async def _execute_hierarchical(self, context: dict[str, Any]) -> list[CortexTaskOutput]:
-        """Execute tasks in hierarchical manner with manager delegation"""
-        # Find manager agent or use first agent as coordinator
-        manager = next(
-            (a for a in self.agents if "manager" in a.role.lower() or "lead" in a.role.lower()), self.agents[0]
-        )
-        outputs = []
-
-        if self.verbose:
-            self._log(f"\n👔 Manager '{manager.role}' coordinating tasks...")
-
-        # Manager decides task order and delegation
-        for i, task in enumerate(self.tasks):
-            if self.verbose:
-                self._log(f"\n📋 Manager reviewing task {i + 1}: {task.description[:50]}...")
-
-            # Manager assigns task to appropriate agent
-            if not task.agent:
-                assigned_agent = self._delegate_task(task, manager)
-                task.agent = assigned_agent
-
-                if self.verbose:
-                    self._log(f"  → Delegated to: {assigned_agent.role}")
-
-            # Execute task
-            output = await self._execute_task(task, context)
-            outputs.append(output)
-
-            # Update context with results
-            context[f"task_{i}_result"] = output.summary
-
-        return outputs
-
-    async def _execute_consensual(self, context: dict[str, Any]) -> list[CortexTaskOutput]:
-        """Execute tasks with consensus from multiple agents"""
-        outputs = []
-
-        for i, task in enumerate(self.tasks):
-            if self.verbose:
-                self._log(f"\n🤝 Seeking consensus for task {i + 1}")
-                self._log(f"📋 {task.description[:80]}...")
-
-            # Get input from all relevant agents
-            proposals = []
-            relevant_agents = [a for a in self.agents if self._is_agent_relevant(a, task)]
-
-            if self.verbose:
-                self._log(f"👥 Consulting {len(relevant_agents)} agents...")
-
-            for agent in relevant_agents:
-                proposal = await self._get_agent_proposal(agent, task, context)
-                proposals.append((agent, proposal))
-
-                if self.verbose:
-                    self._log(f"  💭 {agent.role}: {proposal[:100]}...")
-
-            # Synthesize consensus
-            output = await self._synthesize_consensus(task, proposals, context)
-            outputs.append(output)
-
-            if self.verbose:
-                self._log(f"✅ Consensus reached for task {i + 1}")
-
-        return outputs
-
     def _setup_agents(self):
         """Setup and register all agents"""
         for agent in self.agents:
@@ -711,23 +501,12 @@ class Cortex:
 
         instructions = f"{cortex_agent.backstory}\n\nYour goal: {cortex_agent.goal}"
 
-        # Convert tools to callables
         functions = []
         for tool in cortex_agent.tools:
-            if hasattr(tool, "_run"):
-                # Create a wrapper function that matches the expected signature
-                def make_tool_function(t):
-                    def tool_function(**kwargs):
-                        return t._run(**kwargs)
-
-                    tool_function.__name__ = t.name
-                    tool_function.__doc__ = t.description
-                    return tool_function
-
-                functions.append(make_tool_function(tool))
-            elif callable(tool):
+            if isinstance(tool, CortexTool):
+                functions.append(tool.as_function())
+            else:
                 functions.append(tool)
-
         return Agent(
             id=cortex_agent.id,
             name=cortex_agent.role,
@@ -775,7 +554,9 @@ class Cortex:
 
         # Create final output
         return CortexOutput(
-            raw=self._combine_outputs(task_outputs), tasks_output=task_outputs, token_usage=self.token_usage
+            raw=self._combine_outputs(task_outputs),
+            tasks_output=task_outputs,
+            token_usage=self.token_usage,
         )
 
     async def _execute_sequential(self, context: dict[str, Any]) -> list[CortexTaskOutput]:
@@ -786,18 +567,14 @@ class Cortex:
             if self.verbose:
                 self._log(f"\n📌 Starting CortexTask {i + 1}/{len(self.tasks)}: {task.description[:50]}...")
 
-            # Add context from previous tasks
             task_context = context.copy()
             if task.context:
                 for ctx_task in task.context:
                     if ctx_task.output:
                         task_context[f"task_{ctx_task.id}_output"] = ctx_task.output.raw
-
-            # Execute task
             output = await self._execute_task(task, task_context)
             outputs.append(output)
 
-            # Update task output
             task.output = output
             task.status = "completed"
 
@@ -812,16 +589,13 @@ class Cortex:
 
     async def _execute_hierarchical(self, context: dict[str, Any]) -> list[CortexTaskOutput]:
         """Execute tasks in hierarchical manner with manager delegation"""
-        # Find manager agent
         manager = next((a for a in self.agents if "manager" in a.role.lower()), self.agents[0])
         outputs = []
 
         if self.verbose:
             self._log(f"👔 Manager '{manager.role}' coordinating tasks...")
 
-        # Manager decides task order and delegation
         for task in self.tasks:
-            # Manager assigns task to appropriate agent
             assigned_agent = self._delegate_task(task, manager)
             task.agent = assigned_agent
 
@@ -838,7 +612,6 @@ class Cortex:
             if self.verbose:
                 self._log(f"\n🤝 Seeking consensus for: {task.description[:50]}...")
 
-            # Get input from all relevant agents
             proposals = []
             for agent in self.agents:
                 if self._is_agent_relevant(agent, task):
@@ -855,18 +628,14 @@ class Cortex:
         """Execute a single task"""
         task.start_time = datetime.now()
 
-        # Select agent if not assigned
         if not task.agent:
             task.agent = self._select_best_agent(task)
-
-        # Validate tool compatibility if enhanced tools enabled
         if self.enable_enhanced_tools and self.tool_adapter:
             agent_tools = [
                 self.tool_registry[t.__name__]
                 for t in task.agent.tools
                 if hasattr(t, "__name__") and t.__name__ in self.tool_registry
             ]
-
             if agent_tools:
                 compatibility = self.tool_adapter.validate_tool_compatibility(task.agent, agent_tools)
 
@@ -894,9 +663,12 @@ class Cortex:
         internal_agent = self._convert_to_internal_agent(task.agent)
         calute.register_agent(internal_agent)
 
-        # Create response
         response = await calute.create_response(
-            prompt=prompt, context_variables=context, agent_id=internal_agent.id, stream=False, apply_functions=True
+            prompt=prompt,
+            context_variables=context,
+            agent_id=internal_agent.id,
+            stream=False,
+            apply_functions=True,
         )
 
         self._update_token_usage(response)
@@ -944,8 +716,6 @@ class Cortex:
     def _create_task_prompt(self, task: CortexTask, context: dict[str, Any]) -> str:
         """Create prompt for task execution"""
         prompt_parts = [f"# CortexTask\n{task.description}", f"\n# Expected Output\n{task.expected_output}"]
-
-        # Add context from dependent tasks
         if task.context:
             prompt_parts.append("\n# Context from Previous Tasks")
             for ctx_task in task.context:
@@ -953,14 +723,6 @@ class Cortex:
                     prompt_parts.append(f"\n## {ctx_task.description}")
                     prompt_parts.append(ctx_task.output.summary or ctx_task.output.raw[:500])
 
-        # Add additional context
-        if context:
-            prompt_parts.append("\n# Additional Context")
-            for key, value in context.items():
-                if not key.startswith("task_"):  # Avoid duplicating task outputs
-                    prompt_parts.append(f"- {key}: {str(value)[:200]}")
-
-        # Add output format requirements
         if task.output_json:
             prompt_parts.append(
                 f"\n# Output Format\nProvide output as JSON matching this schema: {task.output_json.schema()}"
@@ -968,7 +730,6 @@ class Cortex:
 
         if task.output_file:
             prompt_parts.append(f"\n# Note\nThe output will be saved to: {task.output_file}")
-
         return "\n".join(prompt_parts)
 
     def _select_best_agent(self, task: CortexTask) -> CortexAgent:
@@ -1027,10 +788,12 @@ class Cortex:
         return response.content
 
     async def _synthesize_consensus(
-        self, task: CortexTask, proposals: list[tuple[CortexAgent, str]], context: dict[str, Any]
+        self,
+        task: CortexTask,
+        proposals: list[tuple[CortexAgent, str]],
+        context: dict[str, Any],
     ) -> CortexTaskOutput:
         """Synthesize consensus from multiple agent proposals"""
-        # Create a synthesis prompt
         synthesis_prompt = f"# CortexTask\n{task.description}\n\n# Expected Output\n{task.expected_output}\n\n"
         synthesis_prompt += "# Agent Proposals\n"
 
@@ -1092,13 +855,14 @@ class Cortex:
 
         return summary
 
-    def _update_token_usage(self, response: Any):
+    def _update_token_usage(self, response: ResponseResult):
         """Update token usage tracking"""
-        # This would extract actual token usage from response
-        # For now, use estimates
-        self.token_usage["total"] += 100
-        self.token_usage["prompt"] += 50
-        self.token_usage["completion"] += 50
+        try:
+            self.token_usage["total"] += response.response.usage.total_tokens
+            self.token_usage["prompt"] += response.response.usage.prompt_tokens
+            self.token_usage["completion"] += response.response.usage.completion_tokens
+        except Exception:
+            ...
 
     def _log(self, message: str, level: str = "INFO"):
         """Log message with timestamp"""
@@ -1142,7 +906,7 @@ class Cortex:
                 enhanced_tool = self.tool_registry[tool.__name__]
                 if hasattr(enhanced_tool, "examples") and enhanced_tool.examples:
                     examples.append(f"\n### {enhanced_tool.name}")
-                    for example in enhanced_tool.examples[:2]:  # Limit to 2 examples per tool
+                    for example in enhanced_tool.examples[:2]:
                         examples.append(f"```json\n{json.dumps(example, indent=2)}\n```")
 
         return "\n".join(examples)

@@ -68,15 +68,15 @@ class PromptTemplate:
 
     def __post_init__(self):
         self.sections = self.sections or {
-            PromptSection.SYSTEM: f"SYSTEM:\n{SEP}",
+            PromptSection.SYSTEM: "SYSTEM:\n",
             PromptSection.PERSONA: f"PERSONA:\n{SEP}Your style and approach:",
-            PromptSection.RULES: f"RULES:\n{SEP}",
+            PromptSection.RULES: "RULES:\n",
             PromptSection.FUNCTIONS: f"FUNCTIONS:\n{SEP}The available functions are listed with their schemas:",
             PromptSection.TOOLS: f"TOOLS:\n{SEP}When using tools, follow this format:",
             PromptSection.EXAMPLES: f"EXAMPLES:\n{SEP}",
             PromptSection.CONTEXT: f"CONTEXT:\n{SEP}Current variables:\n",
             PromptSection.HISTORY: f"HISTORY:\n{SEP}Conversation so far:\n",
-            PromptSection.PROMPT: f"PROMPT:\n{SEP}",
+            PromptSection.PROMPT: "PROMPT:\n",
         }
 
         self.section_order = self.section_order or [
@@ -363,7 +363,7 @@ class Calute:
             if recent_functions:
                 func_history = "RECENT FUNCTION RESULTS:\n"
                 for fname, result in list(recent_functions.items())[-3:]:  # Last 3 results
-                    result_str = str(result)[:100] + "..." if len(str(result)) > 100 else str(result)
+                    result_str = str(result)
                     func_history += f"{SEP}- {fname}: {result_str}\n"
                 context_parts.append(func_history.rstrip())
 
@@ -376,7 +376,7 @@ class Calute:
             formatted_history = self.format_chat_history(history)
             if formatted_history:
                 sections[PromptSection.HISTORY] = (
-                    f"{self.template.sections[PromptSection.HISTORY]}\n{add_depth(formatted_history, True)}"
+                    f"{self.template.sections[PromptSection.HISTORY]}{add_depth(formatted_history, True)}"
                 )
 
         if prompt is not None:
@@ -402,7 +402,7 @@ class Calute:
                 )
 
             sections[PromptSection.PROMPT] = (
-                f"{self.template.sections[PromptSection.PROMPT]} {add_depth(formatted_prompt, True)}"
+                f"{self.template.sections[PromptSection.PROMPT]}{add_depth(formatted_prompt, True)}"
             )
 
         parts = []
@@ -591,9 +591,10 @@ class Calute:
 
         formatted_vars = []
         for key, value in variables.items():
-            var_type = type(value).__name__
-            formatted_value = str(value) if len(str(value)) < 50 else f"{str(value)[:47]}..."
-            formatted_vars.append(f"- {key} ({var_type}): {formatted_value}")
+            if not callable(value):
+                var_type = type(value).__name__
+                formatted_value = str(value)
+                formatted_vars.append(f"- {key} ({var_type}): {formatted_value}")
         return "\n".join(formatted_vars)
 
     def format_prompt(self, prompt: str | None) -> str:
@@ -649,7 +650,6 @@ class Calute:
 
         if print_formatted_prompt:
             print(formatted_prompt)
-
         response = await self.llm_client.generate_completion(
             prompt=formatted_prompt,
             model=agent.model,

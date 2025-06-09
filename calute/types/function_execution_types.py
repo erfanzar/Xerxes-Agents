@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from google.generativeai.types.generation_types import GenerateContentResponse
+from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
 
@@ -199,7 +200,7 @@ class ResponseResult:
     """Result of a non-streaming response"""
 
     content: str
-    response: tp.Any
+    response: ChatCompletion
     function_calls: list[FunctionCall] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)

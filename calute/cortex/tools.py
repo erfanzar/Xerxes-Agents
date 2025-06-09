@@ -19,6 +19,7 @@ import inspect
 import json
 import statistics
 import time
+import typing
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -258,6 +259,8 @@ class ToolSignature:
 class CortexTool(ABC):
     """tool with full signature support"""
 
+    source_func: typing.ClassVar = None
+
     def __init__(
         self,
         name: str,
@@ -278,10 +281,13 @@ class CortexTool(ABC):
         self._cache = {}
         self._execution_history = []
 
+    @property
+    def _direct_call(self):
+        return self._run if self.source_func is None else self.source_func
+
     @abstractmethod
     def _run(self, **kwargs) -> Any:
         """Execute the tool"""
-        pass
 
     def run(self, **kwargs) -> Any:
         """Public interface with validation"""
@@ -289,7 +295,7 @@ class CortexTool(ABC):
         if self._signature:
             self._validate_parameters(kwargs)
 
-        return self._run(**kwargs)
+        return self._direct_call(**kwargs)
 
     def _validate_parameters(self, kwargs: dict[str, Any]):
         """Validate parameters against signature"""
@@ -309,7 +315,10 @@ class CortexTool(ABC):
 
     def _extract_signature(self) -> ToolSignature:
         """Extract signature from _run method"""
-        func_schema = enhanced_function_to_json(self._run)
+
+        fn = self._direct_call
+
+        func_schema = enhanced_function_to_json(fn)
 
         parameters = []
         for param_name, param_info in func_schema["function"]["parameters"]["properties"].items():
@@ -333,21 +342,73 @@ class CortexTool(ABC):
 
     def as_function(self) -> Callable:
         """Convert to callable with proper signature"""
+        source_func = self._direct_call
 
-        def tool_function(**kwargs):
-            return self.run(**kwargs)
+        original_sig = inspect.signature(source_func)
+
+        def make_wrapper():
+            params = list(original_sig.parameters.values())
+            param_strs = []
+            call_strs = []
+
+            for param in params:
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    param_strs.append(f"*{param.name}")
+                    call_strs.append(f"*{param.name}")
+                elif param.kind == inspect.Parameter.VAR_KEYWORD:
+                    param_strs.append(f"**{param.name}")
+                    call_strs.append(f"**{param.name}")
+                elif param.kind == inspect.Parameter.KEYWORD_ONLY:
+                    if param.default is inspect.Parameter.empty:
+                        param_strs.append(f"*, {param.name}")
+                    else:
+                        param_strs.append(f"*, {param.name}={param.name}_default")
+                    call_strs.append(f"{param.name}={param.name}")
+                else:
+                    if param.default is inspect.Parameter.empty:
+                        param_strs.append(param.name)
+                    else:
+                        param_strs.append(f"{param.name}={param.name}_default")
+                    call_strs.append(param.name)
+
+            func_str = f"def tool_function({', '.join(param_strs)}):\n"
+            func_str += f"    return self.run({', '.join(call_strs)})\n"
+
+            namespace = {"self": self}
+            for param in params:
+                if param.default is not inspect.Parameter.empty:
+                    namespace[f"{param.name}_default"] = param.default
+            exec(func_str, namespace)
+            return namespace["tool_function"]
+
+        tool_function = make_wrapper()
 
         tool_function.__name__ = self.name
         tool_function.__doc__ = self.description
-        if hasattr(self._run, "__annotations__"):
-            tool_function.__annotations__ = self._run.__annotations__.copy()
+        tool_function.__signature__ = original_sig
+
+        tool_function.__annotations__ = getattr(source_func, "__annotations__", {}).copy()
+
+        for attr in ["__module__", "__qualname__", "__defaults__", "__kwdefaults__"]:
+            if hasattr(source_func, attr):
+                try:
+                    setattr(tool_function, attr, getattr(source_func, attr))
+                except (AttributeError, TypeError):
+                    pass
+
+        for attr in dir(source_func):
+            if not attr.startswith("_") and not hasattr(tool_function, attr):
+                try:
+                    setattr(tool_function, attr, getattr(source_func, attr))
+                except (AttributeError, TypeError):
+                    pass
 
         return tool_function
 
     def to_openai_schema(self) -> dict[str, Any]:
         """Convert to OpenAI function calling schema"""
         if not self._function_schema:
-            self._function_schema = enhanced_function_to_json(self._run)
+            self._function_schema = enhanced_function_to_json(self._direct_call)
             self._function_schema["function"]["name"] = self.name
             self._function_schema["function"]["description"] = self.description
 
@@ -366,20 +427,13 @@ class CortexTool(ABC):
             def __init__(self):
                 tool_name = name or func.__name__
                 tool_desc = description or _clean_docstring(func.__doc__) or f"Tool {tool_name}"
+
                 super().__init__(tool_name, tool_desc)
-                self.func = func
+                self.source_func = func
                 self.examples = examples or []
 
-                # Preserve function metadata
-                self._run.__name__ = func.__name__
-                self._run.__doc__ = func.__doc__
-
-                # Copy type hints
-                if hasattr(func, "__annotations__"):
-                    self._run.__annotations__ = func.__annotations__.copy()
-
             def _run(self, **kwargs):
-                return self.func(**kwargs)
+                return self.source_func(**kwargs)
 
         return FunctionTool()
 
@@ -507,11 +561,11 @@ class CortexTool(ABC):
 
     async def _execute_async(self, **kwargs):
         """Async wrapper for _run method"""
-        if asyncio.iscoroutinefunction(self._run):
-            return await self._run(**kwargs)
+        if asyncio.iscoroutinefunction(self._direct_call):
+            return await self._direct_call(**kwargs)
         else:
             loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, lambda: self._run(**kwargs))
+            return await loop.run_in_executor(None, lambda: self._direct_call(**kwargs))
 
     def _generate_cache_key(self, kwargs: dict) -> str:
         """Generate cache key from arguments"""
@@ -542,6 +596,11 @@ class CortexTool(ABC):
             "cache_size": len(self._cache),
             "last_execution": self._execution_history[-1]["timestamp"] if self._execution_history else None,
         }
+
+    def __str__(self):
+        return f"CortexTool(signature={self.get_signature()})"
+
+    __repr__ = __str__
 
 
 class ComposedTool(CortexTool):
@@ -577,7 +636,7 @@ class ComposedTool(CortexTool):
         """Public interface with validation"""
         if self._signature:
             self._validate_parameters(kwargs)
-        return asyncio.run(self._run(**kwargs))
+        return asyncio.run(self._direct_call(**kwargs))
 
     async def _run(self, **kwargs):
         """Execute composed tools"""
@@ -632,7 +691,7 @@ class WebTool(CortexTool):
         """Public interface with validation"""
         if self._signature:
             self._validate_parameters(kwargs)
-        return asyncio.run(self._run(**kwargs))
+        return asyncio.run(self._direct_call(**kwargs))
 
     async def _get_async_session(self):
         """Get or create async session"""
