@@ -247,13 +247,16 @@ class UserMessage(BaseMessage):
         r"""Converts the message to the OpenAI format."""
         if isinstance(self.content, str):
             return {"role": self.role, "content": self.content}
-        return {"role": self.role, "content": [chunk.to_openai() for chunk in self.content]}
+        return {
+            "role": self.role,
+            "content": [chunk.to_openai() for chunk in self.content],
+        }
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "UserMessage":
         r"""Converts the OpenAI message to the Calute format."""
         if isinstance(openai_message["content"], str):
-            return cls.model_validate(openai_message)
+            return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
             {
                 "role": openai_message["role"],
@@ -285,7 +288,7 @@ class SystemMessage(BaseMessage):
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "SystemMessage":
         r"""Converts the OpenAI message to the Calute format."""
         if isinstance(openai_message["content"], str):
-            return cls.model_validate(openai_message)
+            return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
             {
                 "role": openai_message["role"],
@@ -351,7 +354,6 @@ class ToolMessage(BaseMessage):
     Attributes:
         content: The content of the message.
         tool_call_id: The tool call id of the message.
-        name: The name of the tool. (Deprecated in V3 tokenization)
 
     Examples:
        >>> message = ToolMessage(content="Hello, how can I help you?", tool_call_id="123")
@@ -369,7 +371,13 @@ class ToolMessage(BaseMessage):
     @classmethod
     def from_openai(cls, messages: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "ToolMessage":
         r"""Converts the OpenAI message to the Calute format."""
-        tool_message = cls.model_validate(messages)
+        tool_message = cls.model_validate(
+            dict(
+                content=messages["content"],
+                role=messages["role"],
+                tool_call_id=messages.get("tool_call_id", None),
+            )
+        )
         assert tool_message.tool_call_id is not None, "tool_call_id must be provided for tool messages."
         return tool_message
 
@@ -384,7 +392,12 @@ _map_role_to_type = {v: k for k, v in _map_type_to_role.items()}
 
 
 class MessagesHistory(CaluteBase):
-    messages: list[Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]]
+    messages: list[
+        Annotated[
+            SystemMessage | UserMessage | AssistantMessage | ToolMessage,
+            Field(discriminator="role"),
+        ]
+    ]
 
     def to_openai(self) -> list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]:
         r"""Converts the message to the OpenAI format."""
@@ -400,7 +413,7 @@ class MessagesHistory(CaluteBase):
     ) -> "MessagesHistory":
         messages = []
         for message in openai_messages:
-            messages.append(_map_role_to_type[message.get("role")](**message))
+            messages.append(_map_role_to_type[message.get("role")].from_openai(message))
         return MessagesHistory(messages=messages)
 
     def make_instruction_prompt(self) -> str:
@@ -464,8 +477,6 @@ class MessagesHistory(CaluteBase):
 
 
 ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
-
-
 ChatMessageType = TypeVar("ChatMessageType", bound=ChatMessage)
 UserMessageType = TypeVar("UserMessageType", bound=UserMessage)
 AssistantMessageType = TypeVar("AssistantMessageType", bound=AssistantMessage)
