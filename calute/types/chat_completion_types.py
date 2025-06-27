@@ -20,7 +20,7 @@ import uuid
 from pydantic import BaseModel, Field
 
 
-class ChatMessage(BaseModel):
+class RequestChatMessage(BaseModel):
     """Represents a single message in a chat conversation."""
 
     role: str
@@ -67,7 +67,7 @@ class ChatCompletionResponseChoice(BaseModel):
     """Represents a single choice within a non-streaming chat completion response."""
 
     index: int
-    message: ChatMessage
+    message: RequestChatMessage
     finish_reason: tp.Literal["stop", "length", "function_call"] | None = None
 
 
@@ -105,7 +105,7 @@ class CountTokenRequest(BaseModel):
     """Represents a request to the token counting endpoint."""
 
     model: str
-    conversation: str | list[ChatMessage]
+    conversation: str | list[RequestChatMessage]
 
 
 class CompletionLogprobs(BaseModel):

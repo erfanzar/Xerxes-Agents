@@ -19,8 +19,8 @@ from dataclasses import dataclass, field
 from .types.function_execution_types import (
     AgentSwitchTrigger,
     ExecutionStatus,
-    FunctionCall,
     FunctionCallStrategy,
+    RequestFunctionCall,
 )
 
 if tp.TYPE_CHECKING:
@@ -130,20 +130,20 @@ class AgentOrchestrator:
 class FunctionExecutionHistory:
     """History of function executions and their results"""
 
-    executions: list[FunctionCall] = field(default_factory=list)
-    execution_map: dict[str, FunctionCall] = field(default_factory=dict)
+    executions: list[RequestFunctionCall] = field(default_factory=list)
+    execution_map: dict[str, RequestFunctionCall] = field(default_factory=dict)
 
-    def add_execution(self, call: FunctionCall):
+    def add_execution(self, call: RequestFunctionCall):
         """Add an execution to the history"""
         self.executions.append(call)
         self.execution_map[call.id] = call
         self.execution_map[call.name] = call
 
-    def get_by_id(self, call_id: str) -> FunctionCall | None:
+    def get_by_id(self, call_id: str) -> RequestFunctionCall | None:
         """Get function call by ID"""
         return self.execution_map.get(call_id)
 
-    def get_by_name(self, name: str) -> FunctionCall | None:
+    def get_by_name(self, name: str) -> RequestFunctionCall | None:
         """Get latest function call by name"""
         return self.execution_map.get(name)
 
@@ -178,16 +178,16 @@ class FunctionExecutor:
 
     def __init__(self, orchestrator: AgentOrchestrator):
         self.orchestrator = orchestrator
-        self.execution_queue: list[FunctionCall] = []
-        self.completed_calls: dict[str, FunctionCall] = {}
+        self.execution_queue: list[RequestFunctionCall] = []
+        self.completed_calls: dict[str, RequestFunctionCall] = {}
         self.execution_history = FunctionExecutionHistory()
 
     async def execute_function_calls(
         self,
-        calls: list[FunctionCall],
+        calls: list[RequestFunctionCall],
         strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL,
         context_variables: dict | None = None,
-    ) -> list[FunctionCall]:
+    ) -> list[RequestFunctionCall]:
         """Execute function calls using the specified strategy"""
         context_variables = context_variables or {}
         context_variables.update(self.execution_history.as_context_dict())
@@ -210,9 +210,9 @@ class FunctionExecutor:
 
     async def _execute_sequential(
         self,
-        calls: list[FunctionCall],
+        calls: list[RequestFunctionCall],
         context: dict,
-    ) -> list[FunctionCall]:
+    ) -> list[RequestFunctionCall]:
         """Execute calls one after another"""
         results = []
         for call in calls:
@@ -229,18 +229,18 @@ class FunctionExecutor:
 
     async def _execute_parallel(
         self,
-        calls: list[FunctionCall],
+        calls: list[RequestFunctionCall],
         context: dict,
-    ) -> list[FunctionCall]:
+    ) -> list[RequestFunctionCall]:
         """Execute calls in parallel"""
         tasks = [self._execute_single_call(call, context.copy()) for call in calls]
         return await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _execute_pipeline(
         self,
-        calls: list[FunctionCall],
+        calls: list[RequestFunctionCall],
         context: dict,
-    ) -> list[FunctionCall]:
+    ) -> list[RequestFunctionCall]:
         """Execute calls in a pipeline where output of one feeds into next"""
         results = []
         current_context = context.copy()
@@ -259,9 +259,9 @@ class FunctionExecutor:
 
     async def _execute_conditional(
         self,
-        calls: list[FunctionCall],
+        calls: list[RequestFunctionCall],
         context: dict,
-    ) -> list[FunctionCall]:
+    ) -> list[RequestFunctionCall]:
         """Execute calls based on conditions and dependencies"""
         sorted_calls = self._topological_sort(calls)
         results = []
@@ -276,9 +276,9 @@ class FunctionExecutor:
 
     async def _execute_single_call(
         self,
-        call: FunctionCall,
+        call: RequestFunctionCall,
         context: dict,
-    ) -> FunctionCall:
+    ) -> RequestFunctionCall:
         """Execute a single function call with error handling and retries"""
         call.status = ExecutionStatus.PENDING
 
@@ -340,7 +340,7 @@ class FunctionExecutor:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: func(**args))
 
-    def _topological_sort(self, calls: list[FunctionCall]) -> list[FunctionCall]:
+    def _topological_sort(self, calls: list[RequestFunctionCall]) -> list[RequestFunctionCall]:
         """Sort function calls based on dependencies"""
         sorted_calls = []
         remaining = calls.copy()
@@ -358,7 +358,7 @@ class FunctionExecutor:
 
         return sorted_calls
 
-    def _dependencies_satisfied(self, call: FunctionCall, completed: list[FunctionCall]) -> bool:
+    def _dependencies_satisfied(self, call: RequestFunctionCall, completed: list[RequestFunctionCall]) -> bool:
         """Check if call's dependencies are satisfied"""
         completed_ids = {c.id for c in completed if c.status == ExecutionStatus.SUCCESS}
         return all(dep in completed_ids for dep in call.dependencies)

@@ -56,7 +56,7 @@ class OpenAIClient(LLMClient):
 
     async def generate_completion(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, str]],
         model: str,
         temperature: float,
         max_tokens: int,
@@ -65,8 +65,10 @@ class OpenAIClient(LLMClient):
         stream: bool,
     ) -> tp.Any:
         """Generate a completion using OpenAI"""
+        if isinstance(prompt, str):
+            prompt = [{"role": "user", "content": prompt}]
         return self.client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
+            messages=prompt,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -132,10 +134,7 @@ class GeminiClient(LLMClient):
             generation_config=generation_config,
         )
 
-        return model_instance.generate_content(
-            prompt,
-            stream=stream,
-        )
+        return model_instance.generate_content(prompt, stream=stream)
 
     def extract_content(self, response: tp.Any) -> str:
         """Extract text content from a Gemini response"""

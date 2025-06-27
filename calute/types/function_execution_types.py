@@ -51,7 +51,7 @@ class ExecutionStatus(Enum):
 
 
 @dataclass
-class FunctionCall:
+class RequestFunctionCall:
     """Enhanced function call representation"""
 
     name: str
@@ -201,7 +201,7 @@ class ResponseResult:
 
     content: str
     response: ChatCompletion
-    function_calls: list[FunctionCall] = field(default_factory=list)
+    function_calls: list[RequestFunctionCall] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)
 

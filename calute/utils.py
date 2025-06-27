@@ -16,6 +16,16 @@ import inspect
 from datetime import datetime
 from typing import Union
 
+from pydantic import BaseModel, ConfigDict
+
+
+class CaluteBase(BaseModel):
+    r"""
+    Forbids extra attributes, validates default values and use enum values.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_default=True, use_enum_values=True)
+
 
 def debug_print(debug: bool, *args: str) -> None:
     if not debug:

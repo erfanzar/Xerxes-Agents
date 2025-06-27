@@ -14,9 +14,12 @@
 
 import json
 import re
+import textwrap
 import typing as tp
 from dataclasses import dataclass
 from enum import Enum
+
+from calute.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
 
 from .client import GeminiClient, OpenAIClient
 from .executors import AgentOrchestrator, FunctionExecutor
@@ -28,18 +31,18 @@ from .types import (
     AgentSwitchTrigger,
     Completion,
     ExecutionStatus,
-    FunctionCall,
     FunctionCallInfo,
     FunctionCallsExtracted,
     FunctionDetection,
     FunctionExecutionComplete,
     FunctionExecutionStart,
+    RequestFunctionCall,
     ResponseResult,
     StreamChunk,
     StreamingResponseType,
     SwitchContext,
 )
-from .utils import function_to_json
+from .utils import debug_print, function_to_json
 
 SEP = "  "  # two spaces
 add_depth = (  # noqa
@@ -69,7 +72,6 @@ class PromptTemplate:
     def __post_init__(self):
         self.sections = self.sections or {
             PromptSection.SYSTEM: "SYSTEM:\n",
-            PromptSection.PERSONA: f"PERSONA:\n{SEP}Your style and approach:",
             PromptSection.RULES: "RULES:\n",
             PromptSection.FUNCTIONS: f"FUNCTIONS:\n{SEP}The available functions are listed with their schemas:",
             PromptSection.TOOLS: f"TOOLS:\n{SEP}When using tools, follow this format:",
@@ -81,7 +83,6 @@ class PromptTemplate:
 
         self.section_order = self.section_order or [
             PromptSection.SYSTEM,
-            PromptSection.PERSONA,
             PromptSection.RULES,
             PromptSection.FUNCTIONS,
             PromptSection.TOOLS,
@@ -159,7 +160,7 @@ class Calute:
         content: str,
         agent_id: str,
         context_variables: dict | None = None,
-        function_calls: list[FunctionCall] | None = None,
+        function_calls: list[RequestFunctionCall] | None = None,
     ):
         """Update memory based on response"""
         if not self.enable_memory:
@@ -198,13 +199,38 @@ class Calute:
             tags=["user_input"],
         )
 
-    def _extract_from_markdown(self, content: str, field: str) -> list[FunctionCall]:
+    def _format_section(
+        self,
+        header: str,
+        content: str | list[str] | None,
+        item_prefix: str | None = "- ",
+    ) -> str | None:
+        """
+        Formats a section of the prompt with a header and indented content.
+        Returns None if the content is empty.
+        """
+        if not content:
+            return None
+
+        if isinstance(content, list):
+            content_str = "\n".join(f"{item_prefix or ''}{str(line).strip()}" for line in content)
+        else:
+            content_str = str(content).strip()
+
+        if not content_str:
+            return None
+
+        indented_content = textwrap.indent(content_str, SEP)
+
+        return f"{header}\n{indented_content}"
+
+    def _extract_from_markdown(self, content: str, field: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content"""
 
         pattern = rf"```{field}\s*\n(.*?)\n```"
         return re.findall(pattern, content, re.DOTALL)
 
-    def _extract_function_calls(self, content: str) -> list[FunctionCall]:
+    def _extract_function_calls(self, content: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content"""
         function_calls = []
 
@@ -213,7 +239,7 @@ class Calute:
         for i, match in enumerate(matches):
             try:
                 call_data = json.loads(match)
-                function_call = FunctionCall(
+                function_call = RequestFunctionCall(
                     name=call_data.get("name"),
                     arguments=call_data.get("content", {}),
                     id=f"call_{i}_{hash(match)}",
@@ -226,193 +252,107 @@ class Calute:
 
         return function_calls
 
-    def generate_prompt(
+    def manage_messages(
         self,
         agent: Agent,
         prompt: str | None = None,
         context_variables: dict | None = None,
-        history: list[dict] | None = None,
+        messages: MessagesHistory | None = None,
         include_memory: bool = True,
         use_chain_of_thought: bool = False,
         require_reflection: bool = False,
-    ) -> str:
+    ) -> MessagesHistory:
         """
-        Generates a structured prompt using the enhanced template with memory integration
-
-        Args:
-            agent: The agent to generate prompt for
-            prompt: The user's prompt/query
-            context_variables: Additional context variables
-            history: Conversation history
-            include_memory: Whether to include memory context
-            use_chain_of_thought: Whether to wrap prompt in chain-of-thought format
-            require_reflection: Whether to require reflection in response
-
-        Returns:
-            Formatted prompt string
+        Generates a structured list of ChatMessage objects for the LLM.
+        This version uses a helper function to ensure clean and consistent indentation.
         """
-
         if not agent:
-            return prompt or "You are a helpful assistant."
+            return [UserMessage(content=prompt or "You are a helpful assistant.")]
 
-        # Update memory with the prompt if enabled
-        if self.enable_memory and prompt:
-            self._update_memory_from_prompt(prompt, agent.id)
+        system_parts = []
 
-        # Check what components are being used
-        rules_being_used = agent.rules is not None and len(agent.rules) > 0
-        functions_being_used = agent.functions is not None and len(agent.functions) > 0
-        examples_being_used = agent.examples is not None and len(agent.examples) > 0
-        tools_being_used = agent.tool_choice is not None and len(agent.tool_choice) > 0
-
-        sections = {}
-
-        # SYSTEM SECTION
-        system_content = agent.name or self.template.sections[PromptSection.SYSTEM]
-        if agent.capabilities:
-            capabilities_str = ", ".join([cap.name for cap in agent.capabilities])
-            system_content += f"\nCapabilities: {capabilities_str}"
-        sections[PromptSection.SYSTEM] = f"{self.template.sections[PromptSection.SYSTEM]}\n{SEP}{system_content}"
-
+        persona_header = self.template.sections.get(PromptSection.SYSTEM, "SYSTEM:")
         instructions = str((agent.instructions() if callable(agent.instructions) else agent.instructions) or "")
-
         if use_chain_of_thought:
             instructions += (
-                f"\n{SEP}Approach every task systematically:\n"
-                f"{SEP * 2}1. Understand the request fully\n"
-                f"{SEP * 2}2. Break down complex problems\n"
-                f"{SEP * 2}3. Consider edge cases\n"
-                f"{SEP * 2}4. Validate your approach\n"
-                f"{SEP * 2}5. Provide clear, structured output"
+                "\n\nApproach every task systematically:\n"
+                "- Understand the request fully.\n"
+                "- Break down complex problems.\n"
+                "- If functions are available, determine if they are needed.\n"
+                "- Formulate your response or function call.\n"
+                "- Verify your output addresses the request completely."
             )
-
-        sections[PromptSection.PERSONA] = f"{self.template.sections[PromptSection.PERSONA]} {instructions}"
-
-        if rules_being_used or functions_being_used or include_memory:
-            rules = []
-
-            if rules_being_used:
-                agent_rules = agent.rules if isinstance(agent.rules, list) else [agent.rules]
-                rules.extend(agent_rules)
-
-            if functions_being_used:
-                rules.append("If a function can satisfy the user, respond only with a tool_call JSON and nothing else.")
-
-            if self.enable_memory and include_memory:
-                rules.extend(
-                    [
-                        "Consider previous context and interactions when relevant",
-                        "Build upon earlier conversations when appropriate",
-                        "Acknowledge when you're using information from memory",
-                    ]
-                )
-
-            rules_string = "\n".join([f"{SEP}- {rule}" for rule in rules])
-            sections[PromptSection.RULES] = f"{self.template.sections[PromptSection.RULES]}\n{rules_string}"
-
-        if functions_being_used:
-            fn_docs = self.generate_function_section(agent.functions)
-            fn_docs_formatted = "\n" + SEP + add_depth(fn_docs, ep=True)
-
-            sections[PromptSection.FUNCTIONS] = f"{self.template.sections[PromptSection.FUNCTIONS]}{fn_docs_formatted}"
-
-        if functions_being_used:
-            fn_docs = self.generate_function_section(agent.functions)
-            fn_docs = "\n" + SEP + add_depth(add_depth(fn_docs, ep=True))
-            sections[PromptSection.FUNCTIONS] = f"{self.template.sections[PromptSection.FUNCTIONS]} {fn_docs}"
-
-        if tools_being_used:
-            sections[PromptSection.TOOLS] = f"{self.template.sections[PromptSection.TOOLS]} {agent.tool_choice}"
-
-        example_text = ""
-
-        if examples_being_used:
-            example_text = "\n\n".join([add_depth(ex, True) for i, ex in enumerate(agent.examples)])
-
-        if functions_being_used:
-            example_text += (
-                "When calling a function, you must include the function name and all required inputs "
-                "inside XML tags. The tag name should be the function name, and parameters should be nested within `<arguments>` tags.\n\n"  # noqa
-                "Here is an example:\n"
-                f'{SEP * 2}User Prompt: "..."\n'
-                f"{SEP * 2}Assistant: <{agent.functions[0].__name__}>\n"
-                f"{SEP * 3}<arguments>\n"
-                f"{SEP * 4}{{...}}\n"
-                f"{SEP * 3}</arguments>\n"
-                f"{SEP * 2}</{agent.functions[0].__name__}>"
+        system_parts.append(self._format_section(persona_header, instructions, item_prefix=None))
+        rules_header = self.template.sections.get(PromptSection.RULES, "RULES:")
+        rules = agent.rules if isinstance(agent.rules, list) else ([agent.rules] if agent.rules else [])
+        if agent.functions:
+            rules.append(
+                "If a function can satisfy the user request, you MUST respond only with a valid tool call in the"
+                " specified format. Do not add any conversational text before or after the tool call."
             )
+        if self.enable_memory and include_memory:
+            rules.extend(
+                [
+                    "Consider previous context and conversation history.",
+                    "Build upon earlier interactions when appropriate.",
+                ]
+            )
+        system_parts.append(self._format_section(rules_header, rules))
 
-        if example_text:
-            sections[PromptSection.EXAMPLES] = f"{self.template.sections[PromptSection.EXAMPLES]}\n{example_text}"
+        if agent.functions:
+            functions_header = self.template.sections.get(PromptSection.FUNCTIONS, "FUNCTIONS:")
+            fn_docs = self.generate_function_section(agent.functions)
+            tool_format_instruction = (
+                "When calling a function, you must use the following XML format. "
+                "The tag name is the function name, and parameters are a JSON object within `<arguments>` tags.\n"
+                "Example:\n"
+                '<my_function_name>\n  <arguments>\n    {"param1": "value1"}\n  </arguments>\n</my_function_name>'
+            )
+            full_function_content = f"{tool_format_instruction}\n\n{fn_docs}"
+            system_parts.append(self._format_section(functions_header, full_function_content, item_prefix=None))
 
-        # CONTEXT SECTION
-        context_parts = []
+        if agent.examples:
+            examples_header = self.template.sections.get(PromptSection.EXAMPLES, "EXAMPLES:")
+            example_content = "\n\n".join(ex.strip() for ex in agent.examples)
+            system_parts.append(self._format_section(examples_header, example_content, item_prefix=None))
 
+        context_header = self.template.sections.get(PromptSection.CONTEXT, "CONTEXT:")
+        context_content_list = []
         if self.enable_memory and include_memory:
             memory_context = self.memory_store.consolidate_memories(agent.id)
             if memory_context:
-                context_parts.append(f"MEMORY:\n{add_depth(memory_context, True)}")
-
+                context_content_list.append(f"Relevant information from memory:\n{memory_context}")
         if context_variables:
             ctx_vars_formatted = self.format_context_variables(context_variables)
             if ctx_vars_formatted:
-                context_parts.append(f"VARIABLES:\n{add_depth(ctx_vars_formatted, True)}")
+                context_content_list.append(f"Current variables:\n{ctx_vars_formatted}")
 
-        if hasattr(self, "executor") and self.executor.execution_history.executions:
-            recent_functions = self.executor.execution_history.get_successful_results()
-            if recent_functions:
-                func_history = "RECENT FUNCTION RESULTS:\n"
-                for fname, result in list(recent_functions.items())[-3:]:  # Last 3 results
-                    result_str = str(result)
-                    func_history += f"{SEP}- {fname}: {result_str}\n"
-                context_parts.append(func_history.rstrip())
-
-        if context_parts:
-            sections[PromptSection.CONTEXT] = f"{self.template.sections[PromptSection.CONTEXT]}\n" + "\n\n".join(
-                context_parts
+        if context_content_list:
+            system_parts.append(
+                self._format_section(context_header, "\n\n".join(context_content_list), item_prefix=None)
             )
 
-        if history:
-            formatted_history = self.format_chat_history(history)
-            if formatted_history:
-                sections[PromptSection.HISTORY] = (
-                    f"{self.template.sections[PromptSection.HISTORY]}{add_depth(formatted_history, True)}"
-                )
+        instructed_messages: list[ChatMessage] = []
+
+        final_system_content = "\n\n".join(part for part in system_parts if part)
+        instructed_messages.append(SystemMessage(content=final_system_content))
+
+        if messages and messages.messages:
+            instructed_messages.extend(messages.messages)
 
         if prompt is not None:
-            formatted_prompt = prompt
-
-            if use_chain_of_thought:
-                formatted_prompt = (
-                    f"{prompt}\n\n"
-                    f"{SEP}Please approach this systematically:\n"
-                    f"{SEP * 2}1. First, clearly understand what is being asked\n"
-                    f"{SEP * 2}2. Identify any constraints or requirements\n"
-                    f"{SEP * 2}3. Determine if any functions would be helpful\n"
-                    f"{SEP * 2}4. Formulate your response\n"
-                    f"{SEP * 2}5. Verify your response addresses the request fully"
-                )
-
+            final_prompt_content = prompt
             if require_reflection:
-                formatted_prompt += (
-                    f"\n\n{SEP}After your response, please briefly reflect on:\n"
-                    f"{SEP * 2}- Any assumptions you made\n"
-                    f"{SEP * 2}- Potential limitations of your approach\n"
-                    f"{SEP * 2}- Alternative solutions that might exist"
+                final_prompt_content += (
+                    f"\n\nAfter your primary response, add a reflection section in `<reflection>` tags:\n"
+                    f"{self.SEP}- Assumptions made.\n"
+                    f"{self.SEP}- Potential limitations of your response."
                 )
+            instructed_messages.append(UserMessage(content=final_prompt_content))
 
-            sections[PromptSection.PROMPT] = (
-                f"{self.template.sections[PromptSection.PROMPT]}{add_depth(formatted_prompt, True)}"
-            )
+        return MessagesHistory(messages=instructed_messages)
 
-        parts = []
-        for section in self.template.section_order:
-            if sections.get(section):
-                parts.append(sections[section])
-
-        return "\n\n".join(parts).strip()
-
-    def _extract_function_calls_from_xml(self, content: str) -> list[FunctionCall]:
+    def _extract_function_calls_from_xml(self, content: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content using XML tags"""
         function_calls = []
         pattern = r"<(\w+)>\s*<arguments>(.*?)</arguments>\s*</\w+>"
@@ -423,7 +363,7 @@ class Calute:
             arguments_str = match[1].strip()
             try:
                 arguments = json.loads(arguments_str)
-                function_call = FunctionCall(
+                function_call = RequestFunctionCall(
                     name=name,
                     arguments=arguments,
                     id=f"call_{i}_{hash(match)}",
@@ -437,7 +377,7 @@ class Calute:
 
         return function_calls
 
-    def _extract_function_calls(self, content: str) -> list[FunctionCall]:
+    def _extract_function_calls(self, content: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content"""
         function_calls = self._extract_function_calls_from_xml(content)
         if function_calls:
@@ -449,7 +389,7 @@ class Calute:
         for i, match in enumerate(matches):
             try:
                 call_data = json.loads(match)
-                function_call = FunctionCall(
+                function_call = RequestFunctionCall(
                     name=call_data.get("name"),
                     arguments=call_data.get("content", {}),
                     id=f"call_{i}_{hash(match)}",
@@ -602,36 +542,23 @@ class Calute:
             return ""
         return prompt
 
-    def format_chat_history(self, history: list[dict]) -> str:
-        """Formats chat history with improved readability and metadata"""
-        if not history:
-            return ""
-
+    def format_chat_history(self, messages: MessagesHistory) -> str:
+        """Formats chat messages with improved readability and metadata"""
         formatted_messages = []
-        for msg in history:
-            role_display = {
-                "user": "User",
-                "assistant": "Assistant",
-                "system": "System",
-                "tool": "Tool",
-            }.get(msg.role, msg.role.capitalize())
-
-            timestamp = getattr(msg, "timestamp", "")
-            time_str = f" at {timestamp}" if timestamp else ""
-
-            formatted_messages.append(f"{role_display}{time_str}:\n{msg.content}")
-
+        for msg in messages.messages:
+            formatted_messages.append(f"## {msg.role}:\n{msg.content}")
         return "\n\n".join(formatted_messages)
 
     async def create_response(
         self,
         prompt: str | None = None,
         context_variables: dict | None = None,
-        history: list[dict] | None = None,
+        messages: MessagesHistory | None = None,
         agent_id: str | None = None,
         stream: bool = True,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
+        use_instructed_prompt: bool = True,
     ) -> ResponseResult | tp.AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching"""
 
@@ -641,17 +568,25 @@ class Calute:
         agent = self.orchestrator.get_current_agent()
         context_variables = context_variables or {}
 
-        formatted_prompt = self.generate_prompt(
+        prompt: MessagesHistory = self.manage_messages(
             agent=agent,
             prompt=prompt,
             context_variables=context_variables,
-            history=history,
+            messages=messages,
         )
 
+        if use_instructed_prompt:
+            prompt = prompt.make_instruction_prompt()
+        else:
+            prompt = prompt.to_openai()["messages"]
         if print_formatted_prompt:
-            print(formatted_prompt)
+            if not use_instructed_prompt:
+                for msg in prompt.messages:
+                    debug_print(f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
+            else:
+                debug_print(prompt)
         response = await self.llm_client.generate_completion(
-            prompt=formatted_prompt,
+            prompt=prompt,
             model=agent.model,
             temperature=agent.temperature,
             max_tokens=agent.max_tokens,

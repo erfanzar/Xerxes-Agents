@@ -34,20 +34,17 @@ class Agent(BaseModel):
     functions: list[tp.Callable] = []
     capabilities: list[AgentCapability] = []
 
-    # Function execution settings
     function_call_strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL
     tool_choice: str | list[str] = None
     parallel_tool_calls: bool = True
     function_timeout: float | None = 30.0
     max_function_retries: int = 3
 
-    # Model parameters
     top_p: float = 0.95
     max_tokens: int = 2048
     temperature: float = 0.7
     stop: str | list[str] | None = None
 
-    # Agent switching settings
     switch_triggers: list[AgentSwitchTrigger] = []
     fallback_agent_id: str | None = None
 
@@ -70,21 +67,21 @@ class Response(BaseModel):
     containing messages and contextual information.
 
         Attributes:
-                messages (tp.List):
-                        A list of messages representing the conversation history up to this response.
-                        Each message is typically a dictionary or a dedicated message object
-                        (e.g., `{'role': 'user', 'content': '...'}`,
-                        `{'role': 'assistant', 'content': '...', 'tool_calls': [...]}`).
-                        Defaults to an empty list.
-                agent (tp.Optional[Agent]):
-                        An optional reference to the `Agent` instance that generated this response
-                        or is associated with this state. This can be useful for understanding
-                        the configuration that led to the response. Defaults to None.
-                context_variables (dict):
-                        A dictionary for storing arbitrary contextual variables related to this
-                        response or the ongoing conversation state. Useful for carrying state
-                        between turns, logging, or passing information to downstream processes.
-                        Defaults to an empty dictionary.
+            messages (tp.List):
+                A list of messages representing the conversation history up to this response.
+                Each message is typically a dictionary or a dedicated message object
+                (e.g., `{'role': 'user', 'content': '...'}`,
+                `{'role': 'assistant', 'content': '...', 'tool_calls': [...]}`).
+                Defaults to an empty list.
+            agent (tp.Optional[Agent]):
+                An optional reference to the `Agent` instance that generated this response
+                or is associated with this state. This can be useful for understanding
+                the configuration that led to the response. Defaults to None.
+            context_variables (dict):
+                A dictionary for storing arbitrary contextual variables related to this
+                response or the ongoing conversation state. Useful for carrying state
+                between turns, logging, or passing information to downstream processes.
+                Defaults to an empty dictionary.
     """
 
     messages: list = []
