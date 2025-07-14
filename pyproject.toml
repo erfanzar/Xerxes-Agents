@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "calute"
-version = "0.0.9"
+version = "0.0.10"
 description = "Agents for intelligence and coordination"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.13"
+python = ">=3.10,<3.14"
 pydantic = "^2.9.2"
 openai = ">=1.72.0"
 google-generativeai = "~0.8.5"
