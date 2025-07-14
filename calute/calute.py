@@ -76,7 +76,7 @@ class PromptTemplate:
             PromptSection.FUNCTIONS: f"FUNCTIONS:\n{SEP}The available functions are listed with their schemas:",
             PromptSection.TOOLS: f"TOOLS:\n{SEP}When using tools, follow this format:",
             PromptSection.EXAMPLES: f"EXAMPLES:\n{SEP}",
-            PromptSection.CONTEXT: f"CONTEXT:\n{SEP}Current variables:\n",
+            PromptSection.CONTEXT: "CONTEXT:\n",
             PromptSection.HISTORY: f"HISTORY:\n{SEP}Conversation so far:\n",
             PromptSection.PROMPT: "PROMPT:\n",
         }
@@ -352,6 +352,38 @@ class Calute:
 
         return MessagesHistory(messages=instructed_messages)
 
+    @staticmethod
+    def extract_md_block(input_string: str) -> list[tuple[str, str]]:
+        """
+        Extract Markdown code blocks from a string.
+
+        This function finds all Markdown code blocks (delimited by triple backticks)
+        in the input string and returns their content along with the optional language
+        specifier (if present).
+
+        Args:
+            input_string (str): The input string containing one or more Markdown code blocks.
+
+        Returns:
+            List[Tuple[str, str]]: A list of tuples, where each tuple contains:
+                - The language specifier (e.g., 'xml', 'python', or '' if not specified).
+                - The content of the code block.
+
+        Example:
+            >>> text = '''```xml
+            ... <web_research>
+            ...   <arguments>
+            ...     {"query": "quantum computing breakthroughs 2024"}
+            ...   </arguments>
+            ... </web_research>
+            ... ```'''
+            >>> extract_md_block(text)
+            [('xml', '<web_research>\n  <arguments>\n    {"query": "quantum computing breakthroughs 2024"}\n  </arguments>\n</web_research>')]
+        """  # noqa
+        pattern = r"```(\w*)\n(.*?)```"
+        matches = re.findall(pattern, input_string, re.DOTALL)
+        return [(lang, content.strip()) for lang, content in matches]
+
     def _extract_function_calls_from_xml(self, content: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content using XML tags"""
         function_calls = []
@@ -528,7 +560,6 @@ class Calute:
         """Formats context variables with type information and improved readability"""
         if not variables:
             return ""
-
         formatted_vars = []
         for key, value in variables.items():
             if not callable(value):
@@ -559,6 +590,7 @@ class Calute:
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
         use_instructed_prompt: bool = True,
+        conversation_name_holder: str = "Messages",
     ) -> ResponseResult | tp.AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching"""
 
@@ -576,7 +608,7 @@ class Calute:
         )
 
         if use_instructed_prompt:
-            prompt = prompt.make_instruction_prompt()
+            prompt = prompt.make_instruction_prompt(conversation_name_holder=conversation_name_holder)
         else:
             prompt = prompt.to_openai()["messages"]
         if print_formatted_prompt:
@@ -584,7 +616,7 @@ class Calute:
                 for msg in prompt.messages:
                     debug_print(f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
             else:
-                debug_print(prompt)
+                print(prompt)
         response = await self.llm_client.generate_completion(
             prompt=prompt,
             model=agent.model,
@@ -592,6 +624,11 @@ class Calute:
             max_tokens=agent.max_tokens,
             top_p=agent.top_p,
             stop=agent.stop,
+            top_k=agent.top_k,
+            min_p=agent.min_p,
+            presence_penalty=agent.presence_penalty,
+            frequency_penalty=agent.frequency_penalty,
+            repetition_penalty=agent.repetition_penalty,
             stream=stream,
         )
 

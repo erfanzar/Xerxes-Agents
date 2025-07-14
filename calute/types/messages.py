@@ -416,7 +416,7 @@ class MessagesHistory(CaluteBase):
             messages.append(_map_role_to_type[message.get("role")].from_openai(message))
         return MessagesHistory(messages=messages)
 
-    def make_instruction_prompt(self) -> str:
+    def make_instruction_prompt(self, conversation_name_holder: str = "Messages") -> str:
         """
         Formats the entire message history into a single, human-readable string
         for debugging and visualization, following the '# Instruction' and '# Messages' structure.
@@ -439,7 +439,7 @@ class MessagesHistory(CaluteBase):
         else:
             prompt_parts.append("  (No system prompt provided)")
         if other_messages:
-            prompt_parts.append("\n# Messages")
+            prompt_parts.append(f"\n# {conversation_name_holder}")
             formatted_messages = []
             for msg in other_messages:
                 role_marker = f"## {getattr(msg.role, 'value', msg.role).capitalize()}"

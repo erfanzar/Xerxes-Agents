@@ -43,6 +43,12 @@ class Agent(BaseModel):
     top_p: float = 0.95
     max_tokens: int = 2048
     temperature: float = 0.7
+    top_k: int = 0
+    min_p: float = 0.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
+
     stop: str | list[str] | None = None
 
     switch_triggers: list[AgentSwitchTrigger] = []

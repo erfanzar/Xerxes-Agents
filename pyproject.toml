@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "calute"
-version = "0.0.8"
+version = "0.0.9"
 description = "Agents for intelligence and coordination"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
 license = "Apache-2.0"

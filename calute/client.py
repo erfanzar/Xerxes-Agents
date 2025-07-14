@@ -11,9 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
 
 import typing as tp
 from abc import ABC, abstractmethod
+
+if tp.TYPE_CHECKING:
+    from openai import Client
 
 
 class LLMClient(ABC):
@@ -51,7 +55,7 @@ class LLMClient(ABC):
 class OpenAIClient(LLMClient):
     """OpenAI client implementation"""
 
-    def __init__(self, client):
+    def __init__(self, client: Client):
         self.client = client
 
     async def generate_completion(
@@ -62,6 +66,11 @@ class OpenAIClient(LLMClient):
         max_tokens: int,
         top_p: float,
         stop: list[str] | None,
+        top_k: int,
+        min_p: float,
+        presence_penalty: float,
+        frequency_penalty: float,
+        repetition_penalty: float,
         stream: bool,
     ) -> tp.Any:
         """Generate a completion using OpenAI"""
@@ -75,6 +84,9 @@ class OpenAIClient(LLMClient):
             top_p=top_p,
             stop=stop,
             stream=stream,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            extra_body={"repetition_penalty": repetition_penalty, "top_k": top_k, "min_p": min_p},
         )
 
     def extract_content(self, response: tp.Any) -> str:
@@ -116,6 +128,11 @@ class GeminiClient(LLMClient):
         temperature: float,
         max_tokens: int,
         top_p: float,
+        top_k: int,
+        min_p: float,
+        presence_penalty: float,
+        frequency_penalty: float,
+        repetition_penalty: float,
         stop: list[str] | None,
         stream: bool,
     ) -> tp.Any:
@@ -124,6 +141,11 @@ class GeminiClient(LLMClient):
             "temperature": temperature,
             "max_output_tokens": max_tokens,
             "top_p": top_p,
+            "min_p": min_p,
+            "top_k": top_k,
+            "presence_penalty": presence_penalty,
+            "frequency_penalty": frequency_penalty,
+            "repetition_penalty": repetition_penalty,
         }
 
         if stop:
