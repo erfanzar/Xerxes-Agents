@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "calute"
-version = "0.0.10"
+version = "0.0.11"
 description = "Agents for intelligence and coordination"
 authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
 license = "Apache-2.0"
@@ -10,13 +10,13 @@ repository = "https://github.com/erfanzar/Calute"
 documentation = "https://erfanzar.github.io/Calute"
 keywords = ["calute", "Agents"]
 classifiers = [
-	"Development Status :: 3 - Alpha",
-	"Intended Audience :: Developers",
-	"Topic :: Scientific/Engineering :: Artificial Intelligence",
-	"License :: OSI Approved :: Apache Software License",
-	"Programming Language :: Python :: 3.10",
-	"Programming Language :: Python :: 3.11",
-	"Programming Language :: Python :: 3.12",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
 ]
 
 [tool.poetry.dependencies]
@@ -58,3 +58,45 @@ python_version = "3.10"
 
 ignore_missing_imports = true
 exclude = ["calute/"]
+
+[tool.basedpyright]
+# Disabled diagnostic rules to reduce type-checking noise
+reportAssignmentType = "none"
+reportUnknownVariableType = "none"
+reportPrivateUsage = "none"
+reportOptionalCall = "none"
+reportUnknownMemberType = "none"
+reportGeneralTypeIssues = "none"
+reportArgumentType = "none"                  # Added to disable argument type warnings
+enableTypeIgnoreComments = true              # Ensures # pyright: ignore comments work
+reportMissingTypeArgument = "none"
+reportUnknownParameterType = "none"
+reportAny = "none"
+reportCallIssue = "none"
+reportUnknownArgumentType = "none"
+reportRedeclaration = "none"
+reportIgnoreCommentWithoutRule = "none"
+reportUnnecessaryIsInstance = "none"
+reportUnusedCallResult = "none"
+reportUnknownLambdaType = "none"
+reportUnannotatedClassAttribute = "none"
+reportImplicitStringConcatenation = "none"
+reportMissingParameterType = "none"
+reportImplicitOverride = "none"
+reportImplicitAbstractClass = "none"
+reportExplicitAny = "none"
+reportIncompatibleMethodOverride = "none"
+reportIndexIssue = "none"
+reportAttributeAccessIssue = "none"
+reportUnreachable = "none"
+reportOptionalMemberAccess = "none"
+reportOperatorIssue = "none"
+reportUninitializedInstanceVariable = "none"
+reportIncompatibleVariableOverride = "none"
+[tool.poetry.dev-dependencies]
+
+
+pytest = "^8.3.3" # For testing
+ruff = "^0.7.0"   # Ensure Ruff version is recent
+black = "^24.8.0" # Ensure Black version is recent
+mypy = "^1.12.0"  # Ensure MyPy version is recents

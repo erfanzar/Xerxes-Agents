@@ -6,10 +6,11 @@ Calute APIs 🔮
 
    basics
    calute
-   chain module
    client
+   cortex
    executors
+   memory
+   multimodal
    types
    utils
-   workflow
    

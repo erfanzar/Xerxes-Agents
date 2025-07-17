@@ -16,6 +16,7 @@
 import time
 import typing as tp
 import uuid
+from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
 
@@ -24,7 +25,7 @@ class RequestChatMessage(BaseModel):
     """Represents a single message in a chat conversation."""
 
     role: str
-    content: str | list[tp.Mapping[str, str]]
+    content: str | list[Mapping[str, str]]
     name: str | None = None
     function_call: dict[str, tp.Any] | None = None
 
@@ -33,7 +34,7 @@ class DeltaMessage(BaseModel):
     """Represents a change (delta) in a chat message, used in streaming responses."""
 
     role: str | None = None
-    content: str | list[tp.Mapping[str, str]] | None = None
+    content: str | list[Mapping[str, str]] | None = None
     function_call: dict[str, tp.Any] | None = None
 
 

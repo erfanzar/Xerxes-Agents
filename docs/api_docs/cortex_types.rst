@@ -1,7 +1,7 @@
-calute.chain_module
+calute.cortex.types
 ===================
 
-.. automodule:: calute.chain_module
+.. automodule:: calute.cortex.types
     :members:
     :undoc-members:
     :show-inheritance:

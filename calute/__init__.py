@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from .calute import Calute, PromptTemplate
 from .cortex import (
     ChainLink,
@@ -81,7 +82,6 @@ __all__ = (
     "CortexTool",
     "ExecutionResult",
     "ExecutionStatus",
-    "FunctionCall",
     "FunctionCallInfo",
     "FunctionCallStrategy",
     "FunctionCallsExtracted",
@@ -95,11 +95,8 @@ __all__ = (
     "ProcessType",
     "PromptTemplate",
     "RequestFunctionCall",
-    "Response",
-    "ResponseResult",
     "Roles",
     "StreamChunk",
-    "StreamingResponseType",
     "SwitchContext",
     "SystemMessage",
     "SystemMessageType",
@@ -111,4 +108,4 @@ __all__ = (
     "convert_openai_tools",
 )
 
-__version__ = "0.0.10"
+__version__ = "0.0.11"

@@ -14,7 +14,7 @@
 
 from .chains import ChainLink, ChainType
 from .cortex import Cortex, CortexToolAdapter
-from .tools import CortexTool, ToolParameter, ToolSignature
+from .tools import CortexTool, ToolParameter, ToolSignature, WebTool
 from .types import CortexAgent, CortexOutput, CortexTask, CortexTaskOutput, ProcessType
 
 __all__ = (
@@ -30,4 +30,5 @@ __all__ = (
     "ProcessType",
     "ToolParameter",
     "ToolSignature",
+    "WebTool",
 )

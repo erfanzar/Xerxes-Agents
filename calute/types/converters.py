@@ -44,7 +44,7 @@ def convert_openai_tools(tools: list[dict[str, Any]]) -> list[Tool]:
     return converted_tools
 
 
-def _check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> None:
+def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> None:
     r"""Check if the names are valid field names.
 
     Names are valid if they are inside the `valid_fields_names` set or chat completion OpenAI fields. If the names are
@@ -79,7 +79,7 @@ def _check_openai_fields_names(valid_fields_names: set[str], names: set[str]) ->
         )
 
 
-def _is_openai_field_name(name: str) -> bool:
+def is_openai_field_name(name: str) -> bool:
     return name in _OPENAI_COMPLETION_FIELDS
 
 

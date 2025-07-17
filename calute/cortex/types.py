@@ -58,7 +58,7 @@ class CortexAgent:
     def __post_init__(self):
         self.id = f"{self.role.lower().replace(' ', '_')}_{id(self)}"
 
-    def execute(self, task: CortexTask, context: dict[str, Any] | None = None) -> CortexTaskOutput:
+    def execute(self, task: CortexTask, context: dict[str, Any] | None = None) -> CortexTaskOutput:  # type:ignore
         pass
 
 

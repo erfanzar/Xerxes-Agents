@@ -35,7 +35,7 @@ class CortexToolAdapter:
     """Adapter to integrate enhanced tools with CortexAI agents"""
 
     @staticmethod
-    def convert_tools_for_agent(tools: list[CortexTool]) -> list[Callable]:
+    def convert_tools_for_agent(tools: list[CortexTool]) -> list[Callable | None]:
         """Convert enhanced tools to callables for CortexAgent"""
         return [tool.as_function() for tool in tools]
 
@@ -75,7 +75,7 @@ class CortexToolAdapter:
         return "\n".join(doc_parts)
 
     @staticmethod
-    def validate_tool_compatibility(agent: CortexAgent, tools: list[CortexTool]) -> dict[str, Any]:
+    def validate_tool_compatibility(agent: CortexAgent, tools: list[CortexTool]) -> dict[str, Any]:  # type:ignore
         """Validate tool compatibility with agent capabilities"""
         compatibility_report = {"compatible_tools": [], "incompatible_tools": [], "warnings": []}
 
@@ -713,7 +713,7 @@ class Cortex:
 
         return output
 
-    def _create_task_prompt(self, task: CortexTask, context: dict[str, Any]) -> str:
+    def _create_task_prompt(self, task: CortexTask, context: dict[str, Any]) -> str:  # type:ignore
         """Create prompt for task execution"""
         prompt_parts = [f"# CortexTask\n{task.description}", f"\n# Expected Output\n{task.expected_output}"]
         if task.context:
@@ -725,7 +725,7 @@ class Cortex:
 
         if task.output_json:
             prompt_parts.append(
-                f"\n# Output Format\nProvide output as JSON matching this schema: {task.output_json.schema()}"
+                f"\n# Output Format\nProvide output as JSON matching this schema: {task.output_json.model_json_schema()}"
             )
 
         if task.output_file:
@@ -750,7 +750,7 @@ class Cortex:
         # Default to first agent
         return self.agents[0]
 
-    def _delegate_task(self, task: CortexTask, manager: CortexAgent) -> CortexAgent:
+    def _delegate_task(self, task: CortexTask, manager: CortexAgent) -> CortexAgent:  # type:ignore
         """Manager delegates task to appropriate agent"""
         # In a real implementation, this would use the LLM to decide
         # For now, use simple selection
@@ -1040,7 +1040,7 @@ class Cortex:
                 {
                     "iteration": i + 1,
                     "timestamp": datetime.now().isoformat(),
-                    "result": result.dict(),
+                    "result": result.model_dump(),
                     "feedback": feedback,
                     "execution_log": self.execution_log.copy(),
                 }

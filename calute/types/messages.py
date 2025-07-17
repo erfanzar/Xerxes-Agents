@@ -47,7 +47,7 @@ class BaseContentChunk(CaluteBase):
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
-    def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "BaseContentChunk":
+    def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "BaseContentChunk":  # type:ignore
         r"""Converts the OpenAI chunk to the Calute format.
 
         Should be implemented by subclasses.
@@ -222,7 +222,7 @@ class BaseMessage(CaluteBase):
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
-    def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "BaseMessage":
+    def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "BaseMessage":  # type:ignore
         r"""Converts the OpenAI message to the Calute format.
 
         Should be implemented by subclasses.
@@ -332,10 +332,7 @@ class AssistantMessage(BaseMessage):
         r"""Converts the OpenAI message to the Calute format."""
         openai_tool_calls = openai_message.get("tool_calls", None)
         tools_calls = (
-            [
-                ToolCall.from_openai(openai_tool_call)  # type: ignore[arg-type]
-                for openai_tool_call in openai_tool_calls
-            ]
+            [ToolCall.from_openai(openai_tool_call) for openai_tool_call in openai_tool_calls]
             if openai_tool_calls is not None
             else None
         )
@@ -404,7 +401,7 @@ class MessagesHistory(CaluteBase):
         message = []
         for msg in self.messages:
             message.append(msg.to_openai())
-        return {"messages": message}
+        return {"messages": message}  # type:ignore
 
     @classmethod
     def from_openai(
@@ -416,7 +413,11 @@ class MessagesHistory(CaluteBase):
             messages.append(_map_role_to_type[message.get("role")].from_openai(message))
         return MessagesHistory(messages=messages)
 
-    def make_instruction_prompt(self, conversation_name_holder: str = "Messages") -> str:
+    def make_instruction_prompt(
+        self,
+        conversation_name_holder: str = "Messages",
+        mention_last_turn: bool = True,
+    ) -> str:
         """
         Formats the entire message history into a single, human-readable string
         for debugging and visualization, following the '# Instruction' and '# Messages' structure.
@@ -473,6 +474,11 @@ class MessagesHistory(CaluteBase):
                 indented_content = textwrap.indent(content_str.strip(), "  ")
                 formatted_messages.append(f"{role_marker}\n{indented_content}")
             prompt_parts.append("\n\n".join(formatted_messages))
+
+        if mention_last_turn and len(other_messages) != 0:
+            selected = other_messages[-1]
+
+            prompt_parts.append(f"Last Message from {selected.role.capitalize()}: {selected.content}")
         return "\n\n".join(prompt_parts)
 
 

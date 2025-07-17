@@ -26,13 +26,19 @@ class LLMClient(ABC):
     @abstractmethod
     async def generate_completion(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, str]],
         model: str,
         temperature: float,
         max_tokens: int,
         top_p: float,
         stop: list[str] | None,
+        top_k: int,
+        min_p: float,
+        presence_penalty: float,
+        frequency_penalty: float,
+        repetition_penalty: float,
         stream: bool,
+        **kwargs,
     ) -> tp.Any:
         """Generate a completion using the LLM"""
         pass
@@ -72,6 +78,7 @@ class OpenAIClient(LLMClient):
         frequency_penalty: float,
         repetition_penalty: float,
         stream: bool,
+        **kwargs,
     ) -> tp.Any:
         """Generate a completion using OpenAI"""
         if isinstance(prompt, str):
@@ -123,18 +130,19 @@ class GeminiClient(LLMClient):
 
     async def generate_completion(
         self,
-        prompt: str,
+        prompt: str | list[dict[str, str]],
         model: str,
         temperature: float,
         max_tokens: int,
         top_p: float,
+        stop: list[str] | None,
         top_k: int,
         min_p: float,
         presence_penalty: float,
         frequency_penalty: float,
         repetition_penalty: float,
-        stop: list[str] | None,
         stream: bool,
+        **kwargs,
     ) -> tp.Any:
         """Generate a completion using Gemini"""
         generation_config = {

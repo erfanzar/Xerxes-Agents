@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from .function_execution_types import AgentCapability, AgentSwitchTrigger, FunctionCallStrategy
 
-AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]]
+AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]]  # type:ignore
 
 
 class Agent(BaseModel):

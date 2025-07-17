@@ -103,8 +103,8 @@ class DelegationEngine:
             # Check tool compatibility
             tool_score = 0
             if task.tools and agent.tools:
-                task_tool_names = {t.name for t in task.tools}
-                agent_tool_names = {t.name for t in agent.tools}
+                task_tool_names = {t.name for t in task.tools}  # type:ignore
+                agent_tool_names = {t.name for t in agent.tools}  # type:ignore
                 tool_score = len(task_tool_names & agent_tool_names)
 
             total_score = overlap + tool_score * 2  # Weight tool compatibility higher
@@ -119,7 +119,7 @@ class DelegationEngine:
         self,
         task: "CortexTask",
         agents: list["CortexAgent"],
-        context: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,  # type:ignore
     ) -> "CortexAgent":
         """Delegate based on expertise matching"""
 
@@ -161,7 +161,7 @@ class CollaborationPattern:
     """Patterns for agent collaboration"""
 
     @staticmethod
-    def pair_programming(driver: "CortexAgent", navigator: "CortexAgent", task: "CortexTask") -> AgentChain:
+    def pair_programming(driver: "CortexAgent", navigator: "CortexAgent", task: "CortexTask") -> AgentChain:  # type:ignore
         """Create a pair programming pattern"""
         chain = AgentChain("pair_programming", ChainType.SEQUENTIAL)
 
@@ -177,7 +177,7 @@ class CollaborationPattern:
         return chain
 
     @staticmethod
-    def expert_consultation(primary: "CortexAgent", experts: list["CortexAgent"], task: "CortexTask") -> "AgentChain":
+    def expert_consultation(primary: "CortexAgent", experts: list["CortexAgent"], task: "CortexTask") -> "AgentChain":  # type:ignore
         """Create an expert consultation pattern"""
         chain = AgentChain("expert_consultation", ChainType.SEQUENTIAL)
 

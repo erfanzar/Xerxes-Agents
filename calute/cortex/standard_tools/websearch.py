@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Mapping
 from typing import Literal
 from urllib.parse import quote_plus
 
 from bs4 import BeautifulSoup
 
-from ..tools import ComposedTool, CortexTool, ToolExecutionContext, ToolParameter, ToolSignature, WebTool
+from ..tools import ComposedTool, ToolExecutionContext, ToolParameter, ToolSignature, WebTool
 
 
 class WebSearchTool(WebTool):
@@ -428,7 +429,9 @@ class WebResearchTool(ComposedTool):
         return research_results
 
 
-def create_web_tools(api_keys: dict[str, str] | None = None) -> dict[str, CortexTool]:
+def create_web_tools(
+    api_keys: dict[str, str] | None = None,
+) -> Mapping[str, WebSearchTool | WebScraperTool | WebResearchTool]:
     """
     Create a standard set of web tools
 

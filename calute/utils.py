@@ -14,7 +14,7 @@
 
 import inspect
 from datetime import datetime
-from typing import Union
+from typing import Union  # type:ignore
 
 from pydantic import BaseModel, ConfigDict
 
@@ -94,7 +94,7 @@ def function_to_json(func) -> dict:
                     param_type = "null"
                 elif param.annotation.__origin__ in (list, tuple, set):  # Collection types
                     param_type = "array"
-                elif param.annotation.__origin__ is Union:  # Union types
+                elif param.annotation.__origin__ is Union:  # Union types #type:ignore
                     param_type = {
                         "type": "union",
                         "types": [type_map.get(arg, "string") for arg in param.annotation.__args__],

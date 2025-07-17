@@ -21,7 +21,7 @@ def flatten_dict(d, parent_key="", sep="-"):
     return dict(items)
 
 
-def unflatten_dict(xs, sep=None):
+def unflatten_dict(xs):
     """
     Convert a flat dictionary with compound keys (tuples) into a nested dictionary.
     If an intermediate key already has a non-dict value, we promote it by storing its value

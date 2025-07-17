@@ -16,6 +16,7 @@ import json
 import re
 import textwrap
 import typing as tp
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 
@@ -96,7 +97,9 @@ class PromptTemplate:
 class Calute:
     """Calute with orchestration"""
 
-    def __init__(self, client, template: PromptTemplate | None = None, enable_memory: bool = True):
+    SEP: tp.ClassVar = SEP
+
+    def __init__(self, client: tp.Any, template: PromptTemplate | None = None, enable_memory: bool = True):
         """
         Initialize Calute with an LLM client.
 
@@ -122,7 +125,7 @@ class Calute:
     def _setup_default_triggers(self):
         """Setup default agent switching triggers"""
 
-        def capability_based_switch(context, agents, current_agent_id):
+        def capability_based_switch(context, agents, current_agent_id):  # type:ignore
             """Switch agent based on required capabilities"""
             required_capability = context.get("required_capability")
             if not required_capability:
@@ -254,7 +257,7 @@ class Calute:
 
     def manage_messages(
         self,
-        agent: Agent,
+        agent: Agent | None,
         prompt: str | None = None,
         context_variables: dict | None = None,
         messages: MessagesHistory | None = None,
@@ -267,7 +270,7 @@ class Calute:
         This version uses a helper function to ensure clean and consistent indentation.
         """
         if not agent:
-            return [UserMessage(content=prompt or "You are a helpful assistant.")]
+            return MessagesHistory(messages=[UserMessage(content=prompt or "You are a helpful assistant.")])
 
         system_parts = []
 
@@ -450,7 +453,7 @@ class Calute:
         return None
 
     @staticmethod
-    def get_thoughts(response: str, tag: str = "think") -> str:
+    def get_thoughts(response: str, tag: str = "think") -> str | None:
         inside = None
         match = re.search(rf"<{tag}>(.*?)</{tag}>", response, flags=re.S)
         if match:
@@ -502,14 +505,13 @@ class Calute:
 
         for func in functions:
             if hasattr(func, "category"):
-                category = func.category
+                category = func.category  # type:ignore
                 if category not in categorized_functions:
                     categorized_functions[category] = []
                 categorized_functions[category].append(func)
             else:
                 uncategorized.append(func)
 
-        # Generate docs for categorized functions
         for category, funcs in categorized_functions.items():
             function_docs.append(f"## {category} Functions\n")
             for func in funcs:
@@ -591,7 +593,7 @@ class Calute:
         print_formatted_prompt: bool = False,
         use_instructed_prompt: bool = True,
         conversation_name_holder: str = "Messages",
-    ) -> ResponseResult | tp.AsyncIterator[StreamingResponseType]:
+    ) -> ResponseResult | AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching"""
 
         if agent_id:
@@ -686,9 +688,9 @@ class Calute:
     async def _handle_streaming_with_functions(
         self,
         response: tp.Any,
-        agent: "Agent",
+        agent: "Agent",  # pyright:ignore
         context: dict,
-    ) -> tp.AsyncIterator[StreamingResponseType]:
+    ) -> AsyncIterator[StreamingResponseType]:
         """Handle streaming response with function calls"""
         buffered_content = ""
         function_calls_detected = False
@@ -788,11 +790,11 @@ class Calute:
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
-    async def _process_streaming_chunks(self, response, callback):
+    async def _process_streaming_chunks(self, response: tp.Any, callback: tp.Any):
         """Process streaming chunks and yield results"""
         chunks = []
 
-        def wrapper_callback(content, chunk):
+        def wrapper_callback(content: tp.Any, chunk: tp.Any):
             result = callback(content, chunk)
             chunks.append(result)
 

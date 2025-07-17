@@ -297,7 +297,7 @@ class CortexTool(ABC):
 
         return self._direct_call(**kwargs)
 
-    def _validate_parameters(self, kwargs: dict[str, Any]):
+    def _validate_parameters(self, kwargs: dict[str, Any]):  # type:ignore
         """Validate parameters against signature"""
         for param in self._signature.parameters:
             if param.required and param.name not in kwargs:
@@ -340,7 +340,7 @@ class CortexTool(ABC):
             returns=func_schema["function"].get("returns"),
         )
 
-    def as_function(self) -> Callable:
+    def as_function(self) -> Callable | None:
         """Convert to callable with proper signature"""
         source_func = self._direct_call
 
@@ -385,7 +385,7 @@ class CortexTool(ABC):
 
         tool_function.__name__ = self.name
         tool_function.__doc__ = self.description
-        tool_function.__signature__ = original_sig
+        tool_function.__signature__ = original_sig  # type:ignore
 
         tool_function.__annotations__ = getattr(source_func, "__annotations__", {}).copy()
 
@@ -403,9 +403,9 @@ class CortexTool(ABC):
                 except (AttributeError, TypeError):
                     pass
 
-        return tool_function
+        return tool_function  # type: ignore[return-value]
 
-    def to_openai_schema(self) -> dict[str, Any]:
+    def to_openai_schema(self) -> dict[str, Any]:  # type:ignore
         """Convert to OpenAI function calling schema"""
         if not self._function_schema:
             self._function_schema = enhanced_function_to_json(self._direct_call)
@@ -419,7 +419,7 @@ class CortexTool(ABC):
         func: Callable,
         name: str | None = None,
         description: str | None = None,
-        examples: list[dict[str, Any]] | None = None,
+        examples: list[dict[str, Any]] | None = None,  # type:ignore
     ) -> CortexTool:
         """Create a tool from a function with full signature preservation"""
 
@@ -456,7 +456,7 @@ class CortexTool(ABC):
     @staticmethod
     def create_parameterized_tool(
         base_func: Callable,
-        parameter_sets: list[dict[str, Any]],
+        parameter_sets: list[dict[str, Any]],  # type:ignore
         name_template: str = "{base_name}_{variant}",
     ) -> list[CortexTool]:
         """Create multiple tool variants with different default parameters"""
@@ -492,7 +492,7 @@ class CortexTool(ABC):
         """Execute tool with full context and error handling"""
         context.start_time = time.time()
         context.execution_id = f"{self.name}_{int(time.time() * 1000)}"
-
+        cache_key = None
         # Check cache if enabled
         if self.cache_results:
             cache_key = self._generate_cache_key(kwargs)
@@ -521,7 +521,7 @@ class CortexTool(ABC):
                 context.end_time = time.time()
 
                 # Cache successful result
-                if self.cache_results:
+                if self.cache_results and cache_key is not None:
                     self._cache[cache_key] = result
 
                 # Record execution
@@ -632,7 +632,7 @@ class ComposedTool(CortexTool):
         self.composition_type = composition_type
         self.conditions = conditions or {}
 
-    def run(self, **kwargs) -> Any:
+    def run(self, **kwargs):
         """Public interface with validation"""
         if self._signature:
             self._validate_parameters(kwargs)
@@ -687,7 +687,7 @@ class WebTool(CortexTool):
         self._session = None
         self._async_session = None
 
-    def run(self, **kwargs) -> Any:
+    def run(self, **kwargs):
         """Public interface with validation"""
         if self._signature:
             self._validate_parameters(kwargs)

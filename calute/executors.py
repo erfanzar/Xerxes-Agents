@@ -25,8 +25,6 @@ from .types.function_execution_types import (
 
 if tp.TYPE_CHECKING:
     from .types import Agent
-else:
-    Agent = tp.Any
 
 __CTX_VARS_NAME__ = "context_variables"
 SEP = "  "
@@ -50,7 +48,7 @@ class FunctionRegistry:
         self._function_agents[func_name] = agent_id
         self._function_metadata[func_name] = metadata or {}
 
-    def get_function(self, name: str) -> tuple[tp.Callable, str]:
+    def get_function(self, name: str) -> tuple[tp.Callable | None, str | None]:
         """Get function and its associated agent"""
         func = self._functions.get(name)
         agent_id = self._function_agents.get(name)
@@ -234,7 +232,16 @@ class FunctionExecutor:
     ) -> list[RequestFunctionCall]:
         """Execute calls in parallel"""
         tasks = [self._execute_single_call(call, context.copy()) for call in calls]
-        return await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        final_results = []
+        for call, result in zip(calls, results, strict=False):
+            if isinstance(result, Exception):
+                call.status = ExecutionStatus.FAILURE
+                call.error = str(result)
+                final_results.append(call)
+            else:
+                final_results.append(result)
+        return final_results
 
     async def _execute_pipeline(
         self,
