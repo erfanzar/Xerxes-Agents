@@ -1,13 +1,13 @@
-[tool.poetry]
+[project]
 name = "calute"
-version = "0.0.11"
+version = "0.0.12"
 description = "Agents for intelligence and coordination"
-authors = ["Erfan Zare Chavoshi <Erfanzare810@gmail.com>"]
-license = "Apache-2.0"
+authors = [
+    {name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com"}
+]
+license = {text = "Apache-2.0"}
 readme = "README.md"
-homepage = "https://github.com/erfanzar/Calute"
-repository = "https://github.com/erfanzar/Calute"
-documentation = "https://erfanzar.github.io/Calute"
+requires-python = ">=3.10,<3.14"
 keywords = ["calute", "Agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -17,34 +17,47 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "pydantic>=2.9.2,<3.0.0",
+    "openai>=1.72.0",
+    "numpy", 
+    "pillow~=11.2.1",
+    "google-generativeai>=0.8.0,<0.9.0",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.14"
-pydantic = "^2.9.2"
-openai = ">=1.72.0"
-google-generativeai = "~0.8.5"
+[project.urls]
+Homepage = "https://github.com/erfanzar/Calute"
+Repository = "https://github.com/erfanzar/Calute"
+Documentation = "https://erfanzar.github.io/Calute"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "ruff>=0.7.0",
+    "black>=24.8.0",
+    "mypy>=1.12.0",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.hatch.build.targets.wheel]
+packages = ["calute"]
 
-[tool.setuptools.package-data]
-"calute" = ["py.typed"]
+[tool.hatch.build.targets.wheel.force-include]
+"calute/py.typed" = "calute/py.typed"
 
 [tool.black]
 line-length = 121
 target-version = ["py310"]
 preview = true
 
-
 [tool.ruff]
 line-length = 121
 target-version = "py310"
-
 
 [tool.ruff.lint]
 select = ["A", "B", "E", "F", "I", "NPY", "RUF", "UP", "W"]
@@ -55,7 +68,6 @@ ignore = ["F722", "B008", "UP015", "A005"]
 
 [tool.mypy]
 python_version = "3.10"
-
 ignore_missing_imports = true
 exclude = ["calute/"]
 
@@ -67,8 +79,8 @@ reportPrivateUsage = "none"
 reportOptionalCall = "none"
 reportUnknownMemberType = "none"
 reportGeneralTypeIssues = "none"
-reportArgumentType = "none"                  # Added to disable argument type warnings
-enableTypeIgnoreComments = true              # Ensures # pyright: ignore comments work
+reportArgumentType = "none"
+enableTypeIgnoreComments = true
 reportMissingTypeArgument = "none"
 reportUnknownParameterType = "none"
 reportAny = "none"
@@ -93,10 +105,13 @@ reportOptionalMemberAccess = "none"
 reportOperatorIssue = "none"
 reportUninitializedInstanceVariable = "none"
 reportIncompatibleVariableOverride = "none"
-[tool.poetry.dev-dependencies]
 
+[tool.uv.build-backend]
+module-name = "calute"
+module-root = "."
 
-pytest = "^8.3.3" # For testing
-ruff = "^0.7.0"   # Ensure Ruff version is recent
-black = "^24.8.0" # Ensure Black version is recent
-mypy = "^1.12.0"  # Ensure MyPy version is recents
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+where = ["."]

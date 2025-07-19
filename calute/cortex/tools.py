@@ -27,9 +27,6 @@ from datetime import datetime
 from functools import wraps
 from typing import Any, Generic, TypeVar, Union, get_args, get_origin
 
-import aiohttp
-import requests
-
 T = TypeVar("T")
 
 
@@ -667,59 +664,3 @@ class ComposedTool(CortexTool):
                     if result.success:
                         return result.value
             raise Exception("No tool condition was met")
-
-
-class WebTool(CortexTool):
-    """Base class for web-based tools with rate limiting and session management"""
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        rate_limit: float = 1.0,  # requests per second
-        user_agent: str = "Mozilla/5.0 (compatible; CortexAI/1.0)",
-        **kwargs,
-    ):
-        super().__init__(name, description, **kwargs)
-        self.rate_limit = rate_limit
-        self.user_agent = user_agent
-        self._last_request_time = 0
-        self._session = None
-        self._async_session = None
-
-    def run(self, **kwargs):
-        """Public interface with validation"""
-        if self._signature:
-            self._validate_parameters(kwargs)
-        return asyncio.run(self._direct_call(**kwargs))
-
-    async def _get_async_session(self):
-        """Get or create async session"""
-        if self._async_session is None:
-            self._async_session = aiohttp.ClientSession(headers={"User-Agent": self.user_agent})
-        return self._async_session
-
-    def _get_session(self):
-        """Get or create sync session"""
-        if self._session is None:
-            self._session = requests.Session()
-            self._session.headers.update({"User-Agent": self.user_agent})
-        return self._session
-
-    async def _rate_limit_check(self):
-        """Enforce rate limiting"""
-        current_time = time.time()
-        time_since_last = current_time - self._last_request_time
-        min_interval = 1.0 / self.rate_limit
-
-        if time_since_last < min_interval:
-            await asyncio.sleep(min_interval - time_since_last)
-
-        self._last_request_time = time.time()
-
-    async def cleanup(self):
-        """Cleanup sessions"""
-        if self._async_session:
-            await self._async_session.close()
-        if self._session:
-            self._session.close()

@@ -99,7 +99,7 @@ class Calute:
 
     SEP: tp.ClassVar = SEP
 
-    def __init__(self, client: tp.Any, template: PromptTemplate | None = None, enable_memory: bool = True):
+    def __init__(self, client: tp.Any, template: PromptTemplate | None = None, enable_memory: bool = False):
         """
         Initialize Calute with an LLM client.
 
@@ -593,6 +593,7 @@ class Calute:
         print_formatted_prompt: bool = False,
         use_instructed_prompt: bool = True,
         conversation_name_holder: str = "Messages",
+        mention_last_turn: bool = True,
     ) -> ResponseResult | AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching"""
 
@@ -610,7 +611,10 @@ class Calute:
         )
 
         if use_instructed_prompt:
-            prompt = prompt.make_instruction_prompt(conversation_name_holder=conversation_name_holder)
+            prompt = prompt.make_instruction_prompt(
+                conversation_name_holder=conversation_name_holder,
+                mention_last_turn=mention_last_turn,
+            )
         else:
             prompt = prompt.to_openai()["messages"]
         if print_formatted_prompt:
