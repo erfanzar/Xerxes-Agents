@@ -9,6 +9,5 @@ Cortex
    cortex_chains
    cortex_cortex
    cortex_delegation
-   cortex_standard_tools
    cortex_tools
    cortex_types
