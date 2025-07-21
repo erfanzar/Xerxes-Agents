@@ -78,11 +78,16 @@ class OpenAIClient(LLMClient):
         frequency_penalty: float,
         repetition_penalty: float,
         stream: bool,
+        extra_body: dict | None = None,
         **kwargs,
     ) -> tp.Any:
         """Generate a completion using OpenAI"""
         if isinstance(prompt, str):
             prompt = [{"role": "user", "content": prompt}]
+        if extra_body is None:
+            extra_body = {}
+        extra_body = {"repetition_penalty": repetition_penalty, "top_k": top_k, "min_p": min_p, **extra_body}
+
         return self.client.chat.completions.create(
             messages=prompt,
             model=model,
@@ -93,7 +98,7 @@ class OpenAIClient(LLMClient):
             stream=stream,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
-            extra_body={"repetition_penalty": repetition_penalty, "top_k": top_k, "min_p": min_p},
+            extra_body=extra_body,
         )
 
     def extract_content(self, response: tp.Any) -> str:

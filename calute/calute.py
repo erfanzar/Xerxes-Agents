@@ -635,6 +635,7 @@ class Calute:
             presence_penalty=agent.presence_penalty,
             frequency_penalty=agent.frequency_penalty,
             repetition_penalty=agent.repetition_penalty,
+            extra_body=agent.extra_body,
             stream=stream,
         )
 

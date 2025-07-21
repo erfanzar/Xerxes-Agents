@@ -48,6 +48,7 @@ class Agent(BaseModel):
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
+    extra_body: dict | None = None
 
     stop: str | list[str] | None = None
 
