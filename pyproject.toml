@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.0.15"
+version = "0.0.16"
 description = "Agents for intelligence and coordination"
 authors = [
     {name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com"}

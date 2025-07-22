@@ -427,7 +427,7 @@ class Calute:
 
         return cleaned.strip()
 
-    def _extract_function_calls_from_xml(self, content: str) -> list[RequestFunctionCall]:
+    def _extract_function_calls_from_xml(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
         """Extract function calls from response content using XML tags"""
         function_calls = []
         pattern = r"<(\w+)>\s*<arguments>(.*?)</arguments>\s*</\w+>"
@@ -442,8 +442,8 @@ class Calute:
                     name=name,
                     arguments=arguments,
                     id=f"call_{i}_{hash(match)}",
-                    timeout=self.orchestrator.get_current_agent().function_timeout,
-                    max_retries=self.orchestrator.get_current_agent().max_function_retries,
+                    timeout=agent.function_timeout,
+                    max_retries=agent.max_function_retries,
                 )
                 function_calls.append(function_call)
             except json.JSONDecodeError:
@@ -451,9 +451,9 @@ class Calute:
 
         return function_calls
 
-    def _extract_function_calls(self, content: str) -> list[RequestFunctionCall]:
+    def _extract_function_calls(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
         """Extract function calls from response content"""
-        function_calls = self._extract_function_calls_from_xml(content)
+        function_calls = self._extract_function_calls_from_xml(content, agent)
         if function_calls:
             return function_calls
 
@@ -467,8 +467,8 @@ class Calute:
                     name=call_data.get("name"),
                     arguments=call_data.get("content", {}),
                     id=f"call_{i}_{hash(match)}",
-                    timeout=self.orchestrator.get_current_agent().function_timeout,
-                    max_retries=self.orchestrator.get_current_agent().max_function_retries,
+                    timeout=agent.function_timeout,
+                    max_retries=agent.max_function_retries,
                 )
                 function_calls.append(function_call)
             except json.JSONDecodeError:
@@ -806,7 +806,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=self.orchestrator.current_agent_id,
+                    agent_id=agent.id,
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
@@ -824,7 +824,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=self.orchestrator.current_agent_id,
+                    agent_id=agent.id,
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
@@ -834,15 +834,15 @@ class Calute:
         if function_calls_detected:
             yield FunctionDetection(
                 message="Processing function calls...",
-                agent_id=self.orchestrator.current_agent_id,
+                agent_id=agent.id,
             )
 
-            function_calls = self._extract_function_calls(buffered_content)
+            function_calls = self._extract_function_calls(buffered_content, agent)
 
             if function_calls:
                 yield FunctionCallsExtracted(
                     function_calls=[FunctionCallInfo(name=fc.name, id=fc.id) for fc in function_calls],
-                    agent_id=self.orchestrator.current_agent_id,
+                    agent_id=agent.id,
                 )
 
                 results = []
@@ -851,10 +851,10 @@ class Calute:
                         function_name=call.name,
                         function_id=call.id,
                         progress=f"{i + 1}/{len(function_calls)}",
-                        agent_id=self.orchestrator.current_agent_id,
+                        agent_id=agent.id,
                     )
 
-                    result = await self.executor._execute_single_call(call, context)
+                    result = await self.executor._execute_single_call(call, context, agent)
                     results.append(result)
 
                     yield FunctionExecutionComplete(
@@ -863,7 +863,7 @@ class Calute:
                         status=result.status.value,
                         result=result.result if result.status == ExecutionStatus.SUCCESS else None,
                         error=result.error,
-                        agent_id=self.orchestrator.current_agent_id,
+                        agent_id=agent.id,
                     )
 
                 switch_context = SwitchContext(
@@ -874,7 +874,7 @@ class Calute:
 
                 target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
                 if target_agent:
-                    old_agent = self.orchestrator.current_agent_id
+                    old_agent = agent.id
                     self.orchestrator.switch_agent(target_agent, "Post-execution switch")
 
                     yield AgentSwitch(
@@ -892,7 +892,7 @@ class Calute:
                     )
                     yield ReinvokeSignal(
                         message="Reinvoking agent with function results...",
-                        agent_id=self.orchestrator.current_agent_id,
+                        agent_id=agent.id,
                     )
 
                     reinvoke_response = await self.create_response(
@@ -918,7 +918,7 @@ class Calute:
         yield Completion(
             final_content=buffered_content,
             function_calls_executed=len(function_calls),
-            agent_id=self.orchestrator.current_agent_id,
+            agent_id=agent.id,
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
@@ -934,10 +934,15 @@ class Calute:
         """Handle non-streaming response with function calls and optional reinvocation"""
 
         content = self.llm_client.extract_content(response)
-        function_calls = self._extract_function_calls(content)
+        function_calls = self._extract_function_calls(content, agent)
 
         if function_calls:
-            results = await self.executor.execute_function_calls(function_calls, agent.function_call_strategy, context)
+            results = await self.executor.execute_function_calls(
+                function_calls,
+                agent.function_call_strategy,
+                context,
+                agent,
+            )
 
             switch_context = SwitchContext(
                 function_results=results,
@@ -977,12 +982,17 @@ class Calute:
             content=content,
             response=response,
             function_calls=function_calls if function_calls else [],
-            agent_id=self.orchestrator.current_agent_id,
+            agent_id=agent.id,
             execution_history=self.orchestrator.execution_history[-5:],
             reinvoked=False,
         )
 
-    async def _handle_streaming(self, response: tp.Any, reinvoked_runtime) -> AsyncIterator[StreamingResponseType]:
+    async def _handle_streaming(
+        self,
+        response: tp.Any,
+        reinvoked_runtime,
+        agent: Agent,
+    ) -> AsyncIterator[StreamingResponseType]:
         """Handle streaming response with function calls and optional reinvocation"""
         buffered_content = ""
 
@@ -997,7 +1007,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=self.orchestrator.current_agent_id,
+                    agent_id=agent.id,
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=False,
@@ -1012,7 +1022,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=self.orchestrator.current_agent_id,
+                    agent_id=agent.id,
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=False,
@@ -1021,11 +1031,16 @@ class Calute:
         yield Completion(
             final_content=buffered_content,
             function_calls_executed=0,
-            agent_id=self.orchestrator.current_agent_id,
+            agent_id=agent.id,
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
-    async def _handle_response(self, response: tp.Any, reinvoked_runtime) -> ResponseResult:
+    async def _handle_response(
+        self,
+        response: tp.Any,
+        reinvoked_runtime,
+        agent: Agent,
+    ) -> ResponseResult:
         """Handle non-streaming response"""
 
         content = self.llm_client.extract_content(response)
@@ -1034,7 +1049,7 @@ class Calute:
             content=content,
             response=response,
             function_calls=[],
-            agent_id=self.orchestrator.current_agent_id,
+            agent_id=agent.id,
             execution_history=self.orchestrator.execution_history[-5:],
             reinvoked=reinvoked_runtime,
         )

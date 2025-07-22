@@ -186,19 +186,20 @@ class FunctionExecutor:
         calls: list[RequestFunctionCall],
         strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL,
         context_variables: dict | None = None,
+        agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute function calls using the specified strategy"""
         context_variables = context_variables or {}
         context_variables.update(self.execution_history.as_context_dict())
 
         if strategy == FunctionCallStrategy.SEQUENTIAL:
-            results = await self._execute_sequential(calls, context_variables)
+            results = await self._execute_sequential(calls, context_variables, agent)
         elif strategy == FunctionCallStrategy.PARALLEL:
-            results = await self._execute_parallel(calls, context_variables)
+            results = await self._execute_parallel(calls, context_variables, agent)
         elif strategy == FunctionCallStrategy.PIPELINE:
-            results = await self._execute_pipeline(calls, context_variables)
+            results = await self._execute_pipeline(calls, context_variables, agent)
         elif strategy == FunctionCallStrategy.CONDITIONAL:
-            results = await self._execute_conditional(calls, context_variables)
+            results = await self._execute_conditional(calls, context_variables, agent)
         else:
             raise ValueError(f"Unknown execution strategy: {strategy}")
 
@@ -211,12 +212,13 @@ class FunctionExecutor:
         self,
         calls: list[RequestFunctionCall],
         context: dict,
+        agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute calls one after another"""
         results = []
         for call in calls:
             try:
-                result = await self._execute_single_call(call, context)
+                result = await self._execute_single_call(call, context, agent)
                 results.append(result)
                 if hasattr(result.result, "context_variables"):
                     context.update(result.result.context_variables)
@@ -230,9 +232,10 @@ class FunctionExecutor:
         self,
         calls: list[RequestFunctionCall],
         context: dict,
+        agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute calls in parallel"""
-        tasks = [self._execute_single_call(call, context.copy()) for call in calls]
+        tasks = [self._execute_single_call(call, context.copy(), agent) for call in calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final_results = []
         for call, result in zip(calls, results, strict=False):
@@ -248,13 +251,14 @@ class FunctionExecutor:
         self,
         calls: list[RequestFunctionCall],
         context: dict,
+        agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute calls in a pipeline where output of one feeds into next"""
         results = []
         current_context = context.copy()
 
         for call in calls:
-            result = await self._execute_single_call(call, current_context)
+            result = await self._execute_single_call(call, current_context, agent)
             results.append(result)
 
             if result.status == ExecutionStatus.SUCCESS and result.result:
@@ -269,6 +273,7 @@ class FunctionExecutor:
         self,
         calls: list[RequestFunctionCall],
         context: dict,
+        agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute calls based on conditions and dependencies"""
         sorted_calls = self._topological_sort(calls)
@@ -276,7 +281,7 @@ class FunctionExecutor:
 
         for call in sorted_calls:
             if self._dependencies_satisfied(call, results):
-                result = await self._execute_single_call(call, context)
+                result = await self._execute_single_call(call, context, agent)
                 results.append(result)
                 self.completed_calls[call.id] = result
 
@@ -286,35 +291,37 @@ class FunctionExecutor:
         self,
         call: RequestFunctionCall,
         context: dict,
+        agent: Agent | None = None,
     ) -> RequestFunctionCall:
         """Execute a single function call with error handling and retries"""
         call.status = ExecutionStatus.PENDING
 
         for attempt in range(call.max_retries + 1):
             try:
-                func, agent_id = self.orchestrator.function_registry.get_function(call.name)
+                if agent is not None:
+                    func, agent_id = {fn.__name__: fn for fn in agent.functions}.get(call.name, None), agent.id
+
+                else:
+                    func, agent_id = self.orchestrator.function_registry.get_function(call.name)
+
+                    if agent_id != self.orchestrator.current_agent_id:
+                        self.orchestrator.switch_agent(agent_id, f"Function {call.name} requires agent {agent_id}")
 
                 if not func:
                     raise ValueError(f"Function {call.name} not found")
-
-                if agent_id != self.orchestrator.current_agent_id:
-                    self.orchestrator.switch_agent(agent_id, f"Function {call.name} requires agent {agent_id}")
                 args = call.arguments.copy()
                 if __CTX_VARS_NAME__ in func.__code__.co_varnames:
                     args[__CTX_VARS_NAME__] = context
-                if self.execution_history.executions:
-                    args[__CTX_VARS_NAME__]["function_results"] = self.execution_history.get_successful_results()
+                    if self.execution_history.executions:
+                        args[__CTX_VARS_NAME__]["function_results"] = self.execution_history.get_successful_results()
 
-                    if len(self.execution_history.executions) > 0:
-                        previous_call = self.execution_history.executions[-1]
-                        if previous_call.status == ExecutionStatus.SUCCESS:
-                            args[__CTX_VARS_NAME__]["prior_result"] = previous_call.result
+                        if len(self.execution_history.executions) > 0:
+                            previous_call = self.execution_history.executions[-1]
+                            if previous_call.status == ExecutionStatus.SUCCESS:
+                                args[__CTX_VARS_NAME__]["prior_result"] = previous_call.result
 
                 if call.timeout:
-                    result = await asyncio.wait_for(
-                        self._run_function(func, args),
-                        timeout=call.timeout,
-                    )
+                    result = await asyncio.wait_for(self._run_function(func, args), timeout=call.timeout)
                 else:
                     result = await self._run_function(func, args)
 
