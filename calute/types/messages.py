@@ -423,8 +423,6 @@ class MessagesHistory(CaluteBase):
         for debugging and visualization, following the '# Instruction' and '# Messages' structure.
         """
         prompt_parts = []
-
-        # 1. Separate System message from the rest
         system_message: SystemMessage | None = None
         other_messages: list[ChatMessage] = []
 
@@ -470,14 +468,12 @@ class MessagesHistory(CaluteBase):
                         parts.append("\n".join(tool_call_strs))
                     content_str = "\n".join(parts)
                 elif isinstance(msg, ToolMessage):
-                    content_str = f"  Tool Result (ID: {msg.tool_call_id})\n  ---\n{msg.content}"
+                    content_str = f"  Tool Result (ID: {msg.tool_call_id}): {msg.content}"
                 indented_content = textwrap.indent(content_str.strip(), "  ")
                 formatted_messages.append(f"{role_marker}\n{indented_content}")
             prompt_parts.append("\n\n".join(formatted_messages))
-
         if mention_last_turn and len(other_messages) != 0:
             selected = other_messages[-1]
-
             prompt_parts.append(f"Last Message from {selected.role.capitalize()}: {selected.content}")
         return "\n\n".join(prompt_parts)
 

@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 
+from calute.types.function_execution_types import ReinvokeSignal
 from calute.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
 
 from .client import GeminiClient, OpenAIClient
@@ -30,6 +31,7 @@ from .types import (
     AgentFunction,
     AgentSwitch,
     AgentSwitchTrigger,
+    AssistantMessage,
     Completion,
     ExecutionStatus,
     FunctionCallInfo,
@@ -42,7 +44,10 @@ from .types import (
     StreamChunk,
     StreamingResponseType,
     SwitchContext,
+    ToolCall,
+    ToolMessage,
 )
+from .types.tool_calls import FunctionCall
 from .utils import debug_print, function_to_json
 
 SEP = "  "  # two spaces
@@ -72,9 +77,9 @@ class PromptTemplate:
 
     def __post_init__(self):
         self.sections = self.sections or {
-            PromptSection.SYSTEM: "SYSTEM:\n",
-            PromptSection.RULES: "RULES:\n",
-            PromptSection.FUNCTIONS: f"FUNCTIONS:\n{SEP}The available functions are listed with their schemas:",
+            PromptSection.SYSTEM: "SYSTEM:",
+            PromptSection.RULES: "RULES:",
+            PromptSection.FUNCTIONS: "FUNCTIONS:",
             PromptSection.TOOLS: f"TOOLS:\n{SEP}When using tools, follow this format:",
             PromptSection.EXAMPLES: f"EXAMPLES:\n{SEP}",
             PromptSection.CONTEXT: "CONTEXT:\n",
@@ -233,28 +238,6 @@ class Calute:
         pattern = rf"```{field}\s*\n(.*?)\n```"
         return re.findall(pattern, content, re.DOTALL)
 
-    def _extract_function_calls(self, content: str) -> list[RequestFunctionCall]:
-        """Extract function calls from response content"""
-        function_calls = []
-
-        matches = self._extract_from_markdown(content=content, field="tool_call")
-
-        for i, match in enumerate(matches):
-            try:
-                call_data = json.loads(match)
-                function_call = RequestFunctionCall(
-                    name=call_data.get("name"),
-                    arguments=call_data.get("content", {}),
-                    id=f"call_{i}_{hash(match)}",
-                    timeout=self.orchestrator.get_current_agent().function_timeout,
-                    max_retries=self.orchestrator.get_current_agent().max_function_retries,
-                )
-                function_calls.append(function_call)
-            except json.JSONDecodeError:
-                continue
-
-        return function_calls
-
     def manage_messages(
         self,
         agent: Agent | None,
@@ -304,14 +287,22 @@ class Calute:
 
         if agent.functions:
             functions_header = self.template.sections.get(PromptSection.FUNCTIONS, "FUNCTIONS:")
-            fn_docs = self.generate_function_section(agent.functions)
-            tool_format_instruction = (
-                "When calling a function, you must use the following XML format. "
-                "The tag name is the function name, and parameters are a JSON object within `<arguments>` tags.\n"
-                "Example:\n"
-                '<my_function_name>\n  <arguments>\n    {"param1": "value1"}\n  </arguments>\n</my_function_name>'
-            )
-            full_function_content = f"{tool_format_instruction}\n\n{fn_docs}"
+
+            tool_format_instruction = textwrap.dedent(
+                """
+                When calling a function, you must use the following XML format.
+                The tag name is the function name and parameters are a JSON object within <arguments> tags.
+
+                Example:
+                    <my_function_name><arguments>{"param1": "value1"}</arguments></my_function_name>
+
+                The available functions are listed with their schemas:
+                """
+            ).strip()
+
+            fn_docs_raw = self.generate_function_section(agent.functions)
+            indented_fn_docs = textwrap.indent(fn_docs_raw, SEP)
+            full_function_content = f"{tool_format_instruction}\n\n{indented_fn_docs}"
             system_parts.append(self._format_section(functions_header, full_function_content, item_prefix=None))
 
         if agent.examples:
@@ -355,6 +346,46 @@ class Calute:
 
         return MessagesHistory(messages=instructed_messages)
 
+    def _build_reinvoke_messages(
+        self,
+        original_messages: MessagesHistory,
+        assistant_content: str,
+        function_calls: list[RequestFunctionCall],
+        results: list[RequestFunctionCall],
+    ) -> MessagesHistory:
+        """Build message history for reinvocation including function results"""
+
+        messages = original_messages.messages.copy()
+
+        tool_calls = []
+        for fc in function_calls:
+            tool_call = ToolCall(
+                id=fc.id,
+                function=FunctionCall(
+                    name=fc.name,
+                    arguments=json.dumps(fc.arguments) if isinstance(fc.arguments, dict) else fc.arguments,
+                ),
+            )
+            tool_calls.append(tool_call)
+
+        clean_content = self._remove_function_calls_from_content(assistant_content)
+        assistant_msg = AssistantMessage(
+            content=clean_content if clean_content.strip() else None,
+            tool_calls=tool_calls if tool_calls else None,
+        )
+        messages.append(assistant_msg)
+
+        for fc, result in zip(function_calls, results, strict=False):
+            if result.status == ExecutionStatus.SUCCESS:
+                tool_content = json.dumps(result.result) if not isinstance(result.result, str) else result.result
+            else:
+                tool_content = f"Error: {result.error}"
+
+            tool_msg = ToolMessage(content=tool_content, tool_call_id=fc.id)
+            messages.append(tool_msg)
+
+        return MessagesHistory(messages=messages)
+
     @staticmethod
     def extract_md_block(input_string: str) -> list[tuple[str, str]]:
         """
@@ -387,6 +418,15 @@ class Calute:
         matches = re.findall(pattern, input_string, re.DOTALL)
         return [(lang, content.strip()) for lang, content in matches]
 
+    def _remove_function_calls_from_content(self, content: str) -> str:
+        """Remove function call XML blocks from content"""
+        pattern = r"<(\w+)>\s*<arguments>.*?</arguments>\s*</\w+>"
+        cleaned = re.sub(pattern, "", content, flags=re.DOTALL)
+        pattern = r"```tool_call.*?```"
+        cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
+
+        return cleaned.strip()
+
     def _extract_function_calls_from_xml(self, content: str) -> list[RequestFunctionCall]:
         """Extract function calls from response content using XML tags"""
         function_calls = []
@@ -407,7 +447,6 @@ class Calute:
                 )
                 function_calls.append(function_call)
             except json.JSONDecodeError:
-                # Handle cases where arguments are not valid JSON
                 continue
 
         return function_calls
@@ -451,6 +490,31 @@ class Calute:
             except Exception:
                 return choosen
         return None
+
+    def _detect_function_calls(self, content: str, agent: Agent) -> bool:
+        """Detect if content contains valid function calls"""
+        if not agent.functions:
+            return False
+        function_names = [func.__name__ for func in agent.functions]
+        for func_name in function_names:
+            if f"<{func_name}>" in content or f"<{func_name} " in content:
+                if "<arguments>" in content:
+                    return True
+        if "```tool_call" in content:
+            return True
+
+        return False
+
+    def _detect_function_calls_regex(self, content: str, agent: Agent) -> bool:
+        """Detect function calls using regex for more precision"""
+        if not agent.functions:
+            return False
+        function_names = [func.__name__ for func in agent.functions]
+        for func_name in function_names:
+            pattern = rf"<{func_name}(?:\s[^>]*)?>.*?<arguments>"
+            if re.search(pattern, content, re.DOTALL):
+                return True
+        return False
 
     @staticmethod
     def get_thoughts(response: str, tag: str = "think") -> str | None:
@@ -498,8 +562,6 @@ class Calute:
             return ""
 
         function_docs = []
-
-        # Group functions by category if they have a category attribute
         categorized_functions = {}
         uncategorized = []
 
@@ -522,8 +584,6 @@ class Calute:
                 except Exception as e:
                     func_name = getattr(func, "__name__", str(func))
                     function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
-
-        # Generate docs for uncategorized functions
         if uncategorized:
             if categorized_functions:
                 function_docs.append("## Other Functions\n")
@@ -539,24 +599,73 @@ class Calute:
         return "\n\n".join(function_docs)
 
     def _format_function_doc(self, schema: dict) -> str:
-        """Format a single function documentation"""
-        doc = [f"Function: {schema['name']}", f"Purpose: {schema['description']}"]
+        """
+        Format a single function's documentation block.
 
-        # Add examples if available
-        if "examples" in schema:
-            doc.append("Examples:")
-            for example in schema["examples"]:
-                doc.append(f"  ```json\n  {json.dumps(example, indent=2)}\n  ```")
+        Layout produced, e.g.:
 
-        params = self.format_function_parameters(schema["parameters"])
-        if params:
-            doc.append("Parameters:")
-            doc.append(params)
+            Function: get_temperature
+            Purpose: get city name and return temperature in C
 
-        if "returns" in schema:
-            doc.append(f"Returns: {schema['returns']}")
+            Parameters:
+                - city (string, required)
+                Description : Name of the city to look up.
 
-        return "\n".join(doc)
+            Returns : float   # temperature in Celsius
+
+            Call-pattern:
+                <get_temperature>
+                <arguments>
+                    {"city": "Isfahan"}
+                </arguments>
+                </get_temperature>
+        """
+        ind1 = SEP
+        ind2 = SEP * 2
+        ind3 = SEP * 3
+
+        doc_lines: list[str] = []
+        doc_lines.append(f"Function: {schema['name']}")
+        if desc := schema.get("description", "").strip():
+            doc_lines.append(f"{ind1}Purpose: {desc}")
+        params_block = []
+        params = schema.get("parameters", {})
+        properties: dict = params.get("properties", {})
+        required = set(params.get("required", []))
+
+        for pname, pinfo in properties.items():
+            if pname == "context_variables":
+                continue
+
+            ptype = pinfo.get("type", "any")
+            req = "required" if pname in required else "optional"
+
+            params_block.append(f"{ind2}- {pname} ({ptype}, {req})")
+
+            if pdesc := pinfo.get("description", "").strip():
+                params_block.append(f"{ind3}Description : {pdesc}")
+
+            if enum_vals := pinfo.get("enum"):
+                joined = ", ".join(map(str, enum_vals))
+                params_block.append(f"{ind3}Allowed values : {joined}")
+
+        if params_block:
+            doc_lines.append(f"\n{ind1}Parameters:")
+            doc_lines.extend(params_block)
+        if ret := schema.get("returns"):
+            doc_lines.append(f"\n{ind1}Returns : {ret}")
+        call_example = textwrap.dedent(
+            f'<{schema["name"]}><arguments>{{"param": "value"}}</arguments></{schema["name"]}>'.rstrip()
+        )
+        doc_lines.append(f"\n{ind1}Call-pattern:")
+        doc_lines.append(textwrap.indent(call_example, ind2))
+        if schema_examples := schema.get("examples"):
+            doc_lines.append(f"\n{ind1}Examples:")
+            for example in schema_examples:
+                json_example = json.dumps(example, indent=2)
+                doc_lines.append(textwrap.indent(f"```json\n{json_example}\n```", ind2))
+
+        return "\n".join(doc_lines)
 
     def format_context_variables(self, variables: dict[str, tp.Any]) -> str:
         """Formats context variables with type information and improved readability"""
@@ -587,23 +696,27 @@ class Calute:
         prompt: str | None = None,
         context_variables: dict | None = None,
         messages: MessagesHistory | None = None,
-        agent_id: str | None = None,
+        agent_id: str | None | Agent = None,
         stream: bool = True,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
         use_instructed_prompt: bool = True,
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
+        reinvoke_after_function: bool = True,
+        reinvoked_runtime: bool = False,
     ) -> ResponseResult | AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching"""
+        if isinstance(agent_id, Agent):
+            agent = agent_id
+        else:
+            if agent_id:
+                self.orchestrator.switch_agent(agent_id, "User specified agent")
+            agent = self.orchestrator.get_current_agent()
 
-        if agent_id:
-            self.orchestrator.switch_agent(agent_id, "User specified agent")
-
-        agent = self.orchestrator.get_current_agent()
         context_variables = context_variables or {}
-
-        prompt: MessagesHistory = self.manage_messages(
+        original_messages = messages.model_copy() if messages else MessagesHistory(messages=[])
+        prompt_messages: MessagesHistory = self.manage_messages(
             agent=agent,
             prompt=prompt,
             context_variables=context_variables,
@@ -611,20 +724,22 @@ class Calute:
         )
 
         if use_instructed_prompt:
-            prompt = prompt.make_instruction_prompt(
+            prompt_str = prompt_messages.make_instruction_prompt(
                 conversation_name_holder=conversation_name_holder,
                 mention_last_turn=mention_last_turn,
             )
         else:
-            prompt = prompt.to_openai()["messages"]
+            prompt_str = prompt_messages.to_openai()["messages"]
+
         if print_formatted_prompt:
-            if not use_instructed_prompt:
-                for msg in prompt.messages:
-                    debug_print(f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
+            if use_instructed_prompt:
+                print(prompt_str)
             else:
-                print(prompt)
+                for msg in prompt_messages.messages:
+                    debug_print(f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
+
         response = await self.llm_client.generate_completion(
-            prompt=prompt,
+            prompt=prompt_str,
             model=agent.model,
             temperature=agent.temperature,
             max_tokens=agent.max_tokens,
@@ -640,69 +755,45 @@ class Calute:
         )
 
         if not apply_functions:
-            return response
+            if stream:
+                return self._handle_streaming(response, reinvoked_runtime)
+            else:
+                return await self._handle_response(response, reinvoked_runtime)
 
         if stream:
             return self._handle_streaming_with_functions(
                 response,
                 agent,
                 context_variables,
+                original_messages,
+                reinvoke_after_function,
+                reinvoked_runtime,
             )
         else:
             return await self._handle_response_with_functions(
                 response,
                 agent,
                 context_variables,
+                original_messages,
+                reinvoke_after_function,
+                reinvoked_runtime,
             )
-
-    async def _handle_response_with_functions(
-        self,
-        response: tp.Any,
-        agent: "Agent",
-        context: dict,
-    ) -> ResponseResult:
-        """Handle non-streaming response with function calls"""
-
-        content = self.llm_client.extract_content(response)
-        function_calls = self._extract_function_calls(content)
-
-        if function_calls:
-            results = await self.executor.execute_function_calls(
-                function_calls,
-                agent.function_call_strategy,
-                context,
-            )
-
-            switch_context = SwitchContext(
-                function_results=results,
-                execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
-            )
-
-            target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
-            if target_agent:
-                self.orchestrator.switch_agent(target_agent, "Post-execution switch")
-
-        return ResponseResult(
-            content=content,
-            response=response,
-            function_calls=function_calls if function_calls else [],
-            agent_id=self.orchestrator.current_agent_id,
-            execution_history=self.orchestrator.execution_history[-5:],
-        )
 
     async def _handle_streaming_with_functions(
         self,
         response: tp.Any,
-        agent: "Agent",  # pyright:ignore
+        agent: Agent,
         context: dict,
+        original_messages: MessagesHistory,
+        reinvoke_after_function: bool,
+        reinvoked_runtime: bool,
     ) -> AsyncIterator[StreamingResponseType]:
-        """Handle streaming response with function calls"""
+        """Handle streaming response with function calls and optional reinvocation"""
         buffered_content = ""
         function_calls_detected = False
         function_calls = []
-
         if isinstance(self.llm_client, OpenAIClient):
-            for chunk in response:  # shouldn't be async
+            for chunk in response:
                 content = None
                 if hasattr(chunk, "choices") and chunk.choices:
                     delta = chunk.choices[0].delta
@@ -710,30 +801,34 @@ class Calute:
                         buffered_content += delta.content
                         content = delta.content
 
-                        if "<" in buffered_content and not function_calls_detected:
-                            function_calls_detected = True
+                        if not function_calls_detected:
+                            function_calls_detected = self._detect_function_calls(buffered_content, agent)
 
                 yield StreamChunk(
                     chunk=chunk,
                     agent_id=self.orchestrator.current_agent_id,
                     content=content,
                     buffered_content=buffered_content,
+                    function_calls_detected=function_calls_detected,
+                    reinvoked=reinvoked_runtime,
                 )
         elif isinstance(self.llm_client, GeminiClient):
-            for chunk in response:  # shouldn't be async
+            async for chunk in response:
                 content = None
                 if hasattr(chunk, "text") and chunk.text:
                     buffered_content += chunk.text
                     content = chunk.text
 
-                    if "<" in buffered_content and not function_calls_detected:
-                        function_calls_detected = True
+                    if not function_calls_detected:
+                        function_calls_detected = self._detect_function_calls(buffered_content, agent)
 
                 yield StreamChunk(
                     chunk=chunk,
                     agent_id=self.orchestrator.current_agent_id,
                     content=content,
                     buffered_content=buffered_content,
+                    function_calls_detected=function_calls_detected,
+                    reinvoked=reinvoked_runtime,
                 )
 
         if function_calls_detected:
@@ -788,11 +883,160 @@ class Calute:
                         reason="Post-execution switch",
                     )
 
+                if reinvoke_after_function and function_calls:
+                    updated_messages = self._build_reinvoke_messages(
+                        original_messages,
+                        buffered_content,
+                        function_calls,
+                        results,
+                    )
+                    yield ReinvokeSignal(
+                        message="Reinvoking agent with function results...",
+                        agent_id=self.orchestrator.current_agent_id,
+                    )
+
+                    reinvoke_response = await self.create_response(
+                        prompt=None,
+                        context_variables=context,
+                        messages=updated_messages,
+                        agent_id=agent,
+                        stream=True,
+                        apply_functions=False,
+                        print_formatted_prompt=False,
+                        use_instructed_prompt=True,
+                        reinvoke_after_function=False,
+                        reinvoked_runtime=True,
+                    )
+                    try:
+                        for chunk in reinvoke_response:
+                            yield chunk
+                    except TypeError:
+                        async for chunk in reinvoke_response:
+                            yield chunk
+                    return
+
         yield Completion(
             final_content=buffered_content,
             function_calls_executed=len(function_calls),
             agent_id=self.orchestrator.current_agent_id,
             execution_history=self.orchestrator.execution_history[-3:],
+        )
+
+    async def _handle_response_with_functions(
+        self,
+        response: tp.Any,
+        agent: Agent,
+        context: dict,
+        original_messages: MessagesHistory,
+        reinvoke_after_function: bool,
+        reinvoked_runtime: bool,
+    ) -> ResponseResult:
+        """Handle non-streaming response with function calls and optional reinvocation"""
+
+        content = self.llm_client.extract_content(response)
+        function_calls = self._extract_function_calls(content)
+
+        if function_calls:
+            results = await self.executor.execute_function_calls(function_calls, agent.function_call_strategy, context)
+
+            switch_context = SwitchContext(
+                function_results=results,
+                execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
+            )
+
+            target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
+            if target_agent:
+                self.orchestrator.switch_agent(target_agent, "Post-execution switch")
+
+            if reinvoke_after_function:
+                updated_messages = self._build_reinvoke_messages(original_messages, content, function_calls, results)
+                reinvoke_response = await self.create_response(
+                    prompt=None,
+                    context_variables=context,
+                    messages=updated_messages,
+                    agent_id=agent,
+                    stream=False,
+                    apply_functions=False,
+                    print_formatted_prompt=False,
+                    use_instructed_prompt=True,
+                    reinvoke_after_function=False,
+                    reinvoked_runtime=True,
+                )
+
+                if isinstance(reinvoke_response, ResponseResult):
+                    return ResponseResult(
+                        content=reinvoke_response.content,
+                        response=reinvoke_response.response,
+                        function_calls=function_calls,
+                        agent_id=reinvoke_response.agent_id,
+                        execution_history=self.orchestrator.execution_history[-5:],
+                        reinvoked=True,
+                    )
+
+        return ResponseResult(
+            content=content,
+            response=response,
+            function_calls=function_calls if function_calls else [],
+            agent_id=self.orchestrator.current_agent_id,
+            execution_history=self.orchestrator.execution_history[-5:],
+            reinvoked=False,
+        )
+
+    async def _handle_streaming(self, response: tp.Any, reinvoked_runtime) -> AsyncIterator[StreamingResponseType]:
+        """Handle streaming response with function calls and optional reinvocation"""
+        buffered_content = ""
+
+        if isinstance(self.llm_client, OpenAIClient):
+            for chunk in response:
+                content = None
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if hasattr(delta, "content") and delta.content:
+                        buffered_content += delta.content
+                        content = delta.content
+
+                yield StreamChunk(
+                    chunk=chunk,
+                    agent_id=self.orchestrator.current_agent_id,
+                    content=content,
+                    buffered_content=buffered_content,
+                    function_calls_detected=False,
+                    reinvoked=reinvoked_runtime,
+                )
+        elif isinstance(self.llm_client, GeminiClient):
+            async for chunk in response:
+                content = None
+                if hasattr(chunk, "text") and chunk.text:
+                    buffered_content += chunk.text
+                    content = chunk.text
+
+                yield StreamChunk(
+                    chunk=chunk,
+                    agent_id=self.orchestrator.current_agent_id,
+                    content=content,
+                    buffered_content=buffered_content,
+                    function_calls_detected=False,
+                    reinvoked=reinvoked_runtime,
+                )
+        yield Completion(
+            final_content=buffered_content,
+            function_calls_executed=0,
+            agent_id=self.orchestrator.current_agent_id,
+            execution_history=self.orchestrator.execution_history[-3:],
+        )
+
+    async def _handle_response(self, response: tp.Any, reinvoked_runtime) -> ResponseResult:
+        """Handle non-streaming response"""
+
+        content = self.llm_client.extract_content(response)
+
+        return ResponseResult(
+            content=content,
+            response=response,
+            function_calls=[],
+            agent_id=self.orchestrator.current_agent_id,
+            execution_history=self.orchestrator.execution_history[-5:],
+            reinvoked=reinvoked_runtime,
         )
 
     async def _process_streaming_chunks(self, response: tp.Any, callback: tp.Any):

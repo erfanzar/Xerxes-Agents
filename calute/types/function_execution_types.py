@@ -105,6 +105,8 @@ class StreamChunk:
     agent_id: str = ""
     content: str | None = None
     buffered_content: str | None = None
+    function_calls_detected: bool | None = None
+    reinvoked: bool = False
 
     def __post_init__(self):
         if self.chunk is not None:
@@ -204,6 +206,16 @@ class ResponseResult:
     function_calls: list[RequestFunctionCall] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)
+    reinvoked: bool = False
+
+
+@dataclass
+class ReinvokeSignal:
+    """Signal that the agent is being reinvoked with function results"""
+
+    message: str
+    agent_id: str
+    type: str = "reinvoke_signal"
 
 
 StreamingResponseType: tp.TypeAlias = (
@@ -214,4 +226,5 @@ StreamingResponseType: tp.TypeAlias = (
     | FunctionExecutionComplete
     | AgentSwitch
     | Completion
+    | ReinvokeSignal
 )
