@@ -420,61 +420,69 @@ class MessagesHistory(CaluteBase):
     ) -> str:
         """
         Formats the entire message history into a single, human-readable string
-        for debugging and visualization, following the '# Instruction' and '# Messages' structure.
+        while ensuring any tool calls are rendered in the canonical XML format
+        so the LLM continues to use it.
         """
-        prompt_parts = []
-        system_message: SystemMessage | None = None
-        other_messages: list[ChatMessage] = []
-
-        for msg in self.messages:
-            if isinstance(msg, SystemMessage):
-                system_message = msg
-            else:
-                other_messages.append(msg)
+        ind1 = "  "
+        prompt_parts: list[str] = []
+        system_msg: SystemMessage | None = next((m for m in self.messages if isinstance(m, SystemMessage)), None)
         prompt_parts.append("# Instruction")
-        if system_message and system_message.content:
-            indented_content = textwrap.indent(system_message.content.strip(), "  ")
-            prompt_parts.append(indented_content)
+        if system_msg and system_msg.content:
+            prompt_parts.append(textwrap.indent(system_msg.content.strip(), ind1))
         else:
-            prompt_parts.append("  (No system prompt provided)")
-        if other_messages:
+            prompt_parts.append(f"{ind1}(No system prompt provided)")
+
+        other_msgs = [m for m in self.messages if not isinstance(m, SystemMessage)]
+
+        def _capitalize_role(role):
+            if hasattr(role, "value"):
+                return role.value.capitalize()
+            return role.capitalize()
+
+        if other_msgs:
             prompt_parts.append(f"\n# {conversation_name_holder}")
-            formatted_messages = []
-            for msg in other_messages:
-                role_marker = f"## {getattr(msg.role, 'value', msg.role).capitalize()}"
-                content_str = ""
+            formatted_msgs = []
+            for msg in other_msgs:
+                role_title = f"## {_capitalize_role(msg.role)}"
+                inner: list[str] = []
                 if isinstance(msg, UserMessage | SystemMessage):
                     if isinstance(msg.content, str):
-                        content_str = msg.content
+                        inner.append(msg.content)
                     else:
-                        content_parts = []
                         for chunk in msg.content:
                             if hasattr(chunk, "text"):
-                                content_parts.append(chunk.text)
+                                inner.append(chunk.text)
                             elif hasattr(chunk, "image"):
-                                content_parts.append("[IMAGE CHUNK]")
+                                inner.append("[IMAGE CHUNK]")
                             elif hasattr(chunk, "image_url"):
-                                content_parts.append(f"[IMAGE URL: {chunk.get_url()}]")
-                        content_str = "\n".join(content_parts)
+                                inner.append(f"[IMAGE URL: {chunk.get_url()}]")
+
                 elif isinstance(msg, AssistantMessage):
-                    parts = []
                     if msg.content:
-                        parts.append(msg.content)
+                        inner.append(msg.content)
+
                     if msg.tool_calls:
-                        tool_call_strs = [
-                            f"Tool Call (ID: {tc.id}): {tc.function.name}({tc.function.arguments})"
-                            for tc in msg.tool_calls
-                        ]
-                        parts.append("\n".join(tool_call_strs))
-                    content_str = "\n".join(parts)
+                        for tc in msg.tool_calls:
+                            xml_call = (
+                                f"<{tc.function.name}>"
+                                f"<arguments>{tc.function.arguments}</arguments>"
+                                f"</{tc.function.name}>"
+                            )
+                            inner.append(xml_call)
                 elif isinstance(msg, ToolMessage):
-                    content_str = f"  Tool Result (ID: {msg.tool_call_id}): {msg.content}"
-                indented_content = textwrap.indent(content_str.strip(), "  ")
-                formatted_messages.append(f"{role_marker}\n{indented_content}")
-            prompt_parts.append("\n\n".join(formatted_messages))
-        if mention_last_turn and len(other_messages) != 0:
-            selected = other_messages[-1]
-            prompt_parts.append(f"Last Message from {selected.role.capitalize()}: {selected.content}")
+                    tool_res = textwrap.indent(str(msg.content), ind1)
+                    inner.append(f"Tool Result (ID: {msg.tool_call_id}):\n{tool_res}")
+
+                formatted_block = textwrap.indent("\n".join(inner).strip(), ind1)
+                formatted_msgs.append(f"{role_title}\n{formatted_block}")
+
+            prompt_parts.append("\n\n".join(formatted_msgs))
+
+        if mention_last_turn and other_msgs:
+            last = other_msgs[-1]
+            preview = last.content if isinstance(last, UserMessage | ToolMessage) else last.content or "[tool calls]"
+            prompt_parts.append(f"\nLast Message from {_capitalize_role(last.role)}: {preview}")
+
         return "\n\n".join(prompt_parts)
 
 

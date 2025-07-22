@@ -901,10 +901,10 @@ class Calute:
                         messages=updated_messages,
                         agent_id=agent,
                         stream=True,
-                        apply_functions=False,
+                        apply_functions=True,
                         print_formatted_prompt=False,
                         use_instructed_prompt=True,
-                        reinvoke_after_function=False,
+                        reinvoke_after_function=True,
                         reinvoked_runtime=True,
                     )
                     try:
@@ -956,10 +956,10 @@ class Calute:
                     messages=updated_messages,
                     agent_id=agent,
                     stream=False,
-                    apply_functions=False,
+                    apply_functions=True,
                     print_formatted_prompt=False,
                     use_instructed_prompt=True,
-                    reinvoke_after_function=False,
+                    reinvoke_after_function=True,
                     reinvoked_runtime=True,
                 )
 
