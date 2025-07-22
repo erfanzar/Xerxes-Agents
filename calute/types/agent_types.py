@@ -1,4 +1,4 @@
-# Copyright 2023 The EASYDEL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,13 +13,41 @@
 # limitations under the License.
 """Defines Pydantic models for the vSurge API, mimicking OpenAI's structure."""
 
+import functools
 import typing as tp
+from abc import ABCMeta, abstractmethod
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from .function_execution_types import AgentCapability, AgentSwitchTrigger, FunctionCallStrategy
 
-AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]]  # type:ignore
+
+class AgentBaseFn(ABCMeta):
+    @staticmethod
+    @abstractmethod
+    def static_call(*args, **kwargs) -> tp.Any:
+        """place-holder for static-call method"""
+
+
+def _wrap_static_call(cls: type["AgentBaseFn"]) -> tp.Callable:
+    """
+    Return a new function that forwards to `cls.static_call`
+    but is *named* after the class (so the LLM sees a unique tool).
+    """
+    static_fn = cls.static_call
+
+    @functools.wraps(static_fn)
+    def _proxy(*args, **kwargs):
+        return static_fn(*args, **kwargs)
+
+    _proxy.__name__ = cls.__name__
+    _proxy.__qualname__ = f"{cls.__qualname__}.static_call"
+    _proxy.__doc__ = static_fn.__doc__
+    _proxy.__module__ = cls.__module__
+    return _proxy
+
+
+AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]] | AgentBaseFn  # type:ignore
 
 
 class Agent(BaseModel):
@@ -31,7 +59,7 @@ class Agent(BaseModel):
     instructions: str | tp.Callable[[], str] = "You are a helpful agent."
     rules: list[str] | tp.Callable[[], list[str]] | None = None
     examples: list[str] | None = None
-    functions: list[tp.Callable] = []
+    functions: list[tp.Callable | AgentBaseFn] = []
     capabilities: list[AgentCapability] = []
 
     function_call_strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL
@@ -54,6 +82,22 @@ class Agent(BaseModel):
 
     switch_triggers: list[AgentSwitchTrigger] = []
     fallback_agent_id: str | None = None
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @field_validator("functions")
+    def _resolve_static_calls(cls, v):
+        processed: list[tp.Callable] = []
+        seen_names: set[str] = set()
+
+        for fn in v or []:
+            if isinstance(fn, type) and issubclass(fn, AgentBaseFn):
+                fn = _wrap_static_call(fn)
+            if fn.__name__ in seen_names:
+                raise ValueError(f"Duplicate function name '{fn.__name__}' detected in Agent.functions")
+            seen_names.add(fn.__name__)
+            processed.append(fn)
+
+        return processed
 
     def add_capability(self, capability: AgentCapability):
         """Add a capability to the agent"""
@@ -66,6 +110,10 @@ class Agent(BaseModel):
     def get_available_functions(self) -> list[str]:
         """Get list of available function names"""
         return [func.__name__ for func in self.functions]
+
+    def get_functions_mapping(self) -> dict[str, tp.Callable]:
+        """Get list of available function names"""
+        return {func.__name__: func for func in self.functions}
 
 
 class Response(BaseModel):

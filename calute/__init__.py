@@ -1,4 +1,4 @@
-# Copyright 2023 The EASYDEL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -108,4 +108,4 @@ __all__ = (
     "convert_openai_tools",
 )
 
-__version__ = "0.0.16"
+__version__ = "0.0.17"

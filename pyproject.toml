@@ -1,11 +1,9 @@
 [project]
 name = "calute"
-version = "0.0.16"
+version = "0.0.17"
 description = "Agents for intelligence and coordination"
-authors = [
-    {name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com"}
-]
-license = {text = "Apache-2.0"}
+authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
+license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 keywords = ["calute", "Agents"]
@@ -22,7 +20,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.9.2,<3.0.0",
     "openai>=1.72.0",
-    "numpy", 
+    "numpy",
     "pillow~=11.2.1",
     "google-generativeai>=0.8.0,<0.9.0",
 ]
@@ -33,12 +31,8 @@ Repository = "https://github.com/erfanzar/Calute"
 Documentation = "https://erfanzar.github.io/Calute"
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.3.3",
-    "ruff>=0.7.0",
-    "black>=24.8.0",
-    "mypy>=1.12.0",
-]
+dev = ["pytest>=8.3.3", "ruff>=0.7.0", "black>=24.8.0", "mypy>=1.12.0"]
+tools = ["ddgs==9.4.1"]
 
 [build-system]
 requires = ["hatchling"]

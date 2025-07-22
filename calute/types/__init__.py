@@ -1,4 +1,4 @@
-# Copyright 2023 The EASYDEL Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from .agent_types import Agent, AgentFunction, Response
+from .agent_types import Agent, AgentBaseFn, AgentFunction, Response
 from .converters import convert_openai_messages, convert_openai_tools
 from .function_execution_types import (
     AgentCapability,
@@ -57,6 +57,7 @@ from .tool_calls import Function, FunctionCall, Tool, ToolCall, ToolChoice, Tool
 
 __all__ = (
     "Agent",
+    "AgentBaseFn",
     "AgentCapability",
     "AgentFunction",
     "AgentSwitch",
