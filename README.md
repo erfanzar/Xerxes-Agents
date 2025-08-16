@@ -1,119 +1,320 @@
-# Calute
+# Calute 🤖
 
-Calute is a framework for building AI agents that can orchestrate function calls and switch between agents. It is designed for researchers experimenting with agent orchestration and function calling.
+**Calute** is a powerful, production-ready framework for building and orchestrating AI agents with advanced function calling, memory systems, and multi-agent collaboration capabilities. Designed for both researchers and developers, Calute provides enterprise-grade features for creating sophisticated AI systems.
 
-## Key Features
+## 🚀 Key Features
 
-* **Agent Orchestration:** Calute helps manage multiple agents and their interactions, allowing you to create complex AI systems.
-* **Function Calling:** Calute simplifies the process of calling functions from AI agents, enabling them to interact with external tools and data sources.
-* **Agent Switching:** Calute provides agent switching capabilities, allowing you to create more dynamic and intelligent systems that can adapt to different situations.
-* **Workflow Engine:** Calute includes a workflow engine for defining and executing complex workflows involving LLMs and function execution.
-* **LLM Client Abstraction:** Calute supports OpenAI and Gemini models through a unified client interface, making it easy to switch between different LLMs.
+### Core Capabilities
 
-## Installation
+- **🎭 Multi-Agent Orchestration**: Seamlessly manage and coordinate multiple specialized agents with dynamic switching based on context, capabilities, or custom triggers
+- **⚡ Enhanced Function Execution**: Advanced function calling with timeout management, retry policies, parallel/sequential execution strategies, and comprehensive error handling
+- **🧠 Advanced Memory Systems**: Sophisticated memory management with multiple types (short-term, long-term, episodic, semantic, working, procedural), vector search, caching, and persistence
+- **🔄 Workflow Engine**: Define and execute complex multi-step workflows with conditional logic and state management
+- **🌊 Streaming Support**: Real-time streaming responses with function execution tracking
+- **🔌 LLM Flexibility**: Unified interface supporting OpenAI, Gemini, Anthropic, and custom models
 
-To install Calute, use the following command:
+### Enhanced Features
+
+- **Memory Store with Indexing**: Fast retrieval with tag-based indexing and importance scoring
+- **Function Registry**: Centralized function management with metrics and validation
+- **Error Recovery**: Robust error handling with customizable retry policies and fallback strategies
+- **Performance Monitoring**: Built-in metrics collection for execution times, success rates, and resource usage
+- **Context Management**: Sophisticated context passing between agents and functions
+- **Security Features**: Function validation, safe execution environments, and access control
+
+## 📦 Installation
+
+### Core Installation (Lightweight)
 
 ```bash
-poetry install
+# Minimal installation with only essential dependencies
+pip install calute
 ```
 
-## Usage
+### Feature-Specific Installations
 
-Here are some examples of how to use Calute:
+```bash
+# For web search capabilities
+pip install "calute[search]"
 
-### Registering an Agent
+# For image/vision processing
+pip install "calute[vision]"
+
+# For additional LLM providers (Gemini, Anthropic, Cohere)
+pip install "calute[providers]"
+
+# For database support (PostgreSQL, MongoDB, etc.)
+pip install "calute[database]"
+
+# For Redis caching/queuing
+pip install "calute[redis]"
+
+# For monitoring and observability
+pip install "calute[monitoring]"
+
+# For vector search and embeddings
+pip install "calute[vectors]"
+```
+
+### Preset Configurations
+
+```bash
+# Research-focused installation (search, vision, vectors)
+pip install "calute[research]"
+
+# Enterprise installation (database, redis, monitoring, providers)
+pip install "calute[enterprise]"
+
+# Full installation with all features
+pip install "calute[full]"
+```
+
+### Development Installation
+
+```bash
+git clone https://github.com/erfanzar/calute.git
+cd calute
+pip install -e ".[dev]"
+```
+
+## 🎯 Quick Start
+
+### Basic Agent Setup
 
 ```python
-from calute import Agent, AgentFunction, Calute
+import openai
+from calute import Agent, Calute
 
-def my_function(input_data: str, context_variables: dict = None):
-    """My function description (LLM will read the docs!)"""
-    return f"Function executed with input: {input_data}"
+# Initialize your LLM client
+client = openai.OpenAI(api_key="your-key")
+
+# Create an agent with functions
+def search_web(query: str) -> str:
+    """Search the web for information."""
+    return f"Results for: {query}"
+
+def analyze_data(data: str) -> dict:
+    """Analyze provided data."""
+    return {"summary": data, "insights": ["insight1", "insight2"]}
 
 agent = Agent(
-    id="my_agent",
-    name="My Agent",
-    functions=[AgentFunction(func=my_function)],
-    instructions="Follow these instructions."
+    id="research_agent",
+    name="Research Assistant",
+    model="gpt-4",
+    instructions="You are a helpful research assistant.",
+    functions=[search_web, analyze_data],
+    temperature=0.7
 )
 
-# Assuming you have an initialized OpenAI or Gemini client
-# client = OpenAI(...) or client = Gemini(...)
-# calute = Calute(client)
-# calute.register_agent(agent)
+# Initialize Calute and register agent
+calute = Calute(client)
+calute.register_agent(agent)
+
+# Use the agent
+response = await calute.create_response(
+    prompt="Find information about quantum computing",
+    agent_id="research_agent"
+)
 ```
 
-### Defining a Workflow
+### Advanced Memory-Enhanced Agent
 
 ```python
-from calute import Workflow, WorkflowStep, WorkflowEngine, WorkflowStepType
+from calute.memory import EnhancedMemoryStore, MemoryType
 
-# Assuming you have a Calute instance
-# calute = Calute(...)
-# workflow_engine = WorkflowEngine(calute)
+# Create memory store with persistence
+memory = EnhancedMemoryStore(
+    max_short_term=100,
+    max_long_term=1000,
+    enable_persistence=True,
+    persistence_path="./agent_memory"
+)
 
-# workflow = workflow_engine.create_function_workflow(
-#     id="my_workflow",
-#     name="My Workflow",
-#     functions=[my_function]
-# )
+# Add memories
+memory.add_memory(
+    content="User prefers technical explanations",
+    memory_type=MemoryType.LONG_TERM,
+    agent_id="assistant",
+    tags=["preference", "user_profile"],
+    importance_score=0.9
+)
+
+# Attach to Calute
+calute.memory = memory
 ```
 
-### Running a Workflow
+### Multi-Agent Collaboration
 
 ```python
-# Assuming you have a workflow defined
-# result = await workflow_engine.execute_workflow(
-#     workflow_id="my_workflow",
-#     context_variables={"input_data": "Hello, world!"}
-# )
-# print(result)
+from calute.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
+
+# Create specialized agents
+research_agent = Agent(id="researcher", name="Researcher", ...)
+analyst_agent = Agent(id="analyst", name="Data Analyst", ...)
+writer_agent = Agent(id="writer", name="Content Writer", ...)
+
+# Set up orchestrator
+orchestrator = EnhancedAgentOrchestrator(enable_metrics=True)
+await orchestrator.register_agent(research_agent)
+await orchestrator.register_agent(analyst_agent)
+await orchestrator.register_agent(writer_agent)
+
+# Enhanced executor with parallel execution
+executor = EnhancedFunctionExecutor(
+    orchestrator=orchestrator,
+    default_timeout=30.0,
+    max_concurrent_executions=5
+)
+
+# Execute functions across agents
+from calute.types import RequestFunctionCall, FunctionCallStrategy
+
+calls = [
+    RequestFunctionCall(name="research_topic", arguments={"topic": "AI"}, id="1"),
+    RequestFunctionCall(name="analyze_findings", arguments={"data": "..."}, id="2"),
+    RequestFunctionCall(name="write_report", arguments={"content": "..."}, id="3")
+]
+
+results = await executor.execute_function_calls(
+    calls=calls,
+    strategy=FunctionCallStrategy.PARALLEL
+)
 ```
 
-## Modules
+## 📚 Example Scenarios
 
-* [`calute.py`](calute/calute.py): Core Calute class with orchestration capabilities.
-* [`chain_module.py`](calute/chain_module.py): Function chaining and execution.
-* [`client.py`](calute/client.py): LLM client abstraction for OpenAI and Gemini.
-* [`executors.py`](calute/executors.py): Function and agent execution logic.
-* [`workflow.py`](calute/workflow.py): Workflow engine for defining and executing complex workflows.
-* [`types/`](calute/types/): Data types and structures used in Calute.
-* [`utils.py`](calute/utils.py): Utility functions.
-* [`basics.py`](calute/basics.py): Basic registries.
+The `examples/` directory contains comprehensive scenarios demonstrating Calute's capabilities:
 
-## Types
+1. **Conversational Assistant** (`scenario_1_conversational_assistant.py`)
+   - Memory-enhanced chatbot with user preference learning
+   - Sentiment analysis and context retention
 
-* [`Agent`](calute/types/agent_types.py): Represents an AI agent with capabilities and functions.
-* [`PromptTemplate`](calute/calute.py): Configurable template for structuring agent prompts.
-* [`FunctionCall`](calute/types/function_execution_types.py): Represents a function call to be executed.
-* [`Workflow`](calute/workflow.py): Defines a workflow with steps and transitions.
+2. **Code Analyzer** (`scenario_2_code_analyzer.py`)
+   - Python code analysis with security scanning
+   - Refactoring suggestions and test generation
+   - Parallel analysis execution
 
-## Example Mermaid Diagram
+3. **Multi-Agent Collaboration** (`scenario_3_multi_agent_collaboration.py`)
+   - Coordinated task execution across specialized agents
+   - Dynamic agent switching based on context
+   - Shared memory and progress tracking
+
+4. **Streaming Research Assistant** (`scenario_4_streaming_research_assistant.py`)
+   - Real-time streaming responses
+   - Knowledge graph building
+   - Research synthesis and progress tracking
+
+## 🏗️ Architecture
 
 ```mermaid
-graph LR
-    A[User Prompt] --> B{Agent Orchestrator}
-    B --> C{Agent 1}
-    C --> D[Function Call 1]
-    D --> E{Function Executor}
-    E --> F[Result 1]
-    F --> B
-    B --> G{Agent 2}
-    G --> H[Function Call 2]
-    H --> E
-    E --> I[Result 2]
-    I --> J[Final Response]
+graph TB
+    subgraph "Calute Core"
+        A[Client Interface] --> B[Agent Registry]
+        B --> C[Orchestrator]
+        C --> D[Function Executor]
+        D --> E[Memory Store]
+    end
+    
+    subgraph "Enhanced Features"
+        F[Retry Policy] --> D
+        G[Timeout Manager] --> D
+        H[Metrics Collector] --> D
+        I[Vector Search] --> E
+        J[Cache Layer] --> E
+        K[Persistence] --> E
+    end
+    
+    subgraph "Agents"
+        L[Agent 1] --> C
+        M[Agent 2] --> C
+        N[Agent N] --> C
+    end
 ```
 
-## License
+## 🛠️ Core Components
+
+### Memory System
+
+- **EnhancedMemoryStore**: Advanced memory management with indexing and caching
+- **MemoryType**: SHORT_TERM, LONG_TERM, EPISODIC, SEMANTIC, WORKING, PROCEDURAL
+- **Features**: Vector search, similarity matching, consolidation, pattern analysis
+
+### Executors
+
+- **EnhancedAgentOrchestrator**: Multi-agent coordination with metrics
+- **EnhancedFunctionExecutor**: Parallel/sequential execution with timeout and retry
+- **FunctionRegistry**: Centralized function management and validation
+
+### Configuration
+
+- **CaluteConfig**: Centralized configuration management
+- **Environment-based settings**: Development, staging, production profiles
+- **Logging configuration**: Structured logging with customizable levels
+
+## 📊 Performance & Monitoring
+
+```python
+# Access execution metrics
+metrics = orchestrator.function_registry.get_metrics("function_name")
+print(f"Total calls: {metrics.total_calls}")
+print(f"Success rate: {metrics.successful_calls / metrics.total_calls:.0%}")
+print(f"Avg duration: {metrics.average_duration:.2f}s")
+
+# Memory statistics
+stats = memory.get_statistics()
+print(f"Cache hit rate: {stats['cache_hit_rate']:.1%}")
+print(f"Total memories: {stats['total_memories']}")
+```
+
+## 🔒 Security & Best Practices
+
+- Function validation before execution
+- Timeout protection against hanging operations
+- Secure memory persistence with encryption support
+- Rate limiting and resource management
+- Comprehensive error handling and logging
+
+## 📖 Documentation
+
+- [API Reference](docs/api.md)
+- [Configuration Guide](docs/configuration.md)
+- [Memory System](docs/memory.md)
+- [Multi-Agent Patterns](docs/patterns.md)
+- [Performance Tuning](docs/performance.md)
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+# Install with dev dependencies
+poetry install --with dev
+
+# Run tests
+pytest
+
+# Run linting
+ruff check .
+
+# Format code
+black .
+```
+
+## 📄 License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-## Contributing
+## 🙏 Acknowledgments
 
-Contributions are welcome! Please see the [contributing guidelines](CONTRIBUTING.md) for more information.
+Built with ❤️ by [erfanzar](https://github.com/erfanzar) and contributors.
 
-## Contact
+## 📬 Contact
 
-If you have any questions or issues, please contact [erfanzar](https://github.com/erfanzar).
+- GitHub: [@erfanzar](https://github.com/erfanzar)
+- Issues: [GitHub Issues](https://github.com/erfanzar/calute/issues)
+
+---
+
+**Note**: This is an active research project. APIs may change between versions. Please pin your dependencies for production use.

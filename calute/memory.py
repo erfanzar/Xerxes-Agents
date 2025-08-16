@@ -27,6 +27,7 @@ class MemoryType(Enum):
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     WORKING = "working"
+    PROCEDURAL = "procedural"  # Added for enhanced memory
 
 
 @dataclass
@@ -211,3 +212,374 @@ class MemoryStore:
                     tags=mem_data["tags"],
                 )
                 self.memories[mem_type].append(entry)
+
+
+# ===========================
+# ENHANCED CLASSES BELOW
+# ===========================
+
+import hashlib
+import heapq
+import pickle
+from collections import defaultdict, deque
+from collections.abc import Callable
+from typing import Any
+
+try:
+    from sklearn.metrics.pairwise import cosine_similarity  # type:ignore
+
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+
+    # Fallback cosine similarity implementation
+    def cosine_similarity(X, Y):
+        """Simple cosine similarity implementation."""
+        X = np.array(X)
+        Y = np.array(Y)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        if Y.ndim == 1:
+            Y = Y.reshape(1, -1)
+
+        # Normalize
+        X_norm = X / np.linalg.norm(X, axis=1, keepdims=True)
+        Y_norm = Y / np.linalg.norm(Y, axis=1, keepdims=True)
+
+        # Compute similarity
+        return np.dot(X_norm, Y_norm.T)
+
+
+class MemoryIndex:
+    """Index structure for fast memory retrieval."""
+
+    def __init__(self):
+        self.by_id: dict[str, EnhancedMemoryEntry] = {}
+        self.by_agent: dict[str, set[str]] = defaultdict(set)
+        self.by_type: dict[MemoryType, set[str]] = defaultdict(set)
+        self.by_tag: dict[str, set[str]] = defaultdict(set)
+        self.by_timestamp: list[tuple[datetime, str]] = []
+        self.by_importance: list[tuple[float, str]] = []
+        
+        # Vector index for semantic search
+        self.embeddings: dict[str, np.ndarray] = {}
+        self.embedding_index: Any | None = None  # For FAISS or similar
+
+
+@dataclass
+class EnhancedMemoryEntry:
+    """Enhanced memory entry with additional metadata and indexing."""
+
+    id: str
+    content: str
+    timestamp: datetime
+    memory_type: MemoryType
+    agent_id: str
+    context: dict[str, Any] = field(default_factory=dict)
+    importance_score: float = 0.5
+    access_count: int = 0
+    last_accessed: datetime | None = None
+    embedding: np.ndarray | None = None
+    tags: list[str] = field(default_factory=list)
+
+    # Additional metadata
+    source: str | None = None
+    confidence: float = 1.0
+    decay_rate: float = 0.01
+    relations: list[str] = field(default_factory=list)  # Related memory IDs
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __hash__(self):
+        """Make entry hashable for set operations."""
+        return hash(self.id)
+
+    def get_current_importance(self) -> float:
+        """Calculate current importance with decay."""
+        time_diff = (datetime.now() - self.timestamp).total_seconds() / 3600  # Hours
+        decayed_importance = self.importance_score * np.exp(-self.decay_rate * time_diff)
+        access_bonus = min(self.access_count * 0.01, 0.2)  # Cap at 0.2
+        return min(decayed_importance + access_bonus, 1.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "content": self.content,
+            "timestamp": self.timestamp.isoformat(),
+            "memory_type": self.memory_type.value,
+            "agent_id": self.agent_id,
+            "context": self.context,
+            "importance_score": self.importance_score,
+            "access_count": self.access_count,
+            "last_accessed": self.last_accessed.isoformat() if self.last_accessed else None,
+            "tags": self.tags,
+            "source": self.source,
+            "confidence": self.confidence,
+            "decay_rate": self.decay_rate,
+            "relations": self.relations,
+            "metadata": self.metadata,
+        }
+
+
+class EnhancedMemoryStore:
+    """Enhanced memory store with indexing, caching, and vector search."""
+
+    def __init__(
+        self,
+        max_short_term: int = 100,
+        max_working: int = 10,
+        max_long_term: int = 10000,
+        enable_vector_search: bool = False,
+        embedding_dimension: int = 768,
+        enable_persistence: bool = False,
+        persistence_path: Path | str | None = None,
+        cache_size: int = 100,
+    ):
+        self.max_short_term = max_short_term
+        self.max_working = max_working
+        self.max_long_term = max_long_term
+        self.enable_vector_search = enable_vector_search
+        self.embedding_dimension = embedding_dimension
+        self.enable_persistence = enable_persistence
+        self.persistence_path = Path(persistence_path) if persistence_path else None
+
+        # Memory storage
+        self.memories: dict[MemoryType, deque[EnhancedMemoryEntry]] = {
+            MemoryType.SHORT_TERM: deque(maxlen=max_short_term),
+            MemoryType.WORKING: deque(maxlen=max_working),
+            MemoryType.LONG_TERM: deque(maxlen=max_long_term),
+            MemoryType.EPISODIC: deque(maxlen=max_long_term),
+            MemoryType.SEMANTIC: deque(maxlen=max_long_term),
+            MemoryType.PROCEDURAL: deque(maxlen=max_long_term),
+        }
+
+        # Enhanced indexing
+        self.index = MemoryIndex()
+
+        # Caching
+        self.cache = {}
+        self.cache_size = cache_size
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+        # Load existing memories if persistence is enabled
+        if self.enable_persistence and self.persistence_path and self.persistence_path.exists():
+            self.load()
+
+    def add_memory(
+        self,
+        content: str,
+        memory_type: MemoryType,
+        agent_id: str,
+        context: dict[str, Any] | None = None,
+        importance_score: float = 0.5,
+        tags: list[str] | None = None,
+        embedding: np.ndarray | None = None,
+        source: str | None = None,
+        confidence: float = 1.0,
+        relations: list[str] | None = None,
+    ) -> EnhancedMemoryEntry:
+        """Add an enhanced memory entry with indexing."""
+        # Generate unique ID
+        memory_id = self._generate_id(content, agent_id)
+
+        # Create enhanced entry
+        entry = EnhancedMemoryEntry(
+            id=memory_id,
+            content=content,
+            timestamp=datetime.now(),
+            memory_type=memory_type,
+            agent_id=agent_id,
+            context=context or {},
+            importance_score=importance_score,
+            tags=tags or [],
+            embedding=embedding,
+            source=source,
+            confidence=confidence,
+            relations=relations or [],
+        )
+
+        # Add to storage
+        self.memories[memory_type].append(entry)
+
+        # Update indexes
+        self._update_indexes(entry)
+
+        # Clear cache
+        self._invalidate_cache()
+
+        # Auto-save if persistence is enabled
+        if self.enable_persistence:
+            self.save()
+
+        return entry
+
+    def retrieve_memories(
+        self,
+        memory_types: list[MemoryType] | None = None,
+        agent_id: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 10,
+        min_importance: float = 0.0,
+        query_embedding: np.ndarray | None = None,
+    ) -> list[EnhancedMemoryEntry]:
+        """Retrieve memories using enhanced indexing and search."""
+        # Check cache
+        cache_key = self._get_cache_key(memory_types, agent_id, tags, limit, min_importance)
+        if cache_key in self.cache:
+            self.cache_hits += 1
+            return self.cache[cache_key]
+
+        self.cache_misses += 1
+
+        # Use indexes for fast retrieval
+        candidate_ids = set()
+
+        if agent_id:
+            candidate_ids.update(self.index.by_agent.get(agent_id, set()))
+        else:
+            # All memory IDs
+            candidate_ids = set(self.index.by_id.keys())
+
+        if memory_types:
+            type_ids = set()
+            for mem_type in memory_types:
+                type_ids.update(self.index.by_type.get(mem_type, set()))
+            candidate_ids &= type_ids
+
+        if tags:
+            tag_ids = set()
+            for tag in tags:
+                tag_ids.update(self.index.by_tag.get(tag, set()))
+            candidate_ids &= tag_ids
+
+        # Get candidate memories
+        candidates = [self.index.by_id[mid] for mid in candidate_ids if mid in self.index.by_id]
+
+        # Filter by importance
+        candidates = [m for m in candidates if m.get_current_importance() >= min_importance]
+
+        # Sort by relevance
+        candidates.sort(key=lambda m: m.get_current_importance(), reverse=True)
+
+        # Limit results
+        results = candidates[:limit]
+
+        # Update access counts
+        for mem in results:
+            mem.access_count += 1
+            mem.last_accessed = datetime.now()
+
+        # Cache results
+        self.cache[cache_key] = results
+        if len(self.cache) > self.cache_size:
+            # Remove oldest cache entry
+            self.cache.pop(next(iter(self.cache)))
+
+        return results
+
+    def get_statistics(self) -> dict[str, Any]:
+        """Get memory store statistics."""
+        total = sum(len(mems) for mems in self.memories.values())
+        by_type = {mem_type.value: len(mems) for mem_type, mems in self.memories.items()}
+
+        cache_rate = self.cache_hits / max(self.cache_hits + self.cache_misses, 1)
+
+        return {
+            "total_memories": total,
+            "by_type": by_type,
+            "cache_hit_rate": cache_rate,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "index_size": len(self.index.by_id),
+        }
+
+    def save(self):
+        """Save memory store to disk."""
+        if not self.persistence_path:
+            return
+
+        self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = {
+            "memories": {},
+            "statistics": self.get_statistics(),
+        }
+
+        for mem_type, entries in self.memories.items():
+            data["memories"][mem_type.value] = [entry.to_dict() for entry in entries]
+
+        with open(self.persistence_path, "wb") as f:
+            pickle.dump(data, f)
+
+    def load(self):
+        """Load memory store from disk."""
+        if not self.persistence_path or not self.persistence_path.exists():
+            return
+
+        with open(self.persistence_path, "rb") as f:
+            data = pickle.load(f)
+
+        for mem_type_str, entries_data in data["memories"].items():
+            mem_type = MemoryType(mem_type_str)
+            for entry_data in entries_data:
+                entry = self._entry_from_dict(entry_data)
+                self.memories[mem_type].append(entry)
+                self._update_indexes(entry)
+
+    def _generate_id(self, content: str, agent_id: str) -> str:
+        """Generate unique memory ID."""
+        timestamp = datetime.now().isoformat()
+        data = f"{content}{agent_id}{timestamp}"
+        return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+    def _update_indexes(self, entry: EnhancedMemoryEntry):
+        """Update all indexes with new entry."""
+        self.index.by_id[entry.id] = entry
+        self.index.by_agent[entry.agent_id].add(entry.id)
+        self.index.by_type[entry.memory_type].add(entry.id)
+
+        for tag in entry.tags:
+            self.index.by_tag[tag].add(entry.id)
+
+        heapq.heappush(self.index.by_timestamp, (entry.timestamp, entry.id))
+        heapq.heappush(self.index.by_importance, (-entry.importance_score, entry.id))
+
+    def _invalidate_cache(self):
+        """Clear the cache."""
+        self.cache.clear()
+
+    def _get_cache_key(self, *args) -> str:
+        """Generate cache key from arguments."""
+        # Convert lists to tuples for hashing
+        hashable_args = []
+        for arg in args:
+            if isinstance(arg, list):
+                hashable_args.append(tuple(arg) if arg else None)
+            elif isinstance(arg, dict):
+                hashable_args.append(tuple(sorted(arg.items())) if arg else None)
+            else:
+                hashable_args.append(arg)
+        return str(hash(tuple(hashable_args)))
+
+    def _entry_from_dict(self, data: dict) -> EnhancedMemoryEntry:
+        """Create entry from dictionary."""
+        return EnhancedMemoryEntry(
+            id=data["id"],
+            content=data["content"],
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            memory_type=MemoryType(data["memory_type"]),
+            agent_id=data["agent_id"],
+            context=data.get("context", {}),
+            importance_score=data.get("importance_score", 0.5),
+            access_count=data.get("access_count", 0),
+            last_accessed=datetime.fromisoformat(data["last_accessed"])
+            if data.get("last_accessed")
+            else None,
+            tags=data.get("tags", []),
+            source=data.get("source"),
+            confidence=data.get("confidence", 1.0),
+            decay_rate=data.get("decay_rate", 0.01),
+            relations=data.get("relations", []),
+            metadata=data.get("metadata", {}),
+        )
