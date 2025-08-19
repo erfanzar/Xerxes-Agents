@@ -41,9 +41,11 @@ class DeltaMessage(BaseModel):
 class UsageInfo(BaseModel):
     """Provides information about token usage and processing time for a request."""
 
-    prompt_tokens: int = 0
     completion_tokens: int | None = 0
+    prompt_tokens: int = 0
     total_tokens: int = 0
+    completion_tokens_details: dict | None = 0
+    prompt_tokens_details: dict | None = 0
     tokens_per_second: float = 0
     processing_time: float = 0.0
 

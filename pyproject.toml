@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.0.18"
+version = "0.0.19"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }
@@ -27,6 +27,11 @@ dependencies = [
     "httpx>=0.25.0",
     "tenacity>=8.2.0",
     "psutil>=5.9.0",
+    "pillow>=11.0.0",
+    "numpy>=1.24.0",
+    "google-generativeai>=0.8.0,<0.9.0",
+    "fastapi>=0.116.1",
+    "uvicorn>=0.35.0",
 ]
 
 [project.urls]
@@ -57,15 +62,9 @@ search = [
     "feedparser>=6.0.0",
 ]
 
-# Image processing
-vision = [
-    "pillow>=11.0.0",
-    "numpy>=1.24.0",
-]
-
+ 
 # Alternative LLM providers
 providers = [
-    "google-generativeai>=0.8.0,<0.9.0",
     "anthropic>=0.18.0",
     "cohere>=5.0.0",
 ]
@@ -115,12 +114,12 @@ vectors = [
 
 # Full installation with all features
 full = [
-    "calute[search,vision,providers,database,redis,monitoring,vectors]",
+    "calute[search,providers,database,redis,monitoring,vectors]",
 ]
 
 # Common presets for different use cases
 research = [
-    "calute[search,vision,vectors]",
+    "calute[search,vectors]",
 ]
 
 enterprise = [
