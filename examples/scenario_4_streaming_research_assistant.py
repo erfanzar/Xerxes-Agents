@@ -14,7 +14,7 @@ from pathlib import Path
 import openai
 
 from calute import Agent, Calute, FunctionExecutionComplete, MessagesHistory, StreamChunk, UserMessage
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 from calute.tools import DuckDuckGoSearch, ReadFile, WriteFile
 
 # Initialize OpenAI client
@@ -24,7 +24,7 @@ client = openai.OpenAI(
 )
 
 # Research memory with vector search capability
-research_memory = EnhancedMemoryStore(
+research_memory = MemoryStore(
     max_short_term=500,
     max_long_term=10000,
     enable_persistence=True,
@@ -446,7 +446,7 @@ async def main():
 
     # Analyze research patterns
 
-    if isinstance(research_memory, EnhancedMemoryStore):
+    if isinstance(research_memory, MemoryStore):
         # Get most important memories
         important_memories = research_memory.retrieve_memories(min_importance=0.8, limit=5)
 

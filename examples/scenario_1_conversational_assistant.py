@@ -12,7 +12,7 @@ import openai
 
 from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
 from calute.config import CaluteConfig, set_config
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 
 # Configure the system
 config = CaluteConfig(
@@ -30,7 +30,7 @@ client = openai.OpenAI(
 )
 
 # Initialize enhanced memory
-memory_store = EnhancedMemoryStore(
+memory_store = MemoryStore(
     max_short_term=100,
     max_working=20,
     enable_persistence=True,

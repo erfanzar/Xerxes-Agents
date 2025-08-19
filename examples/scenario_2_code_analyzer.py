@@ -14,7 +14,7 @@ import openai
 
 from calute import Agent, Calute
 from calute.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -23,7 +23,7 @@ client = openai.OpenAI(
 )
 
 # Initialize memory for code patterns
-code_memory = EnhancedMemoryStore(
+code_memory = MemoryStore(
     max_short_term=200, enable_persistence=True, persistence_path=Path.home() / ".calute" / "code_analysis_memory"
 )
 

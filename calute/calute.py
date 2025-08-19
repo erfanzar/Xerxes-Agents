@@ -23,7 +23,7 @@ from enum import Enum
 from calute.types.function_execution_types import ReinvokeSignal
 from calute.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
 
-from .client import GeminiClient, OpenAIClient
+from .client import GeminiClient, LLMClient, OpenAIClient
 from .executors import AgentOrchestrator, FunctionExecutor
 from .memory import MemoryStore, MemoryType
 from .types import (
@@ -33,6 +33,7 @@ from .types import (
     AgentSwitchTrigger,
     AssistantMessage,
     Completion,
+    ExecutionResult,
     ExecutionStatus,
     FunctionCallInfo,
     FunctionCallsExtracted,
@@ -72,8 +73,8 @@ class PromptSection(Enum):
 class PromptTemplate:
     """Configurable template for structuring agent prompts"""
 
-    sections: dict[PromptSection, str] = None
-    section_order: list[PromptSection] = None
+    sections: dict[PromptSection, str] | None = None
+    section_order: list[PromptSection] | None = None
 
     def __post_init__(self):
         self.sections = self.sections or {
@@ -102,18 +103,26 @@ class PromptTemplate:
 class Calute:
     """Calute with orchestration"""
 
-    SEP: tp.ClassVar = SEP
+    SEP: tp.ClassVar[str] = SEP
 
-    def __init__(self, client: tp.Any, template: PromptTemplate | None = None, enable_memory: bool = False):
+    def __init__(
+        self,
+        client: tp.Any,
+        template: PromptTemplate | None = None,
+        enable_memory: bool = False,
+        memory_config: dict[str, tp.Any] | None = None,
+    ):
         """
         Initialize Calute with an LLM client.
 
         Args:
             client: An instance of OpenAI client or Google Gemini client
             template: Optional prompt template
+            enable_memory: Enable memory system
+            memory_config: Configuration for MemoryStore
         """
         if hasattr(client, "chat") and hasattr(client.chat, "completions"):
-            self.llm_client = OpenAIClient(client)
+            self.llm_client: LLMClient = OpenAIClient(client)
         elif hasattr(client, "GenerativeModel"):
             self.llm_client = GeminiClient(client)
         else:
@@ -124,7 +133,17 @@ class Calute:
         self.executor = FunctionExecutor(self.orchestrator)
         self.enable_memory = enable_memory
         if enable_memory:
-            self.memory_store = MemoryStore()
+            memory_config = memory_config or {}
+            self.memory_store = MemoryStore(
+                max_short_term=memory_config.get("max_short_term", 100),
+                max_working=memory_config.get("max_working", 10),
+                max_long_term=memory_config.get("max_long_term", 10000),
+                enable_vector_search=memory_config.get("enable_vector_search", False),
+                embedding_dimension=memory_config.get("embedding_dimension", 768),
+                enable_persistence=memory_config.get("enable_persistence", False),
+                persistence_path=memory_config.get("persistence_path"),
+                cache_size=memory_config.get("cache_size", 100),
+            )
         self._setup_default_triggers()
 
     def _setup_default_triggers(self):
@@ -257,6 +276,7 @@ class Calute:
 
         system_parts = []
 
+        assert self.template.sections is not None
         persona_header = self.template.sections.get(PromptSection.SYSTEM, "SYSTEM:")
         instructions = str((agent.instructions() if callable(agent.instructions) else agent.instructions) or "")
         if use_chain_of_thought:
@@ -270,7 +290,11 @@ class Calute:
             )
         system_parts.append(self._format_section(persona_header, instructions, item_prefix=None))
         rules_header = self.template.sections.get(PromptSection.RULES, "RULES:")
-        rules = agent.rules if isinstance(agent.rules, list) else ([agent.rules] if agent.rules else [])
+        rules: list[str] = (
+            agent.rules
+            if isinstance(agent.rules, list)
+            else (agent.rules() if callable(agent.rules) else ([str(agent.rules)] if agent.rules else []))
+        )
         if agent.functions:
             rules.append(
                 "If a function can satisfy the user request, you MUST respond only with a valid tool call in the"
@@ -313,7 +337,7 @@ class Calute:
         context_header = self.template.sections.get(PromptSection.CONTEXT, "CONTEXT:")
         context_content_list = []
         if self.enable_memory and include_memory:
-            memory_context = self.memory_store.consolidate_memories(agent.id)
+            memory_context = self.memory_store.consolidate_memories(agent.id or "default")
             if memory_context:
                 context_content_list.append(f"Relevant information from memory:\n{memory_context}")
         if context_variables:
@@ -562,7 +586,7 @@ class Calute:
             return ""
 
         function_docs = []
-        categorized_functions = {}
+        categorized_functions: dict[str, list[AgentFunction]] = {}
         uncategorized = []
 
         for func in functions:
@@ -736,7 +760,7 @@ class Calute:
                 print(prompt_str)
             else:
                 for msg in prompt_messages.messages:
-                    debug_print(f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
+                    debug_print(True, f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
 
         response = await self.llm_client.generate_completion(
             prompt=prompt_str,
@@ -744,7 +768,7 @@ class Calute:
             temperature=agent.temperature,
             max_tokens=agent.max_tokens,
             top_p=agent.top_p,
-            stop=agent.stop,
+            stop=agent.stop if isinstance(agent.stop, list) else ([agent.stop] if agent.stop else None),
             top_k=agent.top_k,
             min_p=agent.min_p,
             presence_penalty=agent.presence_penalty,
@@ -756,9 +780,9 @@ class Calute:
 
         if not apply_functions:
             if stream:
-                return self._handle_streaming(response, reinvoked_runtime)
+                return self._handle_streaming(response, reinvoked_runtime, agent)
             else:
-                return await self._handle_response(response, reinvoked_runtime)
+                return await self._handle_response(response, reinvoked_runtime, agent)
 
         if stream:
             return self._handle_streaming_with_functions(
@@ -806,7 +830,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
@@ -824,7 +848,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
@@ -834,7 +858,7 @@ class Calute:
         if function_calls_detected:
             yield FunctionDetection(
                 message="Processing function calls...",
-                agent_id=agent.id,
+                agent_id=agent.id or "default",
             )
 
             function_calls = self._extract_function_calls(buffered_content, agent)
@@ -842,7 +866,7 @@ class Calute:
             if function_calls:
                 yield FunctionCallsExtracted(
                     function_calls=[FunctionCallInfo(name=fc.name, id=fc.id) for fc in function_calls],
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                 )
 
                 results = []
@@ -851,7 +875,7 @@ class Calute:
                         function_name=call.name,
                         function_id=call.id,
                         progress=f"{i + 1}/{len(function_calls)}",
-                        agent_id=agent.id,
+                        agent_id=agent.id or "default",
                     )
 
                     result = await self.executor._execute_single_call(call, context, agent)
@@ -863,11 +887,20 @@ class Calute:
                         status=result.status.value,
                         result=result.result if result.status == ExecutionStatus.SUCCESS else None,
                         error=result.error,
-                        agent_id=agent.id,
+                        agent_id=agent.id or "default",
                     )
 
+                # Convert RequestFunctionCall results to ExecutionResult for SwitchContext
+                exec_results = [
+                    ExecutionResult(
+                        status=r.status,
+                        result=r.result if hasattr(r, "result") else None,
+                        error=r.error if hasattr(r, "error") else None,
+                    )
+                    for r in results
+                ]
                 switch_context = SwitchContext(
-                    function_results=results,
+                    function_results=exec_results,
                     execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
                     buffered_content=buffered_content,
                 )
@@ -878,7 +911,7 @@ class Calute:
                     self.orchestrator.switch_agent(target_agent, "Post-execution switch")
 
                     yield AgentSwitch(
-                        from_agent=old_agent,
+                        from_agent=old_agent or "default",
                         to_agent=target_agent,
                         reason="Post-execution switch",
                     )
@@ -892,7 +925,7 @@ class Calute:
                     )
                     yield ReinvokeSignal(
                         message="Reinvoking agent with function results...",
-                        agent_id=agent.id,
+                        agent_id=agent.id or "default",
                     )
 
                     reinvoke_response = await self.create_response(
@@ -907,10 +940,12 @@ class Calute:
                         reinvoke_after_function=True,
                         reinvoked_runtime=True,
                     )
-                    try:
-                        for chunk in reinvoke_response:
-                            yield chunk
-                    except TypeError:
+                    # Handle both sync and async iteration
+                    if isinstance(reinvoke_response, ResponseResult):
+                        # If it's a ResponseResult, we can't iterate over it
+                        pass
+                    else:
+                        # It's an AsyncIterator
                         async for chunk in reinvoke_response:
                             yield chunk
                     return
@@ -918,7 +953,7 @@ class Calute:
         yield Completion(
             final_content=buffered_content,
             function_calls_executed=len(function_calls),
-            agent_id=agent.id,
+            agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
@@ -944,8 +979,17 @@ class Calute:
                 agent,
             )
 
+            # Convert RequestFunctionCall to ExecutionResult for SwitchContext
+            exec_results = [
+                ExecutionResult(
+                    status=r.status,
+                    result=r.result if hasattr(r, "result") else None,
+                    error=r.error if hasattr(r, "error") else None,
+                )
+                for r in results
+            ]
             switch_context = SwitchContext(
-                function_results=results,
+                function_results=exec_results,
                 execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
             )
 
@@ -982,7 +1026,7 @@ class Calute:
             content=content,
             response=response,
             function_calls=function_calls if function_calls else [],
-            agent_id=agent.id,
+            agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-5:],
             reinvoked=False,
         )
@@ -1007,7 +1051,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=False,
@@ -1022,7 +1066,7 @@ class Calute:
 
                 yield StreamChunk(
                     chunk=chunk,
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=False,
@@ -1031,7 +1075,7 @@ class Calute:
         yield Completion(
             final_content=buffered_content,
             function_calls_executed=0,
-            agent_id=agent.id,
+            agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
@@ -1049,7 +1093,7 @@ class Calute:
             content=content,
             response=response,
             function_calls=[],
-            agent_id=agent.id,
+            agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-5:],
             reinvoked=reinvoked_runtime,
         )

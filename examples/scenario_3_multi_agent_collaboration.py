@@ -14,7 +14,7 @@ import openai
 
 from calute import Agent, Calute
 from calute.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 from calute.types import AgentSwitchTrigger
 
 # Initialize OpenAI client
@@ -24,7 +24,7 @@ client = openai.OpenAI(
 )
 
 # Shared memory for all agents
-shared_memory = EnhancedMemoryStore(
+shared_memory = MemoryStore(
     max_short_term=200,
     max_working=50,
     enable_persistence=True,

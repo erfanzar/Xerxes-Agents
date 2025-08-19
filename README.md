@@ -120,10 +120,10 @@ response = await calute.create_response(
 ### Advanced Memory-Enhanced Agent
 
 ```python
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 
 # Create memory store with persistence
-memory = EnhancedMemoryStore(
+memory = MemoryStore(
     max_short_term=100,
     max_long_term=1000,
     enable_persistence=True,
@@ -235,7 +235,7 @@ graph TB
 
 ### Memory System
 
-- **EnhancedMemoryStore**: Advanced memory management with indexing and caching
+- **MemoryStore**: Advanced memory management with indexing and caching
 - **MemoryType**: SHORT_TERM, LONG_TERM, EPISODIC, SEMANTIC, WORKING, PROCEDURAL
 - **Features**: Vector search, similarity matching, consolidation, pattern analysis
 

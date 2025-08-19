@@ -12,6 +12,7 @@ run.py
 env.py
 exp.py
 # Distribution / packaging
+assistant_memory
 .Python
 build/
 develop-eggs/

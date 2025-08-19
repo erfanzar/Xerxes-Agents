@@ -32,7 +32,7 @@ from pathlib import Path
 import openai
 
 from calute import Agent, Calute, MessagesHistory, UserMessage
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 from calute.tools import (
     DataConverter,
     DuckDuckGoSearch,
@@ -56,7 +56,7 @@ client = openai.OpenAI(
 )
 
 # Enhanced memory for search intelligence
-search_memory = EnhancedMemoryStore(
+search_memory = MemoryStore(
     max_short_term=1000,
     max_long_term=20000,
     enable_persistence=True,

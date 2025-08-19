@@ -18,7 +18,7 @@ from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
 from calute.config import CaluteConfig, get_config, set_config
 from calute.errors import CaluteTimeoutError
 from calute.logging_config import get_logger
-from calute.memory import EnhancedMemoryStore, MemoryType
+from calute.memory import MemoryStore, MemoryType
 
 # ================== Custom Functions for Testing ==================
 
@@ -345,7 +345,7 @@ def get_system_info() -> str:
 # ================== Interactive Agent Setup ==================
 
 # Global memory store for the agent
-agent_memory = EnhancedMemoryStore(
+agent_memory = MemoryStore(
     max_short_term=100,
     max_working=10,
     enable_persistence=True,

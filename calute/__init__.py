@@ -89,6 +89,8 @@ __all__ = (
     "FunctionExecutionComplete",
     "FunctionExecutionStart",
     "MemoryEntry",
+    "MemoryEntry",
+    "MemoryStore",  # Deprecated, use MemoryStore
     "MemoryStore",
     "MemoryType",
     "MessagesHistory",

@@ -89,7 +89,7 @@ class OpenAIClient(LLMClient):
         extra_body = {"repetition_penalty": repetition_penalty, "top_k": top_k, "min_p": min_p, **extra_body}
 
         return self.client.chat.completions.create(
-            messages=prompt,
+            messages=prompt,  # type: ignore
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -150,7 +150,7 @@ class GeminiClient(LLMClient):
         **kwargs,
     ) -> tp.Any:
         """Generate a completion using Gemini"""
-        generation_config = {
+        generation_config: dict[str, tp.Any] = {
             "temperature": temperature,
             "max_output_tokens": max_tokens,
             "top_p": top_p,

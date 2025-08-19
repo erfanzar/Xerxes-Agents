@@ -246,14 +246,19 @@ class FunctionExecutor:
         """Execute calls in parallel"""
         tasks = [self._execute_single_call(call, context.copy(), agent) for call in calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        final_results = []
+        final_results: list[RequestFunctionCall] = []
         for call, result in zip(calls, results, strict=False):
             if isinstance(result, Exception):
                 call.status = ExecutionStatus.FAILURE
                 call.error = str(result)
                 final_results.append(call)
-            else:
+            elif isinstance(result, RequestFunctionCall):
                 final_results.append(result)
+            else:
+                # This shouldn't happen, but handle gracefully
+                call.status = ExecutionStatus.FAILURE
+                call.error = "Unexpected result type"
+                final_results.append(call)
         return final_results
 
     async def _execute_pipeline(
@@ -286,7 +291,7 @@ class FunctionExecutor:
     ) -> list[RequestFunctionCall]:
         """Execute calls based on conditions and dependencies"""
         sorted_calls = self._topological_sort(calls)
-        results = []
+        results: list[RequestFunctionCall] = []
 
         for call in sorted_calls:
             if self._dependencies_satisfied(call, results):
@@ -311,7 +316,8 @@ class FunctionExecutor:
                     func, agent_id = {fn.__name__: fn for fn in agent.functions}.get(call.name, None), agent.id
 
                 else:
-                    func, agent_id = self.orchestrator.function_registry.get_function(call.name)
+                    func_result = self.orchestrator.function_registry.get_function(call.name)
+                    func, agent_id = func_result if func_result else (None, None)
 
                     if agent_id != self.orchestrator.current_agent_id:
                         self.orchestrator.switch_agent(agent_id, f"Function {call.name} requires agent {agent_id}")
@@ -339,7 +345,7 @@ class FunctionExecutor:
                 self.execution_history.add_execution(call)
                 break
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 call.retry_count += 1
                 call.error = f"Function timed out after {call.timeout}s"
                 if attempt < call.max_retries:
@@ -401,20 +407,20 @@ try:
     )
 except ImportError:
     # Define stub errors if errors module is not available
-    class AgentError(Exception):
+    class AgentError(Exception):  # type: ignore[no-redef]
         def __init__(self, agent_id: str, message: str):
             super().__init__(f"Agent {agent_id}: {message}")
-    
-    class CaluteTimeoutError(Exception):
+
+    class CaluteTimeoutError(Exception):  # type: ignore[no-redef]
         def __init__(self, func_name: str, timeout: float):
             super().__init__(f"Function {func_name} timed out after {timeout}s")
-    
-    class FunctionExecutionError(Exception):
+
+    class FunctionExecutionError(Exception):  # type: ignore[no-redef]
         def __init__(self, func_name: str, message: str, original_error=None):
             super().__init__(f"Function {func_name}: {message}")
             self.original_error = original_error
-    
-    class ValidationError(Exception):
+
+    class ValidationError(Exception):  # type: ignore[no-redef]
         def __init__(self, param_name: str, message: str):
             super().__init__(f"Validation error for {param_name}: {message}")
 
@@ -594,12 +600,12 @@ class EnhancedAgentOrchestrator:
             )
 
             logger.info(f"Switched from agent {old_agent} to {target_agent_id}")
-    
+
     def register_switch_trigger(self, trigger: AgentSwitchTrigger, handler: tp.Callable):
         """Register a custom switch trigger handler."""
         self.switch_triggers[trigger] = handler
         logger.info(f"Registered switch trigger: {trigger}")
-    
+
     def should_switch_agent(self, context: dict) -> str | None:
         """Determine if agent switching is needed."""
         for trigger, handler in self.switch_triggers.items():
@@ -648,7 +654,7 @@ class EnhancedFunctionExecutor:
                 future = loop.run_in_executor(self.thread_pool, functools.partial(func, **arguments))
                 return await asyncio.wait_for(future, timeout=timeout)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise CaluteTimeoutError(func.__name__, timeout) from None
         except Exception as e:
             raise FunctionExecutionError(func.__name__, str(e), original_error=e) from e
@@ -710,18 +716,20 @@ class EnhancedFunctionExecutor:
                     call.arguments[__CTX_VARS_NAME__] = context_variables or {}
 
                 # Get timeout from agent or use default
-                timeout = agent.function_timeout if agent and hasattr(agent, 'function_timeout') else self.default_timeout
+                timeout = (
+                    agent.function_timeout if agent and hasattr(agent, "function_timeout") else self.default_timeout
+                )
 
                 # Execute with retry
                 result = await self.execute_with_retry(func, call.arguments, timeout)
 
                 call.result = result
                 # Add status if not present
-                if not hasattr(call, 'status'):
+                if not hasattr(call, "status"):
                     call.status = ExecutionStatus.SUCCESS
                 else:
                     call.status = ExecutionStatus.SUCCESS
-                if not hasattr(call, 'execution_time'):
+                if not hasattr(call, "execution_time"):
                     call.execution_time = time.time() - start_time
                 else:
                     call.execution_time = time.time() - start_time
@@ -730,31 +738,31 @@ class EnhancedFunctionExecutor:
 
             except CaluteTimeoutError as e:
                 call.result = f"Function timed out: {e}"
-                if hasattr(call, 'status'):
+                if hasattr(call, "status"):
                     call.status = ExecutionStatus.FAILURE  # Use FAILURE for timeout
-                if hasattr(call, 'error'):
+                if hasattr(call, "error"):
                     call.error = str(e)
-                if hasattr(call, 'execution_time'):
+                if hasattr(call, "execution_time"):
                     call.execution_time = time.time() - start_time
                 logger.error(f"Function {func_name} timed out: {e}")
 
             except (FunctionExecutionError, ValidationError) as e:
                 call.result = f"Function execution error: {e}"
-                if hasattr(call, 'status'):
-                    call.status = ExecutionStatus.FAILURE  
-                if hasattr(call, 'error'):
+                if hasattr(call, "status"):
+                    call.status = ExecutionStatus.FAILURE
+                if hasattr(call, "error"):
                     call.error = str(e)
-                if hasattr(call, 'execution_time'):
+                if hasattr(call, "execution_time"):
                     call.execution_time = time.time() - start_time
                 logger.error(f"Function {func_name} failed: {e}")
 
             except Exception as e:
                 call.result = f"Unexpected error: {e}"
-                if hasattr(call, 'status'):
-                    call.status = ExecutionStatus.FAILURE  
-                if hasattr(call, 'error'):
+                if hasattr(call, "status"):
+                    call.status = ExecutionStatus.FAILURE
+                if hasattr(call, "error"):
                     call.error = f"Unexpected error: {e!s}"
-                if hasattr(call, 'execution_time'):
+                if hasattr(call, "execution_time"):
                     call.execution_time = time.time() - start_time
                 logger.error(f"Unexpected error in {func_name}: {e}", exc_info=True)
 
@@ -763,8 +771,8 @@ class EnhancedFunctionExecutor:
                 if self.orchestrator.enable_metrics:
                     metrics = self.orchestrator.function_registry.get_metrics(func_name)
                     if metrics:
-                        exec_time = getattr(call, 'execution_time', 0)
-                        status = getattr(call, 'status', ExecutionStatus.SUCCESS)
+                        exec_time = getattr(call, "execution_time", 0)
+                        status = getattr(call, "status", ExecutionStatus.SUCCESS)
                         metrics.record_execution(exec_time, status)
 
             return call

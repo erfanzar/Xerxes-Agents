@@ -2,6 +2,155 @@
 
 This document describes all the improvements made to the Calute project and how to use them alongside the existing codebase.
 
+## Overview
+
+Successfully integrated `MemoryStore` as the primary memory system in Calute, replacing the basic `MemoryStore` while maintaining backward compatibility.
+
+## Changes Made
+
+### 1. **Core Integration (calute/calute.py)**
+
+- Updated import to use `MemoryStore` instead of `MemoryStore`
+- Added `memory_config` parameter to Calute's `__init__` method
+- Enhanced initialization with configurable parameters:
+  - `max_short_term`: Maximum short-term memories (default: 100)
+  - `max_working`: Maximum working memories (default: 10)
+  - `max_long_term`: Maximum long-term memories (default: 10000)
+  - `enable_vector_search`: Enable vector-based similarity search
+  - `embedding_dimension`: Dimension for embeddings (default: 768)
+  - `enable_persistence`: Enable saving memories to disk
+  - `persistence_path`: Path for persistent storage
+  - `cache_size`: Size of memory cache (default: 100)
+
+### 2. **Memory Module Updates (calute/memory.py)**
+
+- Renamed original `MemoryStore` to `BasicMemoryStore` with deprecation notice
+- Added missing methods to `MemoryStore`:
+  - `consolidate_memories()`: Consolidates memories into summaries
+  - `search_memories()`: Text-based memory search
+  - `analyze_memory_patterns()`: Analyzes memory usage patterns
+
+### 3. **Export Updates (calute/**init**.py)**
+
+- Updated exports to include both `MemoryStore` and `MemoryEntry`
+- Maintained `MemoryStore` export as alias for backward compatibility
+- Added deprecation comment for clarity
+
+## Features of MemoryStore
+
+### Memory Types
+
+- **SHORT_TERM**: Recent, temporary memories
+- **LONG_TERM**: Important, persistent memories
+- **EPISODIC**: Event-based memories
+- **SEMANTIC**: Fact-based memories
+- **WORKING**: Current task-related memories
+- **PROCEDURAL**: How-to knowledge
+
+### Advanced Features
+
+1. **Indexing System**
+   - By ID, agent, type, tags, timestamp, and importance
+   - Fast retrieval and search capabilities
+
+2. **Caching**
+   - LRU cache for frequently accessed memories
+   - Cache hit/miss tracking for performance monitoring
+
+3. **Memory Consolidation**
+   - Automatic grouping by memory type
+   - Priority-based summarization
+
+4. **Pattern Analysis**
+   - Memory type distribution
+   - Common tags identification
+   - Access pattern tracking
+
+5. **Persistence**
+   - Optional save/load to disk
+   - Pickle-based serialization
+
+## Usage Example
+
+```python
+from calute import Calute, Agent
+
+# Initialize with enhanced memory
+calute = Calute(
+    client=oai_client,
+    enable_memory=True,
+    memory_config={
+        "max_short_term": 50,
+        "max_long_term": 5000,
+        "enable_persistence": True,
+        "persistence_path": "./agent_memories",
+        "cache_size": 200
+    }
+)
+
+# Memory operations
+calute.memory_store.add_memory(
+    content="Important user preference",
+    memory_type=MemoryType.LONG_TERM,
+    agent_id="assistant",
+    importance_score=0.9,
+    tags=["preference", "user"]
+)
+
+# Search memories
+results = calute.memory_store.search_memories(
+    query="preference",
+    agent_id="assistant"
+)
+
+# Get consolidated summary
+summary = calute.memory_store.consolidate_memories("assistant")
+```
+
+## Backward Compatibility
+
+The integration maintains full backward compatibility:
+
+- `MemoryStore` is aliased to `MemoryStore`
+- All existing code using `MemoryStore` continues to work
+- Basic operations remain unchanged
+
+## Testing
+
+All tests pass successfully:
+
+- ✅ Basic memory integration
+- ✅ Advanced memory features
+- ✅ Memory with conversation context
+- ✅ Backward compatibility
+
+## Benefits
+
+1. **Improved Performance**: Indexing and caching reduce memory retrieval time
+2. **Better Organization**: Six memory types for different use cases
+3. **Enhanced Search**: Text-based and tag-based search capabilities
+4. **Persistence**: Optional saving of memories across sessions
+5. **Analytics**: Memory pattern analysis for insights
+6. **Scalability**: Handles up to 10,000 long-term memories efficiently
+
+## Migration Guide
+
+For existing code:
+
+1. No changes required - `MemoryStore` still works
+2. To use new features, access via `MemoryStore` directly
+3. Configure advanced features through `memory_config` parameter
+
+## Future Enhancements
+
+Potential improvements:
+
+1. Vector embeddings for semantic search (when `enable_vector_search=True`)
+2. Memory decay and forgetting mechanisms
+3. Cross-agent memory sharing
+4. Memory compression for long-term storage
+5. Integration with external databases
+
 ## ✅ Completed Improvements
 
 All 19 major improvements have been successfully implemented and tested:
@@ -60,7 +209,7 @@ The improvements are designed to work **alongside** the existing codebase withou
 ```python
 # 1. Import the enhanced modules
 from calute.config import CaluteConfig, set_config
-from calute.memory_enhanced import EnhancedMemoryStore
+from calute.memory_enhanced import MemoryStore
 from calute.executors_enhanced import EnhancedFunctionExecutor
 from calute.logging_config import get_logger
 
@@ -72,7 +221,7 @@ config = CaluteConfig(
 set_config(config)
 
 # 3. Use enhanced memory (drop-in replacement)
-memory = EnhancedMemoryStore(
+memory = MemoryStore(
     max_short_term=100,
     enable_persistence=True,
 )
@@ -90,10 +239,8 @@ You can adopt improvements gradually:
 
 1. **Start with configuration**: Just add a `calute.yaml` config file
 2. **Add logging**: Use `get_logger()` for better debugging
-3. **Enhance memory**: Replace `MemoryStore` with `EnhancedMemoryStore`
+3. **Enhance memory**: Replace `MemoryStore` with `MemoryStore`
 4. **Add monitoring**: Enable metrics and tracing when needed
-
-### Backward Compatibility
 
 All existing code continues to work:
 
@@ -104,7 +251,7 @@ client = openai.OpenAI(...)
 calute = Calute(client)
 
 # Enhanced features are opt-in
-calute.memory = EnhancedMemoryStore()  # Optional upgrade
+calute.memory = MemoryStore()  # Optional upgrade
 ```
 
 ## 📁 File Structure
@@ -156,10 +303,10 @@ agent = Agent(model="gpt-4", functions=[...])
 ### Example 2: Enhanced Memory
 
 ```python
-from calute.memory_enhanced import EnhancedMemoryStore, MemoryType
+from calute.memory_enhanced import MemoryStore, MemoryType
 
 # Create enhanced memory with persistence
-memory = EnhancedMemoryStore(
+memory = MemoryStore(
     enable_persistence=True,
     persistence_path="./memory_store"
 )

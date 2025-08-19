@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Test original and enhanced memory systems
-from calute.memory import EnhancedMemoryEntry, EnhancedMemoryStore, MemoryStore, MemoryType
+from calute.memory import MemoryEntry, MemoryStore, MemoryType
 
 
 def test_original_memory():
@@ -46,16 +46,14 @@ def test_original_memory():
 
 
 def test_enhanced_memory():
-    """Test EnhancedMemoryStore."""
-    print("\n🧪 Testing EnhancedMemoryStore...")
+    """Test MemoryStore."""
+    print("\n🧪 Testing MemoryStore...")
     issues = []
 
     try:
         # Test initialization
-        store = EnhancedMemoryStore(
-            max_short_term=10, max_working=5, enable_persistence=False, enable_vector_search=False
-        )
-        print("  ✓ Initialized EnhancedMemoryStore")
+        store = MemoryStore(max_short_term=10, max_working=5, enable_persistence=False, enable_vector_search=False)
+        print("  ✓ Initialized MemoryStore")
 
     except Exception as e:
         issues.append(f"Initialization failed: {e}")
@@ -105,7 +103,7 @@ def test_enhanced_memory():
         print(f"  ✓ Saved to {temp_path}")
 
         # Load back
-        EnhancedMemoryStore(enable_persistence=True, persistence_path=temp_path)
+        MemoryStore(enable_persistence=True, persistence_path=temp_path)
         print(f"  ✓ Loaded from {temp_path}")
 
         # Clean up
@@ -116,9 +114,9 @@ def test_enhanced_memory():
         traceback.print_exc()
 
     if not issues:
-        print("✅ EnhancedMemoryStore working!")
+        print("✅ MemoryStore working!")
     else:
-        print(f"❌ EnhancedMemoryStore has {len(issues)} issues:")
+        print(f"❌ MemoryStore has {len(issues)} issues:")
         for issue in issues:
             print(f"  - {issue}")
 
@@ -131,7 +129,7 @@ def test_memory_indexing():
     issues = []
 
     try:
-        store = EnhancedMemoryStore(max_short_term=20)
+        store = MemoryStore(max_short_term=20)
 
         # Add memories with different properties
         memories_added = []
@@ -180,7 +178,7 @@ def test_memory_decay():
 
     try:
         # Create a memory entry
-        entry = EnhancedMemoryEntry(
+        entry = MemoryEntry(
             id="test_decay",
             content="Test memory",
             timestamp=datetime.now() - timedelta(hours=10),  # 10 hours old
@@ -211,7 +209,7 @@ def test_edge_cases():
     print("\n🧪 Testing Edge Cases...")
     issues = []
 
-    store = EnhancedMemoryStore(max_short_term=5)
+    store = MemoryStore(max_short_term=5)
 
     # Test 1: Empty retrieval
     try:
