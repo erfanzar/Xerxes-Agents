@@ -33,7 +33,6 @@ try:
 except ImportError:
     HAS_SKLEARN = False
 
-    # Fallback cosine similarity implementation
     def cosine_similarity(X, Y):
         """Simple cosine similarity implementation."""
         X = np.array(X)
@@ -43,11 +42,8 @@ except ImportError:
         if Y.ndim == 1:
             Y = Y.reshape(1, -1)
 
-        # Normalize
         X_norm = X / np.linalg.norm(X, axis=1, keepdims=True)
         Y_norm = Y / np.linalg.norm(Y, axis=1, keepdims=True)
-
-        # Compute similarity
         return np.dot(X_norm, Y_norm.T)
 
 
@@ -57,7 +53,7 @@ class MemoryType(Enum):
     EPISODIC = "episodic"
     SEMANTIC = "semantic"
     WORKING = "working"
-    PROCEDURAL = "procedural"  # Added for enhanced memory
+    PROCEDURAL = "procedural"
 
 
 @dataclass

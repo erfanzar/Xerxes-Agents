@@ -255,7 +255,6 @@ class FunctionExecutor:
             elif isinstance(result, RequestFunctionCall):
                 final_results.append(result)
             else:
-                # This shouldn't happen, but handle gracefully
                 call.status = ExecutionStatus.FAILURE
                 call.error = "Unexpected result type"
                 final_results.append(call)

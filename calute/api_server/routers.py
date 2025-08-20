@@ -21,9 +21,10 @@ from fastapi.responses import StreamingResponse
 
 from calute.types import Agent
 
+from ..types.oai_proxies import ChatCompletionRequest
 from .completion_service import CompletionService
 from .converters import MessageConverter
-from .models import ChatCompletionRequest, HealthResponse, ModelInfo, ModelsResponse
+from .models import HealthResponse, ModelInfo, ModelsResponse
 
 
 class ChatRouter:
@@ -62,7 +63,11 @@ class ChatRouter:
                 if request.stream:
                     return StreamingResponse(
                         self.completion_service.create_streaming_completion(agent, messages_history, request),
-                        media_type="text/plain",
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        },
                     )
                 else:
                     return await self.completion_service.create_completion(agent, messages_history, request)

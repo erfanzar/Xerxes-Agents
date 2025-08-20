@@ -18,11 +18,8 @@ def download_image(url: str) -> Image.Image:
     """
     headers = {"User-Agent": "Calute"}
     try:
-        # Make a request to download the image
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raise an error for bad responses (4xx, 5xx)
-
-        # Convert the image content to a PIL Image
+        response.raise_for_status()
         img = Image.open(io.BytesIO(response.content))
         return img
 

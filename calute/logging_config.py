@@ -173,7 +173,6 @@ class CaluteLogger:
         root_logger = logging.getLogger()
         root_logger.setLevel(self.level)
 
-        # Remove existing handlers
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
@@ -192,7 +191,6 @@ class CaluteLogger:
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
 
-        # File handler if specified
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
 

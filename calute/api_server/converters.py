@@ -15,19 +15,19 @@
 """Message conversion utilities for the API server."""
 
 from calute.types import MessagesHistory
-from calute.types.chat_completion_types import RequestChatMessage
 from calute.types.messages import AssistantMessage, SystemMessage, UserMessage
+from calute.types.oai_proxies import ChatMessage
 
 
 class MessageConverter:
     """Converts between OpenAI and Calute message formats."""
 
     @staticmethod
-    def convert_openai_to_calute(messages: list[RequestChatMessage]) -> MessagesHistory:
+    def convert_openai_to_calute(messages: list[ChatMessage]) -> MessagesHistory:
         """Convert OpenAI messages to Calute format.
 
         Args:
-            messages: List of OpenAI RequestChatMessage objects
+            messages: List of OpenAI ChatMessage objects
 
         Returns:
             MessagesHistory with converted messages

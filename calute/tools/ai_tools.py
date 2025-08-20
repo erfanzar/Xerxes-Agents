@@ -58,7 +58,6 @@ class TextEmbedder(AgentBaseFn):
         texts = [t[:max_length] for t in texts]
 
         if method == "tfidf":
-            # Simple TF-IDF like representation
             try:
                 from sklearn.feature_extraction.text import TfidfVectorizer  # type: ignore
 
@@ -70,7 +69,6 @@ class TextEmbedder(AgentBaseFn):
                 result["features"] = vectorizer.get_feature_names_out().tolist()[:20]
 
             except ImportError:
-                # Fallback to simple word frequency
                 all_words = []
                 for t in texts:
                     all_words.extend(t.lower().split())

@@ -16,22 +16,21 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 import typing
-import uuid
 from collections.abc import AsyncIterator
 
 from ..types import Agent, MessagesHistory, StreamChunk
-from ..types.chat_completion_types import (
+from ..types.oai_proxies import (
+    ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
     ChatCompletionStreamResponse,
     ChatCompletionStreamResponseChoice,
+    ChatMessage,
     DeltaMessage,
-    RequestChatMessage,
     UsageInfo,
 )
-from .models import ChatCompletionRequest
 
 if typing.TYPE_CHECKING:
     from calute import Calute
@@ -86,27 +85,44 @@ class CompletionService:
         Returns:
             ChatCompletionResponse with the agent's response
         """
-        response = await self.calute.create_response(
-            messages=messages,
-            agent_id=agent,
-            stream=False,
-            apply_functions=True,
+        # Run synchronous method in executor to avoid blocking
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            self.calute.run,
+            None,  # prompt
+            None,  # context_variables
+            messages,
+            agent,
+            False,  # stream
+            True,  # apply_functions
         )
-
+        usage_info = response.response.usage
         return ChatCompletionResponse(
             model=request.model,
             choices=[
                 ChatCompletionResponseChoice(
                     index=0,
-                    message=RequestChatMessage(role="assistant", content=response.content or ""),
+                    message=ChatMessage(role="assistant", content=response.content or ""),
                     finish_reason="stop",
                 )
             ],
-            usage=UsageInfo(),
+            usage=UsageInfo(
+                completion_tokens=usage_info.completion_tokens,
+                completion_tokens_details=usage_info.completion_tokens_details,
+                processing_time=usage_info.processing_time,
+                prompt_tokens=usage_info.prompt_tokens,
+                prompt_tokens_details=usage_info.prompt_tokens_details,
+                tokens_per_second=usage_info.tokens_per_second,
+                total_tokens=usage_info.total_tokens,
+            ),
         )
 
     async def create_streaming_completion(
-        self, agent: Agent, messages: MessagesHistory, request: ChatCompletionRequest
+        self,
+        agent: Agent,
+        messages: MessagesHistory,
+        request: ChatCompletionRequest,
     ) -> AsyncIterator[str]:
         """Create a streaming chat completion.
 
@@ -118,24 +134,18 @@ class CompletionService:
         Yields:
             Server-sent events containing streaming response chunks
         """
-        completion_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created_time = int(time.time())
 
-        response_stream = await self.calute.create_response(
+        usage_info = None
+        for chunk in self.calute.run(
             messages=messages,
             agent_id=agent,
             stream=True,
             apply_functions=True,
-        )
-
-        usage_info = None
-        async for chunk in response_stream:
+        ):
             if isinstance(chunk, StreamChunk):
                 usage_info = chunk.chunk.usage
 
                 stream_response = ChatCompletionStreamResponse(
-                    id=completion_id,
-                    created=created_time,
                     model=request.model,
                     choices=[
                         ChatCompletionStreamResponseChoice(
@@ -145,21 +155,19 @@ class CompletionService:
                         )
                     ],
                     usage=UsageInfo(
-                        completion_tokens=getattr(usage_info, "completion_tokens", 0),
-                        completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
-                        processing_time=getattr(usage_info, "processing_time", 0),
-                        prompt_tokens=getattr(usage_info, "prompt_tokens", 0),
-                        prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
-                        tokens_per_second=getattr(usage_info, "tokens_per_second", 0),
-                        total_tokens=getattr(usage_info, "total_tokens", 0),
+                        completion_tokens=usage_info.completion_tokens,
+                        completion_tokens_details=usage_info.completion_tokens_details,
+                        processing_time=usage_info.processing_time,
+                        prompt_tokens=usage_info.prompt_tokens,
+                        prompt_tokens_details=usage_info.prompt_tokens_details,
+                        tokens_per_second=usage_info.tokens_per_second,
+                        total_tokens=usage_info.total_tokens,
                     ),
                 )
-                yield f"data: {stream_response.model_dump_json()}\n\n"
+                yield f"data: {stream_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()
+                await asyncio.sleep(0)
 
-        # Send final chunk
         final_response = ChatCompletionStreamResponse(
-            id=completion_id,
-            created=created_time,
             model=request.model,
             choices=[
                 ChatCompletionStreamResponseChoice(
@@ -169,14 +177,14 @@ class CompletionService:
                 )
             ],
             usage=UsageInfo(
-                completion_tokens=getattr(usage_info, "completion_tokens", 0) if usage_info else 0,
-                completion_tokens_details=getattr(usage_info, "completion_tokens_details", None) if usage_info else None,
-                processing_time=getattr(usage_info, "processing_time", 0) if usage_info else 0,
-                prompt_tokens=getattr(usage_info, "prompt_tokens", 0) if usage_info else 0,
-                prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None) if usage_info else None,
-                tokens_per_second=getattr(usage_info, "tokens_per_second", 0) if usage_info else 0,
-                total_tokens=getattr(usage_info, "total_tokens", 0) if usage_info else 0,
+                completion_tokens=usage_info.completion_tokens,
+                completion_tokens_details=usage_info.completion_tokens_details,
+                processing_time=usage_info.processing_time,
+                prompt_tokens=usage_info.prompt_tokens,
+                prompt_tokens_details=usage_info.prompt_tokens_details,
+                tokens_per_second=usage_info.tokens_per_second,
+                total_tokens=usage_info.total_tokens,
             ),
         )
-        yield f"data: {final_response.model_dump_json()}\n\n"
+        yield f"data: {final_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()
         yield "data: [DONE]\n\n"

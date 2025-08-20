@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import queue
 import re
 import textwrap
+import threading
 import typing as tp
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from dataclasses import dataclass
 from enum import Enum
 
@@ -51,10 +54,8 @@ from .types import (
 from .types.tool_calls import FunctionCall
 from .utils import debug_print, function_to_json
 
-SEP = "  "  # two spaces
-add_depth = (  # noqa
-    lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")
-)
+SEP = "  "
+add_depth = lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")  # noqa
 
 
 class PromptSection(Enum):
@@ -1110,6 +1111,187 @@ class Calute:
 
         for chunk in chunks:
             yield chunk
+
+    def run(
+        self,
+        prompt: str | None = None,
+        context_variables: dict | None = None,
+        messages: MessagesHistory | None = None,
+        agent_id: str | None | Agent = None,
+        stream: bool = True,
+        apply_functions: bool = True,
+        print_formatted_prompt: bool = False,
+        use_instructed_prompt: bool = True,
+        conversation_name_holder: str = "Messages",
+        mention_last_turn: bool = True,
+        reinvoke_after_function: bool = True,
+        reinvoked_runtime: bool = False,
+    ) -> ResponseResult | Generator[StreamingResponseType, None, None]:
+        """
+        Synchronous wrapper for create_response.
+
+        When stream=True: returns a generator that yields streaming responses
+        When stream=False: returns the ResponseResult directly
+        """
+        if stream:
+            return self._run_stream(
+                prompt=prompt,
+                context_variables=context_variables,
+                messages=messages,
+                agent_id=agent_id,
+                apply_functions=apply_functions,
+                print_formatted_prompt=print_formatted_prompt,
+                use_instructed_prompt=use_instructed_prompt,
+                conversation_name_holder=conversation_name_holder,
+                mention_last_turn=mention_last_turn,
+                reinvoke_after_function=reinvoke_after_function,
+                reinvoked_runtime=reinvoked_runtime,
+            )
+        else:
+            return self._run_sync(
+                prompt=prompt,
+                context_variables=context_variables,
+                messages=messages,
+                agent_id=agent_id,
+                apply_functions=apply_functions,
+                print_formatted_prompt=print_formatted_prompt,
+                use_instructed_prompt=use_instructed_prompt,
+                conversation_name_holder=conversation_name_holder,
+                mention_last_turn=mention_last_turn,
+                reinvoke_after_function=reinvoke_after_function,
+                reinvoked_runtime=reinvoked_runtime,
+            )
+
+    def _run_sync(
+        self,
+        prompt: str | None = None,
+        context_variables: dict | None = None,
+        messages: MessagesHistory | None = None,
+        agent_id: str | None | Agent = None,
+        apply_functions: bool = True,
+        print_formatted_prompt: bool = False,
+        use_instructed_prompt: bool = True,
+        conversation_name_holder: str = "Messages",
+        mention_last_turn: bool = True,
+        reinvoke_after_function: bool = True,
+        reinvoked_runtime: bool = False,
+    ) -> ResponseResult:
+        """Internal method for non-streaming synchronous execution."""
+        result_holder = [None]
+        exception_holder = [None]
+
+        def run_async():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                async def async_runner():
+                    try:
+                        response = await self.create_response(
+                            prompt=prompt,
+                            context_variables=context_variables,
+                            messages=messages,
+                            agent_id=agent_id,
+                            stream=False,
+                            apply_functions=apply_functions,
+                            print_formatted_prompt=print_formatted_prompt,
+                            use_instructed_prompt=use_instructed_prompt,
+                            conversation_name_holder=conversation_name_holder,
+                            mention_last_turn=mention_last_turn,
+                            reinvoke_after_function=reinvoke_after_function,
+                            reinvoked_runtime=reinvoked_runtime,
+                        )
+                        result_holder[0] = response
+                    except Exception as e:
+                        exception_holder[0] = e
+
+                loop.run_until_complete(async_runner())
+                loop.close()
+            except Exception as e:
+                exception_holder[0] = e
+
+        thread = threading.Thread(target=run_async, daemon=True)
+        thread.start()
+        thread.join()
+
+        if exception_holder[0]:
+            raise exception_holder[0]
+
+        return result_holder[0]
+
+    def _run_stream(
+        self,
+        prompt: str | None = None,
+        context_variables: dict | None = None,
+        messages: MessagesHistory | None = None,
+        agent_id: str | None | Agent = None,
+        apply_functions: bool = True,
+        print_formatted_prompt: bool = False,
+        use_instructed_prompt: bool = True,
+        conversation_name_holder: str = "Messages",
+        mention_last_turn: bool = True,
+        reinvoke_after_function: bool = True,
+        reinvoked_runtime: bool = False,
+    ) -> Generator[StreamingResponseType, None, None]:
+        """Internal method for streaming execution."""
+        output_queue = queue.Queue()
+        exception_holder = [None]
+
+        def run_async():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                async def async_runner():
+                    try:
+                        response = await self.create_response(
+                            prompt=prompt,
+                            context_variables=context_variables,
+                            messages=messages,
+                            agent_id=agent_id,
+                            stream=True,
+                            apply_functions=apply_functions,
+                            print_formatted_prompt=print_formatted_prompt,
+                            use_instructed_prompt=use_instructed_prompt,
+                            conversation_name_holder=conversation_name_holder,
+                            mention_last_turn=mention_last_turn,
+                            reinvoke_after_function=reinvoke_after_function,
+                            reinvoked_runtime=reinvoked_runtime,
+                        )
+
+                        async for output in response:
+                            output_queue.put(output)
+
+                    except Exception as e:
+                        exception_holder[0] = e
+                    finally:
+                        output_queue.put(None)
+
+                loop.run_until_complete(async_runner())
+                loop.close()
+
+            except Exception as e:
+                exception_holder[0] = e
+                output_queue.put(None)
+
+        thread = threading.Thread(target=run_async, daemon=True)
+        thread.start()
+
+        while True:
+            try:
+                output = output_queue.get(timeout=1.0)
+                if output is None:
+                    break
+                yield output
+            except queue.Empty:
+                if not thread.is_alive():
+                    break
+                continue
+
+        if exception_holder[0]:
+            raise exception_holder[0]
+
+        thread.join(timeout=1.0)
 
 
 __all__ = ("Calute", "PromptSection", "PromptTemplate")

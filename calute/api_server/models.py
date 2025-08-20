@@ -16,36 +16,6 @@
 
 from pydantic import BaseModel
 
-from calute.types.chat_completion_types import RequestChatMessage
-
-
-class ChatCompletionRequest(BaseModel):
-    """Request model for OpenAI-compatible chat completions.
-
-    Attributes:
-        model: The model/agent ID to use for completion
-        messages: List of chat messages in the conversation
-        max_tokens: Maximum tokens to generate (default: 2048)
-        temperature: Sampling temperature 0-2 (default: 0.7)
-        top_p: Nucleus sampling parameter (default: 0.95)
-        n: Number of completions to generate (default: 1)
-        stream: Whether to stream the response (default: False)
-        stop: Stop sequences to end generation
-        presence_penalty: Penalty for new tokens (-2 to 2, default: 0.0)
-        frequency_penalty: Penalty for repeated tokens (-2 to 2, default: 0.0)
-    """
-
-    model: str
-    messages: list[RequestChatMessage]
-    max_tokens: int | None = 2048
-    temperature: float | None = 0.7
-    top_p: float | None = 0.95
-    n: int | None = 1
-    stream: bool | None = False
-    stop: str | list[str] | None = None
-    presence_penalty: float | None = 0.0
-    frequency_penalty: float | None = 0.0
-
 
 class ModelInfo(BaseModel):
     """Information about an available model/agent.
