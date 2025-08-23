@@ -27,6 +27,7 @@ from .cortex import (
 )
 from .executors import AgentOrchestrator
 from .memory import MemoryEntry, MemoryStore, MemoryType
+from .terminal import CaluteTerminal
 from .types import (
     Agent,
     AgentCapability,
@@ -70,6 +71,7 @@ __all__ = (
     "AssistantMessage",
     "AssistantMessageType",
     "Calute",
+    "CaluteTerminal",
     "ChainLink",
     "ChainType",
     "ChatMessageType",
@@ -108,4 +110,4 @@ __all__ = (
     "convert_openai_tools",
 )
 
-__version__ = "0.0.20"
+__version__ = "0.0.22"

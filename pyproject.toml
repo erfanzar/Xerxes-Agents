@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.0.20"
+version = "0.0.22"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }
@@ -32,6 +32,7 @@ dependencies = [
     "google-generativeai>=0.8.0,<0.9.0",
     "fastapi>=0.116.1",
     "uvicorn>=0.35.0",
+    "rich>=14.1.0",
 ]
 
 [project.urls]
@@ -56,7 +57,7 @@ dev = [
 
 # Search and web tools
 search = [
-    "duckduckgo-search>=6.0.0",
+    "ddgs>=9.5.4",
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "feedparser>=6.0.0",

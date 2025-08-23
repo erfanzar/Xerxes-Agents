@@ -400,7 +400,11 @@ class MessagesHistory(CaluteBase):
         r"""Converts the message to the OpenAI format."""
         message = []
         for msg in self.messages:
-            message.append(msg.to_openai())
+            msg = msg.to_openai()
+            if msg.get("role", "") == "system" and msg.get("content", "default") == "":
+                ...
+            else:
+                message.append(msg)
         return {"messages": message}  # type:ignore
 
     @classmethod

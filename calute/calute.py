@@ -51,6 +51,7 @@ from .types import (
     ToolCall,
     ToolMessage,
 )
+from .types.oai_protocols import ToolDefinition
 from .types.tool_calls import FunctionCall
 from .utils import debug_print, function_to_json
 
@@ -265,6 +266,7 @@ class Calute:
         context_variables: dict | None = None,
         messages: MessagesHistory | None = None,
         include_memory: bool = True,
+        use_instructed_prompt: bool = False,
         use_chain_of_thought: bool = False,
         require_reflection: bool = False,
     ) -> MessagesHistory:
@@ -278,7 +280,7 @@ class Calute:
         system_parts = []
 
         assert self.template.sections is not None
-        persona_header = self.template.sections.get(PromptSection.SYSTEM, "SYSTEM:")
+        persona_header = self.template.sections.get(PromptSection.SYSTEM, "SYSTEM:") if use_instructed_prompt else ""
         instructions = str((agent.instructions() if callable(agent.instructions) else agent.instructions) or "")
         if use_chain_of_thought:
             instructions += (
@@ -296,7 +298,7 @@ class Calute:
             if isinstance(agent.rules, list)
             else (agent.rules() if callable(agent.rules) else ([str(agent.rules)] if agent.rules else []))
         )
-        if agent.functions:
+        if agent.functions and use_instructed_prompt:
             rules.append(
                 "If a function can satisfy the user request, you MUST respond only with a valid tool call in the"
                 " specified format. Do not add any conversational text before or after the tool call."
@@ -310,7 +312,7 @@ class Calute:
             )
         system_parts.append(self._format_section(rules_header, rules))
 
-        if agent.functions:
+        if agent.functions and use_instructed_prompt:
             functions_header = self.template.sections.get(PromptSection.FUNCTIONS, "FUNCTIONS:")
 
             tool_format_instruction = textwrap.dedent(
@@ -476,8 +478,40 @@ class Calute:
 
         return function_calls
 
-    def _extract_function_calls(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
+    def _extract_function_calls(
+        self,
+        content: str,
+        agent: Agent,
+        tool_calls: None | list[tp.Any] = None,
+    ) -> list[RequestFunctionCall]:
         """Extract function calls from response content"""
+
+        if tool_calls is not None:
+            function_calls = []
+            for call_ in tool_calls:
+                try:
+                    # Parse arguments if they're a JSON string
+                    arguments = call_.function.arguments
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            # If JSON parsing fails, keep as string
+                            pass
+
+                    function_calls.append(
+                        RequestFunctionCall(
+                            name=call_.function.name,
+                            arguments=arguments,
+                            id=call_.id,
+                            timeout=agent.function_timeout,
+                            max_retries=agent.max_function_retries,
+                        )
+                    )
+                except Exception as e:
+                    debug_print(True, f"Error processing tool call: {e}")
+                    continue
+            return function_calls
         function_calls = self._extract_function_calls_from_xml(content, agent)
         if function_calls:
             return function_calls
@@ -551,9 +585,9 @@ class Calute:
 
     @staticmethod
     def filter_thoughts(response: str, tag: str = "think") -> str:
-        before, after = re.split(rf"<{tag}>.*?</{tag}>", response, maxsplit=1, flags=re.S)
-        string = "".join(before) + "".join(after)
-        return string.strip()
+        """Remove all thinking tags from the response"""
+        filtered = re.sub(rf"<{tag}>.*?</{tag}>", "", response, flags=re.S)
+        return filtered.strip()
 
     def format_function_parameters(self, parameters: dict) -> str:
         """Formats function parameters in a clear, structured way"""
@@ -725,7 +759,7 @@ class Calute:
         stream: bool = True,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
-        use_instructed_prompt: bool = True,
+        use_instructed_prompt: bool = False,
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
         reinvoke_after_function: bool = True,
@@ -740,11 +774,11 @@ class Calute:
             agent = self.orchestrator.get_current_agent()
 
         context_variables = context_variables or {}
-        original_messages = messages.model_copy() if messages else MessagesHistory(messages=[])
         prompt_messages: MessagesHistory = self.manage_messages(
             agent=agent,
             prompt=prompt,
             context_variables=context_variables,
+            use_instructed_prompt=use_instructed_prompt,
             messages=messages,
         )
 
@@ -772,6 +806,7 @@ class Calute:
             stop=agent.stop if isinstance(agent.stop, list) else ([agent.stop] if agent.stop else None),
             top_k=agent.top_k,
             min_p=agent.min_p,
+            tools=None if use_instructed_prompt else [ToolDefinition(**function_to_json(fn)) for fn in agent.functions],
             presence_penalty=agent.presence_penalty,
             frequency_penalty=agent.frequency_penalty,
             repetition_penalty=agent.repetition_penalty,
@@ -790,16 +825,17 @@ class Calute:
                 response,
                 agent,
                 context_variables,
-                original_messages,
+                prompt_messages,  # Pass prompt_messages which includes user's message
                 reinvoke_after_function,
                 reinvoked_runtime,
+                use_instructed_prompt,
             )
         else:
             return await self._handle_response_with_functions(
                 response,
                 agent,
                 context_variables,
-                original_messages,
+                prompt_messages,  # Pass prompt_messages which includes user's message
                 reinvoke_after_function,
                 reinvoked_runtime,
             )
@@ -809,14 +845,17 @@ class Calute:
         response: tp.Any,
         agent: Agent,
         context: dict,
-        original_messages: MessagesHistory,
+        prompt_messages: MessagesHistory,  # Changed from original_messages
         reinvoke_after_function: bool,
         reinvoked_runtime: bool,
+        use_instructed_prompt: bool,
     ) -> AsyncIterator[StreamingResponseType]:
         """Handle streaming response with function calls and optional reinvocation"""
         buffered_content = ""
         function_calls_detected = False
         function_calls = []
+        tool_call_accumulator = {}  # Buffer for accumulating tool call deltas
+
         if isinstance(self.llm_client, OpenAIClient):
             for chunk in response:
                 content = None
@@ -828,6 +867,34 @@ class Calute:
 
                         if not function_calls_detected:
                             function_calls_detected = self._detect_function_calls(buffered_content, agent)
+
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        function_calls_detected = True
+                        for tool_call_delta in delta.tool_calls:
+                            if hasattr(tool_call_delta, "index"):
+                                idx = tool_call_delta.index
+                            elif isinstance(tool_call_delta, dict) and "index" in tool_call_delta:
+                                idx = tool_call_delta["index"]
+                            else:
+                                idx = 0
+                            if idx not in tool_call_accumulator:
+                                tool_call_accumulator[idx] = {
+                                    "id": None,
+                                    "type": "function",
+                                    "function": {"name": None, "arguments": ""},
+                                }
+
+                            # Accumulate the delta data
+                            if tool_call_delta.id:
+                                tool_call_accumulator[idx]["id"] = tool_call_delta.id
+
+                            if tool_call_delta.function:
+                                if tool_call_delta.function.name:
+                                    tool_call_accumulator[idx]["function"]["name"] = tool_call_delta.function.name
+                                if tool_call_delta.function.arguments:
+                                    tool_call_accumulator[idx]["function"]["arguments"] += (
+                                        tool_call_delta.function.arguments
+                                    )
 
                 yield StreamChunk(
                     chunk=chunk,
@@ -857,12 +924,32 @@ class Calute:
                 )
 
         if function_calls_detected:
-            yield FunctionDetection(
-                message="Processing function calls...",
-                agent_id=agent.id or "default",
-            )
+            yield FunctionDetection(message="Processing function calls...", agent_id=agent.id or "default")
 
-            function_calls = self._extract_function_calls(buffered_content, agent)
+            if not function_calls:
+                if tool_call_accumulator:
+                    accumulated_tool_calls = []
+                    for idx in sorted(tool_call_accumulator.keys()):
+                        tc = tool_call_accumulator[idx]
+                        if tc["id"] and tc["function"]["name"]:
+
+                            class ToolCallObj:
+                                def __init__(self, id, function):  # noqa
+                                    self.id = id
+                                    self.function = function
+
+                            class FunctionObj:
+                                def __init__(self, name, arguments):
+                                    self.name = name
+                                    self.arguments = arguments
+
+                            func_obj = FunctionObj(tc["function"]["name"], tc["function"]["arguments"])
+                            tool_call_obj = ToolCallObj(tc["id"], func_obj)
+                            accumulated_tool_calls.append(tool_call_obj)
+
+                    function_calls = self._extract_function_calls(buffered_content, agent, accumulated_tool_calls)
+                else:
+                    function_calls = self._extract_function_calls(buffered_content, agent, None)
 
             if function_calls:
                 yield FunctionCallsExtracted(
@@ -919,7 +1006,7 @@ class Calute:
 
                 if reinvoke_after_function and function_calls:
                     updated_messages = self._build_reinvoke_messages(
-                        original_messages,
+                        prompt_messages,  # Use prompt_messages which has user's message
                         buffered_content,
                         function_calls,
                         results,
@@ -937,7 +1024,7 @@ class Calute:
                         stream=True,
                         apply_functions=True,
                         print_formatted_prompt=False,
-                        use_instructed_prompt=True,
+                        use_instructed_prompt=use_instructed_prompt,
                         reinvoke_after_function=True,
                         reinvoked_runtime=True,
                     )
@@ -963,14 +1050,35 @@ class Calute:
         response: tp.Any,
         agent: Agent,
         context: dict,
-        original_messages: MessagesHistory,
+        prompt_messages: MessagesHistory,  # Changed from original_messages
         reinvoke_after_function: bool,
         reinvoked_runtime: bool,
     ) -> ResponseResult:
         """Handle non-streaming response with function calls and optional reinvocation"""
 
         content = self.llm_client.extract_content(response)
-        function_calls = self._extract_function_calls(content, agent)
+        function_calls = []
+
+        if hasattr(response, "choices") and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, "message") and hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
+                for tool_call in choice.message.tool_calls:
+                    if tool_call.function:
+                        try:
+                            arguments = json.loads(tool_call.function.arguments)
+                            function_call = RequestFunctionCall(
+                                name=tool_call.function.name,
+                                arguments=arguments,
+                                id=tool_call.id,
+                                timeout=agent.function_timeout,
+                                max_retries=agent.max_function_retries,
+                            )
+                            function_calls.append(function_call)
+                        except json.JSONDecodeError:
+                            continue
+
+        if not function_calls:
+            function_calls = self._extract_function_calls(content, agent)
 
         if function_calls:
             results = await self.executor.execute_function_calls(
@@ -999,7 +1107,7 @@ class Calute:
                 self.orchestrator.switch_agent(target_agent, "Post-execution switch")
 
             if reinvoke_after_function:
-                updated_messages = self._build_reinvoke_messages(original_messages, content, function_calls, results)
+                updated_messages = self._build_reinvoke_messages(prompt_messages, content, function_calls, results)
                 reinvoke_response = await self.create_response(
                     prompt=None,
                     context_variables=context,
@@ -1121,7 +1229,7 @@ class Calute:
         stream: bool = True,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
-        use_instructed_prompt: bool = True,
+        use_instructed_prompt: bool = False,
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
         reinvoke_after_function: bool = True,
@@ -1170,7 +1278,7 @@ class Calute:
         agent_id: str | None | Agent = None,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
-        use_instructed_prompt: bool = True,
+        use_instructed_prompt: bool = False,
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
         reinvoke_after_function: bool = True,
@@ -1227,7 +1335,7 @@ class Calute:
         agent_id: str | None | Agent = None,
         apply_functions: bool = True,
         print_formatted_prompt: bool = False,
-        use_instructed_prompt: bool = True,
+        use_instructed_prompt: bool = False,
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
         reinvoke_after_function: bool = True,

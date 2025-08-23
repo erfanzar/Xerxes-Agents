@@ -16,7 +16,7 @@
 
 from calute.types import MessagesHistory
 from calute.types.messages import AssistantMessage, SystemMessage, UserMessage
-from calute.types.oai_proxies import ChatMessage
+from calute.types.oai_protocols import ChatMessage
 
 
 class MessageConverter:

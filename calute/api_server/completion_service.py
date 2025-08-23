@@ -21,7 +21,7 @@ import typing
 from collections.abc import AsyncIterator
 
 from ..types import Agent, MessagesHistory, StreamChunk
-from ..types.oai_proxies import (
+from ..types.oai_protocols import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,

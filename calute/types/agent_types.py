@@ -53,10 +53,10 @@ AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]] | AgentBaseFn  # t
 class Agent(BaseModel):
     """Agent with function calling and switching capabilities"""
 
-    model: str
+    model: str | None = None
     id: str | None = None
     name: str | None = None
-    instructions: str | tp.Callable[[], str] = "You are a helpful agent."
+    instructions: str | tp.Callable[[], str] | None = None
     rules: list[str] | tp.Callable[[], list[str]] | None = None
     examples: list[str] | None = None
     functions: list[tp.Callable | AgentBaseFn] = []
@@ -83,6 +83,37 @@ class Agent(BaseModel):
     switch_triggers: list[AgentSwitchTrigger] = []
     fallback_agent_id: str | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def set_model(self, model_id: str):
+        self.model = model_id
+
+    def set_sampling_params(
+        self,
+        top_p: float | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        top_k: int | None = None,
+        min_p: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        repetition_penalty: float | None = None,
+    ):
+        if top_p is not None:
+            self.top_p = top_p
+        if max_tokens is not None:
+            self.max_tokens = max_tokens
+        if temperature is not None:
+            self.temperature = temperature
+        if top_k is not None:
+            self.top_k = top_k
+        if min_p is not None:
+            self.min_p = min_p
+        if presence_penalty is not None:
+            self.presence_penalty = presence_penalty
+        if frequency_penalty is not None:
+            self.frequency_penalty = frequency_penalty
+        if repetition_penalty is not None:
+            self.repetition_penalty = repetition_penalty
 
     @field_validator("functions")
     def _resolve_static_calls(cls, v):

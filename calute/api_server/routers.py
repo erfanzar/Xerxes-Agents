@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 
 from calute.types import Agent
 
-from ..types.oai_proxies import ChatCompletionRequest
+from ..types.oai_protocols import ChatCompletionRequest
 from .completion_service import CompletionService
 from .converters import MessageConverter
 from .models import HealthResponse, ModelInfo, ModelsResponse

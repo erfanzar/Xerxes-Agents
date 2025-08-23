@@ -469,7 +469,7 @@ class CortexTool(ABC):
                     merged_params.update(kwargs)
                     return base_func(**merged_params)
 
-                return variant_func
+                return variant_func  # noqa
 
             variant_func = make_variant_func(params)
 

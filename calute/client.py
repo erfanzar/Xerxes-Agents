@@ -16,6 +16,8 @@ from __future__ import annotations
 import typing as tp
 from abc import ABC, abstractmethod
 
+from .types.oai_protocols import FunctionDefinition
+
 if tp.TYPE_CHECKING:
     from openai import Client
 
@@ -34,6 +36,7 @@ class LLMClient(ABC):
         stop: list[str] | None,
         top_k: int,
         min_p: float,
+        tools: None | list[FunctionDefinition],
         presence_penalty: float,
         frequency_penalty: float,
         repetition_penalty: float,
@@ -74,6 +77,7 @@ class OpenAIClient(LLMClient):
         stop: list[str] | None,
         top_k: int,
         min_p: float,
+        tools: None | list[FunctionDefinition],
         presence_penalty: float,
         frequency_penalty: float,
         repetition_penalty: float,
@@ -95,6 +99,7 @@ class OpenAIClient(LLMClient):
             max_tokens=max_tokens,
             top_p=top_p,
             stop=stop,
+            tools=tools,
             stream=stream,
             presence_penalty=presence_penalty,
             frequency_penalty=frequency_penalty,
@@ -143,6 +148,7 @@ class GeminiClient(LLMClient):
         stop: list[str] | None,
         top_k: int,
         min_p: float,
+        tools: None | list[FunctionDefinition],
         presence_penalty: float,
         frequency_penalty: float,
         repetition_penalty: float,

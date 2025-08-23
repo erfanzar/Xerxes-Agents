@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import inspect
+import re
 from datetime import datetime
-from typing import Union  # type:ignore
+from typing import Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict
 
@@ -58,10 +59,8 @@ def function_to_json(func) -> dict:
     Converts a Python function into a JSON-serializable dictionary
     that describes the function's signature, including its name,
     description, and parameters.
-
     Args:
         func: The function to be converted.
-
     Returns:
         A dictionary representing the function's signature in JSON format.
     """
@@ -82,33 +81,46 @@ def function_to_json(func) -> dict:
         signature = inspect.signature(func)
     except ValueError as e:
         raise ValueError(f"Failed to get signature for function {func.__name__}: {e!s}") from e
+    docstring = func.__doc__ or ""
+    param_descriptions = {}
+    param_pattern = r"(\w+)(?:\s*\([^)]+\))?\s*:\s*(.+?)(?=\n\s*\w+(?:\s*\([^)]+\))?\s*:|$)"
+    matches = re.findall(param_pattern, docstring, re.DOTALL | re.MULTILINE)
+    for param_name, description in matches:
+        param_descriptions[param_name.strip()] = description.strip()
 
     parameters = {}
     for param in signature.parameters.values():
-        param_type = "string"  # Default type
+        param_info = {"type": "string"}
 
-        # Handle complex type annotations
         if param.annotation != inspect.Parameter.empty:
-            if hasattr(param.annotation, "__origin__"):  # Handle Optional, Union, etc.
-                if param.annotation.__origin__ is type(None):  # Optional type
-                    param_type = "null"
-                elif param.annotation.__origin__ in (list, tuple, set):  # Collection types
-                    param_type = "array"
-                elif param.annotation.__origin__ is Union:  # Union types #type:ignore
-                    param_type = {
-                        "type": "union",
-                        "types": [type_map.get(arg, "string") for arg in param.annotation.__args__],
-                    }
-            elif param.annotation in type_map:  # Handle basic types
-                param_type = type_map[param.annotation]
-            else:  # Fallback for unknown types
-                param_type = (
-                    str(param.annotation.__name__) if hasattr(param.annotation, "__name__") else str(param.annotation)
+            origin = get_origin(param.annotation)
+            args = get_args(param.annotation)
+
+            if origin is Union:
+                non_none_types = [arg for arg in args if arg is not type(None)]
+                if len(non_none_types) == 1 and type(None) in args:
+                    param_info["type"] = type_map.get(non_none_types[0], "string")
+                else:
+                    param_info = {"type": "union", "types": [type_map.get(arg, "string") for arg in args]}
+            elif origin in (list, tuple, set):
+                param_info["type"] = "array"
+                if args:
+                    param_info["items"] = {"type": type_map.get(args[0], "string")}
+            elif param.annotation in type_map:
+                param_info["type"] = type_map[param.annotation]
+            else:
+                param_info["type"] = (
+                    param.annotation.__name__ if hasattr(param.annotation, "__name__") else str(param.annotation)
                 )
 
-        parameters[param.name] = {"type": param_type}
+        if param.name in param_descriptions:
+            param_info["description"] = param_descriptions[param.name]
+        if param.default != inspect.Parameter.empty:
+            pass
 
-    required = [param.name for param in signature.parameters.values() if param.default == inspect._empty]
+        parameters[param.name] = param_info
+
+    required = [param.name for param in signature.parameters.values() if param.default == inspect.Parameter.empty]
 
     return {
         "type": "function",
