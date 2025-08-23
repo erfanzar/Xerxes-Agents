@@ -496,8 +496,11 @@ class Calute:
                         try:
                             arguments = json.loads(arguments)
                         except json.JSONDecodeError:
-                            # If JSON parsing fails, keep as string
-                            pass
+                            try:
+                                arguments = json.loads(arguments + "}")  # try to fix it
+                            except json.JSONDecodeError:
+                                # If JSON parsing fails, keep as string
+                                pass
 
                     function_calls.append(
                         RequestFunctionCall(
