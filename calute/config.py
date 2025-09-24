@@ -141,7 +141,7 @@ class LoggingConfig(BaseModel):
     file_path: str | None = None
     enable_console: bool = True
     enable_file: bool = False
-    max_file_size: int = Field(default=10485760, ge=1024, le=104857600)  # 10MB default
+    max_file_size: int = Field(default=10485760, ge=1024, le=104857600)
     backup_count: int = Field(default=5, ge=1, le=100)
     enable_json_format: bool = False
 
@@ -173,10 +173,8 @@ class CaluteConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
-    # Plugin configurations
     plugins: dict[str, Any] = Field(default_factory=dict)
 
-    # Feature flags
     features: dict[str, bool] = Field(
         default_factory=lambda: {
             "enable_agent_switching": True,
@@ -212,13 +210,10 @@ class CaluteConfig(BaseModel):
         """Load configuration from environment variables."""
         config_dict = {}
 
-        # Parse environment variables with the prefix
         for key, value in os.environ.items():
             if key.startswith(prefix):
-                # Remove prefix and convert to lowercase
                 config_key = key[len(prefix) :].lower()
 
-                # Handle nested configuration
                 parts = config_key.split("_")
                 current = config_dict
 
@@ -227,7 +222,6 @@ class CaluteConfig(BaseModel):
                         current[part] = {}
                     current = current[part]
 
-                # Try to parse the value
                 try:
                     current[parts[-1]] = json.loads(value)
                 except json.JSONDecodeError:
@@ -245,7 +239,6 @@ class CaluteConfig(BaseModel):
         with open(path, "w") as f:
             if path.suffix in [".yaml", ".yml"]:
                 if not HAS_YAML:
-                    # Fallback to JSON if YAML not available
                     path = path.with_suffix(".json")
                     json.dump(data, f, indent=2)
                 else:
@@ -274,7 +267,6 @@ class CaluteConfig(BaseModel):
         return CaluteConfig(**merged)
 
 
-# Global configuration instance
 _config: CaluteConfig | None = None
 
 
@@ -299,7 +291,6 @@ def load_config(path: str | Path | None = None) -> CaluteConfig:
     elif os.getenv("CALUTE_CONFIG_FILE"):
         config = CaluteConfig.from_file(os.getenv("CALUTE_CONFIG_FILE"))
     else:
-        # Try to load from default locations
         default_paths = [
             Path.cwd() / "calute.yaml",
             Path.cwd() / "calute.yml",
@@ -314,7 +305,6 @@ def load_config(path: str | Path | None = None) -> CaluteConfig:
                 config = CaluteConfig.from_file(default_path)
                 break
         else:
-            # Load from environment or use defaults
             config = CaluteConfig.from_env()
 
     set_config(config)

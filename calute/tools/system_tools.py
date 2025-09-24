@@ -89,7 +89,6 @@ class SystemInfo(AgentBaseFn):
                 "free_gb": round(disk.free / (1024**3), 2),
             }
 
-            # Get all disk partitions
             partitions = []
             for partition in psutil.disk_partitions():
                 try:
@@ -113,7 +112,6 @@ class SystemInfo(AgentBaseFn):
                 "interfaces": [],
             }
 
-            # Get network interfaces
             for interface, addresses in psutil.net_if_addrs().items():
                 iface_info = {"name": interface, "addresses": []}
                 for addr in addresses:
@@ -157,7 +155,6 @@ class ProcessManager(AgentBaseFn):
         result = {}
 
         if operation == "list":
-            # List running processes
             processes = []
             for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
                 try:
@@ -172,7 +169,6 @@ class ProcessManager(AgentBaseFn):
                 except (psutil.AccessDenied, psutil.NoSuchProcess):
                     pass
 
-            # Sort by CPU usage
             processes.sort(key=lambda x: x["cpu_percent"] or 0, reverse=True)
             result["processes"] = processes[:limit]
             result["total_count"] = len(processes)
@@ -225,7 +221,6 @@ class ProcessManager(AgentBaseFn):
                 return {"error": "command required for run operation"}
 
             try:
-                # Run command with timeout
                 process = subprocess.run(
                     command,
                     shell=True,
@@ -236,7 +231,7 @@ class ProcessManager(AgentBaseFn):
 
                 result["completed"] = True
                 result["returncode"] = process.returncode
-                result["stdout"] = process.stdout[:5000]  # Limit output
+                result["stdout"] = process.stdout[:5000]
                 result["stderr"] = process.stderr[:5000]
 
             except subprocess.TimeoutExpired:
@@ -324,7 +319,7 @@ class FileSystemTools(AgentBaseFn):
                     if recursive:
                         shutil.rmtree(target)
                     else:
-                        target.rmdir()  # Only works if empty
+                        target.rmdir()
                 else:
                     target.unlink()
 
@@ -343,19 +338,17 @@ class FileSystemTools(AgentBaseFn):
                 matches = []
 
                 if pattern:
-                    # Use glob pattern
                     if recursive:
                         matches = list(search_path.rglob(pattern))
                     else:
                         matches = list(search_path.glob(pattern))
                 else:
-                    # List directory contents
                     if recursive:
                         matches = list(search_path.rglob("*"))
                     else:
                         matches = list(search_path.iterdir())
 
-                result["matches"] = [str(m) for m in matches[:100]]  # Limit results
+                result["matches"] = [str(m) for m in matches[:100]]
                 result["count"] = len(matches)
 
             except Exception as e:
@@ -383,7 +376,6 @@ class FileSystemTools(AgentBaseFn):
                 }
 
                 if target.is_dir():
-                    # Count items in directory
                     items = list(target.iterdir())
                     result["info"]["item_count"] = len(items)
                     result["info"]["subdirs"] = len([i for i in items if i.is_dir()])
@@ -405,7 +397,7 @@ class FileSystemTools(AgentBaseFn):
                     items = []
                     contents = sorted(dir_path.iterdir())
 
-                    for i, item in enumerate(contents[:20]):  # Limit items per level
+                    for i, item in enumerate(contents[:20]):
                         is_last = i == len(contents) - 1
                         current_prefix = "└── " if is_last else "├── "
                         items.append(prefix + current_prefix + item.name)
@@ -470,16 +462,13 @@ class EnvironmentManager(AgentBaseFn):
             result["value"] = str(value)
 
         elif operation == "list":
-            # List all or filtered environment variables
             env_vars = {}
 
             if key:
-                # Filter by prefix
                 for k, v in os.environ.items():
                     if k.startswith(key):
                         env_vars[k] = v
             else:
-                # Common/important variables only
                 important_keys = [
                     "PATH",
                     "HOME",
@@ -548,7 +537,6 @@ class TempFileManager(AgentBaseFn):
 
         if operation == "create_file":
             try:
-                # Create temporary file
                 fd, path = tempfile.mkstemp(suffix=suffix, prefix=prefix or "calute_")
 
                 if content:
@@ -569,7 +557,6 @@ class TempFileManager(AgentBaseFn):
 
         elif operation == "create_dir":
             try:
-                # Create temporary directory
                 path = tempfile.mkdtemp(suffix=suffix, prefix=prefix or "calute_")
 
                 result["path"] = path
@@ -582,11 +569,9 @@ class TempFileManager(AgentBaseFn):
                 return {"error": f"Failed to create temp directory: {e!s}"}
 
         elif operation == "cleanup":
-            # Get temp directory
             temp_dir = tempfile.gettempdir()
             result["temp_dir"] = temp_dir
 
-            # List calute temp files
             calute_temps = []
             for item in Path(temp_dir).iterdir():
                 if item.name.startswith("calute_"):

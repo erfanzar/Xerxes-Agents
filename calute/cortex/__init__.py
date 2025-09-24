@@ -12,22 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .chains import ChainLink, ChainType
-from .cortex import Cortex, CortexToolAdapter
-from .tools import CortexTool, ToolParameter, ToolSignature
-from .types import CortexAgent, CortexOutput, CortexTask, CortexTaskOutput, ProcessType
+"""
+Cortex: A orchestration framework built on top of Calute.
+Provides multi-agent collaboration with tasks, tools, and various execution strategies.
+"""
 
-__all__ = (
+from .agent import CortexAgent
+from .cortex import Cortex, CortexOutput, MemoryConfig
+from .enums import ChainType, ProcessType
+from .memory_integration import CortexMemory
+from .planner import CortexPlanner, ExecutionPlan, PlanStep
+from .task import ChainLink, CortexTask, CortexTaskOutput
+from .tool import CortexTool
+
+__all__ = [
     "ChainLink",
     "ChainType",
     "Cortex",
     "CortexAgent",
+    "CortexMemory",
     "CortexOutput",
+    "CortexPlanner",
     "CortexTask",
     "CortexTaskOutput",
     "CortexTool",
-    "CortexToolAdapter",
+    "ExecutionPlan",
+    "MemoryConfig",
+    "PlanStep",
     "ProcessType",
-    "ToolParameter",
-    "ToolSignature",
-)
+]

@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from .calute import Calute, PromptTemplate
 from .cortex import (
     ChainLink,
     ChainType,
     Cortex,
     CortexAgent,
+    CortexMemory,
     CortexOutput,
     CortexTask,
     CortexTaskOutput,
@@ -26,8 +26,8 @@ from .cortex import (
     ProcessType,
 )
 from .executors import AgentOrchestrator
+from .llms import AnthropicLLM, BaseLLM, GeminiLLM, LLMConfig, LocalLLM, OllamaLLM, OpenAILLM, create_llm
 from .memory import MemoryEntry, MemoryStore, MemoryType
-from .terminal import CaluteTerminal
 from .types import (
     Agent,
     AgentCapability,
@@ -57,8 +57,6 @@ from .types import (
     ToolMessageType,
     UserMessage,
     UserMessageType,
-    convert_openai_messages,
-    convert_openai_tools,
 )
 
 __all__ = (
@@ -68,16 +66,18 @@ __all__ = (
     "AgentOrchestrator",
     "AgentSwitch",
     "AgentSwitchTrigger",
+    "AnthropicLLM",
     "AssistantMessage",
     "AssistantMessageType",
+    "BaseLLM",
     "Calute",
-    "CaluteTerminal",
     "ChainLink",
     "ChainType",
     "ChatMessageType",
     "Completion",
     "Cortex",
     "CortexAgent",
+    "CortexMemory",
     "CortexOutput",
     "CortexTask",
     "CortexTaskOutput",
@@ -90,10 +90,15 @@ __all__ = (
     "FunctionDetection",
     "FunctionExecutionComplete",
     "FunctionExecutionStart",
+    "GeminiLLM",
+    "LLMConfig",
+    "LocalLLM",
     "MemoryEntry",
     "MemoryStore",
     "MemoryType",
     "MessagesHistory",
+    "OllamaLLM",
+    "OpenAILLM",
     "ProcessType",
     "PromptTemplate",
     "RequestFunctionCall",
@@ -106,8 +111,7 @@ __all__ = (
     "ToolMessageType",
     "UserMessage",
     "UserMessageType",
-    "convert_openai_messages",
-    "convert_openai_tools",
+    "create_llm",
 )
 
 __version__ = "0.0.23"

@@ -29,7 +29,6 @@ from calute.tools import (
     WriteFile,
 )
 
-# Global research state
 research_state = {
     "topics": {},
     "sources": [],
@@ -57,7 +56,6 @@ def conduct_research(
     """
     research_id = f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # Define search queries based on depth
     depth_configs = {
         "quick": {"queries": 2, "results_per_query": 3},
         "standard": {"queries": 4, "results_per_query": 5},
@@ -66,7 +64,6 @@ def conduct_research(
 
     config = depth_configs.get(depth, depth_configs["standard"])
 
-    # Generate diverse search queries
     query_types = [
         f"{topic} overview introduction",
         f"{topic} latest research 2024",
@@ -78,7 +75,6 @@ def conduct_research(
 
     queries = query_types[: config["queries"]]
 
-    # Store research session
     research_session = {
         "id": research_id,
         "topic": topic,
@@ -92,16 +88,13 @@ def conduct_research(
 
     research_state["topics"][research_id] = research_session
 
-    # Collect search results (simulated)
     total_results = 0
     key_findings = []
 
     for query in queries:
-        # Simulate search results
         num_results = config["results_per_query"]
         total_results += num_results
 
-        # Extract key information
         if "overview" in query:
             key_findings.append(f"Comprehensive overview of {topic} fundamentals")
         elif "research" in query:
@@ -117,7 +110,6 @@ def conduct_research(
 
     research_session["findings"] = key_findings
 
-    # Format output
     result = f"""🔬 RESEARCH REPORT
 {"=" * 50}
 Research ID: {research_id}
@@ -162,10 +154,8 @@ def analyze_sources(
     source_analyses = []
 
     for url in urls:
-        # Extract domain info
         domain = url.split("/")[2] if len(url.split("/")) > 2 else "unknown"
 
-        # Assess source credibility
         credibility_scores = {
             ".edu": 0.9,
             ".gov": 0.85,
@@ -174,13 +164,12 @@ def analyze_sources(
             ".com": 0.6,
         }
 
-        credibility = 0.5  # Default
+        credibility = 0.5
         for suffix, score in credibility_scores.items():
             if suffix in domain:
                 credibility = score
                 break
 
-        # Determine source type
         source_type = "unknown"
         if ".edu" in domain:
             source_type = "academic"
@@ -200,24 +189,21 @@ def analyze_sources(
             "domain": domain,
             "type": source_type,
             "credibility": credibility,
-            "bias_assessment": "neutral",  # Would be determined by content analysis
-            "relevance": 0.7,  # Would be calculated based on topic match
-            "freshness": "current",  # Would check publication date
+            "bias_assessment": "neutral",
+            "relevance": 0.7,
+            "freshness": "current",
         }
 
         source_analyses.append(analysis)
 
-    # Store analysis
     research_state["sources"].extend(source_analyses)
 
-    # Calculate aggregate metrics
     avg_credibility = sum(s["credibility"] for s in source_analyses) / len(source_analyses) if source_analyses else 0
 
     source_types = defaultdict(int)
     for analysis in source_analyses:
         source_types[analysis["type"]] += 1
 
-    # Format output
     result = f"""📊 SOURCE ANALYSIS
 {"=" * 50}
 Analysis ID: {analysis_id}
@@ -229,7 +215,7 @@ Average Credibility: {avg_credibility:.1%}
 Rating: {"Excellent" if avg_credibility > 0.8 else "Good" if avg_credibility > 0.7 else "Fair" if avg_credibility > 0.6 else "Low"}
 
 SOURCE DISTRIBUTION:
-"""  # noqa
+"""
 
     for source_type, count in source_types.items():
         percentage = (count / len(source_analyses)) * 100
@@ -242,7 +228,7 @@ SOURCE DISTRIBUTION:
         result += f"{cred_icon} {analysis['domain']}\n"
         result += f"   Type: {analysis['type']}, Credibility: {analysis['credibility']:.1%}\n"
 
-    result += f"\nRecommendation: {'Highly reliable sources' if avg_credibility > 0.75 else 'Moderately reliable sources' if avg_credibility > 0.6 else 'Verify with additional sources'}"  # noqa
+    result += f"\nRecommendation: {'Highly reliable sources' if avg_credibility > 0.75 else 'Moderately reliable sources' if avg_credibility > 0.6 else 'Verify with additional sources'}"
 
     return result
 
@@ -268,12 +254,9 @@ def synthesize_information(
     if not findings:
         return "⚠️ No findings to synthesize"
 
-    # Process based on synthesis type
     if synthesis_type == "summary":
-        # Create executive summary
         synthesis = f"Based on analysis of {len(findings)} sources:\n\n"
 
-        # Group findings by theme
         themes = {
             "fundamentals": [],
             "applications": [],
@@ -295,7 +278,6 @@ def synthesize_information(
             else:
                 themes["other"].append(finding)
 
-        # Build synthesis
         if themes["fundamentals"]:
             synthesis += f"KEY CONCEPTS: {'; '.join(themes['fundamentals'][:2])}\n\n"
 
@@ -311,7 +293,6 @@ def synthesize_information(
     elif synthesis_type == "comparison":
         synthesis = "COMPARATIVE ANALYSIS:\n\n"
 
-        # Find commonalities and differences
         common_terms = set()
         all_terms = []
 
@@ -320,13 +301,11 @@ def synthesize_information(
             all_terms.extend(words)
             common_terms.update(words)
 
-        # Count term frequency
         term_freq = defaultdict(int)
         for term in all_terms:
-            if len(term) > 4:  # Filter short words
+            if len(term) > 4:
                 term_freq[term] += 1
 
-        # Get top common themes
         top_terms = sorted(term_freq.items(), key=lambda x: x[1], reverse=True)[:5]
 
         synthesis += "Common Themes:\n"
@@ -338,7 +317,6 @@ def synthesize_information(
     elif synthesis_type == "analysis":
         synthesis = "ANALYTICAL SYNTHESIS:\n\n"
 
-        # Analyze patterns
         patterns = {
             "consensus": [],
             "controversy": [],
@@ -364,11 +342,9 @@ def synthesize_information(
         if patterns["gaps"]:
             synthesis += f"Knowledge Gaps:\n{patterns['gaps'][0]}\n"
 
-    # Truncate if needed
     if len(synthesis) > max_length:
         synthesis = synthesis[:max_length] + "..."
 
-    # Store synthesis
     research_state["findings"].append(
         {
             "id": synthesis_id,
@@ -379,7 +355,6 @@ def synthesize_information(
         }
     )
 
-    # Format output
     result = f"""📝 INFORMATION SYNTHESIS
 {"=" * 50}
 Synthesis ID: {synthesis_id}
@@ -427,10 +402,8 @@ def generate_citations(
 
         citations.append(citation)
 
-    # Store citations
     research_state["citations"].extend(citations)
 
-    # Format output
     result = f"""📚 CITATIONS ({style})
 {"=" * 50}
 Generated {len(citations)} citations:
@@ -465,25 +438,20 @@ def fact_check(claim: str, sources: list[str] | None = None) -> str:
         "analysis": "",
     }
 
-    # Check for common fact patterns
     claim_lower = claim.lower()
 
-    # Look for absolute statements
     if any(word in claim_lower for word in ["always", "never", "all", "none", "every"]):
         check_results["analysis"] = "Contains absolute statement - requires careful verification"
         check_results["confidence"] = 0.3
 
-    # Look for statistical claims
     if any(char.isdigit() for char in claim):
         check_results["analysis"] = "Contains numerical claim - verify specific figures"
         check_results["confidence"] = 0.5
 
-    # Look for temporal claims
     if any(word in claim_lower for word in ["first", "last", "newest", "oldest", "recently"]):
         check_results["analysis"] = "Contains temporal claim - verify timeline"
         check_results["confidence"] = 0.4
 
-    # Simulate source checking
     if sources:
         supporting = len(sources) // 2
         contradicting = len(sources) // 4
@@ -500,7 +468,6 @@ def fact_check(claim: str, sources: list[str] | None = None) -> str:
             check_results["status"] = "disputed"
             check_results["confidence"] = 0.4
 
-    # Format output
     confidence_icon = "🟢" if check_results["confidence"] > 0.6 else "🟡" if check_results["confidence"] > 0.4 else "🔴"
 
     result = f"""🔍 FACT CHECK
@@ -520,7 +487,7 @@ SOURCES:
 ✗ Contradicting: {len(check_results["contradicting_sources"])}
 
 RECOMMENDATION: {"Accept with high confidence" if check_results["confidence"] > 0.7 else "Requires further verification" if check_results["confidence"] > 0.4 else "Treat with skepticism"}
-"""  # noqa
+"""
 
     return result
 
@@ -543,7 +510,6 @@ def create_literature_review(
     """
     review_id = f"review_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # Structure for different scopes
     scope_configs = {
         "focused": {
             "sections": ["Introduction", "Key Studies", "Conclusion"],
@@ -571,7 +537,6 @@ def create_literature_review(
 
     config = scope_configs.get(scope, scope_configs["comprehensive"])
 
-    # Generate review content
     review = f"""LITERATURE REVIEW: {topic}
 {"=" * 60}
 Review ID: {review_id}
@@ -610,17 +575,15 @@ Date: {datetime.now().strftime("%Y-%m-%d")}
 
         elif section == "Discussion":
             review += "The literature reveals both consensus and divergence in understanding. "
-            review += "Areas of agreement include core principles, while debate continues regarding implementation approaches.\n"  # noqa
+            review += "Areas of agreement include core principles, while debate continues regarding implementation approaches.\n"
 
         elif section == "Conclusion":
             review += f"This review of {topic} literature highlights the field's maturity and ongoing evolution. "
             review += "Future research should address identified gaps and emerging challenges.\n"
 
-    # Add references section
     review += f"\n\nREFERENCES\n{'-' * 40}\n"
     review += f"[Bibliography of {max_sources} sources would be listed here]\n"
 
-    # Store review
     research_state["knowledge_base"]["reviews"].append(
         {
             "id": review_id,
@@ -648,24 +611,19 @@ def extract_key_concepts(
     Returns:
         Key concepts with definitions
     """
-    # Simple concept extraction (would use NLP in practice)
+
     import re
 
-    # Find capitalized phrases (potential concepts)
     pattern = r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b"
     potential_concepts = re.findall(pattern, text)
 
-    # Find technical terms (words with specific patterns)
     technical_pattern = r"\b\w+(?:tion|ment|ity|ness|ance|ence|ism|ist|ogy|ics)\b"
     technical_terms = re.findall(technical_pattern, text, re.IGNORECASE)
 
-    # Combine and deduplicate
     all_concepts = list(set(potential_concepts + technical_terms))[:max_concepts]
 
-    # Generate concept definitions (simulated)
     concepts = {}
     for concept in all_concepts:
-        # Simple definition generation
         if "tion" in concept.lower():
             definition = f"The process or result of {concept.lower().replace('tion', 'ting')}"
         elif "ment" in concept.lower():
@@ -677,7 +635,6 @@ def extract_key_concepts(
 
         concepts[concept] = definition
 
-    # Format output
     result = f"""📖 KEY CONCEPTS EXTRACTED
 {"=" * 50}
 Found {len(concepts)} key concepts:

@@ -25,13 +25,10 @@ class DuckDuckGoSearch(AgentBaseFn):
         print("`ddgs` package not found please install with calute[tools]")
         raise e
 
-    # Supported search types
     SearchType = Literal["text", "images", "videos", "news", "maps"]
 
-    # Time filters
     TimeFilter = Literal["day", "week", "month", "year", None]
 
-    # Safe search levels
     SafeSearch = Literal["strict", "moderate", "off"]
 
     @staticmethod
@@ -112,11 +109,9 @@ class DuckDuckGoSearch(AgentBaseFn):
         if n_results is not None and not (1 <= n_results <= 30):
             raise ValueError("n_results must be 1-30")
 
-        # Modify query for file type filtering
         if file_type:
             query = f"{query} filetype:{file_type}"
 
-        # Add domain restrictions to query
         if allowed_domains:
             site_query = " OR ".join(f"site:{domain}" for domain in allowed_domains)
             query = f"{query} ({site_query})"
@@ -247,14 +242,12 @@ class DuckDuckGoSearch(AgentBaseFn):
                     if n_results and len(results) >= n_results:
                         break
 
-        # Apply keyword filters
         if must_include_keywords:
             results = DuckDuckGoSearch._filter_by_keywords(results, must_include_keywords, exclude=False)
 
         if exclude_keywords:
             results = DuckDuckGoSearch._filter_by_keywords(results, exclude_keywords, exclude=True)
 
-        # Update metadata
         search_metadata["total_results"] = len(results)
         search_metadata["filters_applied"]["keyword_filters"] = {
             "must_include": must_include_keywords,

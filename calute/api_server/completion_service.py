@@ -1,3 +1,4 @@
+
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -85,17 +86,17 @@ class CompletionService:
         Returns:
             ChatCompletionResponse with the agent's response
         """
-        # Run synchronous method in executor to avoid blocking
+
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
             self.calute.run,
-            None,  # prompt
-            None,  # context_variables
+            None,
+            None,
             messages,
             agent,
-            False,  # stream
-            True,  # apply_functions
+            False,
+            True,
         )
         usage_info = response.response.usage
         return ChatCompletionResponse(

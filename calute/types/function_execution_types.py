@@ -1,3 +1,4 @@
+
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,11 +34,11 @@ class FunctionCallStrategy(Enum):
 class AgentSwitchTrigger(Enum):
     """Triggers for agent switching"""
 
-    EXPLICIT = "explicit"  # Manual switch via function
-    CAPABILITY_BASED = "capability"  # Switch based on required capabilities
-    LOAD_BALANCING = "load"  # Switch based on agent availability
-    CONTEXT_BASED = "context"  # Switch based on conversation context
-    ERROR_RECOVERY = "error"  # Switch on function execution errors
+    EXPLICIT = "explicit"
+    CAPABILITY_BASED = "capability"
+    LOAD_BALANCING = "load"
+    CONTEXT_BASED = "context"
+    ERROR_RECOVERY = "error"
 
 
 class ExecutionStatus(Enum):
@@ -75,7 +76,7 @@ class AgentCapability:
     description: str
     function_names: list[str] = field(default_factory=list)
     context_requirements: dict[str, tp.Any] = field(default_factory=dict)
-    performance_score: float = 1.0  # For capability-based routing
+    performance_score: float = 1.0
 
 
 @dataclass

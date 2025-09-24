@@ -14,6 +14,7 @@
 
 import asyncio
 import json
+import pprint
 import queue
 import re
 import textwrap
@@ -26,8 +27,8 @@ from enum import Enum
 from calute.types.function_execution_types import ReinvokeSignal
 from calute.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
 
-from .client import GeminiClient, LLMClient, OpenAIClient
 from .executors import AgentOrchestrator, FunctionExecutor
+from .llms import BaseLLM
 from .memory import MemoryStore, MemoryType
 from .types import (
     Agent,
@@ -109,26 +110,22 @@ class Calute:
 
     def __init__(
         self,
-        client: tp.Any,
+        llm: BaseLLM | None = None,
         template: PromptTemplate | None = None,
         enable_memory: bool = False,
         memory_config: dict[str, tp.Any] | None = None,
     ):
         """
-        Initialize Calute with an LLM client.
+        Initialize Calute with an LLM.
 
         Args:
-            client: An instance of OpenAI client or Google Gemini client
+            llm: A BaseLLM instance (preferred over client)
             template: Optional prompt template
             enable_memory: Enable memory system
             memory_config: Configuration for MemoryStore
         """
-        if hasattr(client, "chat") and hasattr(client.chat, "completions"):
-            self.llm_client: LLMClient = OpenAIClient(client)
-        elif hasattr(client, "GenerativeModel"):
-            self.llm_client = GeminiClient(client)
-        else:
-            raise ValueError("Unsupported client type. Must be OpenAI or Gemini.")
+
+        self.llm_client: BaseLLM = llm
 
         self.template = template or PromptTemplate()
         self.orchestrator = AgentOrchestrator()
@@ -195,7 +192,6 @@ class Calute:
         if not self.enable_memory:
             return
 
-        # Add response to short-term memory
         self.memory_store.add_memory(
             content=f"Assistant response: {content[:200]}...",
             memory_type=MemoryType.SHORT_TERM,
@@ -381,7 +377,6 @@ class Calute:
         results: list[RequestFunctionCall],
     ) -> MessagesHistory:
         """Build message history for reinvocation including function results"""
-
         messages = original_messages.messages.copy()
 
         tool_calls = []
@@ -440,7 +435,7 @@ class Calute:
             ... ```'''
             >>> extract_md_block(text)
             [('xml', '<web_research>\n  <arguments>\n    {"query": "quantum computing breakthroughs 2024"}\n  </arguments>\n</web_research>')]
-        """  # noqa
+        """
         pattern = r"```(\w*)\n(.*?)```"
         matches = re.findall(pattern, input_string, re.DOTALL)
         return [(lang, content.strip()) for lang, content in matches]
@@ -478,6 +473,35 @@ class Calute:
 
         return function_calls
 
+    def _convert_function_calls(
+        self,
+        function_calls_data: list[dict[str, tp.Any]],
+        agent: Agent,
+    ) -> list[RequestFunctionCall]:
+        """Convert function call data from LLM streaming to RequestFunctionCall objects"""
+        function_calls = []
+        for call_data in function_calls_data:
+            try:
+                arguments = call_data.get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        pass
+
+                function_calls.append(
+                    RequestFunctionCall(
+                        name=call_data.get("name"),
+                        arguments=arguments,
+                        id=call_data.get("id", f"call_{len(function_calls)}"),
+                        timeout=agent.function_timeout,
+                        max_retries=agent.max_function_retries,
+                    )
+                )
+            except Exception:
+                continue
+        return function_calls
+
     def _extract_function_calls(
         self,
         content: str,
@@ -490,16 +514,14 @@ class Calute:
             function_calls = []
             for call_ in tool_calls:
                 try:
-                    # Parse arguments if they're a JSON string
                     arguments = call_.function.arguments
                     if isinstance(arguments, str):
                         try:
                             arguments = json.loads(arguments)
                         except json.JSONDecodeError:
                             try:
-                                arguments = json.loads(arguments + "}")  # try to fix it
+                                arguments = json.loads(arguments + "}")
                             except json.JSONDecodeError:
-                                # If JSON parsing fails, keep as string
                                 pass
 
                     function_calls.append(
@@ -673,7 +695,7 @@ class Calute:
                 - city (string, required)
                 Description : Name of the city to look up.
 
-            Returns : float   # temperature in Celsius
+            Returns : float
 
             Call-pattern:
                 <get_temperature>
@@ -797,9 +819,9 @@ class Calute:
             if use_instructed_prompt:
                 print(prompt_str)
             else:
-                for msg in prompt_messages.messages:
-                    debug_print(True, f"--- ROLE: {msg.role} ---\n{msg.content}\n---------------------\n")
+                pprint.pprint(prompt_messages.to_openai())
 
+        # Always use streaming internally
         response = await self.llm_client.generate_completion(
             prompt=prompt_str,
             model=agent.model,
@@ -814,33 +836,70 @@ class Calute:
             frequency_penalty=agent.frequency_penalty,
             repetition_penalty=agent.repetition_penalty,
             extra_body=agent.extra_body,
-            stream=stream,
+            stream=True,  # Always use streaming
         )
 
         if not apply_functions:
             if stream:
                 return self._handle_streaming(response, reinvoked_runtime, agent)
             else:
-                return await self._handle_response(response, reinvoked_runtime, agent)
+                # Collect streaming response for non-stream mode
+                collected = []
+                async for chunk in self._handle_streaming(response, reinvoked_runtime, agent):
+                    collected.append(chunk)
+                # Return the last chunk which should have full content
+                return (
+                    collected[-1]
+                    if collected
+                    else ResponseResult(
+                        content="",
+                        response=None,
+                        function_calls=[],
+                        agent_id=agent.id,
+                        execution_history=[],
+                        reinvoked=reinvoked_runtime,
+                    )
+                )
 
         if stream:
             return self._handle_streaming_with_functions(
                 response,
                 agent,
                 context_variables,
-                prompt_messages,  # Pass prompt_messages which includes user's message
+                prompt_messages,
                 reinvoke_after_function,
                 reinvoked_runtime,
                 use_instructed_prompt,
             )
         else:
-            return await self._handle_response_with_functions(
+            # Collect streaming response for non-stream mode
+            collected_content = []
+            function_calls = []
+            execution_history = []
+            async for chunk in self._handle_streaming_with_functions(
                 response,
                 agent,
                 context_variables,
-                prompt_messages,  # Pass prompt_messages which includes user's message
+                prompt_messages,
                 reinvoke_after_function,
                 reinvoked_runtime,
+                use_instructed_prompt,
+            ):
+                if hasattr(chunk, "content") and chunk.content:
+                    collected_content.append(chunk.content)
+                if hasattr(chunk, "function_calls"):
+                    function_calls = chunk.function_calls
+                if hasattr(chunk, "result"):
+                    execution_history.append(chunk)
+
+            final_content = "".join(collected_content)
+            return ResponseResult(
+                content=final_content,
+                response=response,
+                function_calls=function_calls,
+                agent_id=agent.id or "default",
+                execution_history=execution_history,
+                reinvoked=reinvoked_runtime,
             )
 
     async def _handle_streaming_with_functions(
@@ -848,7 +907,7 @@ class Calute:
         response: tp.Any,
         agent: Agent,
         context: dict,
-        prompt_messages: MessagesHistory,  # Changed from original_messages
+        prompt_messages: MessagesHistory,
         reinvoke_after_function: bool,
         reinvoked_runtime: bool,
         use_instructed_prompt: bool,
@@ -857,102 +916,54 @@ class Calute:
         buffered_content = ""
         function_calls_detected = False
         function_calls = []
-        tool_call_accumulator = {}  # Buffer for accumulating tool call deltas
 
-        if isinstance(self.llm_client, OpenAIClient):
-            for chunk in response:
-                content = None
-                if hasattr(chunk, "choices") and chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, "content") and delta.content:
-                        buffered_content += delta.content
-                        content = delta.content
+        if hasattr(response, "__aiter__"):
+            stream_generator = self.llm_client.astream_completion(response, agent)
+            async for chunk_data in stream_generator:
+                content = chunk_data.get("content")
+                buffered_content = chunk_data.get("buffered_content", buffered_content)
 
-                        if not function_calls_detected:
-                            function_calls_detected = self._detect_function_calls(buffered_content, agent)
-
-                    if hasattr(delta, "tool_calls") and delta.tool_calls:
-                        function_calls_detected = True
-                        for tool_call_delta in delta.tool_calls:
-                            if hasattr(tool_call_delta, "index"):
-                                idx = tool_call_delta.index
-                            elif isinstance(tool_call_delta, dict) and "index" in tool_call_delta:
-                                idx = tool_call_delta["index"]
-                            else:
-                                idx = 0
-                            if idx not in tool_call_accumulator:
-                                tool_call_accumulator[idx] = {
-                                    "id": None,
-                                    "type": "function",
-                                    "function": {"name": None, "arguments": ""},
-                                }
-
-                            # Accumulate the delta data
-                            if tool_call_delta.id:
-                                tool_call_accumulator[idx]["id"] = tool_call_delta.id
-
-                            if tool_call_delta.function:
-                                if tool_call_delta.function.name:
-                                    tool_call_accumulator[idx]["function"]["name"] = tool_call_delta.function.name
-                                if tool_call_delta.function.arguments:
-                                    tool_call_accumulator[idx]["function"]["arguments"] += (
-                                        tool_call_delta.function.arguments
-                                    )
+                if content and not function_calls_detected:
+                    function_calls_detected = self._detect_function_calls(buffered_content, agent)
 
                 yield StreamChunk(
-                    chunk=chunk,
+                    chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
                     reinvoked=reinvoked_runtime,
                 )
-        elif isinstance(self.llm_client, GeminiClient):
-            async for chunk in response:
-                content = None
-                if hasattr(chunk, "text") and chunk.text:
-                    buffered_content += chunk.text
-                    content = chunk.text
 
-                    if not function_calls_detected:
-                        function_calls_detected = self._detect_function_calls(buffered_content, agent)
+                if chunk_data.get("is_final") and chunk_data.get("function_calls"):
+                    function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
+                    function_calls_detected = True
+        else:
+            stream_generator = self.llm_client.stream_completion(response, agent)
+            for chunk_data in stream_generator:
+                content = chunk_data.get("content")
+                buffered_content = chunk_data.get("buffered_content", buffered_content)
+
+                if content and not function_calls_detected:
+                    function_calls_detected = self._detect_function_calls(buffered_content, agent)
 
                 yield StreamChunk(
-                    chunk=chunk,
+                    chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=function_calls_detected,
                     reinvoked=reinvoked_runtime,
                 )
+
+                if chunk_data.get("is_final") and chunk_data.get("function_calls"):
+                    function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
+                    function_calls_detected = True
 
         if function_calls_detected:
             yield FunctionDetection(message="Processing function calls...", agent_id=agent.id or "default")
-
             if not function_calls:
-                if tool_call_accumulator:
-                    accumulated_tool_calls = []
-                    for idx in sorted(tool_call_accumulator.keys()):
-                        tc = tool_call_accumulator[idx]
-                        if tc["id"] and tc["function"]["name"]:
-
-                            class ToolCallObj:
-                                def __init__(self, id, function):  # noqa
-                                    self.id = id
-                                    self.function = function
-
-                            class FunctionObj:
-                                def __init__(self, name, arguments):
-                                    self.name = name
-                                    self.arguments = arguments
-
-                            func_obj = FunctionObj(tc["function"]["name"], tc["function"]["arguments"])
-                            tool_call_obj = ToolCallObj(tc["id"], func_obj)
-                            accumulated_tool_calls.append(tool_call_obj)
-
-                    function_calls = self._extract_function_calls(buffered_content, agent, accumulated_tool_calls)
-                else:
-                    function_calls = self._extract_function_calls(buffered_content, agent, None)
+                function_calls = self._extract_function_calls(buffered_content, agent, None)
 
             if function_calls:
                 yield FunctionCallsExtracted(
@@ -981,7 +992,6 @@ class Calute:
                         agent_id=agent.id or "default",
                     )
 
-                # Convert RequestFunctionCall results to ExecutionResult for SwitchContext
                 exec_results = [
                     ExecutionResult(
                         status=r.status,
@@ -1009,7 +1019,7 @@ class Calute:
 
                 if reinvoke_after_function and function_calls:
                     updated_messages = self._build_reinvoke_messages(
-                        prompt_messages,  # Use prompt_messages which has user's message
+                        prompt_messages,
                         buffered_content,
                         function_calls,
                         results,
@@ -1031,12 +1041,10 @@ class Calute:
                         reinvoke_after_function=True,
                         reinvoked_runtime=True,
                     )
-                    # Handle both sync and async iteration
+
                     if isinstance(reinvoke_response, ResponseResult):
-                        # If it's a ResponseResult, we can't iterate over it
                         pass
                     else:
-                        # It's an AsyncIterator
                         async for chunk in reinvoke_response:
                             yield chunk
                     return
@@ -1048,136 +1056,37 @@ class Calute:
             execution_history=self.orchestrator.execution_history[-3:],
         )
 
-    async def _handle_response_with_functions(
-        self,
-        response: tp.Any,
-        agent: Agent,
-        context: dict,
-        prompt_messages: MessagesHistory,  # Changed from original_messages
-        reinvoke_after_function: bool,
-        reinvoked_runtime: bool,
-    ) -> ResponseResult:
-        """Handle non-streaming response with function calls and optional reinvocation"""
-
-        content = self.llm_client.extract_content(response)
-        function_calls = []
-
-        if hasattr(response, "choices") and response.choices:
-            choice = response.choices[0]
-            if hasattr(choice, "message") and hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
-                for tool_call in choice.message.tool_calls:
-                    if tool_call.function:
-                        try:
-                            arguments = json.loads(tool_call.function.arguments)
-                            function_call = RequestFunctionCall(
-                                name=tool_call.function.name,
-                                arguments=arguments,
-                                id=tool_call.id,
-                                timeout=agent.function_timeout,
-                                max_retries=agent.max_function_retries,
-                            )
-                            function_calls.append(function_call)
-                        except json.JSONDecodeError:
-                            continue
-
-        if not function_calls:
-            function_calls = self._extract_function_calls(content, agent)
-
-        if function_calls:
-            results = await self.executor.execute_function_calls(
-                function_calls,
-                agent.function_call_strategy,
-                context,
-                agent,
-            )
-
-            # Convert RequestFunctionCall to ExecutionResult for SwitchContext
-            exec_results = [
-                ExecutionResult(
-                    status=r.status,
-                    result=r.result if hasattr(r, "result") else None,
-                    error=r.error if hasattr(r, "error") else None,
-                )
-                for r in results
-            ]
-            switch_context = SwitchContext(
-                function_results=exec_results,
-                execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
-            )
-
-            target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
-            if target_agent:
-                self.orchestrator.switch_agent(target_agent, "Post-execution switch")
-
-            if reinvoke_after_function:
-                updated_messages = self._build_reinvoke_messages(prompt_messages, content, function_calls, results)
-                reinvoke_response = await self.create_response(
-                    prompt=None,
-                    context_variables=context,
-                    messages=updated_messages,
-                    agent_id=agent,
-                    stream=False,
-                    apply_functions=True,
-                    print_formatted_prompt=False,
-                    use_instructed_prompt=True,
-                    reinvoke_after_function=True,
-                    reinvoked_runtime=True,
-                )
-
-                if isinstance(reinvoke_response, ResponseResult):
-                    return ResponseResult(
-                        content=reinvoke_response.content,
-                        response=reinvoke_response.response,
-                        function_calls=function_calls,
-                        agent_id=reinvoke_response.agent_id,
-                        execution_history=self.orchestrator.execution_history[-5:],
-                        reinvoked=True,
-                    )
-
-        return ResponseResult(
-            content=content,
-            response=response,
-            function_calls=function_calls if function_calls else [],
-            agent_id=agent.id or "default",
-            execution_history=self.orchestrator.execution_history[-5:],
-            reinvoked=False,
-        )
-
     async def _handle_streaming(
         self,
         response: tp.Any,
         reinvoked_runtime,
         agent: Agent,
     ) -> AsyncIterator[StreamingResponseType]:
-        """Handle streaming response with function calls and optional reinvocation"""
+        """Handle streaming response without function calls"""
         buffered_content = ""
 
-        if isinstance(self.llm_client, OpenAIClient):
-            for chunk in response:
-                content = None
-                if hasattr(chunk, "choices") and chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if hasattr(delta, "content") and delta.content:
-                        buffered_content += delta.content
-                        content = delta.content
+        if hasattr(response, "__aiter__"):
+            stream_generator = self.llm_client.astream_completion(response, agent)
+            async for chunk_data in stream_generator:
+                content = chunk_data.get("content")
+                buffered_content = chunk_data.get("buffered_content", buffered_content)
 
                 yield StreamChunk(
-                    chunk=chunk,
+                    chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
                     function_calls_detected=False,
                     reinvoked=reinvoked_runtime,
                 )
-        elif isinstance(self.llm_client, GeminiClient):
-            async for chunk in response:
-                content = None
-                if hasattr(chunk, "text") and chunk.text:
-                    buffered_content += chunk.text
-                    content = chunk.text
+        else:
+            stream_generator = self.llm_client.stream_completion(response, agent)
+            for chunk_data in stream_generator:
+                content = chunk_data.get("content")
+                buffered_content = chunk_data.get("buffered_content", buffered_content)
 
                 yield StreamChunk(
-                    chunk=chunk,
+                    chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
@@ -1190,38 +1099,6 @@ class Calute:
             agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-3:],
         )
-
-    async def _handle_response(
-        self,
-        response: tp.Any,
-        reinvoked_runtime,
-        agent: Agent,
-    ) -> ResponseResult:
-        """Handle non-streaming response"""
-
-        content = self.llm_client.extract_content(response)
-
-        return ResponseResult(
-            content=content,
-            response=response,
-            function_calls=[],
-            agent_id=agent.id or "default",
-            execution_history=self.orchestrator.execution_history[-5:],
-            reinvoked=reinvoked_runtime,
-        )
-
-    async def _process_streaming_chunks(self, response: tp.Any, callback: tp.Any):
-        """Process streaming chunks and yield results"""
-        chunks = []
-
-        def wrapper_callback(content: tp.Any, chunk: tp.Any):
-            result = callback(content, chunk)
-            chunks.append(result)
-
-        await self.llm_client.process_streaming_response(response, wrapper_callback)
-
-        for chunk in chunks:
-            yield chunk
 
     def run(
         self,
@@ -1242,7 +1119,7 @@ class Calute:
         Synchronous wrapper for create_response.
 
         When stream=True: returns a generator that yields streaming responses
-        When stream=False: returns the ResponseResult directly
+        When stream=False: collects the stream and returns the ResponseResult directly
         """
         if stream:
             return self._run_stream(
@@ -1259,7 +1136,8 @@ class Calute:
                 reinvoked_runtime=reinvoked_runtime,
             )
         else:
-            return self._run_sync(
+            # Use streaming internally but collect results
+            stream_generator = self._run_stream(
                 prompt=prompt,
                 context_variables=context_variables,
                 messages=messages,
@@ -1273,62 +1151,38 @@ class Calute:
                 reinvoked_runtime=reinvoked_runtime,
             )
 
-    def _run_sync(
-        self,
-        prompt: str | None = None,
-        context_variables: dict | None = None,
-        messages: MessagesHistory | None = None,
-        agent_id: str | None | Agent = None,
-        apply_functions: bool = True,
-        print_formatted_prompt: bool = False,
-        use_instructed_prompt: bool = False,
-        conversation_name_holder: str = "Messages",
-        mention_last_turn: bool = True,
-        reinvoke_after_function: bool = True,
-        reinvoked_runtime: bool = False,
-    ) -> ResponseResult:
-        """Internal method for non-streaming synchronous execution."""
-        result_holder = [None]
-        exception_holder = [None]
+            # Collect all chunks from the stream
+            collected_content = []
+            response = None
+            function_calls = []
+            agent_id_result = "default"
+            execution_history = []
+            reinvoked = False
 
-        def run_async():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            for chunk in stream_generator:
+                if hasattr(chunk, "content") and chunk.content:
+                    collected_content.append(chunk.content)
+                if hasattr(chunk, "agent_id"):
+                    agent_id_result = chunk.agent_id
+                if hasattr(chunk, "reinvoked"):
+                    reinvoked = chunk.reinvoked
+                if hasattr(chunk, "function_calls"):
+                    function_calls = chunk.function_calls
+                if hasattr(chunk, "result"):
+                    execution_history.append(chunk)
+                response = chunk  # Keep the last chunk as it may have final metadata
 
-                async def async_runner():
-                    try:
-                        response = await self.create_response(
-                            prompt=prompt,
-                            context_variables=context_variables,
-                            messages=messages,
-                            agent_id=agent_id,
-                            stream=False,
-                            apply_functions=apply_functions,
-                            print_formatted_prompt=print_formatted_prompt,
-                            use_instructed_prompt=use_instructed_prompt,
-                            conversation_name_holder=conversation_name_holder,
-                            mention_last_turn=mention_last_turn,
-                            reinvoke_after_function=reinvoke_after_function,
-                            reinvoked_runtime=reinvoked_runtime,
-                        )
-                        result_holder[0] = response
-                    except Exception as e:
-                        exception_holder[0] = e
+            # Build the ResponseResult from collected stream data
+            final_content = "".join(collected_content)
 
-                loop.run_until_complete(async_runner())
-                loop.close()
-            except Exception as e:
-                exception_holder[0] = e
-
-        thread = threading.Thread(target=run_async, daemon=True)
-        thread.start()
-        thread.join()
-
-        if exception_holder[0]:
-            raise exception_holder[0]
-
-        return result_holder[0]
+            return ResponseResult(
+                content=final_content,
+                response=response,
+                function_calls=function_calls,
+                agent_id=agent_id_result,
+                execution_history=execution_history,
+                reinvoked=reinvoked,
+            )
 
     def _run_stream(
         self,

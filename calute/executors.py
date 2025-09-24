@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from __future__ import annotations
 
 import asyncio
 import functools
 import inspect
+import json
 import logging
 import time
 import typing as tp
@@ -48,7 +50,7 @@ class FunctionRegistry:
 
     def __init__(self):
         self._functions: dict[str, tp.Callable] = {}
-        self._function_agents: dict[str, str] = {}  # function_name -> agent_id
+        self._function_agents: dict[str, str] = {}
         self._function_metadata: dict[str, dict] = {}
 
     def register(self, func: tp.Callable, agent_id: str, metadata: dict | None = None):
@@ -244,7 +246,9 @@ class FunctionExecutor:
         agent: Agent | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute calls in parallel"""
-        tasks = [self._execute_single_call(call, context.copy(), agent) for call in calls]
+
+        context_dict = context if isinstance(context, dict) else {}
+        tasks = [self._execute_single_call(call, context_dict.copy(), agent) for call in calls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final_results: list[RequestFunctionCall] = []
         for call, result in zip(calls, results, strict=False):
@@ -268,7 +272,9 @@ class FunctionExecutor:
     ) -> list[RequestFunctionCall]:
         """Execute calls in a pipeline where output of one feeds into next"""
         results = []
-        current_context = context.copy()
+
+        context_dict = context if isinstance(context, dict) else {}
+        current_context = context_dict.copy()
 
         for call in calls:
             result = await self._execute_single_call(call, current_context, agent)
@@ -323,7 +329,10 @@ class FunctionExecutor:
 
                 if not func:
                     raise ValueError(f"Function {call.name} not found")
-                args = call.arguments.copy()
+                if isinstance(call.arguments, dict):
+                    args = call.arguments.copy()
+                elif isinstance(call.arguments, str):
+                    args = {} if call.arguments == "" else json.loads(call.arguments)
                 if __CTX_VARS_NAME__ in func.__code__.co_varnames:
                     args[__CTX_VARS_NAME__] = context
                     if self.execution_history.executions:
@@ -393,10 +402,6 @@ class FunctionExecutor:
         return all(dep in completed_ids for dep in call.dependencies)
 
 
-# ===========================
-# ENHANCED CLASSES BELOW
-# ===========================
-
 try:
     from .errors import (
         AgentError,
@@ -405,7 +410,7 @@ try:
         ValidationError,
     )
 except ImportError:
-    # Define stub errors if errors module is not available
+
     class AgentError(Exception):  # type: ignore[no-redef]
         def __init__(self, agent_id: str, message: str):
             super().__init__(f"Agent {agent_id}: {message}")
@@ -473,7 +478,6 @@ class ExecutionMetrics:
             self.successful_calls += 1
         elif status == ExecutionStatus.FAILURE:
             self.failed_calls += 1
-        # Note: We count timeouts as failures since there's no TIMEOUT status
 
         self.max_duration = max(self.max_duration, duration)
         self.min_duration = min(self.min_duration, duration)
@@ -500,7 +504,6 @@ class EnhancedFunctionRegistry:
         """Register a function with validation."""
         func_name = func.__name__
 
-        # Validate function signature
         sig = inspect.signature(func)
         if not sig.parameters:
             logger.warning(f"Function {func_name} has no parameters")
@@ -521,7 +524,6 @@ class EnhancedFunctionRegistry:
         func = self._functions[func_name]
         sig = inspect.signature(func)
 
-        # Check required parameters
         for param_name, param in sig.parameters.items():
             if param_name == __CTX_VARS_NAME__:
                 continue
@@ -529,7 +531,6 @@ class EnhancedFunctionRegistry:
             if param.default == inspect.Parameter.empty and param_name not in arguments:
                 raise ValidationError(param_name, f"Required parameter missing for {func_name}")
 
-        # Run custom validator if provided
         validator = self._function_validators.get(func_name)
         if validator:
             validator(arguments)
@@ -566,7 +567,6 @@ class EnhancedAgentOrchestrator:
 
             self.agents[agent_id] = agent
 
-            # Register functions with validation
             for func in agent.functions:
                 try:
                     self.function_registry.register(func, agent_id)
@@ -648,7 +648,6 @@ class EnhancedFunctionExecutor:
             if asyncio.iscoroutinefunction(func):
                 return await asyncio.wait_for(func(**arguments), timeout=timeout)
             else:
-                # Run sync function in thread pool
                 loop = asyncio.get_event_loop()
                 future = loop.run_in_executor(self.thread_pool, functools.partial(func, **arguments))
                 return await asyncio.wait_for(future, timeout=timeout)
@@ -674,7 +673,6 @@ class EnhancedFunctionExecutor:
                 return await self.execute_with_timeout(func, arguments, timeout)
 
             except CaluteTimeoutError:
-                # Don't retry timeouts
                 raise
 
             except FunctionExecutionError as e:
@@ -701,29 +699,24 @@ class EnhancedFunctionExecutor:
             func_name = call.name
 
             try:
-                # Get function and validate
                 func = self.orchestrator.function_registry._functions.get(func_name)
 
                 if not func:
                     raise FunctionExecutionError(func_name, "Function not found")
 
-                # Validate arguments
                 self.orchestrator.function_registry.validate_arguments(func_name, call.arguments)
 
-                # Add context variables if needed
                 if __CTX_VARS_NAME__ in inspect.signature(func).parameters:
                     call.arguments[__CTX_VARS_NAME__] = context_variables or {}
 
-                # Get timeout from agent or use default
                 timeout = (
                     agent.function_timeout if agent and hasattr(agent, "function_timeout") else self.default_timeout
                 )
 
-                # Execute with retry
                 result = await self.execute_with_retry(func, call.arguments, timeout)
 
                 call.result = result
-                # Add status if not present
+
                 if not hasattr(call, "status"):
                     call.status = ExecutionStatus.SUCCESS
                 else:
@@ -738,7 +731,7 @@ class EnhancedFunctionExecutor:
             except CaluteTimeoutError as e:
                 call.result = f"Function timed out: {e}"
                 if hasattr(call, "status"):
-                    call.status = ExecutionStatus.FAILURE  # Use FAILURE for timeout
+                    call.status = ExecutionStatus.FAILURE
                 if hasattr(call, "error"):
                     call.error = str(e)
                 if hasattr(call, "execution_time"):
@@ -766,7 +759,6 @@ class EnhancedFunctionExecutor:
                 logger.error(f"Unexpected error in {func_name}: {e}", exc_info=True)
 
             finally:
-                # Record metrics
                 if self.orchestrator.enable_metrics:
                     metrics = self.orchestrator.function_registry.get_metrics(func_name)
                     if metrics:
@@ -791,12 +783,13 @@ class EnhancedFunctionExecutor:
             for call in calls:
                 result = await self.execute_single_call(call, context_variables, agent)
                 results.append(result)
-                # Update context with result for next call
+
                 if result.status == ExecutionStatus.SUCCESS:
                     context_variables[f"{call.name}_result"] = result.result
 
         elif strategy == FunctionCallStrategy.PARALLEL:
-            tasks = [self.execute_single_call(call, context_variables.copy(), agent) for call in calls]
+            context_dict = context_variables if isinstance(context_variables, dict) else {}
+            tasks = [self.execute_single_call(call, context_dict.copy(), agent) for call in calls]
             results = await asyncio.gather(*tasks, return_exceptions=False)
 
         else:
@@ -810,8 +803,7 @@ class EnhancedFunctionExecutor:
         try:
             yield self
         finally:
-            # Cleanup resources
-            await asyncio.sleep(0)  # Allow pending tasks to complete
+            await asyncio.sleep(0)
 
     def __del__(self):
         """Cleanup thread pool on deletion."""

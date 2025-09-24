@@ -90,12 +90,10 @@ class JSONProcessor(AgentBaseFn):
             if not query or data is None:
                 return {"error": "query and data required for query operation"}
             try:
-                # Simple dot notation query support
                 parts = query.split(".")
                 current = data
                 for part in parts:
                     if "[" in part and "]" in part:
-                        # Array index access
                         key = part[: part.index("[")]
                         index = int(part[part.index("[") + 1 : part.index("]")])
                         current = current[key][index] if key else current[index]
@@ -106,7 +104,6 @@ class JSONProcessor(AgentBaseFn):
                 return {"error": f"Query failed: {e!s}"}
 
         elif operation == "transform":
-            # Basic transformations
             if data:
                 result["keys"] = list(data.keys()) if isinstance(data, dict) else None
                 result["type"] = type(data).__name__
@@ -197,16 +194,14 @@ class CSVProcessor(AgentBaseFn):
 
                 if rows:
                     result["headers"] = rows[0]
-                    result["sample_data"] = rows[1 : min(6, len(rows))]  # First 5 data rows
+                    result["sample_data"] = rows[1 : min(6, len(rows))]
 
-                    # Basic statistics
                     result["empty_cells"] = sum(1 for row in rows[1:] for cell in row if not cell.strip())
 
             except Exception as e:
                 return {"error": f"Failed to analyze CSV: {e!s}"}
 
         elif operation == "convert":
-            # Convert CSV to JSON
             if not file_path:
                 return {"error": "file_path required for convert operation"}
             try:
@@ -253,20 +248,17 @@ class TextProcessor(AgentBaseFn):
         result = {}
 
         if operation == "stats":
-            # Text statistics
             result["length"] = len(text)
             result["words"] = len(text.split())
             result["lines"] = len(text.splitlines())
             result["characters_no_spaces"] = len(text.replace(" ", "").replace("\n", "").replace("\t", ""))
 
-            # Character frequency
             char_freq = {}
             for char in text.lower():
                 if char.isalpha():
                     char_freq[char] = char_freq.get(char, 0) + 1
             result["most_common_chars"] = sorted(char_freq.items(), key=lambda x: x[1], reverse=True)[:5]
 
-            # Word frequency
             words = re.findall(r"\b\w+\b", text.lower())
             word_freq = {}
             for word in words:
@@ -274,11 +266,10 @@ class TextProcessor(AgentBaseFn):
             result["most_common_words"] = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
 
         elif operation == "clean":
-            # Clean text
             cleaned = text
-            # Remove extra whitespace
+
             cleaned = re.sub(r"\s+", " ", cleaned)
-            # Remove special characters (optional)
+
             if pattern:
                 cleaned = re.sub(pattern, "", cleaned)
             cleaned = cleaned.strip()
@@ -287,13 +278,11 @@ class TextProcessor(AgentBaseFn):
             result["cleaned_length"] = len(cleaned)
 
         elif operation == "extract":
-            # Extract patterns
             if not pattern:
                 return {"error": "pattern required for extract operation"}
 
             flags = 0 if case_sensitive else re.IGNORECASE
 
-            # Common extraction patterns
             if pattern == "emails":
                 pattern = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
             elif pattern == "urls":
@@ -319,7 +308,6 @@ class TextProcessor(AgentBaseFn):
             result["replacements_made"] = len(re.findall(pattern, text, flags))
 
         elif operation == "split":
-            # Split text
             if pattern:
                 parts = re.split(pattern, text)
             else:
@@ -328,22 +316,20 @@ class TextProcessor(AgentBaseFn):
             result["count"] = len(parts)
 
         elif operation == "format":
-            # Format text
             formatted = text
 
-            # Title case
             if pattern == "title":
                 formatted = text.title()
-            # Upper case
+
             elif pattern == "upper":
                 formatted = text.upper()
-            # Lower case
+
             elif pattern == "lower":
                 formatted = text.lower()
-            # Sentence case
+
             elif pattern == "sentence":
                 formatted = ". ".join(s.capitalize() for s in text.split(". "))
-            # Remove punctuation
+
             elif pattern == "no_punctuation":
                 formatted = re.sub(r"[^\w\s]", "", text)
 
@@ -381,7 +367,6 @@ class DataConverter(AgentBaseFn):
         result = {}
 
         try:
-            # Parse input based on format
             parsed_data = None
 
             if from_format == "json":
@@ -416,7 +401,6 @@ class DataConverter(AgentBaseFn):
             else:
                 parsed_data = data
 
-            # Convert to target format
             if to_format == "json":
                 result["output"] = json.dumps(parsed_data, indent=2)
 
@@ -441,7 +425,6 @@ class DataConverter(AgentBaseFn):
                     result["output"] = json.dumps(parsed_data).encode(encoding).hex()
 
             elif to_format == "hash":
-                # Generate various hashes
                 if not isinstance(parsed_data, str):
                     parsed_data = json.dumps(parsed_data)
                 data_bytes = parsed_data.encode(encoding)
@@ -495,7 +478,6 @@ class DateTimeProcessor(AgentBaseFn):
         result = {}
 
         if operation == "now":
-            # Get current time
             now = datetime.now()
             result["datetime"] = now.isoformat()
             result["timestamp"] = now.timestamp()
@@ -512,7 +494,6 @@ class DateTimeProcessor(AgentBaseFn):
                 return {"error": "date_string required for parse operation"}
 
             try:
-                # Try common formats
                 formats = [
                     "%Y-%m-%d",
                     "%Y-%m-%d %H:%M:%S",
@@ -535,7 +516,6 @@ class DateTimeProcessor(AgentBaseFn):
                         continue
 
                 if not parsed_date:
-                    # Try parsing with dateutil if available
                     try:
                         from dateutil import parser  # type:ignore
 
@@ -559,7 +539,6 @@ class DateTimeProcessor(AgentBaseFn):
                 return {"error": f"Failed to parse date: {e!s}"}
 
         elif operation == "delta":
-            # Calculate date with delta
             base_date = datetime.now()
             if date_string:
                 try:
@@ -587,7 +566,6 @@ class DateTimeProcessor(AgentBaseFn):
                 dt = datetime.fromisoformat(date_string.replace("Z", "+00:00"))
 
                 if not format:
-                    # Provide multiple format options
                     result["formats"] = {
                         "iso": dt.isoformat(),
                         "date": dt.strftime("%Y-%m-%d"),

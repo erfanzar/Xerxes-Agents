@@ -50,7 +50,6 @@ try:
 except ImportError:
     HAS_PROMETHEUS = False
 
-    # Create dummy metrics
     class DummyMetric:
         def labels(self, **kwargs):
             return self
@@ -79,7 +78,6 @@ except ImportError:
     jsonlogger = None
 
 
-# Metrics
 FUNCTION_CALLS = Counter(
     "calute_function_calls_total", "Total number of function calls", ["agent_id", "function_name", "status"]
 )
@@ -121,17 +119,13 @@ class CaluteLogger:
         self.enable_json = enable_json
         self.enable_tracing = enable_tracing
 
-        # Setup structured logging
         self._setup_structlog()
 
-        # Setup standard logging
         self._setup_standard_logging()
 
-        # Setup tracing if enabled
         if enable_tracing:
             self._setup_tracing(trace_endpoint)
 
-        # Get logger
         if HAS_STRUCTLOG:
             self.logger = structlog.get_logger(name)
             self._use_structlog = True
@@ -176,7 +170,6 @@ class CaluteLogger:
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
 
-        # Console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(self.level)
 
@@ -196,7 +189,7 @@ class CaluteLogger:
 
             file_handler = logging.handlers.RotatingFileHandler(
                 self.log_file,
-                maxBytes=10 * 1024 * 1024,  # 10MB
+                maxBytes=10 * 1024 * 1024,
                 backupCount=5,
             )
             file_handler.setLevel(self.level)
@@ -224,17 +217,15 @@ class CaluteLogger:
 
         trace.set_tracer_provider(provider)
 
-        # Instrument logging
         LoggingInstrumentor().instrument(set_logging_format=True)
 
     @staticmethod
     def _add_context_processor(logger, log_method, event_dict):
         """Add contextual information to logs."""
-        # Add timestamp if not present
+
         if "timestamp" not in event_dict:
             event_dict["timestamp"] = datetime.utcnow().isoformat()
 
-        # Add trace context if available
         if HAS_OTEL and trace:
             span = trace.get_current_span()
             if span and span.is_recording():
@@ -256,12 +247,10 @@ class CaluteLogger:
         """Log function call with metrics."""
         status = "success" if error is None else "error"
 
-        # Update metrics
         FUNCTION_CALLS.labels(agent_id=agent_id, function_name=function_name, status=status).inc()
 
         FUNCTION_DURATION.labels(agent_id=agent_id, function_name=function_name).observe(duration)
 
-        # Log event
         log_data = {
             "event": "function_call",
             "agent_id": agent_id,
@@ -272,7 +261,7 @@ class CaluteLogger:
         }
 
         if result is not None:
-            log_data["result"] = str(result)[:200]  # Truncate large results
+            log_data["result"] = str(result)[:200]
 
         if error:
             log_data["error"] = str(error)
@@ -406,7 +395,6 @@ class CaluteLogger:
         return generate_latest()
 
 
-# Global logger instance
 _logger: CaluteLogger | None = None
 
 

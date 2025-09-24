@@ -72,34 +72,29 @@ class WebScraper(AgentBaseFn):
             "title": soup.title.string if soup.title else None,
         }
 
-        # Extract specific content if selector provided
         if selector:
             elements = soup.select(selector)
             result["selected_content"] = [elem.get_text(strip=True) for elem in elements]
         else:
-            # Get main content
             content = soup.get_text(separator=" ", strip=True) if clean_text else response.text
-            result["content"] = content[:10000]  # Limit content size
+            result["content"] = content[:10000]
 
-        # Extract links
         if extract_links:
             links = []
             for link in soup.find_all("a", href=True):
                 href = link["href"]
                 absolute_url = urljoin(url, href)
                 links.append({"text": link.get_text(strip=True), "url": absolute_url})
-            result["links"] = links[:100]  # Limit to 100 links
+            result["links"] = links[:100]
 
-        # Extract images
         if extract_images:
             images = []
             for img in soup.find_all("img", src=True):
                 src = img["src"]
                 absolute_url = urljoin(url, src)
                 images.append({"alt": img.get("alt", ""), "src": absolute_url})
-            result["images"] = images[:50]  # Limit to 50 images
+            result["images"] = images[:50]
 
-        # Extract meta tags
         meta_tags = {}
         for meta in soup.find_all("meta"):
             if meta.get("name"):
@@ -183,11 +178,10 @@ class APIClient(AgentBaseFn):
                     "url": str(response.url),
                 }
 
-                # Try to parse as JSON
                 try:
                     result["json"] = response.json()
                 except (ValueError, TypeError):
-                    result["text"] = response.text[:10000]  # Limit text size
+                    result["text"] = response.text[:10000]
 
                 return result
 
@@ -261,11 +255,10 @@ class RSSReader(AgentBaseFn):
                 }
 
                 if include_content:
-                    # Get content or summary
                     content = entry.get("content", [{}])[0].get("value", "") if "content" in entry else ""
                     if not content:
                         content = entry.get("summary", "")
-                    item["content"] = content[:5000]  # Limit content size
+                    item["content"] = content[:5000]
 
                 result["items"].append(item)
 
@@ -319,7 +312,6 @@ class URLAnalyzer(AgentBaseFn):
             "is_valid": bool(parsed.scheme and parsed.netloc),
         }
 
-        # Extract domain parts
         if parsed.netloc:
             parts = parsed.netloc.split(".")
             if len(parts) >= 2:
@@ -328,7 +320,6 @@ class URLAnalyzer(AgentBaseFn):
                 if len(parts) > 2:
                     result["subdomain"] = ".".join(parts[:-2])
 
-        # Check availability
         if check_availability and result["is_valid"]:
             try:
                 import httpx
@@ -340,7 +331,6 @@ class URLAnalyzer(AgentBaseFn):
             except (httpx.RequestError, httpx.HTTPStatusError, Exception):
                 result["is_available"] = False
 
-        # Extract metadata
         if extract_metadata and result.get("is_available"):
             try:
                 import httpx
@@ -349,22 +339,19 @@ class URLAnalyzer(AgentBaseFn):
                 response = httpx.get(url, timeout=10)
                 soup = BeautifulSoup(response.text, "html.parser")
 
-                # Extract basic metadata
                 result["title"] = soup.title.string if soup.title else None
 
-                # Extract Open Graph tags
                 og_tags = {}
                 for meta in soup.find_all("meta", property=re.compile(r"^og:")):
                     og_tags[meta["property"]] = meta.get("content", "")
                 if og_tags:
                     result["open_graph"] = og_tags
 
-                # Extract description
                 description = soup.find("meta", attrs={"name": "description"})
                 if description:
                     result["description"] = description.get("content", "")
 
             except Exception:
-                pass  # Metadata extraction is optional
+                pass
 
         return result

@@ -51,16 +51,13 @@ class Calculator(AgentBaseFn):
         getcontext().prec = precision
 
         if expression:
-            # Evaluate mathematical expression
             try:
-                # Basic safety check for expression
                 allowed_funcs = ["sin", "cos", "tan", "log", "sqrt", "abs", "pow", "exp"]
 
                 safe_expr = expression
                 for func in allowed_funcs:
                     safe_expr = safe_expr.replace(func, f"math.{func}")
 
-                # Evaluate safely
                 safe_dict = {"__builtins__": {}, "math": math}
                 value = eval(safe_expr, safe_dict)
 
@@ -72,7 +69,6 @@ class Calculator(AgentBaseFn):
                 return {"error": f"Invalid expression: {e!s}"}
 
         elif operation and operands:
-            # Specific operations
             if not operands:
                 return {"error": "operands required for operation"}
 
@@ -160,7 +156,6 @@ class StatisticalAnalyzer(AgentBaseFn):
         result = {"data_points": len(data)}
 
         if analysis_type == "descriptive":
-            # Descriptive statistics
             result["statistics"] = {
                 "count": len(data),
                 "mean": statistics.mean(data),
@@ -175,13 +170,11 @@ class StatisticalAnalyzer(AgentBaseFn):
                 result["statistics"]["std_dev"] = statistics.stdev(data)
                 result["statistics"]["variance"] = statistics.variance(data)
 
-            # Try to calculate mode
             try:
                 result["statistics"]["mode"] = statistics.mode(data)
             except statistics.StatisticsError:
                 result["statistics"]["mode"] = None
 
-            # Quartiles
             sorted_data = sorted(data)
             n = len(sorted_data)
 
@@ -193,7 +186,6 @@ class StatisticalAnalyzer(AgentBaseFn):
 
             result["quartiles"]["IQR"] = result["quartiles"]["Q3"] - result["quartiles"]["Q1"]
 
-            # Outliers (using IQR method)
             iqr = result["quartiles"]["IQR"]
             lower_bound = result["quartiles"]["Q1"] - 1.5 * iqr
             upper_bound = result["quartiles"]["Q3"] + 1.5 * iqr
@@ -201,28 +193,24 @@ class StatisticalAnalyzer(AgentBaseFn):
             outliers = [x for x in data if x < lower_bound or x > upper_bound]
             result["outliers"] = {
                 "count": len(outliers),
-                "values": outliers[:20],  # Limit outliers shown
+                "values": outliers[:20],
                 "lower_bound": lower_bound,
                 "upper_bound": upper_bound,
             }
 
         elif analysis_type == "distribution":
-            # Distribution analysis
             sorted_data = sorted(data)
             mean = statistics.mean(data)
 
-            # Skewness (simple measure)
             if len(data) > 2:
                 std_dev = statistics.stdev(data)
                 n = len(data)
                 skewness = sum((x - mean) ** 3 for x in data) / (n * std_dev**3)
                 result["skewness"] = skewness
 
-                # Kurtosis
                 kurtosis = sum((x - mean) ** 4 for x in data) / (n * std_dev**4) - 3
                 result["kurtosis"] = kurtosis
 
-            # Frequency distribution (bins)
             num_bins = min(10, len(set(data)))
             if num_bins > 1:
                 data_range = max(data) - min(data)
@@ -244,16 +232,13 @@ class StatisticalAnalyzer(AgentBaseFn):
                 result["frequency_distribution"] = bins
 
         elif analysis_type == "correlation":
-            # For correlation, we need paired data
             if len(data) % 2 != 0:
                 return {"error": "Correlation analysis requires paired data (even number of values)"}
 
-            # Split into two series
             n = len(data) // 2
             x_data = data[:n]
             y_data = data[n:]
 
-            # Pearson correlation
             mean_x = statistics.mean(x_data)
             mean_y = statistics.mean(y_data)
 
@@ -534,7 +519,7 @@ class NumberTheory(AgentBaseFn):
                     else:
                         n = 3 * n + 1
                     sequence.append(n)
-                    # Prevent infinite loops
+
                     if len(sequence) > 1000:
                         break
                 return sequence
@@ -575,7 +560,6 @@ class UnitConverter(AgentBaseFn):
         """
         result = {}
 
-        # Conversion factors to base unit
         conversions = {
             "length": {
                 "meter": 1.0,
@@ -647,27 +631,24 @@ class UnitConverter(AgentBaseFn):
             },
         }
 
-        # Temperature conversion (special case)
         if from_unit.lower() in ["celsius", "c", "fahrenheit", "f", "kelvin", "k"]:
 
             def convert_temperature(val, from_u, to_u):
                 from_u = from_u.lower()
                 to_u = to_u.lower()
 
-                # Convert to Celsius first
                 if from_u in ["fahrenheit", "f"]:
                     celsius = (val - 32) * 5 / 9
                 elif from_u in ["kelvin", "k"]:
                     celsius = val - 273.15
-                else:  # Celsius
+                else:
                     celsius = val
 
-                # Convert from Celsius to target
                 if to_u in ["fahrenheit", "f"]:
                     return celsius * 9 / 5 + 32
                 elif to_u in ["kelvin", "k"]:
                     return celsius + 273.15
-                else:  # Celsius
+                else:
                     return celsius
 
             converted = convert_temperature(value, from_unit, to_unit)
@@ -678,7 +659,6 @@ class UnitConverter(AgentBaseFn):
             result["category"] = "temperature"
 
         else:
-            # Find the category if not provided
             if not category:
                 for cat, units in conversions.items():
                     if from_unit.lower() in units and to_unit.lower() in units:
@@ -699,7 +679,6 @@ class UnitConverter(AgentBaseFn):
             if to_factor is None:
                 return {"error": f"Unknown unit: {to_unit} in category {category}"}
 
-            # Convert via base unit
             base_value = value * from_factor
             converted = base_value / to_factor
 

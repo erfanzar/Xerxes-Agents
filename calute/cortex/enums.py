@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Modular OpenAI-compatible API server for Calute agents."""
+"""Enumerations for Cortex framework"""
 
-from .server import CaluteAPIServer
+from enum import Enum
 
-__all__ = ["CaluteAPIServer"]
+
+class ProcessType(Enum):
+    """Execution process types for cortex orchestration"""
+
+    SEQUENTIAL = "sequential"
+    HIERARCHICAL = "hierarchical"
+    PARALLEL = "parallel"
+    CONSENSUS = "consensus"
+    PLANNED = "planned"
+
+
+class ChainType(Enum):
+    """Chain types for task dependencies"""
+
+    LINEAR = "linear"
+    BRANCHING = "branching"
+    LOOP = "loop"

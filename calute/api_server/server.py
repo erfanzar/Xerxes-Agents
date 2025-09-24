@@ -1,3 +1,4 @@
+
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -78,10 +79,8 @@ class CaluteAPIServer:
             version="1.0.0",
         )
 
-        # Initialize services
         self.completion_service = CompletionService(self.calute, can_overide_samplings=can_overide_samplings)
 
-        # Initialize routers (will be set up after first agent registration)
         self._routers_initialized = False
 
     def register_agent(self, agent: Agent) -> None:
@@ -98,14 +97,13 @@ class CaluteAPIServer:
         agent_key = agent.id or agent.name or agent.model
         self.agents[agent_key] = agent
 
-        # Initialize routers after first agent registration
         if not self._routers_initialized:
             self._setup_routers()
             self._routers_initialized = True
 
     def _setup_routers(self) -> None:
         """Set up FastAPI routers for the API endpoints."""
-        # Initialize routers
+
         chat_router = ChatRouter(self.agents, self.completion_service)
         models_router = ModelsRouter(self.agents)
         health_router = HealthRouter(self.agents)

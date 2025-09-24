@@ -1,4 +1,5 @@
-# Copyright 2025 The EasyDeL Author @erfanzar (Erfan Zare Chavoshi).
+
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import time
 import typing as tp
 import uuid
@@ -166,8 +168,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: int | None = 1
     stream: bool | None = False
     stop: str | list[str] | None = None
-    logit_bias: dict[str, float] | None = None  # Ignored by EasyDeL
-    user: str | None = None  # Ignored by EasyDeL
+    logit_bias: dict[str, float] | None = None
+    user: str | None = None
     chat_template_kwargs: dict[str, int | float | str | bool] | None = None
 
 
@@ -206,14 +208,14 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[ChatCompletionStreamResponseChoice]
-    usage: UsageInfo  # Usage info might be included in chunks, often zero until the end
+    usage: UsageInfo
 
 
 class CountTokenRequest(OpenAIBaseModel):
     """Represents a request to the token counting endpoint."""
 
     model: str
-    conversation: str | list[ChatMessage]  # Can count tokens for a string or a list of messages
+    conversation: str | list[ChatMessage]
 
 
 class CompletionRequest(OpenAIBaseModel):
@@ -273,7 +275,7 @@ class CompletionStreamResponseChoice(OpenAIBaseModel):
     """Represents a single choice within a streaming completion response chunk."""
 
     index: int
-    text: str  # The delta text content
+    text: str
     logprobs: CompletionLogprobs | None = None
     finish_reason: tp.Literal["stop", "length", "function_call"] | None = None
 
@@ -282,19 +284,18 @@ class CompletionStreamResponse(OpenAIBaseModel):
     """Represents a streaming response from the completions endpoint."""
 
     id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex}")
-    object: str = "text_completion.chunk"  # Correct object type for streaming
+    object: str = "text_completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    choices: list[CompletionStreamResponseChoice]  # Use the new streaming choice model
+    choices: list[CompletionStreamResponseChoice]
     usage: UsageInfo | None = None
-    # Usage is often None until the final chunk in OAI
 
 
 class FunctionCall(OpenAIBaseModel):
     """Represents a function call in the OpenAI format."""
 
     name: str
-    arguments: str  # JSON string of arguments
+    arguments: str
 
 
 class Function(OpenAIBaseModel):
@@ -327,12 +328,12 @@ class FunctionCallFormat(str, Enum):
         NOUS: Nous XML-style format (<tool_call>)
     """
 
-    OPENAI = "openai"  # OpenAI's format
-    JSON_SCHEMA = "json_schema"  # Direct JSON schema
-    HERMES = "hermes"  # Hermes function calling format
-    GORILLA = "gorilla"  # Gorilla function calling format
-    QWEN = "qwen"  # Qwen's special token format
-    NOUS = "nous"  # Nous XML-style format
+    OPENAI = "openai"
+    JSON_SCHEMA = "json_schema"
+    HERMES = "hermes"
+    GORILLA = "gorilla"
+    QWEN = "qwen"
+    NOUS = "nous"
 
 
 class ExtractedToolCallInformation(OpenAIBaseModel):

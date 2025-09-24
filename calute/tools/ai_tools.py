@@ -54,7 +54,6 @@ class TextEmbedder(AgentBaseFn):
         else:
             texts = text
 
-        # Truncate texts
         texts = [t[:max_length] for t in texts]
 
         if method == "tfidf":
@@ -149,18 +148,14 @@ class TextSimilarity(AgentBaseFn):
         result = {}
 
         if method == "cosine":
-            # Cosine similarity based on word frequencies
             words1 = text1.lower().split()
             words2 = text2.lower().split()
 
-            # Create vocabulary
             vocab = list(set(words1 + words2))
 
-            # Create vectors
             vec1 = [words1.count(w) for w in vocab]
             vec2 = [words2.count(w) for w in vocab]
 
-            # Calculate cosine similarity
             dot_product = sum(a * b for a, b in zip(vec1, vec2, strict=False))
             norm1 = math.sqrt(sum(a * a for a in vec1))
             norm2 = math.sqrt(sum(b * b for b in vec2))
@@ -175,7 +170,6 @@ class TextSimilarity(AgentBaseFn):
             result["scale"] = "0 to 1 (1 = identical)"
 
         elif method == "jaccard":
-            # Jaccard similarity
             set1 = set(text1.lower().split())
             set2 = set(text2.lower().split())
 
@@ -190,7 +184,7 @@ class TextSimilarity(AgentBaseFn):
             result["common_words"] = list(intersection)[:20]
 
         elif method == "levenshtein":
-            # Levenshtein distance
+
             def levenshtein_distance(s1, s2):
                 if len(s1) < len(s2):
                     return levenshtein_distance(s2, s1)
@@ -220,7 +214,6 @@ class TextSimilarity(AgentBaseFn):
             result["scale"] = "0 to 1 (1 = identical)"
 
         elif method == "semantic":
-            # Semantic similarity using embeddings
             try:
                 from sentence_transformers import SentenceTransformer, util  # type:ignore
 
@@ -239,7 +232,6 @@ class TextSimilarity(AgentBaseFn):
         else:
             return {"error": f"Unknown similarity method: {method}"}
 
-        # Add interpretation
         sim = result.get("similarity", 0)
         if sim > 0.9:
             result["interpretation"] = "Very high similarity"
@@ -282,17 +274,14 @@ class TextClassifier(AgentBaseFn):
             if not categories:
                 return {"error": "categories required for keyword classification"}
 
-            # Simple keyword-based classification
             scores = {}
             text_lower = text.lower()
 
             for category in categories:
-                # Count occurrences of category keywords
                 category_words = category.lower().split()
                 score = sum(1 for word in category_words if word in text_lower)
                 scores[category] = score
 
-            # Get top category
             if scores:
                 top_category = max(scores, key=scores.get)
                 result["category"] = top_category
@@ -303,7 +292,6 @@ class TextClassifier(AgentBaseFn):
                 result["confidence"] = 0
 
         elif method == "sentiment":
-            # Simple sentiment analysis
             positive_words = [
                 "good",
                 "great",
@@ -353,8 +341,6 @@ class TextClassifier(AgentBaseFn):
             result["negative_score"] = negative_score
 
         elif method == "language":
-            # Simple language detection
-            # Common words in different languages
             lang_indicators = {
                 "english": ["the", "is", "and", "to", "of", "in", "that", "it", "with", "for"],
                 "spanish": ["el", "la", "de", "que", "en", "los", "las", "por", "con", "para"],
@@ -380,7 +366,6 @@ class TextClassifier(AgentBaseFn):
                 result["confidence"] = 0
 
         elif method == "topic":
-            # Simple topic modeling
             topics = {
                 "technology": [
                     "computer",
@@ -494,18 +479,15 @@ class TextSummarizer(AgentBaseFn):
         result = {}
 
         if method == "extractive":
-            # Simple extractive summarization
             sentences = re.split(r"[.!?]+", text)
             sentences = [s.strip() for s in sentences if s.strip()]
 
             if not sentences:
                 return {"error": "No sentences found in text"}
 
-            # Score sentences based on word frequency
             words = text.lower().split()
             word_freq = Counter(words)
 
-            # Remove common words
             common_words = {
                 "the",
                 "a",
@@ -528,7 +510,6 @@ class TextSummarizer(AgentBaseFn):
             }
             word_freq = {w: f for w, f in word_freq.items() if w not in common_words}
 
-            # Score sentences
             sentence_scores = []
             for sentence in sentences:
                 score = 0
@@ -537,11 +518,9 @@ class TextSummarizer(AgentBaseFn):
                     score += word_freq.get(word, 0)
                 sentence_scores.append((sentence, score / len(words_in_sentence) if words_in_sentence else 0))
 
-            # Get top sentences
             sentence_scores.sort(key=lambda x: x[1], reverse=True)
             summary_sentences = [s for s, _ in sentence_scores[:max_sentences]]
 
-            # Reorder to maintain original flow
             summary = ". ".join(summary_sentences)
             if not summary.endswith("."):
                 summary += "."
@@ -555,10 +534,8 @@ class TextSummarizer(AgentBaseFn):
             result["compression_ratio"] = len(summary) / len(text) if text else 0
 
         elif method == "keywords":
-            # Extract key terms
             words = text.lower().split()
 
-            # Remove common words
             common_words = {
                 "the",
                 "a",
@@ -587,11 +564,9 @@ class TextSummarizer(AgentBaseFn):
             }
             words = [w for w in words if w not in common_words and len(w) > 3]
 
-            # Get most common words
             word_freq = Counter(words)
             keywords = [w for w, _ in word_freq.most_common(10)]
 
-            # Extract key phrases (bigrams)
             bigrams = []
             words_list = text.lower().split()
             for i in range(len(words_list) - 1):
@@ -606,7 +581,6 @@ class TextSummarizer(AgentBaseFn):
             result["summary"] = f"Key topics: {', '.join(keywords[:5])}"
 
         elif method == "statistics":
-            # Statistical summary
             sentences = re.split(r"[.!?]+", text)
             sentences = [s.strip() for s in sentences if s.strip()]
 
@@ -651,7 +625,6 @@ class EntityExtractor(AgentBaseFn):
         """
         result = {"entities": {}}
 
-        # Simple pattern-based entity extraction
         patterns = {
             "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
             "urls": r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+",
@@ -664,10 +637,8 @@ class EntityExtractor(AgentBaseFn):
             "currency": r"[$€£¥][\d,]+(?:\.\d{2})?",
         }
 
-        # Names pattern (simple capitalized words)
         name_pattern = r"\b[A-Z][a-z]+(?: [A-Z][a-z]+)+\b"
 
-        # Extract based on requested types or all
         if not entity_types:
             entity_types = [*list(patterns.keys()), "names"]
 
@@ -679,7 +650,6 @@ class EntityExtractor(AgentBaseFn):
                 matches = re.findall(patterns[entity_type], text)
                 result["entities"][entity_type] = list(set(matches))[:20]
 
-        # Count total entities
         total = sum(len(v) for v in result["entities"].values())
         result["total_entities"] = total
 

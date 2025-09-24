@@ -1,3 +1,4 @@
+
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -49,15 +50,12 @@ class ChatRouter:
         async def chat_completions(request: ChatCompletionRequest):
             """Handle chat completion requests (OpenAI compatible)."""
             try:
-                # Find the agent by model name
                 agent = self.agents.get(request.model)
                 if not agent:
                     raise HTTPException(status_code=404, detail=f"Model {request.model} not found")
 
-                # Convert OpenAI messages to Calute format
                 messages_history = MessageConverter.convert_openai_to_calute(request.messages)
 
-                # Apply request parameters to agent
                 self.completion_service.apply_request_parameters(agent, request)
 
                 if request.stream:

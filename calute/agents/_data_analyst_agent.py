@@ -1,3 +1,4 @@
+
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 
 import json
 from collections import defaultdict
@@ -27,7 +27,6 @@ from calute.tools import (
     WriteFile,
 )
 
-# Global analysis state
 analysis_state = {
     "datasets": {},
     "analyses": {},
@@ -52,12 +51,10 @@ def analyze_dataset(
     """
     analysis_id = f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # Parse data if string
     if isinstance(data, str):
         try:
             data = json.loads(data)
         except json.JSONDecodeError:
-            # Try to parse as CSV-like data
             lines = data.strip().split("\n")
             if lines:
                 headers = lines[0].split(",")
@@ -69,19 +66,16 @@ def analyze_dataset(
     if not data:
         return "⚠️ No data provided for analysis"
 
-    # Extract basic statistics
     num_records = len(data) if isinstance(data, list) else 0
 
-    # Analyze data structure
     if isinstance(data, list) and data:
         sample = data[0]
         columns = list(sample.keys()) if isinstance(sample, dict) else []
 
-        # Analyze data types
         data_types = {}
         for col in columns:
             values = [row.get(col) for row in data if isinstance(row, dict)]
-            # Determine type based on values
+
             sample_val = next((v for v in values if v is not None), None)
             if sample_val is not None:
                 if isinstance(sample_val, int | float):
@@ -94,14 +88,12 @@ def analyze_dataset(
         columns = []
         data_types = {}
 
-    # Perform analysis based on type
     insights = []
 
     if analysis_type == "descriptive":
         insights.append(f"Dataset contains {num_records} records")
         insights.append(f"Number of features: {len(columns)}")
 
-        # Calculate basic stats for numeric columns
         for col in columns:
             if data_types.get(col) == "numeric":
                 values = []
@@ -119,12 +111,10 @@ def analyze_dataset(
                     insights.append(f"{col}: avg={avg:.2f}, min={min_val}, max={max_val}")
 
     elif analysis_type == "diagnostic":
-        # Look for patterns and anomalies
         insights.append("Diagnostic analysis identifies causes and correlations")
 
-        # Check for missing values
         missing_counts = defaultdict(int)
-        for row in data[:100]:  # Sample first 100 rows
+        for row in data[:100]:
             if isinstance(row, dict):
                 for col in columns:
                     if row.get(col) is None or row.get(col) == "":
@@ -133,7 +123,6 @@ def analyze_dataset(
         if missing_counts:
             insights.append(f"Missing values detected in {len(missing_counts)} columns")
 
-        # Check for duplicates (simplified)
         if len(data) > len(set(str(row) for row in data[:100])):
             insights.append("Potential duplicate records detected")
 
@@ -142,7 +131,6 @@ def analyze_dataset(
         insights.append("Would apply ML models for predictions")
         insights.append("Time series analysis for temporal data")
 
-    # Store analysis
     analysis_result = {
         "id": analysis_id,
         "type": analysis_type,
@@ -156,7 +144,6 @@ def analyze_dataset(
 
     analysis_state["analyses"][analysis_id] = analysis_result
 
-    # Format output
     result = f"""📊 DATA ANALYSIS REPORT
 {"=" * 50}
 Analysis ID: {analysis_id}
@@ -195,7 +182,6 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
     if operations is None:
         operations = ["remove_duplicates", "handle_missing", "standardize", "validate"]
 
-    # Parse data if needed
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -208,11 +194,9 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
     original_count = len(data)
     cleaning_log = []
 
-    # Perform cleaning operations
     cleaned_data = data.copy()
 
     if "remove_duplicates" in operations:
-        # Simple duplicate removal
         unique_data = []
         seen = set()
         for row in cleaned_data:
@@ -226,23 +210,19 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
         cleaning_log.append(f"Removed {removed} duplicate records")
 
     if "handle_missing" in operations:
-        # Handle missing values
         filled_count = 0
         for row in cleaned_data:
             if isinstance(row, dict):
                 for key in list(row.keys()):
                     if row[key] is None or row[key] == "":
-                        # Simple imputation
                         row[key] = "N/A" if isinstance(row[key], str) else 0
                         filled_count += 1
 
         cleaning_log.append(f"Filled {filled_count} missing values")
 
     if "standardize" in operations:
-        # Standardize formats
         for row in cleaned_data:
             if isinstance(row, dict):
-                # Standardize text fields
                 for key, value in row.items():
                     if isinstance(value, str):
                         row[key] = value.strip().title()
@@ -250,7 +230,6 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
         cleaning_log.append("Standardized text formatting")
 
     if "validate" in operations:
-        # Basic validation
         invalid_count = 0
         valid_data = []
         for row in cleaned_data:
@@ -265,7 +244,6 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
 
     final_count = len(cleaned_data)
 
-    # Store cleaning results
     analysis_state["datasets"][cleaning_id] = {
         "id": cleaning_id,
         "original_count": original_count,
@@ -275,7 +253,6 @@ def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> s
         "timestamp": datetime.now().isoformat(),
     }
 
-    # Format output
     result = f"""🧹 DATA CLEANING REPORT
 {"=" * 50}
 Cleaning ID: {cleaning_id}
@@ -314,9 +291,7 @@ def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
     patterns_found = []
 
     if pattern_type == "trends":
-        # Detect trending patterns
         if isinstance(data, list) and len(data) > 1:
-            # Check for increasing/decreasing trends
             numeric_data = []
             for item in data:
                 try:
@@ -325,7 +300,6 @@ def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
                     pass
 
             if len(numeric_data) > 2:
-                # Simple trend detection
                 first_half = sum(numeric_data[: len(numeric_data) // 2]) / (len(numeric_data) // 2)
                 second_half = sum(numeric_data[len(numeric_data) // 2 :]) / (len(numeric_data) - len(numeric_data) // 2)
 
@@ -337,16 +311,13 @@ def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
                     patterns_found.append("Stable pattern observed")
 
     elif pattern_type == "cycles":
-        # Detect cyclical patterns
         patterns_found.append("Checking for seasonal patterns")
         patterns_found.append("Analyzing periodicity")
 
-        # Simple cycle detection
         if len(data) > 10:
             patterns_found.append(f"Potential cycle length: {len(data) // 4} periods")
 
     elif pattern_type == "anomalies":
-        # Detect anomalies
         numeric_data = []
         for item in data:
             try:
@@ -365,11 +336,10 @@ def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
 
             if anomalies:
                 patterns_found.append(f"Found {len(anomalies)} anomalies")
-                patterns_found.extend(anomalies[:3])  # Show first 3
+                patterns_found.extend(anomalies[:3])
             else:
                 patterns_found.append("No significant anomalies detected")
 
-    # Store pattern detection results
     analysis_state["analyses"][pattern_id] = {
         "id": pattern_id,
         "type": pattern_type,
@@ -378,7 +348,6 @@ def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
         "timestamp": datetime.now().isoformat(),
     }
 
-    # Format output
     result = f"""🔍 PATTERN DETECTION
 {"=" * 50}
 Pattern ID: {pattern_id}
@@ -418,7 +387,6 @@ def generate_insights(
     insights = []
     recommendations = []
 
-    # Extract insights based on analysis results
     if "trends" in str(analysis_results).lower():
         insights.append("Growth trends indicate positive momentum")
         recommendations.append("Scale operations to capture growth")
@@ -431,7 +399,6 @@ def generate_insights(
         insights.append("Recurring patterns suggest predictability")
         recommendations.append("Leverage patterns for forecasting")
 
-    # Add context-specific insights
     if business_context:
         context_lower = business_context.lower()
 
@@ -451,14 +418,12 @@ def generate_insights(
             insights.append("Performance metrics show improvement areas")
             recommendations.append("Focus on underperforming segments")
 
-    # Generate strategic insights
     strategic_insights = [
         "Data-driven decision making enabled",
         "Predictive capabilities enhanced",
         "Risk factors identified and quantified",
     ]
 
-    # Store insights
     analysis_state["reports"].append(
         {
             "id": insights_id,
@@ -469,7 +434,6 @@ def generate_insights(
         }
     )
 
-    # Format output
     result = f"""💡 BUSINESS INSIGHTS
 {"=" * 50}
 Insights ID: {insights_id}
@@ -511,7 +475,6 @@ def create_dashboard_spec(
     """
     dashboard_id = f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # Define dashboard structure
     dashboard = {
         "id": dashboard_id,
         "layout": layout,
@@ -520,7 +483,6 @@ def create_dashboard_spec(
         "components": [],
     }
 
-    # Add components for each metric
     component_types = ["chart", "gauge", "table", "card", "heatmap"]
 
     for i, metric in enumerate(metrics):
@@ -538,7 +500,6 @@ def create_dashboard_spec(
         }
         dashboard["components"].append(component)
 
-    # Add summary components
     dashboard["components"].append(
         {
             "id": "summary",
@@ -552,10 +513,8 @@ def create_dashboard_spec(
         }
     )
 
-    # Store dashboard spec
     analysis_state["visualizations"].append(dashboard)
 
-    # Format output
     result = f"""📊 DASHBOARD SPECIFICATION
 {"=" * 50}
 Dashboard ID: {dashboard_id}
@@ -607,9 +566,7 @@ def forecast_values(
     forecasts = []
 
     if method == "linear":
-        # Simple linear extrapolation
         if len(historical_data) >= 2:
-            # Calculate trend
             n = len(historical_data)
             x_mean = (n - 1) / 2
             y_mean = sum(historical_data) / n
@@ -620,25 +577,21 @@ def forecast_values(
             slope = numerator / denominator if denominator != 0 else 0
             intercept = y_mean - slope * x_mean
 
-            # Generate forecasts
             for i in range(periods):
                 forecast_value = slope * (n + i) + intercept
                 forecasts.append(forecast_value)
 
     elif method == "moving_average":
-        # Simple moving average
         window = min(3, len(historical_data))
         last_values = historical_data[-window:]
         base_forecast = sum(last_values) / window
 
         for i in range(periods):
-            # Add some variation
             variation = (i % 2 - 0.5) * 0.1 * base_forecast
             forecasts.append(base_forecast + variation)
 
     elif method == "exponential":
-        # Simplified exponential smoothing
-        alpha = 0.3  # Smoothing factor
+        alpha = 0.3
         last_value = historical_data[-1]
 
         for i in range(periods):
@@ -648,23 +601,20 @@ def forecast_values(
                 forecast = alpha * forecasts[-1] + (1 - alpha) * forecasts[-1]
             forecasts.append(forecast)
 
-    # Calculate confidence intervals
     std_dev = (
         sum((x - sum(historical_data) / len(historical_data)) ** 2 for x in historical_data) / len(historical_data)
     ) ** 0.5
 
-    # Store forecast
     forecast_result = {
         "id": forecast_id,
         "method": method,
         "historical_periods": len(historical_data),
         "forecast_periods": periods,
         "forecasts": forecasts,
-        "confidence_interval": std_dev * 1.96,  # 95% confidence
+        "confidence_interval": std_dev * 1.96,
         "timestamp": datetime.now().isoformat(),
     }
 
-    # Format output
     result = f"""📈 FORECAST RESULTS
 {"=" * 50}
 Forecast ID: {forecast_id}
@@ -685,7 +635,6 @@ FORECAST VALUES:
         upper = value + forecast_result["confidence_interval"]
         result += f"Period {i}: {value:.2f} (CI: {lower:.2f} - {upper:.2f})\n"
 
-    # Add trend analysis
     if forecasts:
         avg_forecast = sum(forecasts) / len(forecasts)
         avg_historical = sum(historical_data) / len(historical_data)
