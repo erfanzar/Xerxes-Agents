@@ -12,8 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Calute Tools - A comprehensive collection of tools for AI agents."""
 
+from .coding_tools import (
+    analyze_code_structure,
+    apply_diff,
+    copy_file,
+    create_diff,
+    delete_file,
+    find_and_replace,
+    git_add,
+    git_apply_patch,
+    git_diff,
+    git_log,
+    git_status,
+    list_directory,
+    move_file,
+    read_file,
+    write_file,
+)
 from .duckduckgo_engine import DuckDuckGoSearch
 from .standalone import AppendFile, ExecutePythonCode, ExecuteShell, ListDir, ReadFile, WriteFile
 
@@ -61,6 +79,21 @@ __all__ = [
     "TextSummarizer",
     "UnitConverter",
     "WriteFile",
+    "analyze_code_structure",
+    "apply_diff",
+    "copy_file",
+    "create_diff",
+    "delete_file",
+    "find_and_replace",
+    "git_add",
+    "git_apply_patch",
+    "git_diff",
+    "git_log",
+    "git_status",
+    "list_directory",
+    "move_file",
+    "read_file",
+    "write_file",
 ]
 
 

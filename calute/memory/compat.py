@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Compatibility layer for old memory API"""
 
@@ -53,8 +53,7 @@ class MemoryStore(ContextualMemory):
         """Initialize with backward compatible parameters"""
         import os
 
-        # Check WRITE_MEMORY environment variable
-        write_memory = os.environ.get('WRITE_MEMORY', '0') == '1'
+        write_memory = os.environ.get("WRITE_MEMORY", "0") == "1"
 
         storage = None
         if enable_persistence and persistence_path and write_memory:

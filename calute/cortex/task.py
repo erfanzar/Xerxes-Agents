@@ -12,19 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Enhanced task definition for Cortex framework with Cortex-like features"""
+
+from __future__ import annotations
 
 import asyncio
 import json
+import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
 from ..loggings import log_error, log_retry, log_task_complete, log_task_start, log_warning
+from ..streamer_buffer import StreamerBuffer
 from .tool import CortexTool
 
 if TYPE_CHECKING:
@@ -45,17 +51,17 @@ class ChainLink:
     """Represents a link in a task chain"""
 
     condition: Callable[[str], bool] | None = None
-    next_task: "CortexTask | None" = None
-    fallback_task: "CortexTask | None" = None
+    next_task: CortexTask | None = None
+    fallback_task: CortexTask | None = None
 
 
 @dataclass
 class CortexTaskOutput:
     """Enhanced output from a completed task with rich formatting support"""
 
-    task: "CortexTask"
+    task: CortexTask
     output: str
-    agent: "CortexAgent"
+    agent: CortexAgent
     timestamp: float = field(default_factory=time.time)
     raw_output: str | None = None
     token_usage: dict[str, int] = field(default_factory=dict)
@@ -115,14 +121,14 @@ class CortexTask:
 
     description: str
     expected_output: str
-    agent: "CortexAgent | None" = None
+    agent: CortexAgent | None = None
     tools: list[CortexTool] = field(default_factory=list)
-    context: list["CortexTask"] | None = None
+    context: list[CortexTask] | None = None
     output_file: str | None = None
     human_feedback: bool = False
     chain: ChainLink | None = None
     max_retries: int = 3
-    memory: Optional["CortexMemory"] = None
+    memory: CortexMemory | None = None
     save_to_memory: bool = True
     importance: float = 0.5
 
@@ -148,7 +154,7 @@ class CortexTask:
     context_compression: bool = False
     max_context_length: int = 10000
 
-    dependencies: list["CortexTask"] = field(default_factory=list)
+    dependencies: list[CortexTask] = field(default_factory=list)
     conditional_execution: Callable | None = None
     retry_conditions: list[Callable] = field(default_factory=list)
     timeout_behavior: str = "fail"
@@ -421,11 +427,22 @@ class CortexTask:
             execution_metadata={"skipped": True, "reason": reason},
         )
 
-    def execute(self, context_outputs: list[str] | None = None) -> CortexTaskOutput:
-        """Execute the task with enhanced Cortex-like features
+    def execute(
+        self,
+        context_outputs: list[str] | None = None,
+        use_streaming: bool = False,
+        stream_callback: Callable[[Any], None] | None = None,
+    ) -> CortexTaskOutput | tuple[StreamerBuffer, threading.Thread]:
+        """Execute the task with enhanced Cortex-like features and optional streaming
+
+        Args:
+            context_outputs: Optional list of context outputs from previous tasks
+            use_streaming: If True, executes in background thread with streaming
+            stream_callback: Optional callback for streaming chunks (only used if use_streaming=True)
 
         Returns:
-            CortexTaskOutput: The enhanced task output with all metadata
+            If use_streaming=False: CortexTaskOutput with the task result
+            If use_streaming=True: tuple of (StreamerBuffer, Thread) for async streaming
         """
         if not self.agent:
             raise ValueError("Task must have an assigned agent")
@@ -433,7 +450,6 @@ class CortexTask:
         if self.dependencies and not self._check_dependencies():
             raise ValueError("Task dependencies not satisfied")
 
-        # Log task start
         log_task_start(
             self.description[:50] + "..." if len(self.description) > 50 else self.description, self.agent.role
         )
@@ -493,16 +509,31 @@ class CortexTask:
 
                 initial_delegations = getattr(self.agent, "_delegation_count", 0)
 
+                if use_streaming:
+                    buffer, thread = self.agent.execute(
+                        task_description=task_prompt,
+                        context=enhanced_context,
+                        use_thread=True,
+                    )
+
+                    if stream_callback:
+
+                        def process_stream():
+                            for chunk in buffer.stream():  # noqa
+                                stream_callback(chunk)
+
+                        callback_thread = threading.Thread(target=process_stream, daemon=True)
+                        callback_thread.start()
+
+                    buffer.task = self  # type: ignore
+                    buffer.agent = self.agent  # type: ignore
+
+                    return buffer, thread
+
                 if self.agent.allow_delegation:
-                    result = self.agent.execute_with_delegation(
-                        task_description=task_prompt,
-                        context=enhanced_context,
-                    )
+                    result = self.agent.execute_with_delegation(task_description=task_prompt, context=enhanced_context)
                 else:
-                    result = self.agent.execute(
-                        task_description=task_prompt,
-                        context=enhanced_context,
-                    )
+                    result = self.agent.execute(task_description=task_prompt, context=enhanced_context)
 
                 final_delegations = getattr(self.agent, "_delegation_count", 0)
                 self._execution_stats["delegations"] = final_delegations - initial_delegations
@@ -518,7 +549,6 @@ class CortexTask:
                             retries += 1
                             self._execution_stats["retry_count"] = retries
 
-                            # Log validation failure details
                             error_details = []
                             for key, value in validation_results.items():
                                 if key.endswith("_error"):
@@ -537,7 +567,7 @@ class CortexTask:
                     with open(self.output_file, "w") as f:
                         f.write(result)
 
-                if self.human_feedback:
+                if self.human_feedback and os.getenv("ALLOW_HUMAN_FEEDBACK", "0") == "1":
                     feedback = input("\n💭 Please provide feedback on this output (or press Enter to accept): ")
                     if feedback:
                         result = self.agent.execute(
@@ -584,10 +614,7 @@ class CortexTask:
                         "security_applied": bool(self.tool_restrictions),
                         "validation_applied": bool(self.output_json or self.output_pydantic),
                     },
-                    performance_metrics={
-                        "avg_execution_time": execution_time,
-                        "total_retries": retries,
-                    },
+                    performance_metrics={"avg_execution_time": execution_time, "total_retries": retries},
                 )
 
                 try:
@@ -597,7 +624,6 @@ class CortexTask:
 
                 self._execute_callback(self.callback, task_output, self)
 
-                # Log task completion
                 log_task_complete(
                     self.description[:50] + "..." if len(self.description) > 50 else self.description, execution_time
                 )
@@ -664,15 +690,23 @@ class CortexTask:
         """Get the task output"""
         return self._output
 
-    def add_dependency(self, task: "CortexTask"):
+    def add_dependency(self, task: CortexTask):
         """Add a task dependency"""
         if task not in self.dependencies:
             self.dependencies.append(task)
 
-    def remove_dependency(self, task: "CortexTask"):
+    def remove_dependency(self, task: CortexTask):
         """Remove a task dependency"""
         if task in self.dependencies:
             self.dependencies.remove(task)
+
+    def add_context(self, tasks: list[CortexTask] | CortexTask):
+        if not isinstance(tasks, list):
+            tasks = [tasks]
+        if self.context is None:
+            self.context = []
+        for task in tasks:
+            self.context.append(task)
 
     def set_callback(self, callback_type: str, callback: Callable):
         """Set a callback function"""

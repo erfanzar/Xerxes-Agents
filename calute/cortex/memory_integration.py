@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Memory integration for Cortex framework"""
 
 from dataclasses import dataclass
@@ -47,10 +48,8 @@ class CortexMemory:
         """Initialize Cortex memory system"""
         import os
 
-        # Check WRITE_MEMORY environment variable
-        write_memory = os.environ.get('WRITE_MEMORY', '0') == '1'
+        write_memory = os.environ.get("WRITE_MEMORY", "0") == "1"
 
-        # Only create storage if WRITE_MEMORY is enabled and persistence_path is provided
         self.storage = SQLiteStorage(persistence_path) if (persistence_path and write_memory) else None
 
         self.short_term = ShortTermMemory(capacity=short_term_capacity) if enable_short_term else None

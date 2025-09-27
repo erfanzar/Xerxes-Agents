@@ -12,15 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """Lightweight logging system for Calute using ANSI colors"""
 
 import datetime
+import json
 import logging
 import os
+import re
+import shutil
 import sys
+import textwrap
 import threading
+import time
+from pprint import pformat
 
-# ANSI color codes
+from .types import (
+    AgentSwitch,
+    Completion,
+    FunctionCallsExtracted,
+    FunctionDetection,
+    FunctionExecutionComplete,
+    FunctionExecutionStart,
+    ReinvokeSignal,
+    StreamChunk,
+)
+
 COLORS = {
     "BLACK": "\033[30m",
     "RED": "\033[31m",
@@ -46,7 +63,7 @@ COLORS = {
     "BLUE_PURPLE": "\033[38;5;99m",
 }
 
-# Level colors mapping
+
 LEVEL_COLORS = {
     "DEBUG": COLORS["LIGHT_BLUE"],
     "INFO": COLORS["BLUE_PURPLE"],
@@ -93,7 +110,7 @@ class CaluteLogger:
 
     def _setup_logger(self):
         """Set up the main logger"""
-        # Create logger
+
         self.logger = logging.getLogger("Calute")
         self.logger.setLevel(logging.DEBUG)
 
@@ -277,5 +294,210 @@ def log_task_complete(task_name: str, duration: float | None = None):
     logger.info(message)
 
 
-# Create a global logger instance
 logger = get_logger()
+
+
+def stream_callback(chunk):
+    """Purple-accented streaming callback. Keeps your exact tool-call style; adds timing, pretty results, and clean spacing."""
+
+    COL = COLORS
+    ACCENT = COL["BLUE_PURPLE"]
+    BOLD = COL["BOLD"]
+    DIM = COL["DIM"]
+    ITALIC = COL["ITALIC"]
+    RESET = COL["RESET"]
+    LWHITE = COL["LIGHT_WHITE"]
+    LGREEN = COL["LIGHT_GREEN"]
+    LRED = COL["LIGHT_RED"]
+
+    if not hasattr(stream_callback, "_state"):
+        stream_callback._state = {
+            "open_line": False,
+            "tool_headers_printed": set(),
+            "tool_indents": {},
+            "exec_start_times": {},
+        }
+
+    state = stream_callback._state
+
+    ANSI_RE = re.compile(r"\x1b```math[0-9;]*m")
+
+    def strip_ansi(s):
+        return ANSI_RE.sub("", s)
+
+    def term_width():
+        try:
+            return max(60, shutil.get_terminal_size(fallback=(100, 24)).columns)
+        except Exception:
+            return 100
+
+    def paint(text, *styles):
+        return "".join(styles) + str(text) + RESET
+
+    def tag(agent_id):
+        return f"{BOLD}{ACCENT}[{agent_id}]{RESET}"
+
+    def bullet():
+        return paint("•", ACCENT, BOLD)
+
+    def ensure_newline():
+        if state["open_line"]:
+            print("", flush=True)
+            state["open_line"] = False
+
+    def write(s):
+        print(s, end="", flush=True)
+        state["open_line"] = True
+
+    def writeln(s):
+        ensure_newline()
+        print(s, flush=True)
+        state["open_line"] = False
+
+    def indent_newlines(s, indent):
+        if not s or "\n" not in s:
+            return s
+        return s.replace("\n", "\n" + indent)
+
+    def preview(text, max_len=100):
+        s = str(text)
+        return (s[:max_len] + "…") if len(s) > max_len else s
+
+    def pretty_result(value):
+        try:
+            if isinstance(value, dict | list):
+                return json.dumps(value, indent=2, ensure_ascii=False)
+            return json.dumps(value, indent=2, ensure_ascii=False, default=str)
+        except Exception:
+            return pformat(value, width=max(60, term_width() - 8), compact=False)
+
+    def hr(title=None):
+        width = term_width()
+        if not title:
+            print(paint("─" * width, ACCENT), flush=True)
+            return
+        title_str = f" {title} "
+        left = (width - len(title_str)) // 2
+        right = max(0, width - left - len(title_str))
+        print(paint("─" * left, ACCENT) + paint(title_str, LWHITE, BOLD) + paint("─" * right, ACCENT), flush=True)
+
+    if isinstance(chunk, StreamChunk):
+        if getattr(chunk, "content", None):
+            write(chunk.content)
+            if chunk.content.endswith("\n"):
+                state["open_line"] = False
+
+        if getattr(chunk, "streaming_tool_calls", None):
+            for tool_call in chunk.streaming_tool_calls:
+                tool_id = (
+                    getattr(tool_call, "id", None) or f"{getattr(chunk, 'agent_id', '')}:{tool_call.function_name or ''}"
+                )
+
+                if tool_call.function_name is not None and tool_id not in state["tool_headers_printed"]:
+                    ensure_newline()
+                    line = (
+                        f"{paint('🛠️', ACCENT)}  {tag(chunk.agent_id)} "
+                        f"{paint('Calling', ACCENT, BOLD)} "
+                        f"{paint(tool_call.function_name, LWHITE, BOLD)} : "
+                    )
+                    write(line)
+
+                    visible_len = len(strip_ansi(line))
+                    state["tool_indents"][tool_id] = " " * visible_len
+                    state["tool_headers_printed"].add(tool_id)
+
+                if tool_call.arguments is not None:
+                    indent = state["tool_indents"].get(tool_id, "")
+                    arg_text = indent_newlines(tool_call.arguments, indent)
+                    write(paint(arg_text, LWHITE))
+
+    elif isinstance(chunk, FunctionDetection):
+        ensure_newline()
+        writeln(f"{paint('🔍', ACCENT)} {tag(chunk.agent_id)} {paint(chunk.message, LWHITE)}")
+
+    elif isinstance(chunk, FunctionCallsExtracted):
+        ensure_newline()
+        writeln(
+            f"{paint('📋', ACCENT)} {tag(chunk.agent_id)} "
+            f"{paint(f'Found {len(chunk.function_calls)} function(s) to execute:', ACCENT, BOLD)}"
+        )
+        for fc in chunk.function_calls:
+            writeln(f"   {bullet()} {paint(fc.name, LWHITE, BOLD)} {paint(f'(id: {fc.id})', DIM)}")
+
+    elif isinstance(chunk, FunctionExecutionStart):
+        ensure_newline()
+        state["tool_headers_printed"].clear()
+        state["tool_indents"].clear()
+
+        key = (getattr(chunk, "agent_id", ""), getattr(chunk, "function_name", ""))
+        state["exec_start_times"][key] = time.perf_counter()
+
+        progress = f" {paint(chunk.progress, ACCENT)}" if getattr(chunk, "progress", None) else ""
+        writeln(
+            f"{paint('⚡', ACCENT)} {tag(chunk.agent_id)} "
+            f"{paint('Executing', ACCENT, BOLD)} {paint(chunk.function_name, LWHITE, BOLD)}{progress}..."
+        )
+
+    elif isinstance(chunk, FunctionExecutionComplete):
+        ensure_newline()
+
+        key = (getattr(chunk, "agent_id", ""), getattr(chunk, "function_name", ""))
+        started = state["exec_start_times"].pop(key, None)
+        dur = f" in {time.perf_counter() - started:.2f}s" if started else ""
+
+        status_icon = paint("✅", LGREEN) if chunk.status == "success" else paint("❌", LRED)
+        writeln(
+            f"{status_icon} {tag(chunk.agent_id)} "
+            f"{paint(chunk.function_name, LWHITE, BOLD)} {paint('completed', ACCENT)}{paint(dur, DIM)}"
+        )
+
+        if getattr(chunk, "error", None):
+            writeln(f"   {paint('⚠️ Error:', LRED, BOLD)} {paint(chunk.error, LWHITE)}")
+        elif getattr(chunk, "result", None):
+            formatted = pretty_result(chunk.result)
+            if "\n" in formatted or len(formatted) > 200:
+                writeln(paint("   ⋮ Result", ACCENT, BOLD))
+                print(paint(textwrap.indent(formatted, prefix="   "), LWHITE), flush=True)
+            else:
+                writeln(f"   {paint('→ Result:', ACCENT, BOLD)} {paint(preview(formatted, 100), LWHITE)}")
+
+    elif isinstance(chunk, AgentSwitch):
+        ensure_newline()
+        writeln(
+            f"{paint('🔄', ACCENT)} "
+            f"{paint('Switching', ACCENT, BOLD)} {paint('from', DIM)} "
+            f"{paint(f'[{chunk.from_agent}]', ACCENT, BOLD)} {paint('to', DIM)} "
+            f"{paint(f'[{chunk.to_agent}]', ACCENT, BOLD)}"
+        )
+        if getattr(chunk, "reason", None):
+            writeln(f"   {paint('Reason:', ACCENT, BOLD)} {paint(chunk.reason, ITALIC, LWHITE)}")
+
+    elif isinstance(chunk, ReinvokeSignal):
+        ensure_newline()
+        writeln(f"{paint('🔁', ACCENT)} {tag(chunk.agent_id)} {paint(chunk.message, LWHITE)}")
+
+    elif isinstance(chunk, Completion):
+        ensure_newline()
+        if getattr(chunk, "agent_id", "") == "cortex":
+            hr("Pipeline completed")
+            writeln(
+                f"   {bullet()} {paint('Functions executed:', ACCENT, BOLD)} "
+                f"{paint(chunk.function_calls_executed, LWHITE)}"
+            )
+            if hasattr(chunk, "execution_history") and chunk.execution_history:
+                writeln(
+                    f"   {bullet()} {paint('Execution steps:', ACCENT, BOLD)} "
+                    f"{paint(len(chunk.execution_history), LWHITE)}"
+                )
+            hr()
+        else:
+            writeln(f"{paint('✓', LGREEN)} {tag(chunk.agent_id)} {paint('Task completed', ACCENT, BOLD)}")
+            writeln(
+                f"   {bullet()} {paint('Functions called:', ACCENT, BOLD)} "
+                f"{paint(chunk.function_calls_executed, LWHITE)}"
+            )
+            if getattr(chunk, "final_content", None):
+                preview_text = (
+                    chunk.final_content[:100] + "..." if len(chunk.final_content) > 100 else chunk.final_content
+                )
+                writeln(f"   {bullet()} {paint('Output preview:', ACCENT, BOLD)} {paint(preview_text, LWHITE)}")

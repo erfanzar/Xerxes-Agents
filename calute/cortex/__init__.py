@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """
 Cortex: A orchestration framework built on top of Calute.
 Provides multi-agent collaboration with tasks, tools, and various execution strategies.
@@ -19,11 +20,14 @@ Provides multi-agent collaboration with tasks, tools, and various execution stra
 
 from .agent import CortexAgent
 from .cortex import Cortex, CortexOutput, MemoryConfig
+from .dynamic import DynamicCortex, DynamicTaskBuilder, create_dynamic_cortex
 from .enums import ChainType, ProcessType
 from .memory_integration import CortexMemory
 from .planner import CortexPlanner, ExecutionPlan, PlanStep
 from .task import ChainLink, CortexTask, CortexTaskOutput
+from .task_creator import TaskCreationPlan, TaskCreator, TaskDefinition
 from .tool import CortexTool
+from .universal_agent import UniversalAgent, UniversalTaskCreator
 
 __all__ = [
     "ChainLink",
@@ -36,8 +40,16 @@ __all__ = [
     "CortexTask",
     "CortexTaskOutput",
     "CortexTool",
+    "DynamicCortex",
+    "DynamicTaskBuilder",
     "ExecutionPlan",
     "MemoryConfig",
     "PlanStep",
     "ProcessType",
+    "TaskCreationPlan",
+    "TaskCreator",
+    "TaskDefinition",
+    "UniversalAgent",
+    "UniversalTaskCreator",
+    "create_dynamic_cortex",
 ]

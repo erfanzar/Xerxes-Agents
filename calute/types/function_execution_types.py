@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 import typing as tp
 from dataclasses import dataclass, field
@@ -98,6 +98,18 @@ class SwitchContext:
 
 
 @dataclass
+class ToolCallStreamChunk:
+    """Represents a streaming chunk of a tool/function call"""
+
+    id: str
+    type: str = "function"
+    function_name: str | None = None
+    arguments: str | None = None
+    index: int | None = None
+    is_complete: bool = False
+
+
+@dataclass
 class StreamChunk:
     """Represents a streaming chunk response"""
 
@@ -108,6 +120,8 @@ class StreamChunk:
     buffered_content: str | None = None
     function_calls_detected: bool | None = None
     reinvoked: bool = False
+    tool_calls: list[ToolCallStreamChunk] | None = None
+    streaming_tool_calls: list[ToolCallStreamChunk] | None = None
 
     def __post_init__(self):
         if self.chunk is not None:
@@ -204,6 +218,7 @@ class ResponseResult:
 
     content: str
     response: ChatCompletion
+    completion: Completion
     function_calls: list[RequestFunctionCall] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)

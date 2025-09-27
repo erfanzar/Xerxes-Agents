@@ -12,13 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Agent definition for Cortex framework"""
 
+"""Agent definition for Cortex framework.
+
+This module provides the CortexAgent class, which represents an intelligent agent
+within the Cortex framework for AI agent orchestration. CortexAgent enables
+autonomous task execution, delegation, tool usage, and memory integration for
+building complex multi-agent systems.
+
+The agent supports features like:
+- Task execution with context and memory
+- Automatic delegation to other agents
+- Rate limiting and execution timeouts
+- Knowledge management and tool integration
+- Step-by-step callback mechanisms
+- Pydantic model output formatting
+
+Typical usage example:
+    agent = CortexAgent(
+        role="Data Analyst",
+        goal="Analyze data and provide insights",
+        backstory="Expert in statistical analysis",
+        model="gpt-4",
+        tools=[analysis_tool],
+        allow_delegation=True
+    )
+    result = agent.execute("Analyze sales trends")
+"""
+
+import hashlib
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+from pydantic import BaseModel
 
 from calute.llms.base import BaseLLM
+from calute.streamer_buffer import StreamerBuffer
+from calute.types.function_execution_types import Completion, ResponseResult, StreamingResponseType
+from calute.types.tool_calls import Tool
 
 from ..loggings import get_logger, log_delegation, log_error, log_thinking, log_warning
 from ..types import Agent as CaluteAgent
@@ -34,14 +68,58 @@ if TYPE_CHECKING:
 
 @dataclass
 class CortexAgent:
-    """Agent with specific role, goal, and capabilities"""
+    """Agent with specific role, goal, and capabilities.
+
+    CortexAgent represents an autonomous AI agent that can execute tasks,
+    use tools, delegate to other agents, and maintain context through memory.
+    It serves as a wrapper around Calute's Agent class with additional
+    orchestration capabilities for the Cortex framework.
+
+    Attributes:
+        role: The agent's role or title defining its specialization.
+        goal: The primary objective or purpose of the agent.
+        backstory: Background information providing context for the agent's expertise.
+        model: Optional model identifier for the LLM to use (e.g., 'gpt-4').
+        instructions: Optional custom system instructions. Auto-generated if not provided.
+        tools: List of CortexTool instances the agent can use.
+        max_iterations: Maximum number of retry attempts for failed executions.
+        verbose: Whether to output detailed logging information.
+        allow_delegation: Whether the agent can delegate tasks to other agents.
+        temperature: LLM temperature parameter for response randomness (0.0-1.0).
+        max_tokens: Maximum tokens for LLM responses.
+        memory_enabled: Whether to use memory for context building.
+        capabilities: List of special capabilities the agent possesses.
+        calute_instance: Reference to the Calute instance for LLM operations.
+        memory: Optional CortexMemory instance for persistent context.
+        llm: Optional BaseLLM instance for direct LLM access.
+        reinvoke_after_function: Whether to reinvoke LLM after tool execution.
+        cortex_instance: Reference to parent Cortex instance for multi-agent coordination.
+        max_execution_time: Optional timeout in seconds for task execution.
+        max_rpm: Optional rate limit for requests per minute.
+        step_callback: Optional callback function invoked at each execution step.
+        config: Dictionary for custom configuration parameters.
+        knowledge: Dictionary storing agent-specific knowledge.
+        knowledge_sources: List of knowledge source identifiers.
+        auto_format_guidance: Whether to auto-generate format instructions for Pydantic models.
+        output_format_preference: Preferred output format ('xml' or 'json').
+
+    Private Attributes:
+        _internal_agent: Internal Calute Agent instance.
+        _logger: Logger instance for verbose output.
+        _template_engine: PromptTemplate engine for generating prompts.
+        _delegation_count: Current delegation depth to prevent infinite recursion.
+        _times_executed: Total number of task executions.
+        _execution_times: List of execution durations for statistics.
+        _last_rpm_window: Timestamp for rate limiting window.
+        _rpm_requests: List of request timestamps for rate limiting.
+    """
 
     role: str
     goal: str
     backstory: str
     model: str | None = None
     instructions: str | None = None
-    tools: list[CortexTool] = field(default_factory=list)
+    tools: list[CortexTool | Callable | Tool] = field(default_factory=list)
     max_iterations: int = 10
     verbose: bool = True
     allow_delegation: bool = False
@@ -75,7 +153,24 @@ class CortexAgent:
     _rpm_requests: list = field(default_factory=list)
 
     def __post_init__(self):
-        """Initialize the internal Calute agent"""
+        """Initialize the internal Calute agent and supporting components.
+
+        This method is automatically called after dataclass initialization.
+        It sets up the logger, template engine, generates default instructions
+        if needed, processes tools into functions, and creates the internal
+        Calute Agent instance that handles actual LLM interactions.
+
+        Side Effects:
+            - Initializes _logger based on verbose setting
+            - Creates _template_engine instance
+            - Generates default instructions if not provided
+            - Processes tools list into callable functions
+            - Creates Calute instance if needed
+            - Initializes _internal_agent
+
+        Raises:
+            ImportError: If Calute module cannot be imported when creating instance.
+        """
         self._logger = get_logger() if self.verbose else None
         self._template_engine = PromptTemplate()
 
@@ -91,8 +186,11 @@ class CortexAgent:
         for tool in self.tools:
             if callable(tool) and not isinstance(tool, CortexTool):
                 functions.append(tool)
-            elif callable(tool.function):
+            elif hasattr(tool, "function") and callable(tool.function):
                 functions.append(tool.function)
+            else:
+                functions.append(tool)
+
         if self.calute_instance is None and self.llm is not None:
             from calute.calute import Calute
 
@@ -109,11 +207,22 @@ class CortexAgent:
         )
 
     def _check_rate_limit(self) -> bool:
-        """Check if agent is within rate limit"""
+        """Check if agent is within rate limit.
+
+        Verifies whether the agent can make a new request based on the
+        configured max_rpm (requests per minute) limit. Maintains a sliding
+        window of request timestamps to enforce the rate limit.
+
+        Returns:
+            bool: True if within rate limit or no limit configured,
+                  False if rate limit would be exceeded.
+
+        Note:
+            This method cleans up old request timestamps outside the
+            60-second window before checking the limit.
+        """
         if not self.max_rpm:
             return True
-
-        import time
 
         current_time = time.time()
 
@@ -127,18 +236,37 @@ class CortexAgent:
         return True
 
     def _record_request(self):
-        """Record a request for rate limiting"""
+        """Record a request for rate limiting.
+
+        Adds the current timestamp to the list of request times used for
+        rate limiting. Only records if max_rpm is configured.
+
+        Side Effects:
+            Appends current timestamp to _rpm_requests list.
+        """
         if self.max_rpm:
             import time
 
             self._rpm_requests.append(time.time())
 
     def _check_execution_timeout(self, start_time: float) -> bool:
-        """Check if execution has exceeded timeout"""
+        """Check if execution has exceeded timeout.
+
+        Determines whether the elapsed time since start_time exceeds the
+        configured max_execution_time limit.
+
+        Args:
+            start_time: Unix timestamp marking the start of execution.
+
+        Returns:
+            bool: True if timeout exceeded, False otherwise or if no
+                  timeout is configured.
+
+        Side Effects:
+            Logs error message if timeout is exceeded and verbose is True.
+        """
         if not self.max_execution_time:
             return False
-
-        import time
 
         elapsed = time.time() - start_time
         if elapsed > self.max_execution_time:
@@ -148,7 +276,22 @@ class CortexAgent:
         return False
 
     def _execute_step_callback(self, step_info: dict):
-        """Execute step callback if provided"""
+        """Execute step callback if provided.
+
+        Safely invokes the configured step_callback function with information
+        about the current execution step. Catches and logs any exceptions to
+        prevent callback failures from disrupting agent execution.
+
+        Args:
+            step_info: Dictionary containing step details such as:
+                - step: Step type (e.g., 'execution_start', 'retry', 'execution_complete')
+                - agent: Agent role identifier
+                - Additional context-specific fields
+
+        Side Effects:
+            Invokes step_callback if configured.
+            Logs errors if callback fails and verbose is True.
+        """
         if self.step_callback and callable(self.step_callback):
             try:
                 self.step_callback(step_info)
@@ -157,7 +300,24 @@ class CortexAgent:
                     log_error(f"Step callback failed: {e}")
 
     def _build_knowledge_context(self, task_description: str) -> str:
-        """Build context from knowledge sources"""
+        """Build context from knowledge sources.
+
+        Constructs a formatted context string from the agent's knowledge
+        dictionary and knowledge_sources list to provide additional context
+        for task execution.
+
+        Args:
+            task_description: The task being executed (currently unused but
+                            available for future context filtering).
+
+        Returns:
+            str: Formatted context string containing knowledge items and
+                 sources, or empty string if no knowledge is configured.
+
+        Example:
+            Returns a string like:
+            "Available Knowledge:\n- domain: healthcare\n- expertise: diagnostics\n\nKnowledge Sources:\n- medical_db\n\n"
+        """
         if not self.knowledge and not self.knowledge_sources:
             return ""
 
@@ -176,20 +336,36 @@ class CortexAgent:
         return "\n".join(context_parts) + "\n\n" if context_parts else ""
 
     def _generate_format_guidance(self, output_model) -> str:
-        """Generate format guidance from Pydantic model"""
+        """Generate format guidance from Pydantic model.
+
+        Creates detailed formatting instructions for LLM responses based on
+        a Pydantic model schema. Supports both XML and JSON output formats
+        and handles nested structures with proper example generation.
+
+        Args:
+            output_model: A Pydantic BaseModel class to generate guidance for.
+
+        Returns:
+            str: Formatted instruction string with examples and validation rules,
+                 or empty string if model is invalid or auto_format_guidance is False.
+
+        Note:
+            - Automatically detects Pydantic v1 vs v2 schema methods
+            - Generates realistic example data based on field names and types
+            - Provides special handling for nested arrays of objects
+            - Includes critical formatting rules to ensure LLM compliance
+        """
         if not output_model or not self.auto_format_guidance:
             return ""
 
         try:
-            from pydantic import BaseModel
-
             if not issubclass(output_model, BaseModel):
                 return ""
 
             if hasattr(output_model, "model_json_schema"):
                 schema = output_model.model_json_schema()
             else:
-                schema = output_model.schema()
+                schema = output_model.schema()  # type: ignore[attr-defined]
             model_name = schema.get("title", "Output")
 
             example_data = self._create_example_from_schema(schema)
@@ -233,7 +409,26 @@ Ensure your response is valid JSON that can be parsed directly.
             return ""
 
     def _resolve_schema_refs(self, schema: dict, definitions: dict | None = None) -> dict:
-        """Resolve $ref references in schema (supports both Pydantic v1 and v2)"""
+        """Resolve $ref references in schema (supports both Pydantic v1 and v2).
+
+        Recursively resolves JSON Schema $ref references to their actual definitions,
+        supporting both Pydantic v1 (
+
+        Args:
+            schema: JSON schema dictionary potentially containing $ref references.
+            definitions: Optional dictionary of schema definitions. If not provided,
+                        extracted from schema['definitions'] or schema['$defs'].
+
+        Returns:
+            dict: Schema with all $ref references resolved to their actual definitions.
+
+        Example:
+            Input schema with $ref:
+            {"$ref": "#/definitions/User"}
+
+            Returns resolved schema:
+            {"type": "object", "properties": {"name": {"type": "string"}}}
+        """
         if definitions is None:
             definitions = schema.get("definitions", schema.get("$defs", {}))
 
@@ -257,7 +452,25 @@ Ensure your response is valid JSON that can be parsed directly.
         return resolved
 
     def _create_example_from_schema(self, schema: dict) -> dict:
-        """Create realistic example data structure from JSON schema with full resolution"""
+        """Create realistic example data structure from JSON schema with full resolution.
+
+        Generates example data that conforms to a JSON schema, creating realistic
+        values based on field names and types. Handles nested objects, arrays,
+        and various primitive types with appropriate example values.
+
+        Args:
+            schema: JSON schema dictionary defining the data structure.
+
+        Returns:
+            dict: Example data conforming to the schema with realistic values.
+
+        Note:
+            - Field names influence example values (e.g., 'name' fields get name-like values)
+            - Respects minimum/maximum constraints for numeric types
+            - Generates multiple items for array fields based on minItems
+            - Recursively handles nested objects and arrays of objects
+            - Creates industry-specific examples for recognized field names
+        """
 
         resolved_schema = self._resolve_schema_refs(schema)
 
@@ -322,7 +535,26 @@ Ensure your response is valid JSON that can be parsed directly.
         return example
 
     def _create_nested_example(self, schema: dict, index: int = 1) -> dict:
-        """Create a realistic nested object example with variation"""
+        """Create a realistic nested object example with variation.
+
+        Generates varied example data for nested objects in arrays, ensuring
+        each object has different but realistic values based on its index.
+        Particularly useful for demonstrating arrays of complex objects.
+
+        Args:
+            schema: JSON schema for the nested object structure.
+            index: Index of this object in its parent array, used to create variation.
+
+        Returns:
+            dict: Example nested object with varied realistic values.
+
+        Example:
+            For a trend object schema, generates different trend names and
+            descriptions for each index:
+            - Index 1: "Generative AI Enterprise Integration"
+            - Index 2: "Edge AI and IoT Convergence"
+            - Index 3: "AI-Powered Cybersecurity"
+        """
         properties = schema.get("properties", {})
 
         example = {}
@@ -374,7 +606,21 @@ Ensure your response is valid JSON that can be parsed directly.
         return example
 
     def _count_nested_structures(self, schema: dict) -> int:
-        """Count nested arrays of objects to provide better guidance"""
+        """Count nested arrays of objects to provide better guidance.
+
+        Analyzes a schema to count how many fields contain arrays of objects,
+        which require special formatting guidance to ensure LLM compliance.
+
+        Args:
+            schema: JSON schema to analyze.
+
+        Returns:
+            int: Number of array fields containing objects or $ref references.
+
+        Note:
+            This count is used to determine whether to include additional
+            formatting warnings about properly structuring nested arrays.
+        """
         count = 0
         properties = schema.get("properties", {})
 
@@ -386,8 +632,19 @@ Ensure your response is valid JSON that can be parsed directly.
 
         return count
 
-    def _format_json_example(self, data: dict, indent: int = 0) -> str:
-        """Format JSON data as a readable example"""
+    def _format_json_example(self, data: dict) -> str:
+        """Format JSON data as a readable example.
+
+        Converts a dictionary to a formatted JSON string for use in
+        LLM prompts and formatting instructions.
+
+        Args:
+            data: Dictionary to format as JSON.
+
+        Returns:
+            str: Formatted JSON string with 2-space indentation,
+                 or string representation if JSON serialization fails.
+        """
         import json
 
         try:
@@ -395,14 +652,57 @@ Ensure your response is valid JSON that can be parsed directly.
         except Exception:
             return str(data)
 
-    def execute(self, task_description: str, context: str | None = None) -> str:
-        """Execute a task using the agent with advanced controls"""
+    def execute(
+        self,
+        task_description: str,
+        context: str | None = None,
+        streamer_buffer: StreamerBuffer | None = None,
+        stream_callback: Callable[[Any], None] | None = None,
+        use_thread: bool = False,
+    ) -> str | tuple[StreamerBuffer, threading.Thread]:
+        """Execute a task using the agent with advanced controls.
+
+        Main method for task execution. Handles rate limiting, timeouts,
+        memory integration, knowledge context, retries, and step callbacks.
+        Streams responses from the LLM and processes function calls if configured.
+
+        Args:
+            task_description: Natural language description of the task to execute.
+            context: Optional additional context to include in the prompt.
+            streamer_buffer: Optional StreamerBuffer to receive streaming chunks.
+            stream_callback: Optional callback function for streaming responses.
+            use_thread: If True, executes in background thread and returns immediately
+                       with (buffer, thread) tuple. If False, blocks until complete.
+
+        Returns:
+            If use_thread=False: str containing the agent's response.
+            If use_thread=True: tuple of (StreamerBuffer, Thread) for async consumption.
+
+        Raises:
+            ValueError: If the agent is not connected to a Cortex instance.
+            TimeoutError: If execution exceeds max_execution_time.
+            RuntimeError: If no response is received after max_iterations.
+            Exception: Re-raises any exceptions from the underlying LLM execution.
+
+        Side Effects:
+            - Records request for rate limiting
+            - Updates execution statistics
+            - Invokes step callbacks
+            - Saves interaction to memory if enabled
+
+        Example:
+            result = agent.execute(
+                "Analyze the sales data",
+                context="Focus on Q4 2024 trends"
+            )
+        """
         if not self.calute_instance:
             raise ValueError(f"Agent {self.role} not connected to Cortex")
 
-        if not self._check_rate_limit():
-            import time
+        if use_thread:
+            return self._execute_threaded(task_description, context, streamer_buffer, stream_callback)
 
+        if not self._check_rate_limit():
             sleep_time = 60 / self.max_rpm if self.max_rpm else 1
             if self.verbose:
                 if self._logger:
@@ -410,8 +710,6 @@ Ensure your response is valid JSON that can be parsed directly.
             time.sleep(sleep_time)
 
         self._record_request()
-
-        import time
 
         start_time = time.time()
         self._times_executed += 1
@@ -427,7 +725,6 @@ Ensure your response is valid JSON that can be parsed directly.
 
         try:
             knowledge_context = self._build_knowledge_context(task_description)
-
             memory_context = ""
             if self.memory_enabled and self.memory:
                 memory_context = self.memory.build_context_for_task(
@@ -459,26 +756,57 @@ Ensure your response is valid JSON that can be parsed directly.
                     raise TimeoutError(f"Agent execution timed out after {self.max_execution_time}s")
 
                 try:
-                    response_generator = self.calute_instance.run(
-                        prompt=prompt,
-                        agent_id=self._internal_agent,
-                        stream=True,  # Always use stream=True for reliable function execution
-                        apply_functions=True,
-                        reinvoke_after_function=self.reinvoke_after_function,
-                    )
+                    if streamer_buffer is not None or stream_callback is not None:
+                        buffer_was_none = streamer_buffer is None
+                        if streamer_buffer is None:
+                            streamer_buffer = StreamerBuffer()
 
-                    # Collect the streaming response
-                    response_content = []
-                    for chunk in response_generator:
-                        if hasattr(chunk, "content") and chunk.content is not None:
-                            response_content.append(chunk.content)
+                        response_gen = self.calute_instance.run(
+                            prompt=prompt,
+                            agent_id=self._internal_agent,
+                            stream=True,
+                            apply_functions=True,
+                            reinvoke_after_function=self.reinvoke_after_function,
+                            streamer_buffer=streamer_buffer,
+                        )
 
-                    # Create a response object with the full content
-                    class StreamedResponse:
-                        def __init__(self, content):
-                            self.content = content
+                        if stream_callback:
+                            collected_content = []
+                            final_response = None
+                            for chunk in response_gen:
+                                stream_callback(chunk)
+                                if hasattr(chunk, "content") and chunk.content:
+                                    collected_content.append(chunk.content)
+                                final_response = chunk
 
-                    response = StreamedResponse("".join(response_content))
+                            response = ResponseResult(
+                                content="".join(collected_content),
+                                response=final_response,
+                                completion=getattr(final_response, "completion", None),
+                            )
+                        else:
+                            final_response = None
+                            for chunk in response_gen:
+                                final_response = chunk
+
+                            response = ResponseResult(
+                                content=getattr(final_response, "final_content", "") if final_response else "",
+                                response=final_response,
+                                completion=getattr(final_response, "completion", final_response),
+                            )
+
+                        if buffer_was_none:
+                            streamer_buffer.close()
+                    else:
+                        response = self.calute_instance.run(
+                            prompt=prompt,
+                            agent_id=self._internal_agent,
+                            stream=False,
+                            apply_functions=True,
+                            reinvoke_after_function=self.reinvoke_after_function,
+                            streamer_buffer=None,
+                        )
+
                     break
 
                 except Exception as e:
@@ -487,13 +815,24 @@ Ensure your response is valid JSON that can be parsed directly.
                         raise e
 
                     self._execute_step_callback(
-                        {"step": "retry", "agent": self.role, "iteration": iteration, "error": str(e)}
+                        {
+                            "step": "retry",
+                            "agent": self.role,
+                            "iteration": iteration,
+                            "error": str(e),
+                        }
                     )
 
             if not response:
                 raise RuntimeError("Failed to get response after maximum iterations")
 
-            if hasattr(response, "content"):
+            if isinstance(response, ResponseResult):
+                output = response.completion
+                if isinstance(output, Completion):
+                    result = output.final_content if output.final_content is not None else response.final_content
+                else:
+                    result = response.content if hasattr(response, "content") else ""
+            elif hasattr(response, "content"):
                 result = response.content
             elif hasattr(response, "completion"):
                 result = response.completion.content
@@ -525,17 +864,115 @@ Ensure your response is valid JSON that can be parsed directly.
         except Exception as e:
             execution_time = time.time() - start_time
             self._execution_times.append(execution_time)
-
             self._execute_step_callback(
-                {"step": "execution_error", "agent": self.role, "execution_time": execution_time, "error": str(e)}
+                {
+                    "step": "execution_error",
+                    "agent": self.role,
+                    "execution_time": execution_time,
+                    "error": str(e),
+                }
             )
 
             if self.verbose:
                 log_error(f"Agent {self.role}: {e!s}")
+
             raise
 
+    def _execute_threaded(
+        self,
+        task_description: str,
+        context: str | None = None,
+        streamer_buffer: StreamerBuffer | None = None,
+        stream_callback: Callable[[Any], None] | None = None,
+    ) -> tuple[StreamerBuffer, threading.Thread]:
+        """Execute task in background thread with streaming.
+
+        Internal method that wraps the main execute logic in a thread for
+        non-blocking execution with real-time streaming capabilities.
+
+        Args:
+            task_description: Natural language description of the task to execute.
+            context: Optional additional context to include in the prompt.
+            streamer_buffer: Optional StreamerBuffer to use, creates one if not provided.
+            stream_callback: Optional callback function for streaming responses.
+
+        Returns:
+            tuple: (StreamerBuffer, Thread) for async consumption of results.
+
+        Note:
+            This method returns immediately, allowing the caller to consume
+            streaming chunks while the agent executes in the background.
+        """
+        if not self.calute_instance:
+            raise ValueError(f"Agent {self.role} not connected to Cortex")
+
+        knowledge_context = self._build_knowledge_context(task_description)
+        memory_context = ""
+        if self.memory_enabled and self.memory:
+            memory_context = self.memory.build_context_for_task(
+                task_description=task_description,
+                agent_role=self.role,
+                additional_context=context,
+                max_items=10,
+            )
+
+        full_context = ""
+        contexts = [knowledge_context, memory_context, context]
+        contexts = [ctx for ctx in contexts if ctx]
+        if contexts:
+            full_context = "\n\n".join(contexts)
+
+        prompt = self._template_engine.render_task_prompt(
+            description=task_description,
+            expected_output="",
+            context=full_context,
+        )
+
+        buffer, thread = self.calute_instance.thread_run(
+            prompt=prompt,
+            agent_id=self._internal_agent,
+            apply_functions=True,
+            reinvoke_after_function=self.reinvoke_after_function,
+            streamer_buffer=streamer_buffer,
+        )
+
+        buffer.task_description = task_description  # type: ignore
+        buffer.agent_role = self.role  # type: ignore
+
+        if stream_callback:
+
+            def consume_and_callback():
+                """Consume from buffer and invoke callback."""
+                for chunk in buffer.stream():
+                    stream_callback(chunk)
+
+            callback_thread = threading.Thread(target=consume_and_callback, daemon=True)
+            callback_thread.start()
+            buffer.callback_thread = callback_thread
+
+        return buffer, thread
+
     def _check_delegation_needed(self, task_description: str, initial_response: str) -> tuple[bool, str]:
-        """Check if delegation is needed based on task and initial response"""
+        """Check if delegation is needed based on task and initial response.
+
+        Analyzes the initial response and task complexity to determine whether
+        the agent should delegate to another agent. Checks for indicators of
+        uncertainty or need for assistance, and considers task complexity.
+
+        Args:
+            task_description: The original task description.
+            initial_response: The agent's initial response to analyze.
+
+        Returns:
+            tuple[bool, str]: A tuple containing:
+                - bool: Whether delegation is needed
+                - str: Reason for delegation (empty if not needed)
+
+        Note:
+            - Delegation is prevented if already at depth 3 to avoid infinite recursion
+            - Looks for phrases like "I need help", "I cannot", "beyond my expertise"
+            - Also considers task length as complexity indicator (>50 words)
+        """
         if not self.allow_delegation or not self.cortex_instance or self._delegation_count >= 3:
             return False, ""
 
@@ -561,7 +998,25 @@ Ensure your response is valid JSON that can be parsed directly.
         return False, ""
 
     def _select_delegate_agent(self, task_description: str, reason: str) -> Optional["CortexAgent"]:
-        """Select the best agent to delegate to"""
+        """Select the best agent to delegate to.
+
+        Uses the LLM to intelligently select the most appropriate agent
+        from available agents based on the task requirements and each
+        agent's role and goal.
+
+        Args:
+            task_description: Description of the task requiring delegation.
+            reason: Reason why delegation is needed.
+
+        Returns:
+            Optional[CortexAgent]: The selected agent for delegation,
+                                  or None if no suitable agent is found.
+
+        Note:
+            - Excludes the current agent from selection
+            - Falls back to first available agent if selection fails
+            - Uses fuzzy matching to find agent by role name
+        """
         if not self.cortex_instance:
             return None
 
@@ -586,12 +1041,11 @@ Ensure your response is valid JSON that can be parsed directly.
             response_generator = self.calute_instance.run(
                 prompt=selection_prompt,
                 agent_id=self._internal_agent,
-                stream=True,  # Always use stream=True for reliable execution
+                stream=True,
                 apply_functions=False,
                 reinvoke_after_function=False,
             )
 
-            # Collect the streaming response
             response_content = []
             for chunk in response_generator:
                 if hasattr(chunk, "content") and chunk.content is not None:
@@ -614,8 +1068,80 @@ Ensure your response is valid JSON that can be parsed directly.
 
         return available_agents[0] if available_agents else None
 
+    def execute_stream(
+        self,
+        task_description: str,
+        context: str | None = None,
+        callback: Callable[[StreamingResponseType], None] | None = None,
+    ) -> str:
+        """Execute task with real-time streaming and optional callback.
+
+        Convenience method that executes a task in a background thread and
+        processes streaming chunks through an optional callback while returning
+        the final result.
+
+        Args:
+            task_description: Natural language description of the task to execute.
+            context: Optional additional context to include in the prompt.
+            callback: Optional function to call with each streaming chunk.
+                     If not provided, chunks are silently consumed.
+
+        Returns:
+            str: The final agent response after all streaming is complete.
+
+        Example:
+            def print_chunk(chunk):
+                if hasattr(chunk, 'content') and chunk.content:
+                    print(chunk.content, end='', flush=True)
+
+            result = agent.execute_stream(
+                "Write a poem",
+                callback=print_chunk
+            )
+        """
+        from calute.types import StreamChunk
+
+        buffer, thread = self.execute(task_description=task_description, context=context, use_thread=True)
+
+        for chunk in buffer.stream():
+            if callback:
+                callback(chunk)
+
+            elif self.verbose and isinstance(chunk, StreamChunk) and chunk.content:
+                if self._logger:
+                    self._logger.info(f"[{self.role}]: {chunk.content}")
+
+        thread.join(timeout=1.0)
+        result = buffer.get_result()
+
+        if hasattr(result, "content"):
+            return result.content
+        return str(result)
+
     def delegate_task(self, task_description: str, context: str | None = None) -> str:
-        """Delegate a task to another agent"""
+        """Delegate a task to another agent.
+
+        Delegates a task to another agent in the Cortex system. Selects the
+        most appropriate agent and passes the task with additional context
+        about the delegation.
+
+        Args:
+            task_description: Description of the task to delegate.
+            context: Optional additional context for the delegated task.
+
+        Returns:
+            str: Result from the delegate agent, or error message if delegation fails.
+
+        Side Effects:
+            - Increments delegation count
+            - Logs delegation activity
+            - Saves delegation to memory if enabled
+            - Passes delegation count to delegate to maintain depth tracking
+
+        Note:
+            Returns "Delegation not available" if delegation is disabled or
+            no Cortex instance is available.
+        """
         if not self.allow_delegation or not self.cortex_instance:
             return "Delegation not available"
 
@@ -655,7 +1181,32 @@ Ensure your response is valid JSON that can be parsed directly.
         return result
 
     def execute_with_delegation(self, task_description: str, context: str | None = None) -> str:
-        """Execute task with automatic delegation if needed and allowed"""
+        """Execute task with automatic delegation if needed and allowed.
+
+        Executes a task with intelligent delegation support. First attempts
+        to execute the task directly, then checks if delegation would be
+        beneficial. If delegation occurs, combines both responses into a
+        comprehensive final answer.
+
+        Args:
+            task_description: Description of the task to execute.
+            context: Optional additional context.
+
+        Returns:
+            str: Final response, potentially combining insights from multiple agents.
+
+        Note:
+            - Automatically determines if delegation is needed based on initial response
+            - Combines delegated results with initial response for comprehensive answer
+            - Falls back to delegated result if combination fails
+            - Returns initial result if delegation is not needed or not available
+
+        Example:
+
+            result = agent.execute_with_delegation(
+                "Create a marketing strategy with technical implementation details"
+            )
+        """
 
         initial_result = self.execute(task_description, context)
 
@@ -680,12 +1231,11 @@ Ensure your response is valid JSON that can be parsed directly.
                 response_generator = self.calute_instance.run(
                     prompt=final_prompt,
                     agent_id=self._internal_agent,
-                    stream=True,  # Always use stream=True for reliable execution
+                    stream=True,
                     apply_functions=False,
                     reinvoke_after_function=False,
                 )
 
-                # Collect the streaming response
                 response_content = []
                 for chunk in response_generator:
                     if hasattr(chunk, "content") and chunk.content is not None:
@@ -705,7 +1255,23 @@ Ensure your response is valid JSON that can be parsed directly.
         return initial_result
 
     def get_execution_stats(self) -> dict:
-        """Get execution statistics"""
+        """Get execution statistics.
+
+        Compiles comprehensive statistics about the agent's execution history,
+        including timing metrics and execution counts.
+
+        Returns:
+            dict: Statistics dictionary containing:
+                - times_executed: Total number of executions
+                - avg_execution_time: Average execution duration in seconds
+                - total_execution_time: Sum of all execution times
+                - min_execution_time: Fastest execution time
+                - max_execution_time: Slowest execution time
+                - recent_execution_times: Last 5 execution durations (if available)
+
+        Note:
+            Returns zero values for timing metrics if no executions have occurred.
+        """
         if not self._execution_times:
             return {
                 "times_executed": self._times_executed,
@@ -725,43 +1291,141 @@ Ensure your response is valid JSON that can be parsed directly.
         }
 
     def reset_stats(self):
-        """Reset execution statistics"""
+        """Reset execution statistics.
+
+        Clears all execution statistics and counters, returning the agent
+        to a fresh state for metric tracking.
+
+        Side Effects:
+            - Resets _times_executed to 0
+            - Clears _execution_times list
+            - Clears _rpm_requests list
+            - Resets _delegation_count to 0
+        """
         self._times_executed = 0
         self._execution_times.clear()
         self._rpm_requests.clear()
         self._delegation_count = 0
 
     def add_knowledge(self, key: str, value: str):
-        """Add knowledge to the agent's knowledge base"""
+        """Add knowledge to the agent's knowledge base.
+
+        Adds or updates a knowledge entry that will be included in the
+        agent's context during task execution.
+
+        Args:
+            key: Knowledge identifier or category.
+            value: Knowledge content or description.
+
+        Side Effects:
+            Updates the knowledge dictionary.
+
+        Example:
+            agent.add_knowledge("company_policy", "Always prioritize customer satisfaction")
+            agent.add_knowledge("domain_expertise", "Specialized in healthcare analytics")
+        """
         self.knowledge[key] = value
 
     def add_knowledge_source(self, source: str):
-        """Add a knowledge source"""
+        """Add a knowledge source.
+
+        Registers a knowledge source identifier that represents an external
+        source of information available to the agent.
+
+        Args:
+            source: Knowledge source identifier (e.g., database name, API endpoint).
+
+        Side Effects:
+            Appends to knowledge_sources list if not already present.
+
+        Note:
+            Duplicate sources are automatically prevented.
+        """
         if source not in self.knowledge_sources:
             self.knowledge_sources.append(source)
 
     def update_config(self, key: str, value):
-        """Update agent configuration"""
+        """Update agent configuration.
+
+        Sets or updates a configuration parameter for the agent.
+        Configuration can be used to store agent-specific settings
+        or runtime parameters.
+
+        Args:
+            key: Configuration parameter name.
+            value: Configuration parameter value (any type).
+
+        Side Effects:
+            Updates the config dictionary.
+        """
         self.config[key] = value
 
     def get_config(self, key: str, default=None):
-        """Get configuration value"""
+        """Get configuration value.
+
+        Retrieves a configuration parameter value with optional default.
+
+        Args:
+            key: Configuration parameter name to retrieve.
+            default: Default value if key is not found.
+
+        Returns:
+            The configuration value for the key, or default if not found.
+        """
         return self.config.get(key, default)
 
     def set_step_callback(self, callback: Callable):
-        """Set step callback function"""
+        """Set step callback function.
+
+        Registers a callback function that will be invoked at each step
+        of task execution, useful for monitoring and debugging.
+
+        Args:
+            callback: Callable that accepts a dict parameter containing step information.
+                     The dict includes fields like 'step', 'agent', 'task', etc.
+
+        Example:
+            def my_callback(step_info):
+                print(f"Step: {step_info['step']} for agent: {step_info['agent']}")
+
+            agent.set_step_callback(my_callback)
+        """
         self.step_callback = callback
 
     def is_rate_limited(self) -> bool:
-        """Check if agent is currently rate limited"""
+        """Check if agent is currently rate limited.
+
+        Determines whether the agent would be rate limited if it attempted
+        to make a request right now.
+
+        Returns:
+            bool: True if currently rate limited, False otherwise.
+
+        Note:
+            This is a read-only check that doesn't modify rate limit state.
+        """
         return not self._check_rate_limit()
 
     def get_rate_limit_status(self) -> dict:
-        """Get current rate limiting status"""
+        """Get current rate limiting status.
+
+        Provides detailed information about the current rate limiting state,
+        including requests made and remaining capacity.
+
+        Returns:
+            dict: Rate limit status containing:
+                - rate_limited: Whether currently rate limited
+                - max_rpm: Maximum requests per minute allowed (None if no limit)
+                - current_requests: Number of requests in current 60-second window
+                - requests_remaining: Available requests before hitting limit
+
+        Example:
+            status = agent.get_rate_limit_status()
+            if status['requests_remaining'] < 5:
+                print("Approaching rate limit")
+        """
         if not self.max_rpm:
             return {"rate_limited": False, "max_rpm": None, "current_requests": 0}
-
-        import time
 
         current_time = time.time()
         recent_requests = [req for req in self._rpm_requests if current_time - req < 60]
@@ -772,3 +1436,45 @@ Ensure your response is valid JSON that can be parsed directly.
             "current_requests": len(recent_requests),
             "requests_remaining": max(0, self.max_rpm - len(recent_requests)),
         }
+
+    def __eq__(self, other: object) -> bool:
+        """Check equality between two CortexAgent instances.
+
+        Two agents are considered equal if they have the same role, goal,
+        backstory, and model configuration.
+
+        Args:
+            other: Another object to compare with.
+
+        Returns:
+            bool: True if agents are equal, False otherwise.
+        """
+        if not isinstance(other, CortexAgent):
+            return False
+        return (
+            self.role == other.role
+            and self.goal == other.goal
+            and self.backstory == other.backstory
+            and self.model == other.model
+        )
+
+    def __hash__(self) -> int:
+        """Generate a hash value for the CortexAgent using SHA256.
+
+        The hash is computed from the agent's role, goal, backstory, and model
+        to ensure consistent hashing based on the agent's core identity.
+
+        Returns:
+            int: Hash value derived from SHA256 digest of agent attributes.
+
+        Example:
+            agent1 = CortexAgent(role="Analyst", goal="Analyze data", ...)
+            agent2 = CortexAgent(role="Analyst", goal="Analyze data", ...)
+            assert hash(agent1) == hash(agent2)
+        """
+
+        identity_str = f"{self.role}|{self.goal}|{self.backstory}|{self.model or 'default'}"
+
+        sha256_hash = hashlib.sha256(identity_str.encode("utf-8")).digest()
+
+        return int.from_bytes(sha256_hash[:8], byteorder="big", signed=False)

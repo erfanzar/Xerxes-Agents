@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Contextual memory for maintaining conversation and task context"""
 
@@ -107,7 +107,12 @@ class ContextualMemory(Memory):
         return item
 
     def search(
-        self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, search_long_term: bool = True, **kwargs
+        self,
+        query: str,
+        limit: int = 10,
+        filters: dict[str, Any] | None = None,
+        search_long_term: bool = True,
+        **kwargs,
     ) -> list[MemoryItem]:
         """
         Search both short-term and long-term memories.

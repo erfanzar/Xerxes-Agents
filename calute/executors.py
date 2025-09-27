@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+"""Function execution and agent orchestration system.
+
+This module provides the core execution infrastructure for Calute,
+including:
+- Function registry and management
+- Agent orchestration and switching
+- Function execution with various strategies (sequential, parallel, pipeline)
+- Retry policies and error handling
+- Execution metrics and monitoring
+- Enhanced versions with additional features
+
+The module supports both synchronous and asynchronous function execution,
+timeout management, and sophisticated error recovery mechanisms.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -46,43 +62,92 @@ add_depth = (  # noqa
 
 
 class FunctionRegistry:
-    """Registry for managing functions across agents"""
+    """Registry for managing functions across agents.
+
+    Maintains a central registry of all functions available in the system,
+    tracking which agent owns each function and associated metadata.
+
+    Attributes:
+        _functions: Dictionary mapping function names to callable functions.
+        _function_agents: Dictionary mapping function names to agent IDs.
+        _function_metadata: Dictionary mapping function names to metadata.
+    """
 
     def __init__(self):
+        """Initialize an empty function registry."""
         self._functions: dict[str, tp.Callable] = {}
         self._function_agents: dict[str, str] = {}
         self._function_metadata: dict[str, dict] = {}
 
     def register(self, func: tp.Callable, agent_id: str, metadata: dict | None = None):
-        """Register a function with the registry"""
+        """Register a function with the registry.
+
+        Args:
+            func: The callable function to register.
+            agent_id: ID of the agent that owns this function.
+            metadata: Optional metadata about the function.
+        """
         func_name = func.__name__
         self._functions[func_name] = func
         self._function_agents[func_name] = agent_id
         self._function_metadata[func_name] = metadata or {}
 
     def get_function(self, name: str) -> tuple[tp.Callable | None, str | None]:
-        """Get function and its associated agent"""
+        """Get function and its associated agent.
+
+        Args:
+            name: Name of the function to retrieve.
+
+        Returns:
+            Tuple of (function, agent_id) or (None, None) if not found.
+        """
         func = self._functions.get(name)
         agent_id = self._function_agents.get(name)
         return func, agent_id
 
     def get_functions_by_agent(self, agent_id: str) -> list[tp.Callable]:
-        """Get all functions for a specific agent"""
+        """Get all functions for a specific agent.
+
+        Args:
+            agent_id: ID of the agent.
+
+        Returns:
+            List of functions registered to the agent.
+        """
         return [func for func_name, func in self._functions.items() if self._function_agents[func_name] == agent_id]
 
 
 class AgentOrchestrator:
-    """Orchestrates multiple agents and handles switching logic"""
+    """Orchestrates multiple agents and handles switching logic.
+
+    Manages a collection of agents, their functions, and the logic for
+    switching between agents based on various triggers.
+
+    Attributes:
+        agents: Dictionary of registered agents by ID.
+        function_registry: Registry of all available functions.
+        switch_triggers: Dictionary of trigger handlers for agent switching.
+        current_agent_id: ID of the currently active agent.
+        execution_history: History of agent switches and executions.
+    """
 
     def __init__(self):
+        """Initialize the agent orchestrator."""
         self.agents: dict[str, Agent] = {}
         self.function_registry = FunctionRegistry()
         self.switch_triggers: dict[AgentSwitchTrigger, tp.Callable] = {}
         self.current_agent_id: str | None = None
         self.execution_history: list[dict] = []
 
-    def register_agent(self, agent: Agent):
-        """Register an agent with the orchestrator"""
+    def register_agent(self, agent: Agent) -> None:
+        """Register an agent with the orchestrator.
+
+        Args:
+            agent: The agent instance to register.
+
+        Returns:
+            None
+        """
         agent_id = agent.id or f"agent_{len(self.agents)}"
         agent.id = agent_id
         self.agents[agent_id] = agent
@@ -93,20 +158,46 @@ class AgentOrchestrator:
         if self.current_agent_id is None:
             self.current_agent_id = agent_id
 
-    def register_switch_trigger(self, trigger: AgentSwitchTrigger, handler: tp.Callable):
-        """Register a custom switch trigger handler"""
+    def register_switch_trigger(self, trigger: AgentSwitchTrigger, handler: tp.Callable) -> None:
+        """Register a custom switch trigger handler.
+
+        Args:
+            trigger: The trigger type to register.
+            handler: The callable handler for this trigger.
+
+        Returns:
+            None
+        """
         self.switch_triggers[trigger] = handler
 
     def should_switch_agent(self, context: dict) -> str | None:
-        """Determine if agent switching is needed"""
+        """Determine if agent switching is needed.
+
+        Args:
+            context: The current execution context.
+
+        Returns:
+            The ID of the target agent if switching is needed, None otherwise.
+        """
         for _, handler in self.switch_triggers.items():
             target_agent = handler(context, self.agents, self.current_agent_id)
             if target_agent and target_agent != self.current_agent_id:
                 return target_agent
         return None
 
-    def switch_agent(self, target_agent_id: str, reason: str | None = None):
-        """Switch to a different agent"""
+    def switch_agent(self, target_agent_id: str, reason: str | None = None) -> None:
+        """Switch to a different agent.
+
+        Args:
+            target_agent_id: ID of the agent to switch to.
+            reason: Optional reason for the switch.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the target agent is not found.
+        """
         if target_agent_id not in self.agents:
             raise ValueError(f"Agent {target_agent_id} not found")
 
@@ -124,13 +215,24 @@ class AgentOrchestrator:
         )
 
     def get_current_agent(self) -> Agent:
-        """Get the currently active agent"""
+        """Get the currently active agent.
+
+        Returns:
+            The currently active Agent instance.
+
+        Raises:
+            ValueError: If no agent is currently active.
+        """
         if not self.current_agent_id:
             raise ValueError("No active agent")
         return self.agents[self.current_agent_id]
 
     def _get_timestamp(self) -> str:
-        """Get current timestamp"""
+        """Get current timestamp in ISO format.
+
+        Returns:
+            Current timestamp as an ISO formatted string.
+        """
         import datetime
 
         return datetime.datetime.now().isoformat()

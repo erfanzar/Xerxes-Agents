@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+"""Utility functions for the Calute framework.
+
+This module provides helper functions for debugging, data merging, and function
+introspection. It includes utilities for converting Python functions to JSON schema
+format, merging response chunks, and debug printing with timestamps.
+"""
+
 import inspect
 import re
 from datetime import datetime
@@ -29,6 +37,19 @@ class CaluteBase(BaseModel):
 
 
 def debug_print(debug: bool, *args: str) -> None:
+    """Print debug messages with timestamp if debug mode is enabled.
+
+    Args:
+        debug: Whether debug mode is enabled.
+        *args: Variable number of string arguments to print.
+
+    Returns:
+        None
+
+    Example:
+        >>> debug_print(True, "Processing", "function", "call")
+        [2025-01-27 10:30:45] Processing function call
+    """
     if not debug:
         return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -36,7 +57,25 @@ def debug_print(debug: bool, *args: str) -> None:
     print(f"\033[97m[\033[90m{timestamp}\033[97m]\033[90m {message}\033[0m")
 
 
-def merge_fields(target, source):
+def merge_fields(target: dict, source: dict) -> None:
+    """Recursively merge fields from source dictionary into target dictionary.
+
+    For string values, concatenates them. For dict values, merges recursively.
+
+    Args:
+        target: The target dictionary to merge into.
+        source: The source dictionary to merge from.
+
+    Returns:
+        None (modifies target in place)
+
+    Example:
+        >>> target = {"text": "Hello", "nested": {"key": "value"}}
+        >>> source = {"text": " World", "nested": {"key": "2"}}
+        >>> merge_fields(target, source)
+        >>> print(target)
+        {"text": "Hello World", "nested": {"key": "value2"}}
+    """
     for key, value in source.items():
         if isinstance(value, str):
             target[key] += value
@@ -45,6 +84,21 @@ def merge_fields(target, source):
 
 
 def merge_chunk(final_response: dict, delta: dict) -> None:
+    """Merge a streaming response chunk into the final response.
+
+    Handles special processing for tool_calls and removes role field.
+
+    Args:
+        final_response: The accumulated response dictionary.
+        delta: The new chunk to merge.
+
+    Returns:
+        None (modifies final_response in place)
+
+    Note:
+        This function is specifically designed for merging streaming API
+        response chunks that may contain tool calls.
+    """
     delta.pop("role", None)
     merge_fields(final_response, delta)
 
@@ -54,15 +108,33 @@ def merge_chunk(final_response: dict, delta: dict) -> None:
         merge_fields(final_response["tool_calls"][index], tool_calls[0])
 
 
-def function_to_json(func) -> dict:
-    """
-    Converts a Python function into a JSON-serializable dictionary
-    that describes the function's signature, including its name,
-    description, and parameters.
+def function_to_json(func: callable) -> dict:
+    """Convert a Python function into a JSON-serializable dictionary.
+
+    Extracts the function's signature, including its name, description
+    (from docstring), and parameters with their types and descriptions.
+    This is used to generate function schemas for LLM tool calling.
+
     Args:
         func: The function to be converted.
+
     Returns:
-        A dictionary representing the function's signature in JSON format.
+        A dictionary representing the function's signature in JSON format,
+        compatible with OpenAI function calling schema.
+
+    Raises:
+        ValueError: If the function signature cannot be extracted.
+
+    Example:
+        >>> def greet(name: str, age: int = 0) -> str:
+        ...     '''Greet a person.
+        ...     name: Person's name
+        ...     age: Person's age
+        ...     '''
+        ...     return f"Hello {name}"
+        >>> schema = function_to_json(greet)
+        >>> print(schema["function"]["name"])
+        greet
     """
     type_map = {
         str: "string",

@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """XML-based planner agent inspired by SmolAgent's planning system"""
 
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..loggings import get_logger
+from ..streamer_buffer import StreamerBuffer
 from .agent import CortexAgent
 from .templates import PromptTemplate
 
@@ -100,36 +103,58 @@ class CortexPlanner:
             allow_delegation=False,
         )
 
-    def create_plan(self, objective: str, available_agents: list[CortexAgent], context: str = "") -> ExecutionPlan:
-        """Create an execution plan for the given objective"""
+    def create_plan(
+        self,
+        objective: str,
+        available_agents: list[CortexAgent],
+        context: str = "",
+        streamer_buffer: StreamerBuffer | None = None,
+        stream_callback: Callable[[Any], None] | None = None,
+    ) -> ExecutionPlan:
+        """Create an execution plan for the given objective with streaming support"""
 
-        if self.verbose:
-            if self.logger:
-                self.logger.info(f"🧠 Planner creating plan for: {objective[:100]}...")
+        if self.verbose and self.logger:
+            self.logger.info(f"🧠 Planner creating plan for: {objective[:100]}...")
 
         planning_prompt = self.template_engine.render_planner(
-            objective=objective, agents=available_agents, context=context
+            objective=objective,
+            agents=available_agents,
+            context=context,
         )
 
         try:
             if not self.planner_agent.calute_instance and self.cortex_instance:
                 self.planner_agent.calute_instance = self.cortex_instance.calute
 
-            plan_response = self.planner_agent.execute(task_description=planning_prompt, context=context)
+            plan_response = self.planner_agent.execute(
+                task_description=planning_prompt,
+                context=context,
+                streamer_buffer=streamer_buffer,
+                stream_callback=stream_callback,
+            )
 
             execution_plan = self._parse_xml_plan(plan_response, objective)
 
             if self.verbose:
+                success_msg = f"✅ Plan created with {len(execution_plan.steps)} steps"
+                if stream_callback:
+                    stream_callback(success_msg)
+                if streamer_buffer:
+                    streamer_buffer.put(success_msg + "\n")
                 if self.logger:
-                    self.logger.info(f"✅ Plan created with {len(execution_plan.steps)} steps")
+                    self.logger.info(success_msg)
                 self._log_plan_summary(execution_plan)
 
             return execution_plan
 
         except Exception as e:
-            if self.verbose:
-                if self.logger:
-                    self.logger.error(f"❌ Failed to create plan: {e}")
+            error_msg = f"❌ Failed to create plan: {e}"
+            if stream_callback:
+                stream_callback(error_msg)
+            if streamer_buffer:
+                streamer_buffer.put(error_msg + "\n")
+            if self.verbose and self.logger:
+                self.logger.error(error_msg)
 
             return self._create_fallback_plan(objective, available_agents)
 

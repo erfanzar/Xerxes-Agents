@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Storage backends for Calute memory system"""
 
@@ -184,15 +184,13 @@ class SQLiteStorage(MemoryStorage):
     def __init__(self, db_path: str = ".calute_memory/memory.db"):
         import os
 
-        # Check WRITE_MEMORY environment variable
-        self.write_enabled = os.environ.get('WRITE_MEMORY', '0') == '1'
+        self.write_enabled = os.environ.get("WRITE_MEMORY", "0") == "1"
 
         self.db_path = Path(db_path)
         if self.write_enabled:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
         else:
-            # Use in-memory storage when write is disabled
             self._memory_storage = {}
 
     def _init_db(self):
@@ -214,7 +212,6 @@ class SQLiteStorage(MemoryStorage):
     def save(self, key: str, data: Any) -> bool:
         """Save data to database or in-memory storage"""
         if not self.write_enabled:
-            # Use in-memory storage
             self._memory_storage[key] = data
             return True
 
@@ -237,7 +234,6 @@ class SQLiteStorage(MemoryStorage):
     def load(self, key: str) -> Any | None:
         """Load data from database or in-memory storage"""
         if not self.write_enabled:
-            # Use in-memory storage
             return self._memory_storage.get(key)
 
         with sqlite3.connect(self.db_path) as conn:
@@ -250,7 +246,6 @@ class SQLiteStorage(MemoryStorage):
     def delete(self, key: str) -> bool:
         """Delete from database or in-memory storage"""
         if not self.write_enabled:
-            # Use in-memory storage
             if key in self._memory_storage:
                 del self._memory_storage[key]
                 return True
@@ -264,7 +259,6 @@ class SQLiteStorage(MemoryStorage):
     def exists(self, key: str) -> bool:
         """Check if key exists"""
         if not self.write_enabled:
-            # Use in-memory storage
             return key in self._memory_storage
 
         with sqlite3.connect(self.db_path) as conn:
@@ -274,7 +268,6 @@ class SQLiteStorage(MemoryStorage):
     def list_keys(self, pattern: str | None = None) -> list[str]:
         """List all stored keys"""
         if not self.write_enabled:
-            # Use in-memory storage
             keys = list(self._memory_storage.keys())
             if pattern:
                 keys = [k for k in keys if pattern in k]
@@ -292,7 +285,6 @@ class SQLiteStorage(MemoryStorage):
     def clear(self) -> int:
         """Clear all data"""
         if not self.write_enabled:
-            # Use in-memory storage
             count = len(self._memory_storage)
             self._memory_storage.clear()
             return count

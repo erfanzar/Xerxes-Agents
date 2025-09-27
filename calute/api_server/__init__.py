@@ -1,4 +1,3 @@
-
 # Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Modular OpenAI-compatible API server for Calute agents."""
 
+"""Modular OpenAI-compatible API server for Calute agents with Cortex support."""
+
+from .cortex_completion_service import CortexCompletionService
 from .server import CaluteAPIServer
 
-__all__ = ["CaluteAPIServer"]
+__all__ = ["CaluteAPIServer", "CortexCompletionService"]

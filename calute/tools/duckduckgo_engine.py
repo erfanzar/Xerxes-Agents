@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from datetime import datetime
 from typing import Literal
 
@@ -22,7 +23,7 @@ class DuckDuckGoSearch(AgentBaseFn):
     try:
         from ddgs import DDGS
     except ModuleNotFoundError as e:
-        print("`ddgs` package not found please install with calute[tools]")
+        print("`ddgs` package not found please install with calute[search]")
         raise e
 
     SearchType = Literal["text", "images", "videos", "news", "maps"]
@@ -202,10 +203,14 @@ class DuckDuckGoSearch(AgentBaseFn):
                         break
 
             elif search_type == "news":
+                news_safesearch = safesearch.lower() if safesearch else "moderate"
+                if news_safesearch == "strict" and timelimit:
+                    news_safesearch = "moderate"
+
                 search_results = ddgs.news(
                     query,
                     region=region,
-                    safesearch=safesearch.capitalize() if safesearch else "Moderate",
+                    safesearch=news_safesearch,
                     timelimit=timelimit,
                 )
                 for r in search_results:

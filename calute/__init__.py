@@ -12,6 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+"""Calute: An advanced AI agent orchestration framework.
+
+This module provides a comprehensive framework for building and managing AI agents
+with sophisticated capabilities including memory management, task execution, tool
+integration, and multi-agent orchestration. The framework supports multiple LLM
+providers and offers both synchronous and asynchronous execution modes.
+
+Key Features:
+    - Multi-agent orchestration with dynamic switching
+    - Advanced memory management (short-term, long-term, contextual)
+    - Tool and function integration
+    - Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Ollama)
+    - Streaming and batch processing capabilities
+    - Cortex system for complex agent workflows
+
+Example:
+    >>> from calute import Calute, OpenAILLM
+    >>>
+    >>> llm = OpenAILLM(api_key="your-api-key")
+    >>> agent = Calute(llm=llm, name="Assistant")
+    >>> response = agent.query("Hello, how can you help me?")
+    >>> print(response.content)
+"""
+
 from .calute import Calute, PromptTemplate
 from .cortex import (
     ChainLink,
@@ -28,6 +53,7 @@ from .cortex import (
 from .executors import AgentOrchestrator
 from .llms import AnthropicLLM, BaseLLM, GeminiLLM, LLMConfig, LocalLLM, OllamaLLM, OpenAILLM, create_llm
 from .memory import MemoryEntry, MemoryStore, MemoryType
+from .streamer_buffer import StreamerBuffer
 from .types import (
     Agent,
     AgentCapability,
@@ -104,6 +130,7 @@ __all__ = (
     "RequestFunctionCall",
     "Roles",
     "StreamChunk",
+    "StreamerBuffer",
     "SwitchContext",
     "SystemMessage",
     "SystemMessageType",

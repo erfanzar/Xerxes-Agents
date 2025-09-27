@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 """OpenAI LLM implementation."""
 
 from __future__ import annotations
@@ -194,6 +195,7 @@ class OpenAILLM(BaseLLM):
                 "buffered_content": buffered_content,
                 "function_calls": [],
                 "tool_calls": None,
+                "streaming_tool_calls": None,
                 "raw_chunk": chunk,
                 "is_final": False,
             }
@@ -207,6 +209,9 @@ class OpenAILLM(BaseLLM):
                     chunk_data["buffered_content"] = buffered_content
 
                 if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    streaming_tool_calls = {}
+                    accumulated_tool_calls = {}
+
                     for tool_call_delta in delta.tool_calls:
                         idx = getattr(tool_call_delta, "index", 0)
                         if isinstance(tool_call_delta, dict):
@@ -219,17 +224,35 @@ class OpenAILLM(BaseLLM):
                                 "function": {"name": None, "arguments": ""},
                             }
 
+                        streaming_update = {}
+
                         if hasattr(tool_call_delta, "id") and tool_call_delta.id:
                             tool_call_accumulator[idx]["id"] = tool_call_delta.id
+                            streaming_update["id"] = tool_call_delta.id
 
                         if hasattr(tool_call_delta, "function") and tool_call_delta.function:
                             func = tool_call_delta.function
                             if hasattr(func, "name") and func.name:
                                 tool_call_accumulator[idx]["function"]["name"] = func.name
+                                streaming_update["name"] = func.name
                             if hasattr(func, "arguments") and func.arguments:
                                 tool_call_accumulator[idx]["function"]["arguments"] += func.arguments
+                                streaming_update["arguments"] = func.arguments
 
-                    chunk_data["tool_calls"] = tool_call_accumulator
+                        if streaming_update:
+                            streaming_tool_calls[idx] = streaming_update
+
+                        accumulated_tool_calls[idx] = {
+                            "id": tool_call_accumulator[idx]["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_call_accumulator[idx]["function"]["name"],
+                                "arguments": tool_call_accumulator[idx]["function"]["arguments"],
+                            },
+                        }
+
+                    chunk_data["tool_calls"] = accumulated_tool_calls if accumulated_tool_calls else None
+                    chunk_data["streaming_tool_calls"] = streaming_tool_calls if streaming_tool_calls else None
 
                 if chunk.choices[0].finish_reason:
                     chunk_data["is_final"] = True
@@ -273,6 +296,7 @@ class OpenAILLM(BaseLLM):
                 "buffered_content": buffered_content,
                 "function_calls": [],
                 "tool_calls": None,
+                "streaming_tool_calls": None,
                 "raw_chunk": chunk,
                 "is_final": False,
             }
@@ -286,6 +310,9 @@ class OpenAILLM(BaseLLM):
                     chunk_data["buffered_content"] = buffered_content
 
                 if hasattr(delta, "tool_calls") and delta.tool_calls:
+                    streaming_tool_calls = {}
+                    accumulated_tool_calls = {}
+
                     for tool_call_delta in delta.tool_calls:
                         idx = getattr(tool_call_delta, "index", 0)
                         if isinstance(tool_call_delta, dict):
@@ -298,16 +325,35 @@ class OpenAILLM(BaseLLM):
                                 "function": {"name": None, "arguments": ""},
                             }
 
+                        streaming_update = {}
+
                         if hasattr(tool_call_delta, "id") and tool_call_delta.id:
                             tool_call_accumulator[idx]["id"] = tool_call_delta.id
+                            streaming_update["id"] = tool_call_delta.id
 
                         if hasattr(tool_call_delta, "function") and tool_call_delta.function:
                             func = tool_call_delta.function
                             if hasattr(func, "name") and func.name:
                                 tool_call_accumulator[idx]["function"]["name"] = func.name
+                                streaming_update["name"] = func.name
                             if hasattr(func, "arguments") and func.arguments:
                                 tool_call_accumulator[idx]["function"]["arguments"] += func.arguments
-                    chunk_data["tool_calls"] = tool_call_accumulator
+                                streaming_update["arguments"] = func.arguments
+
+                        if streaming_update:
+                            streaming_tool_calls[idx] = streaming_update
+
+                        accumulated_tool_calls[idx] = {
+                            "id": tool_call_accumulator[idx]["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tool_call_accumulator[idx]["function"]["name"],
+                                "arguments": tool_call_accumulator[idx]["function"]["arguments"],
+                            },
+                        }
+
+                    chunk_data["tool_calls"] = accumulated_tool_calls if accumulated_tool_calls else None
+                    chunk_data["streaming_tool_calls"] = streaming_tool_calls if streaming_tool_calls else None
 
                 if chunk.choices[0].finish_reason:
                     chunk_data["is_final"] = True
