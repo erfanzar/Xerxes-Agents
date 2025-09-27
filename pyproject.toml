@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.0.23"
+version = "0.1.0"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }
@@ -22,10 +22,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.9.2,<3.0.0",
     "openai>=1.72.0",
-    "pyyaml>=6.0",
-    "aiofiles>=23.0.0",
     "httpx>=0.25.0",
-    "tenacity>=8.2.0",
     "psutil>=5.9.0",
     "pillow>=11.0.0",
     "numpy>=1.24.0",
@@ -33,6 +30,9 @@ dependencies = [
     "fastapi>=0.116.1",
     "uvicorn>=0.35.0",
     "jinja2>=3.1.6",
+    "requests>=2.31.0",
+    "ddgs>=9.5.4",
+    "lxml>=5.0.0",
 ]
 
 [project.urls]
@@ -57,24 +57,24 @@ dev = [
 
 # Search and web tools
 search = [
-    "ddgs>=9.5.4",
     "beautifulsoup4>=4.12.0",
-    "lxml>=5.0.0",
     "feedparser>=6.0.0",
+    "python-dateutil>=2.8.0",
+    "pyyaml>=6.0",
 ]
 
-# Database backends
-database = [
-    "sqlalchemy>=2.0.0",
-    "alembic>=1.13.0",
-    "asyncpg>=0.29.0",
-    "psycopg2-binary>=2.9.9",
-    "pymongo>=4.6.0",
-    "motor>=3.3.0",
-]
+# Database backends (currently unused - placeholder for future)
+# database = [
+#     "sqlalchemy>=2.0.0",
+#     "alembic>=1.13.0",
+#     "asyncpg>=0.29.0",
+#     "psycopg2-binary>=2.9.9",
+#     "pymongo>=4.6.0",
+#     "motor>=3.3.0",
+# ]
 
-# Redis for caching/queuing
-redis = ["redis>=5.0.0", "redis[hiredis]>=5.0.0"]
+# Redis for caching/queuing (currently unused - placeholder for future)
+# redis = ["redis>=5.0.0", "redis[hiredis]>=5.0.0"]
 
 # Monitoring and observability
 monitoring = [
@@ -90,18 +90,24 @@ monitoring = [
 
 # Vector search and embeddings
 vectors = [
-    "numpy>=1.24.0",
     "scikit-learn>=1.3.0",
-    "faiss-cpu>=1.7.4",
     "sentence-transformers>=2.3.0",
+    # "faiss-cpu>=1.7.4",  # Currently unused - uncomment if needed
 ]
 
+# Alternative LLM providers (Note: these use httpx which is already in core)
+# llm-providers = [
+#     "anthropic>=0.39.0",  # Not actually used - AnthropicLLM uses httpx directly
+#     "ollama>=0.3.0",      # Not actually used - OllamaLLM uses httpx directly
+# ]
+
 # Full installation with all features
-full = ["calute[search,database,redis,monitoring,vectors]"]
+full = ["calute[search,monitoring,vectors]"]
 
 # Common presets for different use cases
 research = ["calute[search,vectors]"]
-enterprise = ["calute[database,redis,monitoring]"]
+enterprise = ["calute[monitoring]"]
+ai-complete = ["calute[vectors]"]
 
 [build-system]
 requires = ["hatchling"]

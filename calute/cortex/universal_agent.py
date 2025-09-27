@@ -17,11 +17,7 @@
 
 from typing import Any
 
-from ..tools import (
-    DuckDuckGoSearch,
-    ExecutePythonCode,
-    WriteFile,
-)
+from ..tools import DuckDuckGoSearch, ExecutePythonCode, WriteFile
 from ..tools.coding_tools import (
     analyze_code_structure,
     apply_diff,
