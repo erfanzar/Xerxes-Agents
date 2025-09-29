@@ -1980,7 +1980,7 @@ class Calute:
     def create_ui(self, target_agent: Agent = None):
         from .ui import create_application
 
-        return create_application(calute=self, agent=target_agent)
+        return create_application(executor=self, agent=target_agent)
 
 
 __all__ = ("Calute", "PromptSection", "PromptTemplate")

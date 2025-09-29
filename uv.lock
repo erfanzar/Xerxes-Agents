@@ -334,13 +334,12 @@ wheels = [
 
 [[package]]
 name = "calute"
-version = "0.1.0"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "ddgs" },
     { name = "fastapi" },
     { name = "google-generativeai" },
-    { name = "gradio" },
     { name = "httpx" },
     { name = "jinja2" },
     { name = "lxml" },
@@ -385,6 +384,7 @@ full = [
     { name = "beautifulsoup4" },
     { name = "datadog" },
     { name = "feedparser" },
+    { name = "gradio" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
@@ -410,6 +410,7 @@ monitoring = [
 research = [
     { name = "beautifulsoup4" },
     { name = "feedparser" },
+    { name = "gradio" },
     { name = "python-dateutil" },
     { name = "pyyaml" },
     { name = "scikit-learn" },
@@ -421,6 +422,9 @@ search = [
     { name = "python-dateutil" },
     { name = "pyyaml" },
 ]
+ui = [
+    { name = "gradio" },
+]
 vectors = [
     { name = "scikit-learn" },
     { name = "sentence-transformers" },
@@ -431,15 +435,15 @@ requires-dist = [
     { name = "beautifulsoup4", marker = "extra == 'search'", specifier = ">=4.12.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.8.0" },
     { name = "calute", extras = ["monitoring"], marker = "extra == 'enterprise'" },
-    { name = "calute", extras = ["search", "monitoring", "vectors"], marker = "extra == 'full'" },
-    { name = "calute", extras = ["search", "vectors"], marker = "extra == 'research'" },
+    { name = "calute", extras = ["search", "monitoring", "vectors", "ui"], marker = "extra == 'full'" },
+    { name = "calute", extras = ["search", "vectors", "ui"], marker = "extra == 'research'" },
     { name = "calute", extras = ["vectors"], marker = "extra == 'ai-complete'" },
     { name = "datadog", marker = "extra == 'monitoring'", specifier = ">=0.48.0" },
     { name = "ddgs", specifier = ">=9.5.4" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "feedparser", marker = "extra == 'search'", specifier = ">=6.0.0" },
     { name = "google-generativeai", specifier = ">=0.8.0,<0.9.0" },
-    { name = "gradio", specifier = ">=5.47.2" },
+    { name = "gradio", marker = "extra == 'ui'", specifier = ">=5.47.2" },
     { name = "httpx", specifier = ">=0.25.0" },
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=6.29.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
@@ -471,7 +475,7 @@ requires-dist = [
     { name = "structlog", marker = "extra == 'monitoring'", specifier = ">=24.1.0" },
     { name = "uvicorn", specifier = ">=0.35.0" },
 ]
-provides-extras = ["dev", "search", "monitoring", "vectors", "full", "research", "enterprise", "ai-complete"]
+provides-extras = ["dev", "ui", "search", "monitoring", "vectors", "full", "research", "enterprise", "ai-complete"]
 
 [[package]]
 name = "certifi"

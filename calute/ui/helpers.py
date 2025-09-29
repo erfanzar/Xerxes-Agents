@@ -303,7 +303,7 @@ def process_message(
             buffer = StreamerBuffer()
 
             def fn():
-                plan, tasks = TaskCreator(llm=agent).create_tasks_from_prompt(
+                _plan, tasks = TaskCreator(llm=agent).create_tasks_from_prompt(
                     prompt=calute_msgs.messages[-1].content,
                     available_agents=[UniversalAgent(llm=agent, allow_delegation=True)],
                     streamer_buffer=buffer,
