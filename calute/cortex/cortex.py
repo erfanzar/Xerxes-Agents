@@ -992,6 +992,11 @@ class Cortex:
         """Clear all cortex memory"""
         self.cortex_memory.reset_all()
 
+    def create_ui(self):
+        from calute.ui import create_application
+
+        return create_application(executor=self)
+
 
 @dataclass
 class CortexOutput:

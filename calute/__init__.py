@@ -141,4 +141,4 @@ __all__ = (
     "create_llm",
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

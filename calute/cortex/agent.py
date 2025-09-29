@@ -1437,6 +1437,11 @@ Ensure your response is valid JSON that can be parsed directly.
             "requests_remaining": max(0, self.max_rpm - len(recent_requests)),
         }
 
+    def create_ui(self):
+        from calute.ui import create_application
+
+        return create_application(executor=self)
+
     def __eq__(self, other: object) -> bool:
         """Check equality between two CortexAgent instances.
 

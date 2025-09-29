@@ -19,10 +19,13 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from calute.cortex.memory_integration import CortexMemory
+from calute.memory.compat import MemoryType
+
 from ..llms import BaseLLM
 from ..streamer_buffer import StreamerBuffer
 from .agent import CortexAgent
-from .cortex import Cortex
+from .cortex import Cortex, MemoryConfig
 from .enums import ProcessType
 from .task import CortexTask
 from .task_creator import TaskCreationPlan, TaskCreator
@@ -92,9 +95,40 @@ class DynamicTaskBuilder:
 class DynamicCortex(Cortex):
     """Extended Cortex with dynamic prompt execution capabilities"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        agents: list[CortexAgent],
+        tasks: list[CortexTask],
+        llm: BaseLLM,
+        process: ProcessType = ProcessType.SEQUENTIAL,
+        manager_agent: CortexAgent | None = None,
+        memory_type: MemoryType = MemoryType.SHORT_TERM,
+        verbose: bool = True,
+        max_iterations: int = 10,
+        model: str = "gpt-4",
+        memory: CortexMemory | None = None,
+        memory_config: MemoryConfig | None = None,
+        reinvoke_after_function: bool = True,
+        enable_calute_memory: bool = False,
+        cortex_name: str = "CorTex",
+    ):
         """Initialize DynamicCortex with optional TaskCreator"""
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            agents=agents,
+            tasks=tasks,
+            llm=llm,
+            process=process,
+            manager_agent=manager_agent,
+            memory_type=memory_type,
+            verbose=verbose,
+            max_iterations=max_iterations,
+            model=model,
+            memory=memory,
+            memory_config=memory_config,
+            reinvoke_after_function=reinvoke_after_function,
+            enable_calute_memory=enable_calute_memory,
+            cortex_name=cortex_name,
+        )
         self.task_creator = None
 
     def create_tasks_from_prompt(
@@ -321,6 +355,11 @@ class DynamicCortex(Cortex):
                 return outputs
             else:
                 return result.raw_output
+
+    def create_ui(self):
+        from calute.ui import create_application
+
+        return create_application(executor=self)
 
 
 def create_dynamic_cortex(

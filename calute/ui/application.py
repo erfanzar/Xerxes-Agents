@@ -1,18 +1,30 @@
+from __future__ import annotations
+
+import typing
+
 import gradio as gr
 
-from calute.calute import Calute
 from calute.types.agent_types import Agent
 from calute.types.messages import MessagesHistory
 
 from .helpers import clear_session, process_message
 from .themes import APP_SUBTITLE, APP_TITLE, CSS
 
+if typing.TYPE_CHECKING:
+    from calute.calute import Calute
+    from calute.cortex import Cortex, CortexAgent, CortexTask
+    from calute.cortex.dynamic import DynamicCortex
+    from calute.cortex.task_creator import TaskCreator
 
-def create_application(calute: Calute, agent: Agent = None):
+
+def create_application(
+    executor: Calute | CortexAgent | CortexTask | Cortex | TaskCreator,
+    agent: Agent | Cortex | DynamicCortex | None = None,
+):
     """Create and configure the Gradio application interface.
 
     Args:
-        calute: Calute instance for managing conversations and processing.
+        executor: Calute instance for managing conversations and processing.
         agent: Optional agent configuration for specialized behavior.
 
     Returns:
@@ -59,7 +71,7 @@ def create_application(calute: Calute, agent: Agent = None):
         def on_send(user_text, chat, calute_msgs):
             if not user_text.strip():
                 return chat, calute_msgs
-            yield from process_message(user_text, chat, calute_msgs, agent=agent, calute=calute)
+            yield from process_message(user_text, chat, calute_msgs, agent=agent, executor=executor)
 
         send.click(
             on_send,

@@ -451,3 +451,10 @@ Respond ONLY with the XML plan, no additional text.
         if use_streaming:
             return buffer, thread
         return result
+
+    def create_ui(self, cortex: Cortex | None = None):
+        from calute.ui import create_application
+
+        if cortex is None:
+            cortex = self.llm
+        return create_application(executor=self, agent=cortex)

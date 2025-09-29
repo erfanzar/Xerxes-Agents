@@ -737,3 +737,8 @@ class CortexTask:
     def set_json_output_model(self, model: type[BaseModel]):
         """Set JSON output validation model"""
         self.output_json = model
+
+    def create_ui(self):
+        from calute.ui import create_application
+
+        return create_application(executor=self)

@@ -5,14 +5,23 @@ thinking panels, and UI updates in the Gradio-based chat interface. It manages t
 complex state transitions during message processing and formats responses for display.
 """
 
+from __future__ import annotations
+
 import json
 import re
+import threading
 import time
 from typing import Any
 
 from gradio import ChatMessage
 
 from calute.calute import Calute
+from calute.cortex import Cortex, CortexAgent, CortexTask
+from calute.cortex.dynamic import DynamicCortex
+from calute.cortex.task_creator import TaskCreator
+from calute.cortex.universal_agent import UniversalAgent
+from calute.llms.base import BaseLLM
+from calute.streamer_buffer import StreamerBuffer
 from calute.types import (
     Completion,
     FunctionCallsExtracted,
@@ -77,7 +86,12 @@ def _format_seconds(seconds: float) -> str:
 
 
 def process_message(
-    message: str, history: list[ChatMessage | dict], calute_msgs: MessagesHistory | None, *, calute: Calute, agent: Agent
+    message: str,
+    history: list[ChatMessage | dict],
+    calute_msgs: MessagesHistory | None,
+    *,
+    executor: Calute | CortexAgent | CortexTask | Cortex | TaskCreator,
+    agent: Agent | Cortex | DynamicCortex | None,
 ):
     history = normalize_history(history)
     calute_msgs = calute_msgs or MessagesHistory(messages=[])
@@ -271,7 +285,41 @@ def process_message(
             reinvoke_idx = None
             reinvoking = False
 
-    buffer, thread = calute.thread_run(messages=calute_msgs, agent_id=agent)
+    if isinstance(executor, Calute):
+        buffer, thread = executor.thread_run(messages=calute_msgs, agent_id=agent)
+    elif isinstance(executor, CortexAgent):
+        buffer, thread = executor.execute(task_description=calute_msgs.messages[-1].content, use_thread=True)
+    elif isinstance(executor, CortexTask):
+        buffer, thread = executor.execute(use_streaming=True)
+    elif isinstance(executor, Cortex):
+        buffer, thread = executor.kickoff(use_streaming=True)
+    elif isinstance(executor, DynamicCortex):
+        buffer, thread = executor.execute_prompt(prompt=calute_msgs.messages[-1].content, stream=True)
+    elif isinstance(executor, TaskCreator):
+        assert isinstance(agent, Cortex) or isinstance(agent, DynamicCortex) or isinstance(agent, BaseLLM), (
+            "TaskCreator requires a Cortex or DynamicCortex agent"
+        )
+        if isinstance(agent, BaseLLM):
+            buffer = StreamerBuffer()
+
+            def fn():
+                plan, tasks = TaskCreator(llm=agent).create_tasks_from_prompt(
+                    prompt=calute_msgs.messages[-1].content,
+                    available_agents=[UniversalAgent(llm=agent, allow_delegation=True)],
+                    streamer_buffer=buffer,
+                    stream=True,
+                )
+
+                Cortex.from_task_creator(tasks).kickoff(use_streaming=True, streamer_buffer=buffer)[-1].join()
+
+            thread = threading.Thread(target=fn)
+            thread.start()
+        else:
+            buffer, thread = executor.create_and_execute(
+                prompt=calute_msgs.messages[-1].content,
+                background=None,
+                cortex=agent,
+            )
 
     for ev in buffer.stream():
         if isinstance(ev, StreamChunk):
