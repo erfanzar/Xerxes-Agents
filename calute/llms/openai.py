@@ -330,7 +330,6 @@ class OpenAILLM(BaseLLM):
                         if hasattr(tool_call_delta, "id") and tool_call_delta.id:
                             tool_call_accumulator[idx]["id"] = tool_call_delta.id
                             streaming_update["id"] = tool_call_delta.id
-
                         if hasattr(tool_call_delta, "function") and tool_call_delta.function:
                             func = tool_call_delta.function
                             if hasattr(func, "name") and func.name:

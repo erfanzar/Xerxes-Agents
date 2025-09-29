@@ -383,7 +383,13 @@ def stream_callback(chunk):
 
     if isinstance(chunk, StreamChunk):
         if getattr(chunk, "content", None):
-            write(chunk.content)
+            # Check if we're in thinking mode
+            if hasattr(chunk, "is_thinking") and chunk.is_thinking:
+                # Write thinking content in purple/magenta
+                write(paint(chunk.content, COL["MAGENTA"]))
+            else:
+                # Write normal content
+                write(chunk.content)
             if chunk.content.endswith("\n"):
                 state["open_line"] = False
 

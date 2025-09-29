@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import re
 import typing as tp
 from dataclasses import dataclass, field
 from enum import Enum
@@ -139,6 +140,15 @@ class StreamChunk:
                 return self.content or ""
         elif self.content:
             return self.content
+
+    @property
+    def is_thinking(self) -> bool:
+        """Check if currently inside thinking/reasoning tags."""
+        if not self.buffered_content:
+            return False
+        opens = len(re.findall(r"<(think|thinking|reason|reasoning)>", self.buffered_content, re.I))
+        closes = len(re.findall(r"</(think|thinking|reason|reasoning)>", self.buffered_content, re.I))
+        return opens > closes
 
 
 @dataclass

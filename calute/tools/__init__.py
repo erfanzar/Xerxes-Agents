@@ -55,8 +55,18 @@ except ImportError:
 
 from .ai_tools import EntityExtractor, TextClassifier, TextEmbedder, TextSimilarity, TextSummarizer
 from .math_tools import Calculator, MathematicalFunctions, NumberTheory, StatisticalAnalyzer, UnitConverter
+from .memory_tool import (
+    MEMORY_TOOLS,
+    consolidate_agent_memories,
+    delete_memory,
+    get_memory_statistics,
+    get_memory_tool_descriptions,
+    save_memory,
+    search_memory,
+)
 
 __all__ = [
+    "MEMORY_TOOLS",
     "AppendFile",
     "CSVProcessor",
     "Calculator",
@@ -81,10 +91,14 @@ __all__ = [
     "WriteFile",
     "analyze_code_structure",
     "apply_diff",
+    "consolidate_agent_memories",
     "copy_file",
     "create_diff",
     "delete_file",
+    "delete_memory",
     "find_and_replace",
+    "get_memory_statistics",
+    "get_memory_tool_descriptions",
     "git_add",
     "git_apply_patch",
     "git_diff",
@@ -93,6 +107,8 @@ __all__ = [
     "list_directory",
     "move_file",
     "read_file",
+    "save_memory",
+    "search_memory",
     "write_file",
 ]
 
@@ -128,6 +144,7 @@ TOOL_CATEGORIES = {
     "ai": ["TextEmbedder", "TextSimilarity", "TextClassifier", "TextSummarizer", "EntityExtractor"],
     "math": ["Calculator", "StatisticalAnalyzer", "MathematicalFunctions", "NumberTheory", "UnitConverter"],
     "system": ["SystemInfo", "EnvironmentManager", "ProcessManager"],
+    "memory": ["save_memory", "search_memory", "consolidate_agent_memories", "delete_memory", "get_memory_statistics"],
 }
 
 

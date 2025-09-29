@@ -55,6 +55,8 @@ dev = [
     "notebook>=7.0.0",
 ]
 
+ui = ["gradio>=5.47.2"]
+
 # Search and web tools
 search = [
     "beautifulsoup4>=4.12.0",
@@ -102,10 +104,10 @@ vectors = [
 # ]
 
 # Full installation with all features
-full = ["calute[search,monitoring,vectors]"]
+full = ["calute[search,monitoring,vectors,ui]"]
 
 # Common presets for different use cases
-research = ["calute[search,vectors]"]
+research = ["calute[search,vectors,ui]"]
 enterprise = ["calute[monitoring]"]
 ai-complete = ["calute[vectors]"]
 

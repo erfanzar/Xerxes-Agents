@@ -19,7 +19,7 @@ import functools
 import typing as tp
 from abc import ABCMeta, abstractmethod
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .function_execution_types import AgentCapability, AgentSwitchTrigger, FunctionCallStrategy
 
@@ -61,8 +61,8 @@ class Agent(BaseModel):
     instructions: str | tp.Callable[[], str] | None = None
     rules: list[str] | tp.Callable[[], list[str]] | None = None
     examples: list[str] | None = None
-    functions: list[tp.Callable | AgentBaseFn] = []
-    capabilities: list[AgentCapability] = []
+    functions: list[tp.Callable | AgentBaseFn] = Field(default_factory=list)
+    capabilities: list[AgentCapability] = Field(default_factory=list)
 
     function_call_strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL
     tool_choice: str | list[str] = None
@@ -82,7 +82,7 @@ class Agent(BaseModel):
 
     stop: str | list[str] | None = None
 
-    switch_triggers: list[AgentSwitchTrigger] = []
+    switch_triggers: list[AgentSwitchTrigger] = Field(default_factory=list)
     fallback_agent_id: str | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -172,9 +172,9 @@ class Response(BaseModel):
                 Defaults to an empty dictionary.
     """
 
-    messages: list = []
+    messages: list = Field(default_factory=list)
     agent: Agent | None = None
-    context_variables: dict = {}
+    context_variables: dict = Field(default_factory=dict)
 
 
 class Result(BaseModel):
@@ -189,7 +189,7 @@ class Result(BaseModel):
 
     value: str = ""
     agent: Agent | None = None
-    context_variables: dict = {}
+    context_variables: dict = Field(default_factory=dict)
 
 
 __all__ = "Agent", "AgentFunction", "Result"

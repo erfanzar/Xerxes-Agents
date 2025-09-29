@@ -36,6 +36,7 @@ import inspect
 import json
 import logging
 import time
+import traceback
 import typing as tp
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -434,7 +435,13 @@ class FunctionExecutor:
                 if isinstance(call.arguments, dict):
                     args = call.arguments.copy()
                 elif isinstance(call.arguments, str):
-                    args = {} if call.arguments == "" else json.loads(call.arguments)
+                    if call.arguments == "":
+                        args = {}
+                    else:
+                        try:
+                            args = json.loads(call.arguments)
+                        except json.JSONDecodeError:
+                            args = json.loads(call.arguments + "}")
                 if __CTX_VARS_NAME__ in func.__code__.co_varnames:
                     args[__CTX_VARS_NAME__] = context
                     if self.execution_history.executions:
@@ -461,6 +468,7 @@ class FunctionExecutor:
                 if attempt < call.max_retries:
                     await asyncio.sleep(2**attempt)
             except Exception as e:
+                traceback.print_exc()
                 call.retry_count += 1
                 call.error = str(e)
                 if attempt < call.max_retries:

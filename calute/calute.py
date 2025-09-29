@@ -179,6 +179,7 @@ class Calute:
         template: PromptTemplate | None = None,
         enable_memory: bool = False,
         memory_config: dict[str, tp.Any] | None = None,
+        auto_add_memory_tools: bool = True,
     ):
         """Initialize Calute with an LLM.
 
@@ -186,6 +187,7 @@ class Calute:
             llm: A BaseLLM instance for generating completions.
             template: Optional prompt template for structuring prompts.
             enable_memory: Whether to enable the memory system.
+            auto_add_memory_tools: Whether to automatically add memory tools to agents when memory is enabled.
             memory_config: Configuration for MemoryStore with keys:
                 - max_short_term: Maximum short-term memory entries (default: 100)
                 - max_working: Maximum working memory entries (default: 10)
@@ -211,6 +213,7 @@ class Calute:
         self.orchestrator = AgentOrchestrator()
         self.executor = FunctionExecutor(self.orchestrator)
         self.enable_memory = enable_memory
+        self.auto_add_memory_tools = auto_add_memory_tools
         if enable_memory:
             memory_config = memory_config or {}
             self.memory_store = MemoryStore(
@@ -268,7 +271,29 @@ class Calute:
         Args:
             agent: The Agent instance to register for orchestration.
         """
+        # Auto-add memory tools if memory is enabled
+        if self.enable_memory and self.auto_add_memory_tools:
+            self._add_memory_tools_to_agent(agent)
         self.orchestrator.register_agent(agent)
+
+    def _add_memory_tools_to_agent(self, agent: Agent):
+        """Add memory tools to an agent if not already present.
+
+        Args:
+            agent: The agent to add memory tools to.
+        """
+        from .tools.memory_tool import MEMORY_TOOLS
+
+        if agent.functions is None:
+            agent.functions = []
+
+        # Get current function names
+        current_func_names = {func.__name__ for func in agent.functions}
+
+        # Add memory tools that aren't already present
+        for tool in MEMORY_TOOLS:
+            if tool.__name__ not in current_func_names:
+                agent.functions.append(tool)
 
     def _update_memory_from_response(
         self,
@@ -346,9 +371,8 @@ class Calute:
         if not content_str:
             return None
 
-        indented_content = textwrap.indent(content_str, SEP)
-
-        return f"{header}\n{indented_content}"
+        indented = textwrap.indent(content_str, SEP)
+        return f"{header}\n{indented}" if header else indented
 
     def _extract_from_markdown(self, content: str, field: str) -> list[RequestFunctionCall]:
         """Extract function calls from markdown code blocks.
@@ -761,18 +785,15 @@ class Calute:
             >>> Calute.extract_from_markdown("json", content)
             {'key': 'value'}
         """
-        search_mour = f"```{format}"
-        index = string.find(search_mour)
-
-        if index != -1:
-            choosen = string[index + len(search_mour) :]
-            if choosen.endswith("```"):
-                choosen = choosen[:-3]
-            try:
-                return json.loads(choosen)
-            except Exception:
-                return choosen
-        return None
+        pattern = rf"```{re.escape(format)}\s*\n(.*?)\n```"
+        m = re.search(pattern, string, re.DOTALL)
+        if not m:
+            return None
+        block = m.group(1).strip()
+        try:
+            return json.loads(block)
+        except Exception:
+            return block
 
     def _detect_function_calls(self, content: str, agent: Agent) -> bool:
         """Detect if content contains valid function calls.
@@ -1387,7 +1408,13 @@ class Calute:
                         streamer_buffer.put(out)
                     yield out
 
-                    result = await self.executor._execute_single_call(call, context, agent)
+                    # Add memory_store and agent_id to context
+                    enhanced_context = context.copy()
+                    if self.enable_memory:
+                        enhanced_context["memory_store"] = self.memory_store
+                    enhanced_context["agent_id"] = agent.id or "default"
+
+                    result = await self.executor._execute_single_call(call, enhanced_context, agent)
                     results.append(result)
 
                     out = FunctionExecutionComplete(
@@ -1949,6 +1976,11 @@ class Calute:
         streamer_buffer.aget_result = aget_result
 
         return streamer_buffer, task
+
+    def create_ui(self, target_agent: Agent = None):
+        from .ui import create_application
+
+        return create_application(calute=self, agent=target_agent)
 
 
 __all__ = ("Calute", "PromptSection", "PromptTemplate")
