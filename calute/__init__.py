@@ -52,6 +52,7 @@ from .cortex import (
 )
 from .executors import AgentOrchestrator
 from .llms import AnthropicLLM, BaseLLM, GeminiLLM, LLMConfig, LocalLLM, OllamaLLM, OpenAILLM, create_llm
+from .mcp import MCPClient, MCPManager, MCPResource, MCPServerConfig, MCPTool
 from .memory import MemoryEntry, MemoryStore, MemoryType
 from .streamer_buffer import StreamerBuffer
 from .types import (
@@ -119,6 +120,11 @@ __all__ = (
     "GeminiLLM",
     "LLMConfig",
     "LocalLLM",
+    "MCPClient",
+    "MCPManager",
+    "MCPResource",
+    "MCPServerConfig",
+    "MCPTool",
     "MemoryEntry",
     "MemoryStore",
     "MemoryType",
@@ -141,4 +147,4 @@ __all__ = (
     "create_llm",
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

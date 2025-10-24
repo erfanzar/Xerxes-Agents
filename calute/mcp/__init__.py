@@ -13,19 +13,21 @@
 # limitations under the License.
 
 
-from . import compaction_agent
-from ._coder_agent import code_agent
-from ._data_analyst_agent import data_analyst_agent
-from ._planner_agent import planner_agent
-from ._researcher_agent import research_agent
-from .compaction_agent import CompactionAgent, create_compaction_agent
+"""MCP (Model Context Protocol) integration for Calute.
 
-__all__ = (
-    "CompactionAgent",
-    "code_agent",
-    "compaction_agent",
-    "create_compaction_agent",
-    "data_analyst_agent",
-    "planner_agent",
-    "research_agent",
-)
+This module provides integration with MCP servers, allowing Calute agents
+to access external resources, tools, and prompts through the standardized
+Model Context Protocol.
+"""
+
+from .client import MCPClient
+from .manager import MCPManager
+from .types import MCPResource, MCPServerConfig, MCPTool
+
+__all__ = [
+    "MCPClient",
+    "MCPManager",
+    "MCPResource",
+    "MCPServerConfig",
+    "MCPTool",
+]

@@ -13,19 +13,14 @@
 # limitations under the License.
 
 
-from . import compaction_agent
-from ._coder_agent import code_agent
-from ._data_analyst_agent import data_analyst_agent
-from ._planner_agent import planner_agent
-from ._researcher_agent import research_agent
-from .compaction_agent import CompactionAgent, create_compaction_agent
+"""Auto compaction agent stub."""
 
-__all__ = (
-    "CompactionAgent",
-    "code_agent",
-    "compaction_agent",
-    "create_compaction_agent",
-    "data_analyst_agent",
-    "planner_agent",
-    "research_agent",
-)
+from typing import Any
+
+
+class AutoCompactAgent:
+    """Stub for AutoCompactAgent to satisfy imports."""
+
+    def __init__(self, llm_client: Any = None, **kwargs):
+        """Initialize AutoCompactAgent stub."""
+        self.llm_client = llm_client

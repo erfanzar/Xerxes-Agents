@@ -390,7 +390,7 @@ class CortexCompletionService:
             Execution result as string
         """
         try:
-            plan, tasks = self.task_creator.create_tasks_from_prompt(
+            _plan, tasks = self.task_creator.create_tasks_from_prompt(
                 prompt=prompt,
                 background=background,
                 available_agents=self.agents,

@@ -274,6 +274,66 @@ print(f"Total memories: {stats['total_memories']}")
 - Rate limiting and resource management
 - Comprehensive error handling and logging
 
+## 🔌 MCP Integration
+
+Calute now supports **Model Context Protocol (MCP)** for connecting agents to external data sources, tools, and APIs!
+
+### Quick Start with MCP
+
+```python
+import asyncio
+from calute.cortex import CortexAgent
+from calute.llms import OpenAILLM
+from calute.mcp import MCPManager, MCPServerConfig
+from calute.mcp.integration import add_mcp_tools_to_agent
+from calute.mcp.types import MCPTransportType
+
+async def main():
+    # Setup MCP manager
+    mcp_manager = MCPManager()
+
+    # Configure MCP server (e.g., filesystem access)
+    config = MCPServerConfig(
+        name="filesystem",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+        transport=MCPTransportType.STDIO,
+    )
+
+    # Connect to MCP server
+    await mcp_manager.add_server(config)
+
+    # Create agent with MCP tools
+    agent = CortexAgent(
+        role="Data Assistant",
+        goal="Help with file operations",
+        backstory="Expert with filesystem access",
+        model="gpt-4",
+        llm=OpenAILLM(api_key="your-key"),
+    )
+
+    # Add MCP tools to agent
+    await add_mcp_tools_to_agent(agent, mcp_manager)
+
+    # Use the agent with MCP capabilities
+    result = agent.execute("List and analyze files in the directory")
+    print(result)
+
+    await mcp_manager.disconnect_all()
+
+asyncio.run(main())
+```
+
+### Supported MCP Servers
+
+- **Filesystem**: Local file operations
+- **SQLite**: Database queries
+- **GitHub**: Repository management
+- **Brave Search**: Web search capabilities
+- **Custom**: Build your own MCP servers
+
+See the [MCP Integration Guide](docs/mcp_integration.md) for detailed documentation and examples.
+
 ## 📖 Documentation
 
 - [API Reference](docs/api.md)
@@ -281,6 +341,7 @@ print(f"Total memories: {stats['total_memories']}")
 - [Memory System](docs/memory.md)
 - [Multi-Agent Patterns](docs/patterns.md)
 - [Performance Tuning](docs/performance.md)
+- [MCP Integration Guide](docs/mcp_integration.md) ⭐ NEW
 
 ## 🤝 Contributing
 

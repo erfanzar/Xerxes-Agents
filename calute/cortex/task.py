@@ -31,6 +31,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..loggings import log_error, log_retry, log_task_complete, log_task_start, log_warning
 from ..streamer_buffer import StreamerBuffer
+from .string_utils import interpolate_inputs
 from .tool import CortexTool
 
 if TYPE_CHECKING:
@@ -163,6 +164,55 @@ class CortexTask:
     _output: str | None = None
     _execution_stats: dict = field(default_factory=dict)
     _start_time: float = 0.0
+
+    _original_description: str | None = None
+    _original_expected_output: str | None = None
+    _original_output_file: str | None = None
+    _original_prompt_context: str | None = None
+
+    def interpolate_inputs(self, inputs: dict[str, Any]) -> None:
+        """
+        Interpolate inputs into the task's description, expected output, and other fields.
+
+        This method replaces template variables (e.g., {variable_name}) in the task's
+        attributes with values from the provided inputs dictionary. Original values
+        are preserved for potential re-interpolation.
+
+        Args:
+            inputs: Dictionary mapping template variables to their values.
+                   Supported value types are strings, integers, floats, bools,
+                   and serializable dicts/lists.
+
+        Side Effects:
+            Updates description, expected_output, output_file, and prompt_context
+            with interpolated values. Stores original values if not already saved.
+
+        Example:
+            >>> task = CortexTask(
+            ...     description="Analyze {topic} trends in {year}",
+            ...     expected_output="Report on {topic} developments"
+            ... )
+            >>> task.interpolate_inputs({"topic": "AI", "year": 2025})
+
+
+        """
+
+        if self._original_description is None:
+            self._original_description = self.description
+        if self._original_expected_output is None:
+            self._original_expected_output = self.expected_output
+        if self.output_file is not None and self._original_output_file is None:
+            self._original_output_file = self.output_file
+        if self.prompt_context is not None and self._original_prompt_context is None:
+            self._original_prompt_context = self.prompt_context
+
+        if inputs:
+            self.description = interpolate_inputs(input_string=self._original_description, inputs=inputs)
+            self.expected_output = interpolate_inputs(input_string=self._original_expected_output, inputs=inputs)
+            if self.output_file:
+                self.output_file = interpolate_inputs(input_string=self._original_output_file, inputs=inputs)
+            if self.prompt_context:
+                self.prompt_context = interpolate_inputs(input_string=self._original_prompt_context, inputs=inputs)
 
     def _extract_json_from_output(self, output: str) -> str | None:
         """Extract JSON from output that may contain thinking process or other text"""

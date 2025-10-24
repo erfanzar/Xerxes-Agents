@@ -173,6 +173,7 @@ class DynamicCortex(Cortex):
     def execute_with_task_creation(
         self,
         prompt: str,
+        inputs: dict[str, Any] | None = None,
         background: str | None = None,
         process: ProcessType | None = None,
         stream: bool = False,
@@ -183,6 +184,7 @@ class DynamicCortex(Cortex):
 
         Args:
             prompt: The objective to accomplish
+            inputs: Optional dictionary of inputs to interpolate into templates
             background: Optional approach/context
             process: Optional ProcessType override
             stream: Whether to stream execution
@@ -192,7 +194,7 @@ class DynamicCortex(Cortex):
             Cortex execution result
         """
 
-        plan, cortex_tasks = self.create_tasks_from_prompt(
+        _plan, cortex_tasks = self.create_tasks_from_prompt(
             prompt=prompt,
             background=background,
             auto_assign=True,
@@ -207,9 +209,9 @@ class DynamicCortex(Cortex):
 
         try:
             if stream:
-                result = self.kickoff(use_streaming=True, stream_callback=stream_callback)
+                result = self.kickoff(inputs=inputs, use_streaming=True, stream_callback=stream_callback)
             else:
-                result = self.kickoff()
+                result = self.kickoff(inputs=inputs)
         finally:
             if process:
                 self.process = original_process

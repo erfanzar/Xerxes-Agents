@@ -271,7 +271,7 @@ class Calute:
         Args:
             agent: The Agent instance to register for orchestration.
         """
-        # Auto-add memory tools if memory is enabled
+
         if self.enable_memory and self.auto_add_memory_tools:
             self._add_memory_tools_to_agent(agent)
         self.orchestrator.register_agent(agent)
@@ -287,10 +287,8 @@ class Calute:
         if agent.functions is None:
             agent.functions = []
 
-        # Get current function names
         current_func_names = {func.__name__ for func in agent.functions}
 
-        # Add memory tools that aren't already present
         for tool in MEMORY_TOOLS:
             if tool.__name__ not in current_func_names:
                 agent.functions.append(tool)
@@ -1408,7 +1406,6 @@ class Calute:
                         streamer_buffer.put(out)
                     yield out
 
-                    # Add memory_store and agent_id to context
                     enhanced_context = context.copy()
                     if self.enable_memory:
                         enhanced_context["memory_store"] = self.memory_store

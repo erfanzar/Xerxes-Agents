@@ -13,8 +13,8 @@
 # limitations under the License.
 
 
-from calute import Agent
-from calute.tools import JSONProcessor, ReadFile, WriteFile
+from ..tools import JSONProcessor, ReadFile, WriteFile
+from ..types import Agent
 
 planner_agent = Agent(
     id="planner_agent",

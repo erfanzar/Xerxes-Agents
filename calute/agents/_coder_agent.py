@@ -25,8 +25,8 @@ This agent specializes in:
 - Code analysis and metrics
 """
 
-from calute import Agent
-from calute.tools import ExecutePythonCode, ExecuteShell, FileSystemTools, ReadFile, WriteFile
+from ..tools import ExecutePythonCode, ExecuteShell, FileSystemTools, ReadFile, WriteFile
+from ..types import Agent
 
 code_agent = Agent(
     id="coder_agent",

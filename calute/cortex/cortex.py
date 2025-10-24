@@ -180,8 +180,29 @@ class Cortex:
             if self.planner.planner_agent.memory_enabled and not self.planner.planner_agent.memory:
                 self.planner.planner_agent.memory = self.cortex_memory
 
+    def _interpolate_inputs(self, inputs: dict[str, Any]) -> None:
+        """
+        Interpolate inputs into all agents and tasks.
+
+        Args:
+            inputs: Dictionary mapping template variables to their values
+        """
+
+        for agent in self.agents:
+            agent.interpolate_inputs(inputs)
+
+        if self.manager_agent:
+            self.manager_agent.interpolate_inputs(inputs)
+
+        if self.planner and self.planner.planner_agent:
+            self.planner.planner_agent.interpolate_inputs(inputs)
+
+        for task in self.tasks:
+            task.interpolate_inputs(inputs)
+
     def kickoff(
         self,
+        inputs: dict[str, Any] | None = None,
         use_streaming: bool = False,
         stream_callback: Callable[[Any], None] | None = None,
         streamer_buffer: StreamerBuffer | None = None,
@@ -190,13 +211,20 @@ class Cortex:
         """Execute the cortex's tasks according to the specified process
 
         Args:
+            inputs: Optional dictionary of inputs to interpolate into agent/task templates
             use_streaming: If True, executes tasks with streaming in background threads
             stream_callback: Optional callback for streaming chunks
+            streamer_buffer: Optional buffer for streaming output
+            log_process: If True, log the process execution
 
         Returns:
             If use_streaming=False: CortexOutput with results
             If use_streaming=True: tuple of (StreamerBuffer, Thread) for async streaming
         """
+
+        if inputs:
+            self._interpolate_inputs(inputs)
+
         self.logger.info(
             f"🚀 {self.cortex_name} Execution Started (Process: {self.process.value}, Agents: {len(self.agents)}, Tasks: {len(self.tasks)})"
         )

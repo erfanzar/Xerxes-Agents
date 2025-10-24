@@ -13,19 +13,26 @@
 # limitations under the License.
 
 
-from . import compaction_agent
-from ._coder_agent import code_agent
-from ._data_analyst_agent import data_analyst_agent
-from ._planner_agent import planner_agent
-from ._researcher_agent import research_agent
-from .compaction_agent import CompactionAgent, create_compaction_agent
+"""Context management modules for Calute framework."""
 
-__all__ = (
-    "CompactionAgent",
-    "code_agent",
-    "compaction_agent",
-    "create_compaction_agent",
-    "data_analyst_agent",
-    "planner_agent",
-    "research_agent",
+from .compaction_strategies import (
+    BaseCompactionStrategy,
+    PriorityBasedStrategy,
+    SlidingWindowStrategy,
+    SmartCompactionStrategy,
+    SummarizationStrategy,
+    TruncateStrategy,
+    get_compaction_strategy,
 )
+from .token_counter import SmartTokenCounter
+
+__all__ = [
+    "BaseCompactionStrategy",
+    "PriorityBasedStrategy",
+    "SlidingWindowStrategy",
+    "SmartCompactionStrategy",
+    "SmartTokenCounter",
+    "SummarizationStrategy",
+    "TruncateStrategy",
+    "get_compaction_strategy",
+]

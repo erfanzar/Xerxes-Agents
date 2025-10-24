@@ -54,9 +54,12 @@ from calute.streamer_buffer import StreamerBuffer
 from calute.types.function_execution_types import Completion, ResponseResult, StreamingResponseType
 from calute.types.tool_calls import Tool
 
-from ..loggings import get_logger, log_delegation, log_error, log_thinking, log_warning
+from ..agents.auto_compact_agent import AutoCompactAgent
+from ..loggings import get_logger, log_delegation, log_error, log_success, log_thinking, log_warning
 from ..types import Agent as CaluteAgent
 from ..types import AgentCapability
+from ..types.function_execution_types import CompactionStrategy
+from .string_utils import interpolate_inputs
 from .templates import PromptTemplate
 from .tool import CortexTool
 
@@ -143,7 +146,18 @@ class CortexAgent:
     auto_format_guidance: bool = True
     output_format_preference: str = "xml"
 
+    auto_compact: bool = False
+    compact_threshold: float = 0.8
+    compact_target: float = 0.5
+    max_context_tokens: int | None = None
+    compaction_strategy: CompactionStrategy = CompactionStrategy.SMART
+    preserve_system_prompt: bool = True
+    preserve_recent_messages: int = 5
+
     _internal_agent: CaluteAgent | None = None
+    _auto_compact_agent: AutoCompactAgent | None = None
+    _conversation_history: list[dict[str, str]] = field(default_factory=list)
+    _messages_history: Any = None
     _logger = None
     _template_engine: PromptTemplate | None = None
     _delegation_count: int = 0
@@ -151,6 +165,11 @@ class CortexAgent:
     _execution_times: list = field(default_factory=list)
     _last_rpm_window: float = 0
     _rpm_requests: list = field(default_factory=list)
+
+    _original_role: str | None = None
+    _original_goal: str | None = None
+    _original_backstory: str | None = None
+    _original_instructions: str | None = None
 
     def __post_init__(self):
         """Initialize the internal Calute agent and supporting components.
@@ -206,6 +225,46 @@ class CortexAgent:
             parallel_tool_calls=True,
         )
 
+        if self.auto_compact:
+            llm_for_compaction = None
+            if hasattr(self, "calute_instance") and self.calute_instance:
+                llm_for_compaction = self.calute_instance
+            elif hasattr(self, "llm") and self.llm:
+                llm_for_compaction = self.llm
+
+            self._auto_compact_agent = AutoCompactAgent(
+                model=self.model,
+                auto_compact=True,
+                compact_threshold=self.compact_threshold,
+                compact_target=self.compact_target,
+                max_context_tokens=self.max_context_tokens,
+                compaction_strategy=self.compaction_strategy,
+                preserve_system_prompt=self.preserve_system_prompt,
+                preserve_recent_messages=self.preserve_recent_messages,
+                llm_client=llm_for_compaction,
+                verbose=self.verbose,
+            )
+
+    def get_compaction_stats(self) -> dict[str, Any] | None:
+        """Get auto-compaction statistics.
+
+        Returns:
+            Dictionary with compaction statistics or None if not enabled.
+        """
+        if self._auto_compact_agent:
+            return self._auto_compact_agent.get_statistics()
+        return None
+
+    def check_context_usage(self) -> dict[str, Any] | None:
+        """Check current context usage.
+
+        Returns:
+            Dictionary with usage statistics or None if not enabled.
+        """
+        if self._auto_compact_agent:
+            return self._auto_compact_agent.check_usage()
+        return None
+
     def _check_rate_limit(self) -> bool:
         """Check if agent is within rate limit.
 
@@ -248,6 +307,116 @@ class CortexAgent:
             import time
 
             self._rpm_requests.append(time.time())
+
+    def interpolate_inputs(self, inputs: dict[str, Any]) -> None:
+        """
+        Interpolate inputs into the agent's role, goal, backstory, and instructions.
+
+        This method replaces template variables (e.g., {variable_name}) in the agent's
+        attributes with values from the provided inputs dictionary. Original values
+        are preserved for potential re-interpolation.
+
+        Args:
+            inputs: Dictionary mapping template variables to their values.
+                   Supported value types are strings, integers, floats, bools,
+                   and serializable dicts/lists.
+
+        Side Effects:
+            Updates role, goal, backstory, and instructions with interpolated values.
+            Stores original values if not already saved.
+
+        Example:
+            >>> agent = CortexAgent(role="Expert in {domain}", goal="Master {topic}")
+            >>> agent.interpolate_inputs({"domain": "AI", "topic": "LLMs"})
+
+
+        """
+
+        if self._original_role is None:
+            self._original_role = self.role
+        if self._original_goal is None:
+            self._original_goal = self.goal
+        if self._original_backstory is None:
+            self._original_backstory = self.backstory
+        if self._original_instructions is None:
+            self._original_instructions = self.instructions
+
+        if inputs:
+            self.role = interpolate_inputs(input_string=self._original_role, inputs=inputs)
+            self.goal = interpolate_inputs(input_string=self._original_goal, inputs=inputs)
+            self.backstory = interpolate_inputs(input_string=self._original_backstory, inputs=inputs)
+            if self.instructions:
+                self.instructions = interpolate_inputs(input_string=self._original_instructions, inputs=inputs)
+
+            if self._internal_agent:
+                self._internal_agent.instructions = self.instructions
+
+    def attach_mcp(self, mcp_servers: Any, server_names: list[str] | None = None) -> None:
+        """Attach MCP servers to this agent, connecting and adding their tools.
+
+        This method provides a convenient way to connect MCP servers and automatically
+        add their tools to the agent's function list. Works with both CortexAgent and
+        its internal Calute Agent.
+
+        Args:
+            mcp_servers: Can be one of:
+                - MCPManager: An existing MCP manager instance
+                - MCPServerConfig: A single server config (will create manager and connect)
+                - list[MCPServerConfig]: Multiple server configs (will create manager and connect all)
+            server_names: Optional list of server names to filter tools from.
+                         If None, adds tools from all servers in the manager.
+
+        Example:
+            >>>
+            >>> agent.attach_mcp(MCPServerConfig(
+            ...     name="filesystem",
+            ...     command="npx",
+            ...     args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+            ... ))
+            >>>
+            >>>
+            >>> agent.attach_mcp([
+            ...     MCPServerConfig(name="filesystem", ...),
+            ...     MCPServerConfig(name="sqlite", ...)
+            ... ])
+            >>>
+            >>>
+            >>> manager = MCPManager()
+            >>> await manager.add_server(config1)
+            >>> await manager.add_server(config2)
+            >>> agent.attach_mcp(manager, server_names=["filesystem"])
+        """
+        import asyncio
+
+        from ..mcp import MCPManager, MCPServerConfig
+        from ..mcp.integration import add_mcp_tools_to_agent
+
+        if isinstance(mcp_servers, MCPManager):
+            manager = mcp_servers
+        elif isinstance(mcp_servers, MCPServerConfig):
+            manager = MCPManager()
+            asyncio.run(manager.add_server(mcp_servers))
+        elif isinstance(mcp_servers, list):
+            manager = MCPManager()
+            for config in mcp_servers:
+                if isinstance(config, MCPServerConfig):
+                    asyncio.run(manager.add_server(config))
+                else:
+                    raise TypeError(f"Expected MCPServerConfig in list, got {type(config)}")
+        else:
+            raise TypeError(f"Expected MCPManager, MCPServerConfig, or list, got {type(mcp_servers)}")
+
+        if self._internal_agent:
+            asyncio.run(add_mcp_tools_to_agent(self._internal_agent, manager, server_names))
+        else:
+            if self.verbose:
+                self._logger.warning(
+                    "Internal agent not yet initialized. MCP tools will be added during initialization."
+                )
+
+        if not hasattr(self, "_mcp_managers"):
+            self._mcp_managers = []
+        self._mcp_managers.append(manager)
 
     def _check_execution_timeout(self, start_time: float) -> bool:
         """Check if execution has exceeded timeout.
@@ -746,6 +915,66 @@ Ensure your response is valid JSON that can be parsed directly.
                 context=full_context,
             )
 
+            if self._auto_compact_agent and self._messages_history is None:
+                from calute.types.messages import MessagesHistory
+
+                self._messages_history = MessagesHistory(messages=[])
+
+            if self._auto_compact_agent and self._messages_history:
+                from calute.types.messages import UserMessage
+
+                self._messages_history.messages.append(UserMessage(content=prompt))
+
+            if self._auto_compact_agent and self._messages_history:
+                messages = []
+                for msg in self._messages_history.messages:
+                    messages.append({"role": msg.role, "content": msg.content or ""})
+
+                conversation_tokens = self._auto_compact_agent.token_counter.count_tokens(messages)
+
+                if conversation_tokens >= self._auto_compact_agent.threshold_tokens:
+                    if self.verbose:
+                        log_warning(
+                            f" Conversation history: {conversation_tokens} tokens - compacting to fit {self._auto_compact_agent.max_context_tokens} limit"
+                        )
+
+                    from ..context_management.compaction_strategies import get_compaction_strategy
+
+                    strategy = get_compaction_strategy(
+                        strategy=self._auto_compact_agent.compaction_strategy,
+                        target_tokens=self._auto_compact_agent.target_tokens,
+                        model=self.model,
+                        llm_client=self._auto_compact_agent.llm_client,
+                        preserve_system=self._auto_compact_agent.preserve_system_prompt,
+                        preserve_recent=self._auto_compact_agent.preserve_recent_messages,
+                    )
+
+                    compacted_messages, stats = strategy.compact(messages)
+
+                    if compacted_messages:
+                        from calute.types.messages import AssistantMessage, MessagesHistory, SystemMessage, UserMessage
+
+                        new_messages = []
+                        for msg in compacted_messages:
+                            role = msg.get("role", "user")
+                            content = msg.get("content", "")
+
+                            if role == "system":
+                                new_messages.append(SystemMessage(content=content))
+                            elif role == "assistant":
+                                new_messages.append(AssistantMessage(content=content))
+                            else:
+                                new_messages.append(UserMessage(content=content))
+
+                        self._messages_history = MessagesHistory(messages=new_messages)
+
+                        new_conversation_tokens = self._auto_compact_agent.token_counter.count_tokens(compacted_messages)
+                        if self.verbose:
+                            log_success(
+                                f"Conversation compacted: {conversation_tokens} → {new_conversation_tokens} tokens "
+                                f"(saved {conversation_tokens - new_conversation_tokens} tokens, {((conversation_tokens - new_conversation_tokens) / conversation_tokens * 100):.1f}% reduction)"
+                            )
+
             if self.verbose:
                 log_thinking(self.role)
 
@@ -763,6 +992,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
                         response_gen = self.calute_instance.run(
                             prompt=prompt,
+                            messages=self._messages_history,
                             agent_id=self._internal_agent,
                             stream=True,
                             apply_functions=True,
@@ -800,6 +1030,7 @@ Ensure your response is valid JSON that can be parsed directly.
                     else:
                         response = self.calute_instance.run(
                             prompt=prompt,
+                            messages=self._messages_history,
                             agent_id=self._internal_agent,
                             stream=False,
                             apply_functions=True,
@@ -838,6 +1069,14 @@ Ensure your response is valid JSON that can be parsed directly.
                 result = response.completion.content
             else:
                 result = str(response)
+
+            if self._auto_compact_agent and result:
+                from calute.types.messages import AssistantMessage
+
+                self._messages_history.messages.append(AssistantMessage(content=result))
+
+                response_message = {"role": "assistant", "content": result}
+                self._conversation_history.append(response_message)
 
             execution_time = time.time() - start_time
             self._execution_times.append(execution_time)

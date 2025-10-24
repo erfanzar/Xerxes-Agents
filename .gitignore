@@ -11,6 +11,7 @@ __pycache__/
 run.py
 env.py
 exp.py
+outputs/
 # Distribution / packaging
 assistant_memory
 .Python

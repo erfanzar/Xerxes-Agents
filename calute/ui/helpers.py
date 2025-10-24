@@ -1,3 +1,18 @@
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 """Helper utilities for processing chat messages and managing UI state in Calute.
 
 This module provides core functionality for handling message streaming, tool execution,
@@ -53,11 +68,10 @@ def normalize_history(history: list[ChatMessage | dict] | None) -> list[ChatMess
 def _render_collapsible_panel(
     title: str, body_md: str | None, *, status: str = "pending", icon: str = "🧠", opened: bool = True
 ) -> str:
-    # Body can be markdown. We wrap it into a <details> so it can collapse.
     open_attr = " open" if opened else ""
     status_class = "status-pending" if status == "pending" else "status-done"
     safe_body = (body_md or "").strip()
-    # Keep an empty <div> to avoid collapsing height to zero when no body yet
+
     if not safe_body:
         safe_body = "<div class='panel-empty'>Initializing…</div>"
 
@@ -77,7 +91,6 @@ def _render_collapsible_panel(
 
 def _format_seconds(seconds: float) -> str:
     if seconds < 1:
-        # Show tenths under 1s
         return f"{seconds:.1f}s"
     if seconds < 60:
         return f"{round(seconds)}s"
@@ -102,7 +115,6 @@ def process_message(
     history.append(ChatMessage(role="assistant", content=""))
     assistant_idx = len(history) - 1
 
-    # State for auxiliary panels
     in_think = False
     think_idx_current = None
     think_seq = 0
@@ -119,7 +131,6 @@ def process_message(
         cur = history[assistant_idx].content or ""
         history[assistant_idx] = ChatMessage(role="assistant", content=cur + text)
 
-    # ---- Thinking panel helpers ----
     def _set_panel_content(idx: int, *, title: str, body: str, status: str, icon: str, opened: bool):
         md = dict(history[idx].metadata or {})
         md["title"] = title
@@ -181,7 +192,6 @@ def process_message(
             )
             think_idx_current = None
 
-    # ---- Tool panels ----
     def get_or_create_tool_panel(tool_id: str, tool_name: str | None) -> int:
         nonlocal assistant_idx
         if tool_id in tool_msg_idx:
@@ -244,7 +254,6 @@ def process_message(
                 body = f"**Result:**\n{result!s}"
             _set_panel_content(idx, title=title, body=body, status="done", icon="✅", opened=False)
 
-    # ---- Reinvoke panel ----
     def open_reinvoke_panel():
         nonlocal reinvoke_idx, reinvoking, assistant_idx, in_think, prev_buf
         if in_think:
@@ -397,7 +406,6 @@ def process_message(
             for idx in list(tool_msg_idx.values()):
                 md = dict(history[idx].metadata or {})
                 if md.get("status") == "pending":
-                    # Complete but keep the rendered (collapsed) panel
                     _set_panel_content(
                         idx,
                         title=md.get("title", "Tool"),
@@ -410,7 +418,6 @@ def process_message(
         if not thread.is_alive():
             buffer.close()
 
-    # Strip any private <think> tags that may have leaked into the main assistant message
     main_text = history[assistant_idx].content or ""
     main_text = re.sub(
         r"<(?:think|thinking|reason|reasoning)>.*?</(?:think|thinking|reason|reasoning)>",

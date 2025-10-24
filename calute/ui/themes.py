@@ -1,3 +1,18 @@
+# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 """Theme configuration and styling for Calute UI components.
 
 Defines application theme constants, colors, and CSS styles for the Gradio interface.
@@ -37,7 +52,7 @@ CSS = f"""
     border-radius: 20px;
 }}
 
-#app-header {{
+
     background: linear-gradient(135deg, {COLORS["surface"]} 0%, {COLORS["surface_light"]} 100%);
     border-radius: 20px;
     padding: 8px;
@@ -46,7 +61,7 @@ CSS = f"""
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
 }}
 
-#app-header h1 {{
+
     color: {COLORS["text"]};
     margin: 0 0 8px 0;
     font-size: 20px;
@@ -54,7 +69,7 @@ CSS = f"""
     letter-spacing: -0.02em;
 }}
 
-#app-header p {{
+
     color: {COLORS["text_secondary"]};
     margin: 0;
     font-size: 14px;
@@ -295,11 +310,11 @@ CSS = f"""
 }}
 
 @media (max-width: 768px) {{
-    #app-header {{
+
         padding: 16px;
     }}
 
-    #app-header h1 {{
+
         font-size: 24px;
     }}
 
@@ -310,7 +325,7 @@ CSS = f"""
 """
 CSS += f"""
 /* Center the main column like ChatGPT */
-#app-header,
+
 .gr-chatbot,
 .input-row,
 .gr-examples {{
@@ -402,134 +417,134 @@ CSS += f"""
     margin-top: 6px;
 }}
 
-#composer-wrap {{
+
   max-width: 980px;
   margin: 12px auto 0 auto;
 }}
 
-#composer {{
+
   position: relative;
-  background: linear-gradient(135deg, var(--surface-light, #334155) 0%, var(--surface, #1e293b) 100%);
-  border: 1px solid #334155;
+  background: linear-gradient(135deg, var(--surface-light,
+  border: 1px solid
   border-radius: 18px;
   padding: 14px 64px 52px 16px; /* extra right/bottom for buttons */
 }}
 
 /* Make the textbox look like a plain area inside the capsule */
-#composer .gr-textbox {{
+
   background: transparent;
   border: none;
   box-shadow: none;
 }}
-#composer .gr-textbox:focus {{
+
   border: none;
   box-shadow: none;
 }}
-#composer .gr-textbox textarea {{
+
   background: transparent;
   border: none !important;
   outline: none !important;
-  color: #f1f5f9;
+  color:
   padding: 8px 0;
   font-size: 14px;
   resize: vertical;
 }}
 
 /* Plugin badges at top-right of capsule */
-#plugin-badges {{
+
   position: absolute;
   top: 10px;
   right: 12px;
   display: flex;
   gap: 6px;
 }}
-#plugin-badges .badge {{
+
   display: grid;
   place-items: center;
   width: 30px;
   height: 22px;
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.12);
-  border: 1px solid #334155;
-  color: #d1d5db;
+  border: 1px solid
+  color:
   font-size: 14px;
 }}
 
 /* Attach + send buttons inside the capsule (bottom-right) */
-#attach-btn, #send-btn {{
+
   position: absolute;
   bottom: 10px;
   border-radius: 10px;
 }}
-#attach-btn {{ right: 64px; }}
-#send-btn {{ right: 14px; }}
 
-#attach-btn > button {{
+
+
+
   width: 36px;
   height: 36px;
   padding: 0;
   border-radius: 999px;
   background: transparent;
-  border: 1px solid #334155;
-  color: #cbd5e1;
+  border: 1px solid
+  color:
   font-size: 18px;
 }}
 
-#send-btn > button {{
+
   width: 38px;
   height: 38px;
   padding: 0;
   border-radius: 999px;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  background: linear-gradient(135deg,
   color: white;
   font-weight: 800;
   font-size: 16px;
   border: none;
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
 }}
-#send-btn > button:hover {{
+
   transform: translateY(-1px);
 }}
 
 /* Pills row and subtle clear button */
-#composer-actions {{
+
   max-width: 980px;
   margin: 8px auto 0 auto;
   display: flex;
   gap: 8px;
   align-items: center;
 }}
-#composer-actions .composer-actions-spacer {{
+
   flex: 1;
 }}
-#composer-actions .gr-button {{
+
   border-radius: 9999px;
   padding: 8px 14px;
   font-weight: 600;
   font-size: 13px;
   background: rgba(148, 163, 184, 0.08);
-  border: 1px solid #334155;
-  color: #e2e8f0;
+  border: 1px solid
+  color:
 }}
-#btn-deepthink > button {{
+
   background: rgba(59, 130, 246, 0.12);
   border-color: rgba(59, 130, 246, 0.35);
-  color: #93c5fd;
+  color:
 }}
 
 /* Small caption centered under the capsule */
-#composer-note {{
+
   text-align: center;
-  color: #94a3b8;
+  color:
   font-size: 12px;
   margin-top: 6px;
 }}
 
 /* Keep everything centered like earlier */
-#app-header,
+
 .gr-chatbot,
-#composer-wrap,
-#composer-actions,
+
+
 .gr-examples {{
   max-width: 980px;
   margin-left: auto !important;
@@ -538,153 +553,153 @@ CSS += f"""
 
 /* Optional: tighten input spacing on small screens */
 @media (max-width: 768px) {{
-  #composer {{ padding: 12px 56px 48px 12px; }}
-  #attach-btn {{ right: 58px; }}
-  #send-btn {{ right: 10px; }}
+
+
+
 }}
 
 
 
-#composer-wrap {{
+
   max-width: 980px;
   margin: 14px auto 0 auto;
 }}
 
-#composer {{
+
   position: relative;
   border-radius: 18px;
   background: linear-gradient(180deg, rgba(2, 6, 23, 0.35) 0%, rgba(2, 6, 23, 0.15) 100%);
-  border: 1px solid #334155;
+  border: 1px solid
   padding: 14px 64px 48px 16px; /* room for right-side icons + bottom controls */
 }}
 
 /* Completely flatten the Textbox (Gradio wraps it a lot) */
-#composer #message-input,
-#composer #message-input * {{
+
+
   box-shadow: none !important;
 }}
-#composer #message-input > div,                 /* outer wrapper */
-#composer #message-input .wrap,                 /* inner wrap */
-#composer #message-input .container,            /* sometimes present */
-#composer #message-input .gr-input,             /* component shell */
-#composer #message-input .gr-box,               /* component box */
-#composer #message-input .prose,                /* md wrapper some versions */
-#composer #message-input .border,               /* tailwind border class */
-#composer #message-input .form,                 /* form wrap */
-#composer #message-input .block,                /* block wrap */
-#composer #message-input .svelte-container,     /* svelte wrapper (fallback) */
-#composer #message-input textarea {{
+
+
+
+
+
+
+
+
+
+
+
   background: transparent !important;
   border: 0 !important;
 }}
 
 /* Actual textarea look */
-#composer #message-input textarea {{
+
   outline: none !important;
-  color: #e5eefb;
+  color:
   padding: 10px 8px 6px 8px;
   font-size: 14px;
   min-height: 66px;           /* size like the reference */
   resize: vertical;
 }}
-#composer #message-input textarea::placeholder {{
-  color: #94a3b8;
+
+  color:
 }}
 
 /* Top-right plugin badges (optional) */
-#plugin-badges {{
+
   position: absolute;
   top: 10px;
   right: 12px;
   display: flex;
   gap: 6px;
 }}
-#plugin-badges .badge {{
+
   display: grid;
   place-items: center;
   width: 30px;
   height: 22px;
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.12);
-  border: 1px solid #334155;
-  color: #d1d5db;
+  border: 1px solid
+  color:
   font-size: 14px;
 }}
 
 /* Attach + Send buttons inside the capsule (bottom-right) */
-#attach-btn, #send-btn {{
+
   position: absolute;
   bottom: 10px;
   z-index: 2;
 }}
-#attach-btn {{ right: 64px; }}
-#send-btn   {{ right: 14px; }}
 
-#attach-btn > button,
-#attach-btn button {{
+
+
+
+
   width: 36px !important;
   height: 36px !important;
   padding: 0 !important;
   border-radius: 999px !important;
   background: rgba(148, 163, 184, 0.12) !important;
-  border: 1px solid #334155 !important;
-  color: #cbd5e1 !important;
+  border: 1px solid
+  color:
   font-size: 16px !important;
 }}
 
 /* Circular arrow button */
-#send-btn > button,
-#send-btn button {{
+
+
   width: 38px !important;
   height: 38px !important;
   padding: 0 !important;
   border-radius: 999px !important;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
-  color: #ffffff !important;
+  background: linear-gradient(135deg,
+  color:
   font-weight: 800 !important;
   font-size: 16px !important;
   border: none !important;
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25) !important;
 }}
-#send-btn > button:hover {{ transform: translateY(-1px); }}
+
 
 /* Pills row under the capsule */
-#composer-actions {{
+
   max-width: 980px;
   margin: 8px auto 0 auto;
   display: flex;
   gap: 8px;
   align-items: center;
 }}
-#composer-actions .composer-actions-spacer {{ flex: 1; }}
-#composer-actions .gr-button {{
+
+
   border-radius: 9999px !important;
   padding: 8px 14px !important;
   font-weight: 600 !important;
   font-size: 13px !important;
   background: rgba(148, 163, 184, 0.08) !important;
-  border: 1px solid #334155 !important;
-  color: #e2e8f0 !important;
+  border: 1px solid
+  color:
 }}
-#btn-deepthink > button {{
+
   background: rgba(59, 130, 246, 0.12) !important;
   border-color: rgba(59, 130, 246, 0.35) !important;
-  color: #93c5fd !important;
+  color:
 }}
 
 /* Small centered caption */
-#composer-note {{
+
   text-align: center;
-  color: #94a3b8;
+  color:
   font-size: 12px;
   margin-top: 6px;
 }}
 
 /* Keep chat and composer centered */
-#app-header,
+
 .gr-chatbot,
-#composer-wrap,
-#composer-actions,
+
+
 .gr-examples {{
   max-width: 980px;
   margin-left: auto !important;
@@ -693,96 +708,96 @@ CSS += f"""
 
 /* Mobile adjustments */
 @media (max-width: 768px) {{
-  #composer {{ padding: 12px 56px 46px 12px; }}
-  #attach-btn {{ right: 58px; }}
-  #send-btn {{ right: 10px; }}
+
+
+
 }}
 
 
 
-#composer {{
+
   position: relative;
   border-radius: 18px;
-  background: #1e293b; /* solid tone; you can swap to #223247 or any hex you like */
-  border: 1px solid #334155;
+  background:
+  border: 1px solid
   padding: 14px 64px 48px 16px;
 }}
 
 /* 2) Absolutely flatten the Textbox: no inner box, no extra background */
-#composer #message-input,
-#composer #message-input * {{
+
+
   box-shadow: none !important;
 }}
-#composer #message-input > div,
-#composer #message-input .wrap,
-#composer #message-input .container,
-#composer #message-input .gr-input,
-#composer #message-input .gr-box,
-#composer #message-input .prose,
-#composer #message-input .border,
-#composer #message-input .form,
-#composer #message-input .block,
-#composer #message-input .svelte-container,
-#composer [data-testid="textbox"],
-#composer [data-testid="textbox"] > div,
-#composer [data-testid="textbox"] .wrap,
-#composer [data-testid="textbox"] .container {{
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   background: transparent !important;
   border: 0 !important;
   box-shadow: none !important;
 }}
 
 /* 3) Textarea itself is transparent so it blends into the capsule */
-#composer #message-input textarea,
-#composer #message-input textarea:focus {{
+
+
   background: transparent !important;
   border: 0 !important;
   outline: none !important;
-  color: #e5eefb;
+  color:
   padding: 10px 8px 6px 8px;
   font-size: 14px;
   min-height: 66px;
   resize: vertical;
-  caret-color: #e5eefb;
+  caret-color:
 }}
-#composer #message-input textarea::placeholder {{ color: #94a3b8; }}
+
 
 /* 4) Controls on the right (unchanged) */
-#attach-btn, #send-btn {{ position: absolute; bottom: 10px; z-index: 2; }}
-#attach-btn {{ right: 64px; }}
-#send-btn   {{ right: 14px; }}
 
-#attach-btn > button, #attach-btn button {{
+
+
+
+
   width: 36px !important; height: 36px !important; padding: 0 !important;
   border-radius: 999px !important;
   background: rgba(148,163,184,0.12) !important;
-  border: 1px solid #334155 !important; color: #cbd5e1 !important; font-size: 16px !important;
+  border: 1px solid
 }}
-#send-btn > button, #send-btn button {{
+
   width: 38px !important; height: 38px !important; padding: 0 !important;
   border-radius: 999px !important;
-  background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%) !important;
-  color: #fff !important; font-weight: 800 !important; font-size: 16px !important; border: none !important;
+  background: linear-gradient(135deg,
+  color:
   box-shadow: 0 4px 12px rgba(59,130,246,0.25) !important;
 }}
-#send-btn > button:hover {{ transform: translateY(-1px); }}
+
 
 /* Optional badges (keep if you use them) */
-#plugin-badges {{ position: absolute; top: 10px; right: 12px; display: flex; gap: 6px; }}
-#plugin-badges .badge {{
+
+
   display: grid; place-items: center; width: 30px; height: 22px; border-radius: 6px;
-  background: rgba(148,163,184,0.12); border: 1px solid #334155; color: #d1d5db; font-size: 14px;
+  background: rgba(148,163,184,0.12); border: 1px solid
 }}
 
 /* Center the composer with the chat */
-#composer-wrap, #composer-actions, .gr-chatbot, #app-header, .gr-examples {{
+
   max-width: 980px; margin-left: auto !important; margin-right: auto !important;
 }}
 
 /* Mobile tweak */
 @media (max-width: 768px) {{
-  #composer {{ padding: 12px 56px 46px 12px; }}
-  #attach-btn {{ right: 58px; }}
-  #send-btn {{ right: 10px; }}
+
+
+
 }}
 """

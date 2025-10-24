@@ -16,8 +16,7 @@
 from collections import defaultdict
 from datetime import datetime
 
-from calute import Agent
-from calute.tools import (
+from ..tools import (
     DuckDuckGoSearch,
     EntityExtractor,
     ReadFile,
@@ -29,6 +28,7 @@ from calute.tools import (
     WebScraper,
     WriteFile,
 )
+from ..types import Agent
 
 research_state = {
     "topics": {},

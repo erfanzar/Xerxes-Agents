@@ -18,14 +18,14 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
-from calute import Agent
-from calute.tools import (
+from ..tools import (
     DataConverter,
     JSONProcessor,
     ReadFile,
     StatisticalAnalyzer,
     WriteFile,
 )
+from ..types import Agent
 
 analysis_state = {
     "datasets": {},

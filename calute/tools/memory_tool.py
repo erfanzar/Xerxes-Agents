@@ -60,27 +60,23 @@ def save_memory(
         {"content": "User prefers dark mode", "tags": ["preference", "ui"]}
         {"content": "Project uses Python 3.11", "memory_type": "long_term"}
     """
-    # Get memory store from context
+
     memory_store = context_variables.get("memory_store") if context_variables else None
 
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
 
-    # Get current agent_id from context if not provided
     if not agent_id and context_variables:
         agent_id = context_variables.get("agent_id", "default")
 
     try:
-        # Convert string memory type to enum
         memory_type_enum = MemoryType[memory_type.upper()]
 
-        # Prepare metadata
         full_metadata = metadata or {}
         full_metadata["timestamp"] = datetime.now().isoformat()
         if agent_id:
             full_metadata["created_by"] = agent_id
 
-        # Add memory (importance_score defaults to 1.0 in MemoryStore)
         memory_id = memory_store.add_memory(
             content=content,
             memory_type=memory_type_enum,
@@ -89,7 +85,6 @@ def save_memory(
             tags=tags or [],
         )
 
-        # Convert memory_id to string if it's a MemoryItem object
         memory_id_str = str(memory_id.memory_id) if hasattr(memory_id, "memory_id") else str(memory_id)
 
         return {
@@ -133,45 +128,36 @@ def search_memory(
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
 
-    # Get current agent_id from context if not provided
     if not agent_id and context_variables:
         agent_id = context_variables.get("agent_id", "default")
 
     try:
-        # Convert string memory types to enums if provided
         memory_type_enums = None
         if memory_types:
             memory_type_enums = [MemoryType[mt.upper()] for mt in memory_types]
 
-        # Retrieve memories without tag filtering (it's broken in MemoryStore)
-        # We'll filter tags manually
         memories = memory_store.retrieve_memories(
             memory_types=memory_type_enums,
             agent_id=agent_id,
-            tags=None,  # Don't use tag filter - it's broken
-            limit=limit * 5 if (query or tags) else limit,  # Get more for manual filtering
+            tags=None,
+            limit=limit * 5 if (query or tags) else limit,
         )
 
-        # Manual filtering for tags and query
         if (query or tags) and memories:
             filtered_memories = []
             query_lower = query.lower() if query else ""
 
             for mem in memories:
-                # Check tag filter
                 if tags:
                     mem_tags = mem.metadata.get("tags", [])
                     if not any(tag in mem_tags for tag in tags):
                         continue
 
-                # Check query filter
                 if query:
-                    # Search in content and tags - check each word in query
                     query_words = query_lower.split()
                     content_lower = mem.content.lower()
                     tags_lower = [str(tag).lower() for tag in mem.metadata.get("tags", [])]
 
-                    # Check if any query word matches content or tags
                     match_found = any(word in content_lower for word in query_words)
                     if not match_found:
                         match_found = any(word in tag for word in query_words for tag in tags_lower)
@@ -185,7 +171,6 @@ def search_memory(
 
             memories = filtered_memories
 
-        # Filter by time range if provided
         if time_range and memories:
             filtered_memories = []
             for mem in memories:
@@ -198,7 +183,6 @@ def search_memory(
                     filtered_memories.append(mem)
             memories = filtered_memories
 
-        # Format results
         results = []
         for mem in memories:
             results.append(
@@ -245,17 +229,14 @@ def consolidate_agent_memories(
         return {"status": "error", "message": "Memory store not available"}
 
     try:
-        # Retrieve memories for the agent
         memories = memory_store.retrieve_memories(
             agent_id=agent_id,
             limit=max_items,
         )
 
-        # Generate a summary from the memories
         if not memories:
             summary = "No memories found for this agent."
         else:
-            # Group memories by tags
             tagged_memories = {}
             for mem in memories:
                 mem_tags = mem.metadata.get("tags", ["untagged"])
@@ -264,21 +245,19 @@ def consolidate_agent_memories(
                         tagged_memories[tag] = []
                     tagged_memories[tag].append(mem.content)
 
-            # Build summary
             summary_parts = []
             summary_parts.append(f"Total memories: {len(memories)}")
             summary_parts.append("\nMemories by category:")
 
             for tag in sorted(tagged_memories.keys()):
                 summary_parts.append(f"\n{tag.upper()}:")
-                for content in tagged_memories[tag][:3]:  # Show first 3 per tag
+                for content in tagged_memories[tag][:3]:
                     summary_parts.append(f"  - {content}")
                 if len(tagged_memories[tag]) > 3:
                     summary_parts.append(f"  ... and {len(tagged_memories[tag]) - 3} more")
 
             summary = "\n".join(summary_parts)
 
-        # Get statistics
         stats = memory_store.get_statistics()
 
         return {
@@ -322,8 +301,6 @@ def delete_memory(
     try:
         deleted_count = 0
 
-        # For now, we'll return a message about what would be deleted
-        # since the current MemoryStore doesn't have a delete method
         criteria = []
         if memory_id:
             criteria.append(f"memory_id={memory_id}")
@@ -365,18 +342,15 @@ def get_memory_tags_and_terms(
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
 
-    # Get current agent_id from context if not provided
     if not agent_id and context_variables:
         agent_id = context_variables.get("agent_id", "default")
 
     try:
-        # Retrieve all memories for the agent
         memories = memory_store.retrieve_memories(
             agent_id=agent_id,
-            limit=1000,  # Get many memories to collect all tags
+            limit=1000,
         )
 
-        # Organize tags by memory type
         tags_by_type = {
             "short_term": set(),
             "long_term": set(),
@@ -386,30 +360,21 @@ def get_memory_tags_and_terms(
             "procedural": set(),
         }
 
-        # Also track tag frequency
         tag_frequency = {}
 
         for mem in memories:
-            # Get memory type from metadata or use default
             mem_type = mem.memory_type.lower() if hasattr(mem, "memory_type") else "unknown"
 
-            # Get tags from metadata
             mem_tags = mem.metadata.get("tags", []) if hasattr(mem, "metadata") else []
 
-            # Add tags to the appropriate memory type set
             if mem_type in tags_by_type:
                 for tag in mem_tags:
                     tags_by_type[mem_type].add(tag)
                     tag_frequency[tag] = tag_frequency.get(tag, 0) + 1
 
-        # Convert sets to sorted lists
         result = {
             "status": "success",
-            "tags_by_type": {
-                mem_type: sorted(list(tags))
-                for mem_type, tags in tags_by_type.items()
-                if tags  # Only include types that have tags
-            },
+            "tags_by_type": {mem_type: sorted(list(tags)) for mem_type, tags in tags_by_type.items() if tags},
             "all_tags": sorted(set().union(*tags_by_type.values())),
             "tag_frequency": dict(sorted(tag_frequency.items(), key=lambda x: x[1], reverse=True)),
             "total_unique_tags": len(set().union(*tags_by_type.values())),
@@ -446,7 +411,6 @@ def get_memory_statistics(
     try:
         stats = memory_store.get_statistics()
 
-        # Add agent-specific stats if requested
         if agent_id:
             agent_memories = memory_store.retrieve_memories(
                 agent_id=agent_id,
@@ -463,7 +427,6 @@ def get_memory_statistics(
         return {"status": "error", "message": str(e)}
 
 
-# Tool definitions for agent registration
 MEMORY_TOOLS = [
     save_memory,
     search_memory,
@@ -516,10 +479,10 @@ def add_memory_tools_to_agent(
         ...     functions=[]
         ... )
         >>>
-        >>> # Add all memory tools
+        >>>
         >>> agent = add_memory_tools_to_agent(agent, memory_store=my_memory_store)
         >>>
-        >>> # Or add specific tools only
+        >>>
         >>> agent = add_memory_tools_to_agent(
         ...     agent,
         ...     memory_store=my_memory_store,

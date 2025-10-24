@@ -52,6 +52,16 @@ class ExecutionStatus(Enum):
     CANCELLED = "cancelled"
 
 
+class CompactionStrategy(Enum):
+    """Strategy for context compaction"""
+
+    SUMMARIZE = "summarize"
+    SLIDING_WINDOW = "sliding_window"
+    PRIORITY_BASED = "priority_based"
+    SMART = "smart"
+    TRUNCATE = "truncate"
+
+
 @dataclass
 class RequestFunctionCall:
     """Enhanced function call representation"""

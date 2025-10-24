@@ -427,7 +427,7 @@ Respond ONLY with the XML plan, no additional text.
         """
 
         if cortex.agents:
-            task_plan, cortex_tasks = self.create_tasks_from_prompt(
+            _task_plan, cortex_tasks = self.create_tasks_from_prompt(
                 prompt=prompt,
                 background=background,
                 available_agents=cortex.agents,

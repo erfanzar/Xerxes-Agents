@@ -127,14 +127,12 @@ class FunctionDefinition(OpenAIBaseModel):
     Attributes:
         name: Function name
         description: Function description for the model
-        parameters: JSON Schema for function parameters
-        required: List of required parameter names
+        parameters: JSON Schema for function parameters (includes 'required' field inside)
     """
 
     name: str
     description: str | None = None
     parameters: dict[str, tp.Any] = Field(default_factory=dict)
-    required: list[str] | None = None
 
 
 class ToolDefinition(OpenAIBaseModel):

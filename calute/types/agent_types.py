@@ -15,13 +15,19 @@
 
 """Defines Pydantic models for the vSurge API, mimicking OpenAI's structure."""
 
+from __future__ import annotations
+
 import functools
 import typing as tp
 from abc import ABCMeta, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .function_execution_types import AgentCapability, AgentSwitchTrigger, FunctionCallStrategy
+from .function_execution_types import AgentCapability, AgentSwitchTrigger, CompactionStrategy, FunctionCallStrategy
+
+if tp.TYPE_CHECKING:
+    from calute.mcp.manager import MCPManager
+    from calute.mcp.types import MCPServerConfig
 
 
 class AgentBaseFn(ABCMeta):
@@ -31,7 +37,7 @@ class AgentBaseFn(ABCMeta):
         """place-holder for static-call method"""
 
 
-def _wrap_static_call(cls: type["AgentBaseFn"]) -> tp.Callable:
+def _wrap_static_call(cls: type[AgentBaseFn]) -> tp.Callable:
     """
     Return a new function that forwards to `cls.static_call`
     but is *named* after the class (so the LLM sees a unique tool).
@@ -81,6 +87,14 @@ class Agent(BaseModel):
     extra_body: dict | None = None
 
     stop: str | list[str] | None = None
+
+    auto_compact: bool = False
+    compact_threshold: float = 0.8
+    compact_target: float = 0.5
+    max_context_tokens: int | None = None
+    compaction_strategy: CompactionStrategy = CompactionStrategy.SMART
+    preserve_system_prompt: bool = True
+    preserve_recent_messages: int = 5
 
     switch_triggers: list[AgentSwitchTrigger] = Field(default_factory=list)
     fallback_agent_id: str | None = None
@@ -147,6 +161,63 @@ class Agent(BaseModel):
     def get_functions_mapping(self) -> dict[str, tp.Callable]:
         """Get list of available function names"""
         return {func.__name__: func for func in self.functions}
+
+    def attach_mcp(self, mcp_servers: MCPManager | MCPServerConfig | list) -> None:
+        """Attach MCP servers to this agent, connecting and adding their tools.
+
+        This method provides a convenient way to connect MCP servers and automatically
+        add their tools to the agent's function list.
+
+        Args:
+            mcp_servers: Can be one of:
+                - MCPManager: An existing MCP manager instance
+                - MCPServerConfig: A single server config (will create manager and connect)
+                - list[MCPServerConfig]: Multiple server configs (will create manager and connect all)
+
+        Example:
+            >>>
+            >>> agent.attach_mcp(MCPServerConfig(
+            ...     name="filesystem",
+            ...     command="npx",
+            ...     args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+            ... ))
+            >>>
+            >>>
+            >>> agent.attach_mcp([
+            ...     MCPServerConfig(name="filesystem", ...),
+            ...     MCPServerConfig(name="sqlite", ...)
+            ... ])
+            >>>
+            >>>
+            >>> manager = MCPManager()
+            >>> await manager.add_server(config)
+            >>> agent.attach_mcp(manager)
+        """
+        import asyncio
+
+        from calute.mcp import MCPManager, MCPServerConfig
+        from calute.mcp.integration import add_mcp_tools_to_agent
+
+        if isinstance(mcp_servers, MCPManager):
+            manager = mcp_servers
+        elif isinstance(mcp_servers, MCPServerConfig):
+            manager = MCPManager()
+            asyncio.run(manager.add_server(mcp_servers))
+        elif isinstance(mcp_servers, list):
+            manager = MCPManager()
+            for config in mcp_servers:
+                if isinstance(config, MCPServerConfig):
+                    asyncio.run(manager.add_server(config))
+                else:
+                    raise TypeError(f"Expected MCPServerConfig in list, got {type(config)}")
+        else:
+            raise TypeError(f"Expected MCPManager, MCPServerConfig, or list, got {type(mcp_servers)}")
+
+        asyncio.run(add_mcp_tools_to_agent(self, manager))
+
+        if not hasattr(self, "_mcp_managers"):
+            self._mcp_managers = []
+        self._mcp_managers.append(manager)
 
 
 class Response(BaseModel):
