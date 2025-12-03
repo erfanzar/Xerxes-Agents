@@ -15,11 +15,11 @@
 
 """Integration helpers for MCP with Calute agents."""
 
-import asyncio
 from collections.abc import Callable
 from typing import Any
 
 from ..loggings import get_logger
+from ..utils import run_sync
 from .manager import MCPManager
 from .types import MCPTool
 
@@ -76,26 +76,10 @@ def mcp_tool_to_calute_function(tool: MCPTool, manager: MCPManager) -> Callable:
     def sync_wrapper(**kwargs) -> Any:
         """Synchronous wrapper for MCP tool execution."""
         try:
-            try:
-                loop = asyncio.get_running_loop()
-
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, manager.call_tool(tool.name, kwargs))
-                    result = future.result()
-                return result
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    result = loop.run_until_complete(manager.call_tool(tool.name, kwargs))
-                    return result
-                finally:
-                    loop.close()
+            return run_sync(manager.call_tool(tool.name, kwargs))
         except Exception as e:
             logger.error(f"Error executing MCP tool {tool.name}: {e}")
-            return {"error": str(e)}
+            raise  # Re-raise instead of returning error dict
 
     func_name = tool.name.replace("-", "_").replace(".", "_")
     sync_wrapper.__name__ = func_name
@@ -165,7 +149,9 @@ async def add_mcp_tools_to_agent(agent: Any, manager: MCPManager, server_names: 
         if agent._internal_agent.functions is None:
             agent._internal_agent.functions = []
         agent._internal_agent.functions.extend(functions)
-        logger.info(f"Added {len(functions)} MCP tools to agent {agent.role}")
+        logger.info(
+            f"Added {len(functions)} MCP tools to agent {getattr(agent, 'role', getattr(agent, 'name', 'unknown'))}"
+        )
     else:
         logger.warning("Agent does not support adding functions")
 
@@ -190,6 +176,6 @@ def create_mcp_enabled_agent(
 
     agent = agent_class(**agent_kwargs)
 
-    asyncio.run(add_mcp_tools_to_agent(agent, manager, server_names))
+    run_sync(add_mcp_tools_to_agent(agent, manager, server_names))
 
     return agent

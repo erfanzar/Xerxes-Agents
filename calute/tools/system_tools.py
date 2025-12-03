@@ -240,6 +240,30 @@ class ProcessManager(AgentBaseFn):
             except Exception as e:
                 return {"error": f"Failed to run command: {e!s}"}
 
+        elif operation == "kill":
+            if not pid:
+                return {"error": "pid required for kill operation"}
+
+            try:
+                proc = psutil.Process(pid)
+                proc_name = proc.name()
+                proc.terminate()  # Graceful termination first
+                try:
+                    proc.wait(timeout=5)  # Wait up to 5 seconds
+                    result["status"] = "terminated"
+                except psutil.TimeoutExpired:
+                    proc.kill()  # Force kill if still running
+                    result["status"] = "killed"
+                result["pid"] = pid
+                result["name"] = proc_name
+                result["message"] = f"Process {proc_name} (PID {pid}) has been stopped"
+            except psutil.NoSuchProcess:
+                return {"error": f"No process with PID {pid}"}
+            except psutil.AccessDenied:
+                return {"error": f"Access denied to kill process {pid}"}
+            except Exception as e:
+                return {"error": f"Failed to kill process: {e!s}"}
+
         else:
             return {"error": f"Unknown operation: {operation}"}
 
@@ -570,16 +594,31 @@ class TempFileManager(AgentBaseFn):
                 return {"error": f"Failed to create temp directory: {e!s}"}
 
         elif operation == "cleanup":
+            import shutil
+
             temp_dir = tempfile.gettempdir()
             result["temp_dir"] = temp_dir
 
             calute_temps = []
+            deleted = []
+            failed = []
+
             for item in Path(temp_dir).iterdir():
                 if item.name.startswith("calute_"):
                     calute_temps.append(str(item))
+                    try:
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
+                        deleted.append(str(item))
+                    except Exception as e:
+                        failed.append({"path": str(item), "error": str(e)})
 
-            result["calute_temps"] = calute_temps
-            result["count"] = len(calute_temps)
+            result["found"] = calute_temps
+            result["deleted"] = deleted
+            result["failed"] = failed
+            result["deleted_count"] = len(deleted)
 
         else:
             return {"error": f"Unknown operation: {operation}"}

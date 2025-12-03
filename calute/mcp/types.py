@@ -21,11 +21,20 @@ from typing import Any
 
 
 class MCPTransportType(Enum):
-    """MCP transport types."""
+    """MCP transport types.
+
+    STDIO: Local subprocess communication (for npx, uvx style servers)
+    SSE: Server-Sent Events over HTTP (legacy 2024-11-05 protocol)
+    STREAMABLE_HTTP: Streamable HTTP transport (recommended for 2025+)
+    """
 
     STDIO = "stdio"
-    HTTP = "http"
-    WEBSOCKET = "websocket"
+    SSE = "sse"
+    STREAMABLE_HTTP = "streamable_http"
+
+    # Backwards compatibility aliases
+    HTTP = "sse"  # Deprecated: use SSE instead
+    WEBSOCKET = "streamable_http"  # Deprecated: use STREAMABLE_HTTP instead
 
 
 @dataclass
@@ -37,10 +46,12 @@ class MCPServerConfig:
         command: Command to start the server (for stdio transport)
         args: Arguments for the server command
         env: Environment variables for the server
-        transport: Transport type (stdio, http, websocket)
-        url: Server URL (for http/websocket transport)
+        transport: Transport type (stdio, sse, streamable_http)
+        url: Server URL (for SSE/Streamable HTTP transports)
         headers: HTTP headers for authentication
         enabled: Whether this server is enabled
+        timeout: Timeout for HTTP operations in seconds (default 30)
+        sse_read_timeout: Timeout for SSE event stream in seconds (default 300)
     """
 
     name: str
@@ -51,6 +62,8 @@ class MCPServerConfig:
     url: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    timeout: float = 30.0
+    sse_read_timeout: float = 300.0
 
 
 @dataclass

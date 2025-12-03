@@ -63,6 +63,8 @@ class GeminiLLM(BaseLLM):
         if self.client is None:
             self.client = self.genai.GenerativeModel(self.config.model)
 
+        self._auto_fetch_model_info()
+
     async def generate_completion(
         self,
         prompt: str | list[dict[str, str]],
@@ -317,3 +319,19 @@ class GeminiLLM(BaseLLM):
                                 }
                             )
         return tool_calls
+
+    def fetch_model_info(self) -> dict[str, Any]:
+        """Fetch model info from Gemini API.
+
+        Returns:
+            Dictionary with input_token_limit as max_model_len
+        """
+        try:
+            model_info = self.genai.get_model(f"models/{self.config.model}")
+            return {
+                "max_model_len": getattr(model_info, "input_token_limit", None),
+                "output_token_limit": getattr(model_info, "output_token_limit", None),
+            }
+        except Exception:
+            pass
+        return {}

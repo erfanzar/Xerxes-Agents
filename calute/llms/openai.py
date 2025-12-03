@@ -65,6 +65,8 @@ class OpenAILLM(BaseLLM):
                 timeout=self.config.timeout,
             )
 
+        self._auto_fetch_model_info()
+
     async def generate_completion(
         self,
         prompt: str | list[dict[str, str]],
@@ -392,6 +394,24 @@ class OpenAILLM(BaseLLM):
                     }
                 )
         return tool_calls
+
+    def fetch_model_info(self) -> dict[str, Any]:
+        """Fetch model info from /v1/models endpoint.
+
+        Returns:
+            Dictionary with max_model_len and metadata if available
+        """
+        try:
+            models = self.client.models.list()
+            for model in models.data:
+                if model.id == self.config.model:
+                    return {
+                        "max_model_len": getattr(model, "max_model_len", None),
+                        "metadata": getattr(model, "metadata", {}),
+                    }
+        except Exception:
+            pass
+        return {}
 
     async def close(self) -> None:
         """Close the OpenAI client."""

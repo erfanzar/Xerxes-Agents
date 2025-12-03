@@ -13,15 +13,18 @@
 # limitations under the License.
 
 
-"""Calute UI module for creating Gradio-based chat interfaces.
+"""Calute UI module for creating Chainlit-based chat interfaces.
 
 This module provides components for building interactive chat applications
-with the Calute framework.
+with the Calute framework using Chainlit.
 """
 
 try:
-    from .application import create_application
-except Exception:
-    print("Error importing gradio install calute via `pip install calute[ui]`")
-    create_application = None
-__all__ = ["create_application"]
+    from .application import launch_application
+    from .themes import setup_chainlit_theme
+except ImportError:
+    print("Chainlit not installed. Install with: pip install calute[ui]")
+    launch_application = None
+    setup_chainlit_theme = None
+
+__all__ = ["launch_application", "setup_chainlit_theme"]

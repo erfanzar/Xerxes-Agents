@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import threading
@@ -714,14 +713,6 @@ class CortexTask:
         else:
             raise Exception(f"Task failed after {retries} retries: {last_error}")
 
-    async def execute_async(self, context_outputs: list[str] | None = None) -> CortexTaskOutput:
-        """Execute the task asynchronously"""
-        if not self.async_execution:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self.execute, context_outputs)
-
-        return self.execute(context_outputs)
-
     def get_execution_stats(self) -> dict:
         """Get execution statistics"""
         return self._execution_stats.copy()
@@ -789,6 +780,6 @@ class CortexTask:
         self.output_json = model
 
     def create_ui(self):
-        from calute.ui import create_application
+        from calute.ui import launch_application
 
-        return create_application(executor=self)
+        return launch_application(executor=self)

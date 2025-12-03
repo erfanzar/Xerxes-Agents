@@ -230,7 +230,8 @@ class Cortex:
         )
 
         if log_process and stream_callback is None:
-            from calute.loggings import stream_callback
+            from calute.loggings import stream_callback as default_stream_callback
+            stream_callback = default_stream_callback
 
         if use_streaming:
             buffer_was_none = streamer_buffer is None
@@ -595,7 +596,10 @@ class Cortex:
             if "task_id" not in task_plan:
                 raise ValueError("Task plan missing 'task_id'")
             task_id = task_plan["task_id"] - 1
-            if task_id >= len(self.tasks):
+            if task_id < 0 or task_id >= len(self.tasks):
+                self.logger.warning(
+                    f"⚠️ Skipping invalid task_id {task_plan['task_id']} (valid range: 1-{len(self.tasks)})"
+                )
                 continue
 
             task = self.tasks[task_id]
@@ -623,7 +627,7 @@ class Cortex:
                         raise ValueError(f"Task {task_id + 1} depends on task {dep_id} which hasn't been completed yet")
                     context.append(completed_tasks[dep_id])
 
-            self.logger.agent_start(assigned_agent.role, task.description)
+            log_agent_start(assigned_agent.role)
             task_output = task.execute(context if context else None)
             output = task_output.output
             completed_tasks[task_id + 1] = output
@@ -1021,9 +1025,9 @@ class Cortex:
         self.cortex_memory.reset_all()
 
     def create_ui(self):
-        from calute.ui import create_application
+        from calute.ui import launch_application
 
-        return create_application(executor=self)
+        return launch_application(executor=self)
 
 
 @dataclass

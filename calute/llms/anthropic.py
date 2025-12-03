@@ -24,6 +24,17 @@ from typing import Any
 
 from .base import BaseLLM, LLMConfig
 
+# Anthropic doesn't expose context lengths via API, so we use known values
+ANTHROPIC_CONTEXT_LENGTHS = {
+    "claude-3-opus": 200000,
+    "claude-3-sonnet": 200000,
+    "claude-3-haiku": 200000,
+    "claude-3-5-sonnet": 200000,
+    "claude-3-5-haiku": 200000,
+    "claude-opus-4": 200000,
+    "claude-sonnet-4": 200000,
+}
+
 try:
     import httpx
 
@@ -74,6 +85,7 @@ class AnthropicLLM(BaseLLM):
             },
             timeout=self.config.timeout,
         )
+        self._auto_fetch_model_info()
 
     async def generate_completion(
         self,
@@ -355,6 +367,19 @@ class AnthropicLLM(BaseLLM):
                         }
                     )
         return tool_calls
+
+    def fetch_model_info(self) -> dict[str, Any]:
+        """Get model info from known Anthropic model context lengths.
+
+        Returns:
+            Dictionary with max_model_len based on model name
+        """
+        model = self.config.model
+        # Match by prefix since Anthropic model names have date suffixes
+        for prefix, context_len in ANTHROPIC_CONTEXT_LENGTHS.items():
+            if model.startswith(prefix):
+                return {"max_model_len": context_len}
+        return {}
 
     async def close(self) -> None:
         """Close the HTTP client."""

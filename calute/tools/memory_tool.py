@@ -301,19 +301,32 @@ def delete_memory(
     try:
         deleted_count = 0
 
-        criteria = []
-        if memory_id:
-            criteria.append(f"memory_id={memory_id}")
+        # Build filters dict for deletion
+        filters = {}
         if tags:
-            criteria.append(f"tags={tags}")
+            filters["tags"] = tags
         if agent_id:
-            criteria.append(f"agent_id={agent_id}")
+            filters["agent_id"] = agent_id
         if older_than:
-            criteria.append(f"older_than={older_than}")
+            from datetime import datetime
+
+            try:
+                cutoff = datetime.fromisoformat(older_than.replace("Z", "+00:00"))
+                filters["created_before"] = cutoff
+            except ValueError:
+                return {"status": "error", "message": f"Invalid timestamp format: {older_than}"}
+
+        # Actually perform the deletion
+        if memory_id:
+            deleted_count = memory_store.delete(memory_id=memory_id)
+        elif filters:
+            deleted_count = memory_store.delete(filters=filters)
+        else:
+            return {"status": "error", "message": "No deletion criteria provided"}
 
         return {
             "status": "success",
-            "message": f"Delete operation would remove memories matching: {', '.join(criteria)}",
+            "message": f"Successfully deleted {deleted_count} memories",
             "deleted_count": deleted_count,
         }
     except Exception as e:

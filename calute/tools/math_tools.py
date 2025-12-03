@@ -70,9 +70,6 @@ class Calculator(AgentBaseFn):
                 return {"error": f"Invalid expression: {e!s}"}
 
         elif operation and operands:
-            if not operands:
-                return {"error": "operands required for operation"}
-
             try:
                 if operation == "add":
                     value = sum(operands)
@@ -176,13 +173,12 @@ class StatisticalAnalyzer(AgentBaseFn):
             except statistics.StatisticsError:
                 result["statistics"]["mode"] = None
 
-            sorted_data = sorted(data)
-            n = len(sorted_data)
-
+            # Use statistics.quantiles for proper quartile calculation (matches numpy/pandas)
+            quantile_list = statistics.quantiles(data, n=4)
             result["quartiles"] = {
-                "Q1": statistics.median(sorted_data[: n // 2]),
-                "Q2": statistics.median(sorted_data),
-                "Q3": statistics.median(sorted_data[(n + 1) // 2 :]),
+                "Q1": quantile_list[0],
+                "Q2": quantile_list[1],  # This is the median
+                "Q3": quantile_list[2],
             }
 
             result["quartiles"]["IQR"] = result["quartiles"]["Q3"] - result["quartiles"]["Q1"]
@@ -200,7 +196,7 @@ class StatisticalAnalyzer(AgentBaseFn):
             }
 
         elif analysis_type == "distribution":
-            sorted_data = sorted(data)
+            sorted(data)
             mean = statistics.mean(data)
 
             if len(data) > 2:

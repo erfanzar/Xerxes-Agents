@@ -62,6 +62,7 @@ class OllamaLLM(BaseLLM):
             base_url=self.config.base_url,
             timeout=self.config.timeout,
         )
+        self._auto_fetch_model_info()
 
     async def generate_completion(
         self,
@@ -293,6 +294,35 @@ class OllamaLLM(BaseLLM):
         """
 
         return []
+
+    def fetch_model_info(self) -> dict[str, Any]:
+        """Fetch model info from Ollama /api/show endpoint.
+
+        Returns:
+            Dictionary with context_length and other model details
+        """
+        try:
+            with httpx.Client(base_url=self.config.base_url, timeout=10.0) as client:
+                resp = client.post("/api/show", json={"name": self.config.model})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    model_info = data.get("model_info", {})
+                    details = data.get("details", {})
+                    # Ollama stores context length in model_info with various key names
+                    context_len = (
+                        model_info.get("context_length")
+                        or model_info.get("llama.context_length")
+                        or model_info.get("num_ctx")
+                    )
+                    return {
+                        "max_model_len": context_len,
+                        "parameter_size": details.get("parameter_size"),
+                        "family": details.get("family"),
+                        "quantization_level": details.get("quantization_level"),
+                    }
+        except Exception:
+            pass
+        return {}
 
     async def close(self) -> None:
         """Close the HTTP client."""

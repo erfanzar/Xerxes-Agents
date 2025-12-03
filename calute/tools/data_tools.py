@@ -128,6 +128,7 @@ class CSVProcessor(AgentBaseFn):
         data: list[dict] | None = None,
         delimiter: str = ",",
         headers: list[str] | None = None,
+        has_header: bool = True,
         max_rows: int | None = None,
         **context_variables,
     ) -> dict[str, Any]:
@@ -139,7 +140,8 @@ class CSVProcessor(AgentBaseFn):
             file_path: Path to CSV file
             data: Data to write (list of dictionaries)
             delimiter: CSV delimiter
-            headers: Column headers for writing
+            headers: Column headers for writing (also used as fieldnames when has_header=False)
+            has_header: Whether the CSV file has a header row (default True)
             max_rows: Maximum rows to read
 
         Returns:
@@ -153,7 +155,18 @@ class CSVProcessor(AgentBaseFn):
             try:
                 rows = []
                 with open(file_path, "r", newline="", encoding="utf-8") as f:
-                    reader = csv.DictReader(f, delimiter=delimiter)
+                    # If no header row, use provided headers or generate column names
+                    fieldnames = None
+                    if not has_header:
+                        if headers:
+                            fieldnames = headers
+                        else:
+                            # Peek at first row to determine column count
+                            first_line = f.readline()
+                            col_count = len(first_line.split(delimiter))
+                            fieldnames = [f"col_{i}" for i in range(col_count)]
+                            f.seek(0)  # Reset to beginning
+                    reader = csv.DictReader(f, fieldnames=fieldnames, delimiter=delimiter)
                     for i, row in enumerate(reader):
                         if max_rows and i >= max_rows:
                             break

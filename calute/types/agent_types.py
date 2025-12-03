@@ -162,7 +162,11 @@ class Agent(BaseModel):
         """Get list of available function names"""
         return {func.__name__: func for func in self.functions}
 
-    def attach_mcp(self, mcp_servers: MCPManager | MCPServerConfig | list) -> None:
+    def attach_mcp(
+        self,
+        mcp_servers: MCPManager | MCPServerConfig | list,
+        server_names: list[str] | None = None,
+    ) -> None:
         """Attach MCP servers to this agent, connecting and adding their tools.
 
         This method provides a convenient way to connect MCP servers and automatically
@@ -173,6 +177,8 @@ class Agent(BaseModel):
                 - MCPManager: An existing MCP manager instance
                 - MCPServerConfig: A single server config (will create manager and connect)
                 - list[MCPServerConfig]: Multiple server configs (will create manager and connect all)
+            server_names: Optional list of server names to filter tools from.
+                         If None, adds tools from all servers in the manager.
 
         Example:
             >>>
@@ -190,30 +196,30 @@ class Agent(BaseModel):
             >>>
             >>>
             >>> manager = MCPManager()
-            >>> await manager.add_server(config)
-            >>> agent.attach_mcp(manager)
+            >>> await manager.add_server(config1)
+            >>> await manager.add_server(config2)
+            >>> agent.attach_mcp(manager, server_names=["filesystem"])
         """
-        import asyncio
-
         from calute.mcp import MCPManager, MCPServerConfig
         from calute.mcp.integration import add_mcp_tools_to_agent
+        from calute.utils import run_sync
 
         if isinstance(mcp_servers, MCPManager):
             manager = mcp_servers
         elif isinstance(mcp_servers, MCPServerConfig):
             manager = MCPManager()
-            asyncio.run(manager.add_server(mcp_servers))
+            run_sync(manager.add_server(mcp_servers))
         elif isinstance(mcp_servers, list):
             manager = MCPManager()
             for config in mcp_servers:
                 if isinstance(config, MCPServerConfig):
-                    asyncio.run(manager.add_server(config))
+                    run_sync(manager.add_server(config))
                 else:
                     raise TypeError(f"Expected MCPServerConfig in list, got {type(config)}")
         else:
             raise TypeError(f"Expected MCPManager, MCPServerConfig, or list, got {type(mcp_servers)}")
 
-        asyncio.run(add_mcp_tools_to_agent(self, manager))
+        run_sync(add_mcp_tools_to_agent(self, manager, server_names))
 
         if not hasattr(self, "_mcp_managers"):
             self._mcp_managers = []

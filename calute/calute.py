@@ -75,7 +75,7 @@ from .types.tool_calls import FunctionCall
 from .utils import debug_print, function_to_json
 
 SEP = "  "
-add_depth = lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")  # noqa
+add_depth = lambda x, add_prefix=False: SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")  # noqa
 
 
 class PromptSection(Enum):
@@ -692,7 +692,8 @@ class Calute:
                         max_retries=agent.max_function_retries,
                     )
                 )
-            except Exception:
+            except (KeyError, TypeError, ValueError) as e:
+                self._logger.debug(f"Skipping malformed function call data: {e}")
                 continue
         return function_calls
 
@@ -790,7 +791,7 @@ class Calute:
         block = m.group(1).strip()
         try:
             return json.loads(block)
-        except Exception:
+        except json.JSONDecodeError:
             return block
 
     def _detect_function_calls(self, content: str, agent: Agent) -> bool:
@@ -1273,6 +1274,8 @@ class Calute:
         buffered_content = ""
         function_calls_detected = False
         function_calls = []
+        # Track tool IDs across streaming chunks to ensure consistency
+        tool_id_by_index: dict[int, str] = {}
 
         if hasattr(response, "__aiter__"):
             stream_generator = self.llm_client.astream_completion(response, agent)
@@ -1286,7 +1289,10 @@ class Calute:
                 if streaming_tool_calls_data:
                     for tool_idx, tool_delta in streaming_tool_calls_data.items():
                         if tool_delta:
-                            tool_id = tool_delta.get("id", f"tool_{tool_idx}")
+                            # Use tracked ID if available, update if new ID arrives
+                            if tool_delta.get("id"):
+                                tool_id_by_index[tool_idx] = tool_delta["id"]
+                            tool_id = tool_id_by_index.get(tool_idx, f"tool_{tool_idx}")
 
                             tool_call_chunks.append(
                                 ToolCallStreamChunk(
@@ -1337,7 +1343,11 @@ class Calute:
                         else enumerate(streaming_tool_calls_data or [])
                     ):
                         if tool_delta:
-                            tool_id = tool_delta.get("id", f"tool_{tool_idx}")
+                            idx = tool_idx if isinstance(tool_idx, int) else 0
+                            # Use tracked ID if available, update if new ID arrives
+                            if tool_delta.get("id"):
+                                tool_id_by_index[idx] = tool_delta["id"]
+                            tool_id = tool_id_by_index.get(idx, f"tool_{idx}")
 
                             tool_call_chunks.append(
                                 ToolCallStreamChunk(
@@ -1345,7 +1355,7 @@ class Calute:
                                     type="function",
                                     function_name=tool_delta.get("name"),
                                     arguments=tool_delta.get("arguments"),
-                                    index=tool_idx if isinstance(tool_idx, int) else 0,
+                                    index=idx,
                                     is_complete=False,
                                 )
                             )
@@ -1975,9 +1985,9 @@ class Calute:
         return streamer_buffer, task
 
     def create_ui(self, target_agent: Agent = None):
-        from .ui import create_application
+        from .ui import launch_application
 
-        return create_application(executor=self, agent=target_agent)
+        return launch_application(executor=self, agent=target_agent)
 
 
 __all__ = ("Calute", "PromptSection", "PromptTemplate")

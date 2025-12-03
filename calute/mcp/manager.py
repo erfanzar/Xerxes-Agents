@@ -15,7 +15,6 @@
 
 """MCP Manager for managing multiple MCP server connections."""
 
-from collections.abc import Callable
 from typing import Any
 
 from ..loggings import get_logger
@@ -121,49 +120,6 @@ class MCPManager:
             MCPClient instance or None if not found
         """
         return self.servers.get(name)
-
-    def convert_tools_to_functions(self) -> list[Callable]:
-        """Convert MCP tools to Calute-compatible functions.
-
-        Returns:
-            List of callable functions that wrap MCP tools
-        """
-        functions = []
-
-        for tool in self.get_all_tools():
-            func = self._create_tool_wrapper(tool)
-            functions.append(func)
-
-        return functions
-
-    def _create_tool_wrapper(self, tool: MCPTool) -> Callable:
-        """Create a wrapper function for an MCP tool.
-
-        Args:
-            tool: MCP tool to wrap
-
-        Returns:
-            Callable function that executes the tool
-        """
-
-        async def tool_function(**kwargs) -> Any:
-            """Execute MCP tool.
-
-            This function is dynamically created to wrap MCP tool calls.
-            """
-            server = self.servers.get(tool.server_name)
-            if not server:
-                raise RuntimeError(f"MCP server {tool.server_name} not connected")
-
-            return await server.call_tool(tool.name, kwargs)
-
-        tool_function.__name__ = tool.name
-        tool_function.__doc__ = tool.description
-
-        tool_function.__dict__["input_schema"] = tool.input_schema  # type: ignore
-        tool_function.__dict__["mcp_server"] = tool.server_name  # type: ignore
-
-        return tool_function
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool by name.

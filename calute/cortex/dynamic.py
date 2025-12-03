@@ -359,9 +359,9 @@ class DynamicCortex(Cortex):
                 return result.raw_output
 
     def create_ui(self):
-        from calute.ui import create_application
+        from calute.ui import launch_application
 
-        return create_application(executor=self)
+        return launch_application(executor=self)
 
 
 def create_dynamic_cortex(

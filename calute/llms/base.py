@@ -41,6 +41,9 @@ class LLMConfig:
     timeout: float = 60.0
     retry_attempts: int = 3
     extra_params: dict[str, Any] = field(default_factory=dict)
+    # Model metadata (auto-fetched from provider)
+    max_model_len: int | None = None
+    model_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class BaseLLM(ABC):
@@ -213,6 +216,30 @@ class BaseLLM(ABC):
         formatted.extend(messages)
         return formatted
 
+    def fetch_model_info(self) -> dict[str, Any]:
+        """Fetch model metadata from provider API.
+
+        Override in subclasses to implement provider-specific fetching.
+
+        Returns:
+            Dictionary with model metadata (e.g., max_model_len, context_window)
+        """
+        return {}
+
+    def _auto_fetch_model_info(self) -> None:
+        """Auto-fetch model metadata and store in config.
+
+        Called at end of _initialize_client() in subclasses.
+        Silently fails if metadata cannot be fetched.
+        """
+        try:
+            info = self.fetch_model_info()
+            if info.get("max_model_len"):
+                self.config.max_model_len = info["max_model_len"]
+            self.config.model_metadata.update(info)
+        except Exception:
+            pass
+
     def get_model_info(self) -> dict[str, Any]:
         """Get information about the current model configuration.
 
@@ -224,6 +251,7 @@ class BaseLLM(ABC):
             "model": self.config.model,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
+            "max_model_len": self.config.max_model_len,
             "stream": self.config.stream,
         }
 

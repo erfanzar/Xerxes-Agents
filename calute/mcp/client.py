@@ -18,17 +18,39 @@
 import asyncio
 import json
 import subprocess
+from contextlib import AsyncExitStack
 from typing import Any
 
 from ..loggings import get_logger
 from .types import MCPPrompt, MCPResource, MCPServerConfig, MCPTool, MCPTransportType
 
+# Lazy imports for optional MCP SDK
+_MCP_SDK_AVAILABLE: bool | None = None
+
+
+def _check_mcp_sdk() -> bool:
+    """Check if the MCP SDK is installed."""
+    global _MCP_SDK_AVAILABLE
+    if _MCP_SDK_AVAILABLE is None:
+        try:
+            import mcp  # noqa: F401
+
+            _MCP_SDK_AVAILABLE = True
+        except ImportError:
+            _MCP_SDK_AVAILABLE = False
+    return _MCP_SDK_AVAILABLE
+
 
 class MCPClient:
     """Client for connecting to and interacting with MCP servers.
 
-    This client supports stdio, HTTP, and WebSocket transports for
-    communicating with MCP servers according to the Model Context Protocol.
+    This client supports multiple transports for communicating with MCP servers:
+    - STDIO: Local subprocess communication (for npx, uvx style servers)
+    - SSE: Server-Sent Events over HTTP (legacy 2024-11-05 protocol)
+    - STREAMABLE_HTTP: Streamable HTTP transport (recommended for 2025+)
+
+    Note: SSE and STREAMABLE_HTTP transports require the optional `mcp` package.
+    Install with: pip install calute[mcp]
 
     Attributes:
         config: MCP server configuration
@@ -38,6 +60,8 @@ class MCPClient:
         resources: Available resources from the server
         prompts: Available prompts from the server
     """
+
+    _request_id_counter: int = 0  # Class-level counter for unique JSON-RPC IDs
 
     def __init__(self, config: MCPServerConfig):
         """Initialize MCP client with server configuration.
@@ -55,6 +79,15 @@ class MCPClient:
         self.resources: list[MCPResource] = []
         self.prompts: list[MCPPrompt] = []
 
+        # For SDK-based transports (SSE, Streamable HTTP)
+        self._session: Any = None
+        self._exit_stack: AsyncExitStack | None = None
+
+    def _next_request_id(self) -> int:
+        """Generate unique JSON-RPC request ID (thread-safe via GIL)."""
+        MCPClient._request_id_counter += 1
+        return MCPClient._request_id_counter
+
     async def connect(self) -> bool:
         """Connect to the MCP server.
 
@@ -62,12 +95,19 @@ class MCPClient:
             True if connection successful, False otherwise
         """
         try:
-            if self.config.transport == MCPTransportType.STDIO:
+            transport = self.config.transport
+            # Handle deprecated aliases
+            if transport == MCPTransportType.HTTP:
+                transport = MCPTransportType.SSE
+            elif transport == MCPTransportType.WEBSOCKET:
+                transport = MCPTransportType.STREAMABLE_HTTP
+
+            if transport == MCPTransportType.STDIO:
                 return await self._connect_stdio()
-            elif self.config.transport == MCPTransportType.HTTP:
-                return await self._connect_http()
-            elif self.config.transport == MCPTransportType.WEBSOCKET:
-                return await self._connect_websocket()
+            elif transport == MCPTransportType.SSE:
+                return await self._connect_sse()
+            elif transport == MCPTransportType.STREAMABLE_HTTP:
+                return await self._connect_streamable_http()
             else:
                 self.logger.error(f"Unsupported transport type: {self.config.transport}")
                 return False
@@ -103,7 +143,10 @@ class MCPClient:
             await asyncio.sleep(0.5)
 
             if self.process.poll() is not None:
-                stderr_output = self.process.stderr.read() if self.process.stderr else ""
+                # Use asyncio.to_thread to avoid blocking the event loop
+                stderr_output = ""
+                if self.process.stderr:
+                    stderr_output = await asyncio.to_thread(self.process.stderr.read)
                 self.logger.error(f"MCP server process failed to start. Exit code: {self.process.returncode}")
                 self.logger.error(f"stderr: {stderr_output}")
                 return False
@@ -116,7 +159,7 @@ class MCPClient:
                     "capabilities": {},
                     "clientInfo": {"name": "Calute", "version": "0.1.2"},
                 },
-                "id": 1,
+                "id": self._next_request_id(),
             }
 
             self._write_message(init_request)
@@ -147,17 +190,177 @@ class MCPClient:
                 self.logger.error(f"Process poll: {self.process.poll()}")
             return False
 
-    async def _connect_http(self) -> bool:
-        """Connect using HTTP transport."""
+    async def _connect_sse(self) -> bool:
+        """Connect using SSE transport (legacy HTTP+SSE protocol).
 
-        self.logger.warning("HTTP transport not yet implemented")
-        return False
+        This transport uses Server-Sent Events over HTTP, which was the standard
+        for MCP protocol version 2024-11-05. For newer deployments, prefer
+        STREAMABLE_HTTP transport.
 
-    async def _connect_websocket(self) -> bool:
-        """Connect using WebSocket transport."""
+        Requires the optional `mcp` package: pip install calute[mcp]
+        """
+        if not _check_mcp_sdk():
+            raise ImportError(
+                "SSE transport requires the MCP SDK. Install with: pip install calute[mcp]"
+            )
 
-        self.logger.warning("WebSocket transport not yet implemented")
-        return False
+        if not self.config.url:
+            self.logger.error(f"No URL specified for SSE MCP server {self.config.name}")
+            return False
+
+        try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+
+            self._exit_stack = AsyncExitStack()
+            await self._exit_stack.__aenter__()
+
+            # Create SSE client connection
+            sse_transport = await self._exit_stack.enter_async_context(
+                sse_client(
+                    url=self.config.url,
+                    headers=self.config.headers,
+                    timeout=self.config.timeout,
+                    sse_read_timeout=self.config.sse_read_timeout,
+                )
+            )
+
+            # Unpack the transport tuple (read_stream, write_stream)
+            read_stream, write_stream = sse_transport
+
+            # Create and initialize the MCP session
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await self._session.initialize()
+
+            self.session_id = str(id(self))
+            self.connected = True
+            self.logger.debug(f"Connected to MCP server {self.config.name} via SSE")
+
+            # Discover capabilities using SDK session
+            await self._discover_capabilities_sdk()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to connect via SSE: {e}")
+            if self._exit_stack:
+                await self._exit_stack.__aexit__(None, None, None)
+                self._exit_stack = None
+            return False
+
+    async def _connect_streamable_http(self) -> bool:
+        """Connect using Streamable HTTP transport (recommended for 2025+).
+
+        This is the recommended transport for new MCP deployments. It uses
+        standard HTTP with streaming support for bidirectional communication.
+
+        Requires the optional `mcp` package: pip install calute[mcp]
+        """
+        if not _check_mcp_sdk():
+            raise ImportError(
+                "Streamable HTTP transport requires the MCP SDK. Install with: pip install calute[mcp]"
+            )
+
+        if not self.config.url:
+            self.logger.error(f"No URL specified for Streamable HTTP MCP server {self.config.name}")
+            return False
+
+        try:
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+
+            self._exit_stack = AsyncExitStack()
+            await self._exit_stack.__aenter__()
+
+            # Create Streamable HTTP client connection
+            http_transport = await self._exit_stack.enter_async_context(
+                streamablehttp_client(
+                    url=self.config.url,
+                    headers=self.config.headers,
+                    timeout=self.config.timeout,
+                )
+            )
+
+            # Unpack the transport tuple (read_stream, write_stream, get_session_id)
+            read_stream, write_stream, get_session_id = http_transport
+
+            # Create and initialize the MCP session
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await self._session.initialize()
+
+            # Get session ID from transport if available
+            session_id = get_session_id()
+            self.session_id = session_id if session_id else str(id(self))
+            self.connected = True
+            self.logger.debug(f"Connected to MCP server {self.config.name} via Streamable HTTP")
+
+            # Discover capabilities using SDK session
+            await self._discover_capabilities_sdk()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to connect via Streamable HTTP: {e}")
+            if self._exit_stack:
+                await self._exit_stack.__aexit__(None, None, None)
+                self._exit_stack = None
+            return False
+
+    async def _discover_capabilities_sdk(self) -> None:
+        """Discover tools, resources, and prompts using the SDK session."""
+        if not self._session:
+            return
+
+        try:
+            # List tools
+            tools_result = await self._session.list_tools()
+            self.tools = [
+                MCPTool(
+                    name=tool.name,
+                    description=tool.description or "",
+                    input_schema=tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    server_name=self.config.name,
+                )
+                for tool in tools_result.tools
+            ]
+            self.logger.info(f"Discovered {len(self.tools)} tools from {self.config.name}")
+        except Exception as e:
+            self.logger.debug(f"Failed to list tools: {e}")
+
+        try:
+            # List resources
+            resources_result = await self._session.list_resources()
+            self.resources = [
+                MCPResource(
+                    uri=resource.uri,
+                    name=resource.name or "",
+                    description=resource.description or "",
+                    mime_type=resource.mimeType if hasattr(resource, "mimeType") else None,
+                    server_name=self.config.name,
+                )
+                for resource in resources_result.resources
+            ]
+            self.logger.info(f"Discovered {len(self.resources)} resources from {self.config.name}")
+        except Exception as e:
+            self.logger.debug(f"Failed to list resources: {e}")
+
+        try:
+            # List prompts
+            prompts_result = await self._session.list_prompts()
+            self.prompts = [
+                MCPPrompt(
+                    name=prompt.name,
+                    description=prompt.description or "",
+                    arguments=prompt.arguments if hasattr(prompt, "arguments") else [],
+                    server_name=self.config.name,
+                )
+                for prompt in prompts_result.prompts
+            ]
+            self.logger.info(f"Discovered {len(self.prompts)} prompts from {self.config.name}")
+        except Exception as e:
+            self.logger.debug(f"Failed to list prompts: {e}")
 
     def _write_message(self, message: dict[str, Any]) -> None:
         """Write a message to the MCP server (stdio)."""
@@ -189,7 +392,10 @@ class MCPClient:
             )
 
             if self.process.poll() is not None:
-                stderr_output = self.process.stderr.read() if self.process.stderr else ""
+                # Use asyncio.to_thread to avoid blocking the event loop
+                stderr_output = ""
+                if self.process.stderr:
+                    stderr_output = await asyncio.to_thread(self.process.stderr.read)
                 self.logger.error(f"MCP server process exited. stderr: {stderr_output}")
             return None
         except json.JSONDecodeError as e:
@@ -199,7 +405,7 @@ class MCPClient:
     async def _discover_capabilities(self) -> None:
         """Discover tools, resources, and prompts from the server."""
 
-        tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2}
+        tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": self._next_request_id()}
         self._write_message(tools_request)
         tools_response = await self._read_message()
 
@@ -216,7 +422,7 @@ class MCPClient:
             ]
             self.logger.info(f"Discovered {len(self.tools)} tools from {self.config.name}")
 
-        resources_request = {"jsonrpc": "2.0", "method": "resources/list", "params": {}, "id": 3}
+        resources_request = {"jsonrpc": "2.0", "method": "resources/list", "params": {}, "id": self._next_request_id()}
         self._write_message(resources_request)
         resources_response = await self._read_message()
 
@@ -234,7 +440,7 @@ class MCPClient:
             ]
             self.logger.info(f"Discovered {len(self.resources)} resources from {self.config.name}")
 
-        prompts_request = {"jsonrpc": "2.0", "method": "prompts/list", "params": {}, "id": 4}
+        prompts_request = {"jsonrpc": "2.0", "method": "prompts/list", "params": {}, "id": self._next_request_id()}
         self._write_message(prompts_request)
         prompts_response = await self._read_message()
 
@@ -264,11 +470,17 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
+        # Use SDK session for SSE/Streamable HTTP transports
+        if self._session:
+            result = await self._session.call_tool(tool_name, arguments)
+            return result.content
+
+        # Use stdio for STDIO transport
         request = {
             "jsonrpc": "2.0",
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
-            "id": 100,
+            "id": self._next_request_id(),
         }
 
         self._write_message(request)
@@ -293,7 +505,13 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
-        request = {"jsonrpc": "2.0", "method": "resources/read", "params": {"uri": uri}, "id": 101}
+        # Use SDK session for SSE/Streamable HTTP transports
+        if self._session:
+            result = await self._session.read_resource(uri)
+            return result.contents
+
+        # Use stdio for STDIO transport
+        request = {"jsonrpc": "2.0", "method": "resources/read", "params": {"uri": uri}, "id": self._next_request_id()}
 
         self._write_message(request)
         response = await self._read_message()
@@ -318,11 +536,23 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
+        # Use SDK session for SSE/Streamable HTTP transports
+        if self._session:
+            result = await self._session.get_prompt(name, arguments or {})
+            messages = result.messages
+            if messages:
+                content = messages[0].content
+                if hasattr(content, "text"):
+                    return content.text
+                return str(content)
+            return ""
+
+        # Use stdio for STDIO transport
         request = {
             "jsonrpc": "2.0",
             "method": "prompts/get",
             "params": {"name": name, "arguments": arguments or {}},
-            "id": 102,
+            "id": self._next_request_id(),
         }
 
         self._write_message(request)
@@ -340,6 +570,16 @@ class MCPClient:
 
     async def disconnect(self) -> None:
         """Disconnect from the MCP server."""
+        # Clean up SDK session and exit stack (for SSE/Streamable HTTP)
+        if self._exit_stack:
+            try:
+                await self._exit_stack.__aexit__(None, None, None)
+            except Exception as e:
+                self.logger.error(f"Error closing MCP session: {e}")
+            self._exit_stack = None
+            self._session = None
+
+        # Clean up subprocess (for STDIO)
         if self.process:
             try:
                 self.process.terminate()

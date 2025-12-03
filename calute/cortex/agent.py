@@ -304,8 +304,6 @@ class CortexAgent:
             Appends current timestamp to _rpm_requests list.
         """
         if self.max_rpm:
-            import time
-
             self._rpm_requests.append(time.time())
 
     def interpolate_inputs(self, inputs: dict[str, Any]) -> None:
@@ -386,28 +384,27 @@ class CortexAgent:
             >>> await manager.add_server(config2)
             >>> agent.attach_mcp(manager, server_names=["filesystem"])
         """
-        import asyncio
-
         from ..mcp import MCPManager, MCPServerConfig
         from ..mcp.integration import add_mcp_tools_to_agent
+        from ..utils import run_sync
 
         if isinstance(mcp_servers, MCPManager):
             manager = mcp_servers
         elif isinstance(mcp_servers, MCPServerConfig):
             manager = MCPManager()
-            asyncio.run(manager.add_server(mcp_servers))
+            run_sync(manager.add_server(mcp_servers))
         elif isinstance(mcp_servers, list):
             manager = MCPManager()
             for config in mcp_servers:
                 if isinstance(config, MCPServerConfig):
-                    asyncio.run(manager.add_server(config))
+                    run_sync(manager.add_server(config))
                 else:
                     raise TypeError(f"Expected MCPServerConfig in list, got {type(config)}")
         else:
             raise TypeError(f"Expected MCPManager, MCPServerConfig, or list, got {type(mcp_servers)}")
 
         if self._internal_agent:
-            asyncio.run(add_mcp_tools_to_agent(self._internal_agent, manager, server_names))
+            run_sync(add_mcp_tools_to_agent(self._internal_agent, manager, server_names))
         else:
             if self.verbose:
                 self._logger.warning(
@@ -949,7 +946,7 @@ Ensure your response is valid JSON that can be parsed directly.
                         preserve_recent=self._auto_compact_agent.preserve_recent_messages,
                     )
 
-                    compacted_messages, stats = strategy.compact(messages)
+                    compacted_messages, _stats = strategy.compact(messages)
 
                     if compacted_messages:
                         from calute.types.messages import AssistantMessage, MessagesHistory, SystemMessage, UserMessage
@@ -1290,13 +1287,7 @@ Ensure your response is valid JSON that can be parsed directly.
                 if hasattr(chunk, "content") and chunk.content is not None:
                     response_content.append(chunk.content)
 
-            class StreamedResponse:
-                def __init__(self, content):
-                    self.content = content
-
-            response = StreamedResponse("".join(response_content))
-
-            selected_role = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            selected_role = "".join(response_content).strip()
 
             for agent in available_agents:
                 if agent.role.lower() == selected_role.lower() or selected_role.lower() in agent.role.lower():
@@ -1480,14 +1471,7 @@ Ensure your response is valid JSON that can be parsed directly.
                     if hasattr(chunk, "content") and chunk.content is not None:
                         response_content.append(chunk.content)
 
-                class StreamedResponse:
-                    def __init__(self, content):
-                        self.content = content
-
-                final_response = StreamedResponse("".join(response_content))
-
-                result = final_response.content if hasattr(final_response, "content") else str(final_response)
-                return result
+                return "".join(response_content)
             except Exception:
                 return delegated_result
 
@@ -1677,9 +1661,9 @@ Ensure your response is valid JSON that can be parsed directly.
         }
 
     def create_ui(self):
-        from calute.ui import create_application
+        from calute.ui import launch_application
 
-        return create_application(executor=self)
+        return launch_application(executor=self)
 
     def __eq__(self, other: object) -> bool:
         """Check equality between two CortexAgent instances.

@@ -18,14 +18,30 @@ from typing import Literal
 
 from ..types import AgentBaseFn
 
+# Lazy import flag
+_DDGS = None
+_DDGS_AVAILABLE = None
+
+
+def _get_ddgs():
+    """Lazy import of DDGS to avoid crashing if not installed."""
+    global _DDGS, _DDGS_AVAILABLE
+    if _DDGS_AVAILABLE is None:
+        try:
+            from ddgs import DDGS
+
+            _DDGS = DDGS
+            _DDGS_AVAILABLE = True
+        except ModuleNotFoundError:
+            _DDGS_AVAILABLE = False
+    if not _DDGS_AVAILABLE:
+        raise ImportError(
+            "`ddgs` package not found. Please install with: pip install calute[search]"
+        )
+    return _DDGS
+
 
 class DuckDuckGoSearch(AgentBaseFn):
-    try:
-        from ddgs import DDGS
-    except ModuleNotFoundError as e:
-        print("`ddgs` package not found please install with calute[search]")
-        raise e
-
     SearchType = Literal["text", "images", "videos", "news", "maps"]
 
     TimeFilter = Literal["day", "week", "month", "year", None]
@@ -136,7 +152,7 @@ class DuckDuckGoSearch(AgentBaseFn):
             },
         }
 
-        with DuckDuckGoSearch.DDGS() as ddgs:
+        with _get_ddgs()() as ddgs:
             if search_type == "text":
                 search_results = ddgs.text(
                     query,
@@ -312,12 +328,15 @@ class DuckDuckGoSearch(AgentBaseFn):
         """
         suggestions = []
 
-        with DuckDuckGoSearch.DDGS() as ddgs:
+        with _get_ddgs()() as ddgs:
             try:
                 results = ddgs.suggestions(query, region=region)
                 suggestions = [r.get("phrase", "") for r in results if r.get("phrase")]
-            except Exception:
-                pass
+            except Exception as e:
+                # Return empty list but could log if logging is available
+                import logging
+
+                logging.getLogger(__name__).debug(f"Failed to get suggestions for '{query}': {e}")
 
         return suggestions
 
@@ -333,11 +352,14 @@ class DuckDuckGoSearch(AgentBaseFn):
         Returns:
             str: Translated query.
         """
-        with DuckDuckGoSearch.DDGS() as ddgs:
+        with _get_ddgs()() as ddgs:
             try:
                 result = ddgs.translate(query, to=to_language)
                 return result.get("translated", query)
-            except Exception:
+            except Exception as e:
+                import logging
+
+                logging.getLogger(__name__).debug(f"Failed to translate '{query}' to {to_language}: {e}")
                 return query
 
 

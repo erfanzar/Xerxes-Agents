@@ -20,12 +20,50 @@ introspection. It includes utilities for converting Python functions to JSON sch
 format, merging response chunks, and debug printing with timestamps.
 """
 
+import asyncio
 import inspect
 import re
+from collections.abc import Coroutine
 from datetime import datetime
-from typing import Union, get_args, get_origin
+from typing import Any, TypeVar, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict
+
+T = TypeVar("T")
+
+
+def run_sync(coro: Coroutine[Any, Any, T]) -> T:
+    """Run an async coroutine synchronously, handling nested event loops.
+
+    This function safely executes a coroutine from synchronous code,
+    handling the case where an event loop is already running (e.g., in
+    Jupyter notebooks or async frameworks).
+
+    Args:
+        coro: The coroutine to execute.
+
+    Returns:
+        The result of the coroutine.
+
+    Example:
+        >>> async def fetch_data():
+        ...     return "data"
+        >>> result = run_sync(fetch_data())
+        >>> print(result)
+        data
+    """
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop, safe to use asyncio.run()
+        return asyncio.run(coro)
+
+    # Event loop is running, need alternative approach
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(asyncio.run, coro)
+        return future.result()
 
 
 class CaluteBase(BaseModel):
@@ -108,12 +146,62 @@ def merge_chunk(final_response: dict, delta: dict) -> None:
         merge_fields(final_response["tool_calls"][index], tool_calls[0])
 
 
+def estimate_tokens(text: str, chars_per_token: float = 4.0) -> int:
+    """Estimate the number of tokens in a text string.
+
+    Uses a simple character-based heuristic. For more accurate counting,
+    consider using tiktoken or a provider-specific tokenizer.
+
+    Args:
+        text: The text to estimate tokens for.
+        chars_per_token: Average characters per token (default: 4.0 for English).
+
+    Returns:
+        Estimated number of tokens.
+
+    Example:
+        >>> estimate_tokens("Hello, world!")
+        4
+    """
+    if not text:
+        return 0
+    return max(1, int(len(text) / chars_per_token))
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate the total number of tokens in a list of messages.
+
+    Args:
+        messages: List of message dictionaries with 'role' and 'content' keys.
+
+    Returns:
+        Estimated total number of tokens.
+
+    Example:
+        >>> msgs = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]
+        >>> estimate_messages_tokens(msgs)
+        5
+    """
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if content:
+            total += estimate_tokens(str(content))
+        # Add overhead for message structure (role, etc.)
+        total += 4  # Approximate overhead per message
+    return total
+
+
 def function_to_json(func: callable) -> dict:
     """Convert a Python function into a JSON-serializable dictionary.
 
     Extracts the function's signature, including its name, description
     (from docstring), and parameters with their types and descriptions.
     This is used to generate function schemas for LLM tool calling.
+
+    If the function has a `__calute_schema__` attribute, it will be used
+    directly instead of extracting from the signature. This is useful for
+    dynamically created functions like MCP tool wrappers.
 
     Args:
         func: The function to be converted.
@@ -136,6 +224,18 @@ def function_to_json(func: callable) -> dict:
         >>> print(schema["function"]["name"])
         greet
     """
+    # Check for pre-defined schema (used by MCP tool wrappers)
+    if hasattr(func, "__calute_schema__"):
+        schema = func.__calute_schema__
+        return {
+            "type": "function",
+            "function": {
+                "name": schema.get("name", func.__name__),
+                "description": schema.get("description", func.__doc__ or ""),
+                "parameters": schema.get("parameters", {"type": "object", "properties": {}, "required": []}),
+            },
+        }
+
     type_map = {
         str: "string",
         int: "integer",

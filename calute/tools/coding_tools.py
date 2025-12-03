@@ -528,30 +528,49 @@ def apply_diff(original: str, diff: str, context_variables: dict | None = None) 
         Modified content or error message
     """
     try:
-        lines = original.splitlines()
+        lines = original.splitlines(keepends=True)
         diff_lines = diff.splitlines()
 
         result = []
-        i = 0
+        current_line = 0  # 0-indexed position in original
 
         for diff_line in diff_lines:
             if diff_line.startswith("+++") or diff_line.startswith("---"):
                 continue
             elif diff_line.startswith("@@"):
-                match = re.match(r"@@ -(\d+),(\d+) \+(\d+),(\d+) @@", diff_line)
+                # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
+                match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_line)
                 if match:
-                    old_start = int(match.group(1)) - 1
-                    i = old_start
-            elif diff_line.startswith("+"):
-                result.append(diff_line[1:])
-            elif diff_line.startswith("-"):
-                i += 1
+                    old_start = int(match.group(1)) - 1  # Convert to 0-indexed
+                    # Copy unchanged lines before this hunk
+                    while current_line < old_start and current_line < len(lines):
+                        result.append(lines[current_line])
+                        current_line += 1
+            elif diff_line.startswith("+") and not diff_line.startswith("+++"):
+                # Addition - add the new line
+                result.append(diff_line[1:] + "\n")
+            elif diff_line.startswith("-") and not diff_line.startswith("---"):
+                # Deletion - skip the original line
+                current_line += 1
             elif diff_line.startswith(" "):
-                if i < len(lines):
-                    result.append(lines[i])
-                    i += 1
+                # Context line - copy from original
+                if current_line < len(lines):
+                    result.append(lines[current_line])
+                    current_line += 1
 
-        return "\n".join(result)
+        # Copy any remaining lines after the last hunk
+        while current_line < len(lines):
+            result.append(lines[current_line])
+            current_line += 1
+
+        # Join and handle trailing newline
+        output = "".join(result)
+        if output.endswith("\n") and not original.endswith("\n"):
+            output = output[:-1]
+        elif not output.endswith("\n") and original.endswith("\n"):
+            output += "\n"
+
+        return output.rstrip("\n") if not original.endswith("\n") else output
 
     except Exception as e:
         return f"Error applying diff: {e!s}"

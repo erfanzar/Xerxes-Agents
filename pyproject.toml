@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.1.3"
+version = "0.1.5"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }
@@ -55,7 +55,7 @@ dev = [
     "notebook>=7.0.0",
 ]
 
-ui = ["gradio>=5.47.2"]
+ui = ["chainlit~=2.9.2", "markdown>=3.5.0"]
 
 # Search and web tools
 search = [
@@ -97,6 +97,11 @@ vectors = [
     # "faiss-cpu>=1.7.4",  # Currently unused - uncomment if needed
 ]
 
+# MCP (Model Context Protocol) - for SSE and Streamable HTTP transports
+mcp = [
+    "mcp>=1.1.0",
+]
+
 # Alternative LLM providers (Note: these use httpx which is already in core)
 # llm-providers = [
 #     "anthropic>=0.39.0",  # Not actually used - AnthropicLLM uses httpx directly
@@ -104,7 +109,7 @@ vectors = [
 # ]
 
 # Full installation with all features
-full = ["calute[search,monitoring,vectors,ui]"]
+full = ["calute[search,monitoring,vectors,ui,mcp]"]
 
 # Common presets for different use cases
 research = ["calute[search,vectors,ui]"]
