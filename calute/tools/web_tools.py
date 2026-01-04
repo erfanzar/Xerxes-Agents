@@ -13,7 +13,23 @@
 # limitations under the License.
 
 
-"""Web-related tools for fetching, scraping, and processing web content."""
+"""Web-related tools for fetching, scraping, and processing web content.
+
+This module provides a collection of web tools for agents to interact
+with web resources. It includes:
+- Web scraping with content extraction and CSS selectors
+- Generic HTTP API client for RESTful interactions
+- RSS/Atom feed reading and parsing
+- URL analysis and validation
+
+All tools support both synchronous and asynchronous execution modes,
+with comprehensive error handling and configurable timeouts.
+
+Example:
+    >>> scraper = WebScraper()
+    >>> result = scraper.static_call("https://example.com", extract_links=True)
+    >>> print(result["title"])
+"""
 
 from __future__ import annotations
 
@@ -28,7 +44,26 @@ from ..types import AgentBaseFn
 
 
 class WebScraper(AgentBaseFn):
-    """Advanced web scraper with content extraction."""
+    """Advanced web scraper with content extraction.
+
+    Provides comprehensive web scraping capabilities including HTML parsing,
+    CSS selector-based content extraction, link and image extraction,
+    and metadata parsing. Supports both async and sync execution modes.
+
+    The scraper uses BeautifulSoup for HTML parsing and httpx for
+    HTTP requests with automatic redirect following.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Example:
+        >>> result = WebScraper.static_call(
+        ...     "https://example.com",
+        ...     selector="article",
+        ...     extract_links=True
+        ... )
+        >>> print(result["title"])
+    """
 
     @staticmethod
     async def async_call(
@@ -40,19 +75,35 @@ class WebScraper(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Scrape web content with advanced extraction options.
+        """Scrape web content with advanced extraction options.
+
+        Fetches the specified URL and extracts content based on the
+        provided options. Supports CSS selector-based extraction,
+        link/image extraction, and automatic text cleaning.
 
         Args:
-            url: The URL to scrape
-            selector: CSS selector for specific content (requires beautifulsoup4)
-            extract_links: Whether to extract all links
-            extract_images: Whether to extract all images
-            clean_text: Whether to clean and format text
-            timeout: Request timeout in seconds
+            url: The URL to scrape.
+            selector: CSS selector for specific content (requires beautifulsoup4).
+            extract_links: Whether to extract all links from the page.
+            extract_images: Whether to extract all images from the page.
+            clean_text: Whether to clean and format extracted text.
+            timeout: Request timeout in seconds (default: 30).
+            **context_variables: Additional context passed from the agent.
 
         Returns:
-            Dictionary with scraped content and metadata
+            Dictionary containing:
+                - url: Final URL after redirects
+                - status_code: HTTP response status code
+                - title: Page title if available
+                - content/selected_content: Extracted text content
+                - links: List of extracted links (if requested)
+                - images: List of extracted images (if requested)
+                - meta: Dictionary of meta tags
+                - error: Error message if request failed
+
+        Note:
+            Requires beautifulsoup4 for HTML parsing. Install with:
+            pip install calute[search]
         """
         try:
             from bs4 import BeautifulSoup  # type:ignore
@@ -116,14 +167,49 @@ class WebScraper(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Synchronous wrapper for async web scraping."""
+        """Synchronous wrapper for async web scraping.
+
+        Provides a blocking interface to the async scraping functionality.
+        Uses asyncio.run() to execute the async method.
+
+        Args:
+            url: The URL to scrape.
+            selector: CSS selector for specific content.
+            extract_links: Whether to extract all links from the page.
+            extract_images: Whether to extract all images from the page.
+            clean_text: Whether to clean and format extracted text.
+            timeout: Request timeout in seconds.
+            **context_variables: Additional context passed from the agent.
+
+        Returns:
+            Dictionary with scraped content and metadata.
+        """
         return asyncio.run(
             WebScraper.async_call(url, selector, extract_links, extract_images, clean_text, timeout, **context_variables)
         )
 
 
 class APIClient(AgentBaseFn):
-    """Generic API client for making HTTP requests."""
+    """Generic API client for making HTTP requests.
+
+    Provides a flexible HTTP client for interacting with REST APIs.
+    Supports all standard HTTP methods, custom headers, query parameters,
+    JSON payloads, and raw data bodies.
+
+    The client automatically handles JSON response parsing and provides
+    comprehensive error handling for network and HTTP errors.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Example:
+        >>> result = APIClient.static_call(
+        ...     "https://api.example.com/data",
+        ...     method="POST",
+        ...     json_data={"key": "value"}
+        ... )
+        >>> print(result["status_code"])
+    """
 
     @staticmethod
     async def async_call(
@@ -136,20 +222,33 @@ class APIClient(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Make HTTP API requests with various methods and payloads.
+        """Make HTTP API requests with various methods and payloads.
+
+        Sends an HTTP request to the specified URL with the given
+        method and payload options. Automatically follows redirects
+        and parses JSON responses when available.
 
         Args:
-            url: The API endpoint URL
-            method: HTTP method (GET, POST, PUT, DELETE, PATCH)
-            headers: Request headers
-            params: URL parameters
-            json_data: JSON payload for request body
-            data: Raw data for request body
-            timeout: Request timeout in seconds
+            url: The API endpoint URL.
+            method: HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS).
+            headers: Dictionary of request headers.
+            params: Dictionary of URL query parameters.
+            json_data: Dictionary to be sent as JSON in request body.
+            data: Raw string data for request body.
+            timeout: Request timeout in seconds (default: 30).
+            **context_variables: Additional context passed from the agent.
 
         Returns:
-            Dictionary with response data and metadata
+            Dictionary containing:
+                - status_code: HTTP response status code
+                - headers: Response headers as dictionary
+                - url: Final URL after redirects
+                - json: Parsed JSON response (if applicable)
+                - text: Response text (if not JSON, truncated to 10000 chars)
+                - error: Error message if request failed
+
+        Raises:
+            Returns error dict if HTTP method is invalid or request fails.
         """
         method = method.upper()
         if method not in ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]:
@@ -200,14 +299,50 @@ class APIClient(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Synchronous wrapper for API requests."""
+        """Synchronous wrapper for API requests.
+
+        Provides a blocking interface to the async API client.
+        Uses asyncio.run() to execute the async method.
+
+        Args:
+            url: The API endpoint URL.
+            method: HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS).
+            headers: Dictionary of request headers.
+            params: Dictionary of URL query parameters.
+            json_data: Dictionary to be sent as JSON in request body.
+            data: Raw string data for request body.
+            timeout: Request timeout in seconds.
+            **context_variables: Additional context passed from the agent.
+
+        Returns:
+            Dictionary with response data and metadata.
+        """
         return asyncio.run(
             APIClient.async_call(url, method, headers, params, json_data, data, timeout, **context_variables)
         )
 
 
 class RSSReader(AgentBaseFn):
-    """RSS/Atom feed reader and parser."""
+    """RSS/Atom feed reader and parser.
+
+    Provides functionality for reading and parsing RSS and Atom feeds.
+    Extracts feed metadata and individual entries with configurable
+    content inclusion and item limits.
+
+    Uses the feedparser library for robust feed parsing that handles
+    various feed formats and edge cases.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Example:
+        >>> result = RSSReader.static_call(
+        ...     "https://example.com/feed.xml",
+        ...     max_items=5
+        ... )
+        >>> for item in result["items"]:
+        ...     print(item["title"])
+    """
 
     @staticmethod
     async def async_call(
@@ -216,16 +351,29 @@ class RSSReader(AgentBaseFn):
         include_content: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Read and parse RSS/Atom feeds.
+        """Read and parse RSS/Atom feeds.
+
+        Fetches and parses an RSS or Atom feed from the specified URL,
+        extracting feed metadata and individual entries.
 
         Args:
-            feed_url: URL of the RSS/Atom feed
-            max_items: Maximum number of items to return
-            include_content: Whether to include full content
+            feed_url: URL of the RSS/Atom feed.
+            max_items: Maximum number of items to return (default: 10).
+            include_content: Whether to include full article content.
+            **context_variables: Additional context passed from the agent.
 
         Returns:
-            Parsed feed data with articles
+            Dictionary containing:
+                - title: Feed title
+                - description: Feed description
+                - link: Feed website link
+                - updated: Last update timestamp
+                - items: List of feed entries with title, link, published,
+                  author, tags, and optionally content
+                - error: Error message if parsing failed
+
+        Note:
+            Requires feedparser library. Install with: pip install feedparser
         """
         try:
             import feedparser  # type:ignore
@@ -275,12 +423,40 @@ class RSSReader(AgentBaseFn):
         include_content: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Synchronous wrapper for RSS reading."""
+        """Synchronous wrapper for RSS reading.
+
+        Provides a blocking interface to the async RSS reader.
+        Uses asyncio.run() to execute the async method.
+
+        Args:
+            feed_url: URL of the RSS/Atom feed.
+            max_items: Maximum number of items to return.
+            include_content: Whether to include full article content.
+            **context_variables: Additional context passed from the agent.
+
+        Returns:
+            Dictionary with parsed feed data and articles.
+        """
         return asyncio.run(RSSReader.async_call(feed_url, max_items, include_content, **context_variables))
 
 
 class URLAnalyzer(AgentBaseFn):
-    """Analyze and extract information from URLs."""
+    """Analyze and extract information from URLs.
+
+    Provides URL parsing, validation, and optional availability checking.
+    Extracts URL components like scheme, domain, path, and query parameters.
+    Can also fetch and extract page metadata including Open Graph tags.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Example:
+        >>> result = URLAnalyzer.static_call(
+        ...     "https://example.com/path?query=value",
+        ...     check_availability=True
+        ... )
+        >>> print(result["domain"])
+    """
 
     @staticmethod
     def static_call(
@@ -289,16 +465,36 @@ class URLAnalyzer(AgentBaseFn):
         extract_metadata: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Analyze URL structure and optionally check availability.
+        """Analyze URL structure and optionally check availability.
+
+        Parses the URL to extract its components and optionally checks
+        if the URL is accessible and extracts page metadata.
 
         Args:
-            url: URL to analyze
-            check_availability: Whether to check if URL is accessible
-            extract_metadata: Whether to extract page metadata
+            url: URL to analyze.
+            check_availability: Whether to check if URL is accessible.
+            extract_metadata: Whether to extract page metadata (requires availability).
+            **context_variables: Additional context passed from the agent.
 
         Returns:
-            URL analysis results
+            Dictionary containing:
+                - url: Original URL
+                - scheme: URL scheme (http, https, etc.)
+                - domain: Full domain/netloc
+                - path: URL path
+                - params: URL parameters
+                - query: Query string
+                - fragment: URL fragment
+                - is_valid: Whether URL has valid scheme and domain
+                - tld: Top-level domain (if extractable)
+                - domain_name: Primary domain name
+                - subdomain: Subdomain if present
+                - is_available: Whether URL responds (if checked)
+                - status_code: HTTP status code (if checked)
+                - final_url: URL after redirects (if checked)
+                - title: Page title (if metadata extracted)
+                - open_graph: Open Graph tags (if present)
+                - description: Meta description (if present)
         """
         parsed = urlparse(url)
 

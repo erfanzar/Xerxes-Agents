@@ -15,7 +15,30 @@
 
 """Theme configuration for Calute Chainlit UI.
 
-Generates Chainlit configuration files for theming and styling.
+This module provides theming and styling configuration for the
+Chainlit-based chat interface. It includes:
+- Dark and light theme color definitions
+- Chainlit theme.json configuration
+- Custom CSS for thinking panels, tool steps, and code blocks
+- Chainlit config.toml generation
+- Theme file setup utilities
+
+The theme is inspired by OpenWebUI and provides a modern, dark
+interface with proper syntax highlighting and step visualization.
+
+Module Attributes:
+    APP_TITLE: Application title displayed in the UI.
+    APP_SUBTITLE: Application subtitle/description.
+    COLORS: Dictionary of color values for programmatic use.
+    CHAINLIT_THEME: Theme configuration for theme.json.
+    CUSTOM_CSS: Custom CSS styles for enhanced UI elements.
+    CONFIG_TOML: Chainlit config.toml content.
+
+Example:
+    >>> from calute.ui.themes import setup_chainlit_theme, get_theme_colors
+    >>> setup_chainlit_theme()  # Creates theme files in current directory
+    >>> colors = get_theme_colors()
+    >>> print(colors["primary"])
 """
 
 import json
@@ -217,8 +240,18 @@ def setup_chainlit_theme(base_path: Path | str | None = None) -> None:
     for Chainlit theming. Removes any existing .chainlit directory first
     to avoid version conflicts.
 
+    The function creates:
+    - .chainlit/config.toml - Main Chainlit configuration
+    - public/theme.json - Theme color definitions
+    - public/custom.css - Custom CSS styling
+
     Args:
-        base_path: Base directory for config files. Defaults to current working directory.
+        base_path: Base directory for config files. Defaults to current
+            working directory if not specified.
+
+    Note:
+        Any existing .chainlit directory is removed before setup to
+        prevent version mismatch issues with Chainlit upgrades.
     """
     import shutil
 
@@ -255,7 +288,18 @@ def setup_chainlit_theme(base_path: Path | str | None = None) -> None:
 def get_theme_colors() -> dict[str, str]:
     """Get theme colors for programmatic use.
 
+    Provides access to the theme color palette for use in custom
+    components or styling. Returns a copy to prevent modification
+    of the original color definitions.
+
     Returns:
-        Dictionary of color name to hex value.
+        Dictionary mapping color names to hex values. Keys include:
+        background, surface, surface_light, border, text, text_secondary,
+        text_muted, success, error, warning, primary, code_bg.
+
+    Example:
+        >>> colors = get_theme_colors()
+        >>> print(f"Primary color: {colors['primary']}")
+        Primary color: #676767
     """
     return COLORS.copy()

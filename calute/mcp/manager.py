@@ -13,7 +13,18 @@
 # limitations under the License.
 
 
-"""MCP Manager for managing multiple MCP server connections."""
+"""MCP Manager for managing multiple MCP server connections.
+
+This module provides the MCPManager class for orchestrating connections
+to multiple MCP servers, including:
+- Connection lifecycle management (add, remove, disconnect)
+- Unified access to tools, resources, and prompts across all servers
+- Cross-server tool invocation and resource reading
+- Capability discovery and summarization
+
+The manager abstracts away the complexity of dealing with multiple
+MCP servers, providing a single interface for tool and resource access.
+"""
 
 from typing import Any
 
@@ -41,11 +52,15 @@ class MCPManager:
     async def add_server(self, config: MCPServerConfig) -> bool:
         """Add and connect to an MCP server.
 
+        Creates a new MCPClient instance, attempts to connect, and registers
+        it with the manager if successful. Skips servers that are disabled
+        in their configuration.
+
         Args:
-            config: Server configuration
+            config: Server configuration specifying connection details.
 
         Returns:
-            True if server added successfully, False otherwise
+            True if server added successfully, False otherwise.
         """
         if config.name in self.servers:
             self.logger.warning(f"MCP server {config.name} already exists")
@@ -69,8 +84,11 @@ class MCPManager:
     async def remove_server(self, name: str) -> None:
         """Remove and disconnect from an MCP server.
 
+        Disconnects from the specified server and removes it from the manager.
+        If the server is not found, this method does nothing.
+
         Args:
-            name: Server name
+            name: Name of the server to remove.
         """
         if name in self.servers:
             await self.servers[name].disconnect()
@@ -80,8 +98,10 @@ class MCPManager:
     def get_all_tools(self) -> list[MCPTool]:
         """Get all tools from all connected servers.
 
+        Aggregates tools from all connected MCP servers into a single list.
+
         Returns:
-            List of all available MCP tools
+            List of all available MCP tools across all servers.
         """
         tools = []
         for client in self.servers.values():
@@ -91,8 +111,10 @@ class MCPManager:
     def get_all_resources(self) -> list[MCPResource]:
         """Get all resources from all connected servers.
 
+        Aggregates resources from all connected MCP servers into a single list.
+
         Returns:
-            List of all available MCP resources
+            List of all available MCP resources across all servers.
         """
         resources = []
         for client in self.servers.values():
@@ -102,8 +124,10 @@ class MCPManager:
     def get_all_prompts(self) -> list[MCPPrompt]:
         """Get all prompts from all connected servers.
 
+        Aggregates prompts from all connected MCP servers into a single list.
+
         Returns:
-            List of all available MCP prompts
+            List of all available MCP prompts across all servers.
         """
         prompts = []
         for client in self.servers.values():
@@ -111,27 +135,34 @@ class MCPManager:
         return prompts
 
     def get_server(self, name: str) -> MCPClient | None:
-        """Get MCP server by name.
+        """Get MCP server client by name.
+
+        Retrieves the MCPClient instance for a specific server, allowing
+        direct access to the server's capabilities and methods.
 
         Args:
-            name: Server name
+            name: Name of the server to retrieve.
 
         Returns:
-            MCPClient instance or None if not found
+            MCPClient instance or None if not found.
         """
         return self.servers.get(name)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool by name.
 
-        Finds the tool across all servers and executes it.
+        Finds the tool across all connected servers and executes it on the
+        server that provides it. The first matching tool found is used.
 
         Args:
-            tool_name: Name of the tool
-            arguments: Tool arguments
+            tool_name: Name of the tool to call.
+            arguments: Dictionary of arguments to pass to the tool.
 
         Returns:
-            Tool execution result
+            Tool execution result from the MCP server.
+
+        Raises:
+            ValueError: If the tool is not found in any connected server.
         """
         for client in self.servers.values():
             for tool in client.tools:
@@ -143,11 +174,17 @@ class MCPManager:
     async def read_resource(self, uri: str) -> Any:
         """Read a resource by URI.
 
+        Searches all connected servers for a resource matching the given URI
+        and reads its content from the server that provides it.
+
         Args:
-            uri: Resource URI
+            uri: Resource URI to read.
 
         Returns:
-            Resource content
+            Resource content as returned by the MCP server.
+
+        Raises:
+            ValueError: If the resource is not found in any connected server.
         """
         for client in self.servers.values():
             for resource in client.resources:
@@ -159,12 +196,18 @@ class MCPManager:
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Get a prompt by name.
 
+        Searches all connected servers for a prompt matching the given name
+        and retrieves it from the server that provides it.
+
         Args:
-            name: Prompt name
-            arguments: Prompt arguments
+            name: Name of the prompt to retrieve.
+            arguments: Optional dictionary of arguments for prompt rendering.
 
         Returns:
-            Rendered prompt text
+            Rendered prompt text as a string.
+
+        Raises:
+            ValueError: If the prompt is not found in any connected server.
         """
         for client in self.servers.values():
             for prompt in client.prompts:
@@ -174,7 +217,12 @@ class MCPManager:
         raise ValueError(f"Prompt {name} not found in any connected MCP server")
 
     async def disconnect_all(self) -> None:
-        """Disconnect from all MCP servers."""
+        """Disconnect from all MCP servers.
+
+        Gracefully closes all active server connections and clears the
+        internal server registry. This method is safe to call even if
+        no servers are connected.
+        """
         for client in list(self.servers.values()):
             await client.disconnect()
         self.servers.clear()
@@ -184,15 +232,19 @@ class MCPManager:
         """Get list of connected server names.
 
         Returns:
-            List of server names
+            List of server names currently connected to the manager.
         """
         return list(self.servers.keys())
 
     def get_capabilities_summary(self) -> dict[str, Any]:
         """Get summary of all capabilities across servers.
 
+        Provides an overview of the tools, resources, and prompts available
+        from each connected server, useful for debugging and monitoring.
+
         Returns:
-            Dictionary with counts of tools, resources, and prompts per server
+            Dictionary mapping server names to capability counts, with keys
+            'tools', 'resources', and 'prompts' for each server.
         """
         summary = {}
         for name, client in self.servers.items():

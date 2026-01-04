@@ -34,7 +34,14 @@ class EntityMemory(Memory):
         max_items: int = 5000,
         enable_embeddings: bool = False,
     ):
-        """Initialize entity memory"""
+        """
+        Initialize entity memory.
+
+        Args:
+            storage: Storage backend for persistence
+            max_items: Maximum number of memory items to store
+            enable_embeddings: Whether to compute embeddings for semantic search
+        """
         super().__init__(storage=storage, max_items=max_items, enable_embeddings=enable_embeddings)
         self.entities: dict[str, dict[str, Any]] = {}
         self.relationships: dict[str, list[tuple[str, str]]] = defaultdict(list)
@@ -143,7 +150,18 @@ class EntityMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve memories"""
+        """
+        Retrieve memories by ID or filters.
+
+        Args:
+            memory_id: Specific memory ID to retrieve
+            filters: Filter criteria for memory attributes
+            limit: Maximum number of results to return
+
+        Returns:
+            Single MemoryItem if memory_id provided, list of items otherwise,
+            or None if memory_id not found
+        """
         if memory_id:
             return self._index.get(memory_id)
 
@@ -165,7 +183,16 @@ class EntityMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update memory item"""
+        """
+        Update a memory item and re-extract entities if content changes.
+
+        Args:
+            memory_id: ID of the memory to update
+            updates: Dictionary of fields to update
+
+        Returns:
+            True if update was successful, False if memory_id not found
+        """
         if memory_id not in self._index:
             return False
 
@@ -194,7 +221,16 @@ class EntityMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete memories"""
+        """
+        Delete memories and update entity mention tracking.
+
+        Args:
+            memory_id: Specific memory ID to delete
+            filters: Filter criteria for bulk deletion (not implemented)
+
+        Returns:
+            Number of memories deleted
+        """
         count = 0
 
         if memory_id and memory_id in self._index:
@@ -213,7 +249,7 @@ class EntityMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear all memories"""
+        """Clear all memories, entities, relationships, and mention tracking."""
         self._items.clear()
         self._index.clear()
         self.entities.clear()
@@ -225,7 +261,15 @@ class EntityMemory(Memory):
                 self.storage.delete(key)
 
     def get_entity_info(self, entity: str) -> dict[str, Any]:
-        """Get all information about an entity"""
+        """
+        Get all information about an entity including relationships.
+
+        Args:
+            entity: Name of the entity to look up
+
+        Returns:
+            Dictionary containing entity data, mentions, and relationships
+        """
         info = self.entities.get(entity, {})
         info["mentions"] = self.entity_mentions.get(entity, [])
         info["relationships"] = []
@@ -240,7 +284,19 @@ class EntityMemory(Memory):
         return info
 
     def get_related_entities(self, entity: str, max_depth: int = 2) -> set[str]:
-        """Get entities related to the given entity"""
+        """
+        Get entities related to the given entity via relationship traversal.
+
+        Uses breadth-first search to find connected entities up to max_depth
+        hops away in the relationship graph.
+
+        Args:
+            entity: Starting entity name
+            max_depth: Maximum relationship hops to traverse
+
+        Returns:
+            Set of related entity names
+        """
         related = set()
         to_explore = [(entity, 0)]
         explored = set()
@@ -266,7 +322,19 @@ class EntityMemory(Memory):
         return related
 
     def _extract_entities(self, text: str) -> list[str]:
-        """Extract entities from text (simple implementation)"""
+        """
+        Extract entities from text using pattern matching.
+
+        Uses simple heuristics to identify entities:
+        - Capitalized words and phrases (proper nouns)
+        - Quoted strings
+
+        Args:
+            text: Text to extract entities from
+
+        Returns:
+            List of unique entity names found in text
+        """
 
         entities = []
 
@@ -283,7 +351,19 @@ class EntityMemory(Memory):
         return entities
 
     def _extract_relationships(self, text: str, entities: list[str]) -> list[tuple[str, str, str]]:
-        """Extract relationships between entities"""
+        """
+        Extract relationships between entities from text.
+
+        Identifies relationship patterns like "X works at Y" or "X knows Y"
+        and returns structured relationship tuples.
+
+        Args:
+            text: Text to extract relationships from
+            entities: List of known entities to match against
+
+        Returns:
+            List of (entity1, relation_type, entity2) tuples
+        """
         relationships = []
 
         patterns = [
@@ -305,7 +385,13 @@ class EntityMemory(Memory):
         return relationships
 
     def _update_entity(self, entity: str, memory_item: MemoryItem):
-        """Update entity information"""
+        """
+        Update entity tracking data with new memory mention.
+
+        Args:
+            entity: Entity name to update
+            memory_item: Memory item containing the entity mention
+        """
         if entity not in self.entities:
             self.entities[entity] = {"first_seen": memory_item.timestamp, "frequency": 0, "contexts": []}
 

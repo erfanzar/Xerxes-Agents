@@ -13,7 +13,40 @@
 # limitations under the License.
 
 
-"""Dynamic prompt-based execution for Cortex framework"""
+"""Dynamic prompt-based execution for Cortex framework.
+
+This module provides dynamic task creation and execution capabilities for the
+Cortex framework. It enables building workflows from natural language prompts
+without pre-defining task structures, making it easier to create flexible
+and adaptive multi-agent systems.
+
+Key features:
+- Dynamic task creation from natural language prompts
+- Automatic task chaining with context passing
+- Streaming execution support
+- Integration with TaskCreator for intelligent task decomposition
+- Flexible agent assignment strategies
+
+The module provides two main classes:
+- DynamicTaskBuilder: Utility for creating tasks from prompts
+- DynamicCortex: Extended Cortex with dynamic execution capabilities
+
+Typical usage example:
+    # Create dynamic cortex with agents
+    cortex = create_dynamic_cortex(
+        agents=[analyst, writer],
+        llm=my_llm,
+        process=ProcessType.SEQUENTIAL
+    )
+
+    # Execute a single prompt
+    result = cortex.execute_prompt("Analyze the sales data", agent="Data Analyst")
+
+    # Or create and execute tasks from a complex prompt
+    result = cortex.execute_with_task_creation(
+        prompt="Research AI trends and write a blog post about them"
+    )
+"""
 
 import threading
 from collections.abc import Callable
@@ -32,7 +65,28 @@ from .task_creator import TaskCreationPlan, TaskCreator
 
 
 class DynamicTaskBuilder:
-    """Utility for creating tasks dynamically from prompts"""
+    """Utility for creating tasks dynamically from prompts.
+
+    DynamicTaskBuilder provides static methods for converting natural language
+    prompts into CortexTask objects. It supports single task creation and
+    chaining multiple prompts into a sequence of dependent tasks.
+
+    This class is designed as a stateless utility and should be used through
+    its static methods rather than instantiation.
+
+    Example:
+        # Create a single task
+        task = DynamicTaskBuilder.from_prompt(
+            "Analyze the quarterly report",
+            agent=analyst_agent
+        )
+
+        # Create a chain of tasks
+        tasks = DynamicTaskBuilder.chain_prompts(
+            prompts=["Research topic", "Write draft", "Review and edit"],
+            agents=[researcher, writer, editor]
+        )
+    """
 
     @staticmethod
     def from_prompt(
@@ -93,7 +147,42 @@ class DynamicTaskBuilder:
 
 
 class DynamicCortex(Cortex):
-    """Extended Cortex with dynamic prompt execution capabilities"""
+    """Extended Cortex with dynamic prompt execution capabilities.
+
+    DynamicCortex extends the base Cortex class with methods for creating
+    and executing tasks dynamically from natural language prompts. This
+    enables more flexible workflows where tasks don't need to be pre-defined,
+    and the system can adapt to user inputs at runtime.
+
+    Key capabilities:
+    - Execute single prompts with automatic agent selection
+    - Create tasks from complex objectives using TaskCreator
+    - Chain multiple prompts with automatic context passing
+    - Stream responses for real-time feedback
+    - Launch interactive UI for prompt execution
+
+    Attributes:
+        task_creator: Optional TaskCreator instance for intelligent task
+            decomposition. Initialized lazily when first needed.
+
+    Inherits all attributes from Cortex base class including:
+        agents, tasks, llm, process, memory, verbose, etc.
+
+    Example:
+        cortex = DynamicCortex(
+            agents=[researcher, writer],
+            tasks=[],  # Can be empty initially
+            llm=my_llm
+        )
+
+        # Execute a simple prompt
+        result = cortex.execute_prompt("Summarize this article")
+
+        # Or use task creation for complex objectives
+        result = cortex.execute_with_task_creation(
+            prompt="Create a marketing plan for our new product"
+        )
+    """
 
     def __init__(
         self,
@@ -112,7 +201,31 @@ class DynamicCortex(Cortex):
         enable_calute_memory: bool = False,
         cortex_name: str = "CorTex",
     ):
-        """Initialize DynamicCortex with optional TaskCreator"""
+        """Initialize DynamicCortex with optional TaskCreator.
+
+        Creates a new DynamicCortex instance with all capabilities of the
+        base Cortex class plus dynamic task creation and execution methods.
+
+        Args:
+            agents: List of CortexAgent instances available for task execution.
+            tasks: Initial list of tasks (can be empty for dynamic execution).
+            llm: BaseLLM instance for language model interactions.
+            process: Execution process type (SEQUENTIAL, PARALLEL, or HIERARCHICAL).
+                Defaults to SEQUENTIAL.
+            manager_agent: Optional agent for hierarchical process management.
+            memory_type: Type of memory to use for context. Defaults to SHORT_TERM.
+            verbose: Whether to enable detailed logging output. Defaults to True.
+            max_iterations: Maximum retry attempts for failed tasks. Defaults to 10.
+            model: Default model identifier for agents. Defaults to "gpt-4".
+            memory: Optional CortexMemory instance for persistent context.
+            memory_config: Optional MemoryConfig for memory settings.
+            reinvoke_after_function: Whether to reinvoke LLM after tool calls.
+                Defaults to True.
+            enable_calute_memory: Whether to enable Calute-level memory.
+                Defaults to False.
+            cortex_name: Name identifier for this Cortex instance.
+                Defaults to "CorTex".
+        """
         super().__init__(
             agents=agents,
             tasks=tasks,
@@ -359,6 +472,20 @@ class DynamicCortex(Cortex):
                 return result.raw_output
 
     def create_ui(self):
+        """Create and launch an interactive UI for prompt execution.
+
+        Launches a user interface application that allows interactive
+        prompt execution with this DynamicCortex instance. The UI provides
+        a convenient way to experiment with prompts and view agent responses.
+
+        Returns:
+            The result of launch_application, typically a UI application
+            instance or handle.
+
+        Note:
+            Requires the calute.ui module to be available. The UI runs
+            with this DynamicCortex instance as the execution backend.
+        """
         from calute.ui import launch_application
 
         return launch_application(executor=self)

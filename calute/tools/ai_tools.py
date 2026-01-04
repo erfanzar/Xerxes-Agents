@@ -13,7 +13,24 @@
 # limitations under the License.
 
 
-"""AI and machine learning tools for text processing and analysis."""
+"""AI and machine learning tools for text processing and analysis.
+
+This module provides a comprehensive set of AI-powered text processing
+tools for the Calute framework. It includes:
+- Text embedding generation using TF-IDF, sentence-transformers, or OpenAI
+- Text similarity calculation with multiple metrics (cosine, Jaccard, Levenshtein, semantic)
+- Text classification with keyword, sentiment, language, and topic detection
+- Text summarization using extractive and keyword-based methods
+- Named entity extraction for emails, URLs, phone numbers, dates, and more
+
+All tools are implemented as AgentBaseFn subclasses for seamless integration
+with Calute agents and support context_variables for runtime configuration.
+
+Example:
+    >>> from calute.tools.ai_tools import TextSummarizer, TextSimilarity
+    >>> summary = TextSummarizer.static_call("Long article text...", method="extractive")
+    >>> similarity = TextSimilarity.static_call("text one", "text two", method="cosine")
+"""
 
 from __future__ import annotations
 
@@ -26,7 +43,18 @@ from ..types import AgentBaseFn
 
 
 class TextEmbedder(AgentBaseFn):
-    """Generate text embeddings using various methods."""
+    """Generate text embeddings using various methods.
+
+    Supports multiple embedding backends including TF-IDF, sentence-transformers,
+    and OpenAI embeddings. Falls back to simple word frequency vectors when
+    sklearn is not available.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Methods:
+        static_call: Generate embeddings for one or more texts.
+    """
 
     @staticmethod
     def static_call(
@@ -126,7 +154,18 @@ class TextEmbedder(AgentBaseFn):
 
 
 class TextSimilarity(AgentBaseFn):
-    """Calculate text similarity using various metrics."""
+    """Calculate text similarity using various metrics.
+
+    Provides multiple similarity calculation methods including cosine
+    similarity, Jaccard index, Levenshtein distance, and semantic
+    similarity using sentence embeddings.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Methods:
+        static_call: Calculate similarity between two texts.
+    """
 
     @staticmethod
     def static_call(
@@ -249,7 +288,18 @@ class TextSimilarity(AgentBaseFn):
 
 
 class TextClassifier(AgentBaseFn):
-    """Classify text into categories using various methods."""
+    """Classify text into categories using various methods.
+
+    Supports keyword-based classification, sentiment analysis,
+    language detection, and topic classification. Uses simple
+    heuristic methods that work without external ML dependencies.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Methods:
+        static_call: Classify text into categories.
+    """
 
     @staticmethod
     def static_call(
@@ -455,7 +505,18 @@ class TextClassifier(AgentBaseFn):
 
 
 class TextSummarizer(AgentBaseFn):
-    """Summarize text using various techniques."""
+    """Summarize text using various techniques.
+
+    Provides extractive summarization, keyword extraction, and
+    statistical analysis of text. Uses sentence scoring based on
+    word frequency for extractive summaries.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Methods:
+        static_call: Generate a summary of the input text.
+    """
 
     @staticmethod
     def static_call(
@@ -606,7 +667,18 @@ class TextSummarizer(AgentBaseFn):
 
 
 class EntityExtractor(AgentBaseFn):
-    """Extract named entities from text."""
+    """Extract named entities from text.
+
+    Uses regex patterns to identify and extract various entity types
+    including emails, URLs, phone numbers, dates, times, currency
+    values, hashtags, mentions, and proper names.
+
+    Attributes:
+        Inherits from AgentBaseFn for agent integration.
+
+    Methods:
+        static_call: Extract entities from the input text.
+    """
 
     @staticmethod
     def static_call(

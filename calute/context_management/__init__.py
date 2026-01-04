@@ -13,7 +13,41 @@
 # limitations under the License.
 
 
-"""Context management modules for Calute framework."""
+"""Context management system for Calute framework.
+
+This module provides comprehensive context management capabilities
+for managing conversation history and token budgets in LLM applications.
+It includes:
+
+- Multiple compaction strategies for managing conversation context
+- Smart token counting with multi-provider support
+- Automatic strategy selection based on compression requirements
+- Support for preserving important messages during compaction
+
+The context management system helps maintain conversation coherence
+while staying within token limits of various LLM providers.
+
+Available Strategies:
+    - SummarizationStrategy: Uses LLM to summarize older messages
+    - SlidingWindowStrategy: Keeps only the most recent messages
+    - PriorityBasedStrategy: Retains messages based on importance scores
+    - SmartCompactionStrategy: Hybrid approach combining multiple strategies
+    - TruncateStrategy: Simple truncation for emergency compaction
+
+Example:
+    >>> from calute.context_management import (
+    ...     SmartCompactionStrategy,
+    ...     SmartTokenCounter,
+    ...     get_compaction_strategy,
+    ... )
+    >>> counter = SmartTokenCounter(model="gpt-4")
+    >>> token_count = counter.count_tokens("Hello, world!")
+    >>> strategy = get_compaction_strategy(
+    ...     strategy=CompactionStrategy.SMART,
+    ...     target_tokens=4000,
+    ...     model="gpt-4"
+    ... )
+"""
 
 from .compaction_strategies import (
     BaseCompactionStrategy,

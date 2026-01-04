@@ -13,7 +13,51 @@
 # limitations under the License.
 
 
-"""Enhanced task definition for Cortex framework with Cortex-like features"""
+"""Task definition for Cortex framework.
+
+This module provides the CortexTask class and related data structures for defining
+and executing tasks within the Cortex multi-agent orchestration framework. Tasks
+represent units of work that can be assigned to agents, with support for features
+like output validation, chaining, retries, and memory integration.
+
+The module includes:
+- CortexTask: Main task class for defining executable work units
+- CortexTaskOutput: Rich output container with execution metadata
+- ChainLink: Task chaining and conditional routing
+- TaskValidationError: Custom exception for validation failures
+
+Key features:
+- Output validation with Pydantic models (JSON and XML parsing)
+- Task chaining with conditional routing
+- Automatic retry with configurable conditions
+- Human input/feedback integration
+- Memory persistence for results
+- Security configurations and tool restrictions
+- Context compression and priority weighting
+- Streaming execution support
+- Dependency management between tasks
+
+Typical usage example:
+    from calute.cortex.task import CortexTask
+    from calute.cortex.agent import CortexAgent
+
+    agent = CortexAgent(
+        role="Data Analyst",
+        goal="Analyze data",
+        backstory="Expert analyst"
+    )
+
+    task = CortexTask(
+        description="Analyze quarterly sales data",
+        expected_output="Summary report with key insights",
+        agent=agent,
+        max_retries=3,
+        importance=0.8
+    )
+
+    result = task.execute()
+    print(result.output)
+"""
 
 from __future__ import annotations
 
@@ -39,16 +83,51 @@ if TYPE_CHECKING:
 
 
 class TaskValidationError(Exception):
-    """Exception raised when task output validation fails"""
+    """Exception raised when task output validation fails.
+
+    This exception is raised when a task's output fails to validate against
+    the specified Pydantic model or JSON schema, after all retry attempts
+    have been exhausted.
+
+    Attributes:
+        message: Detailed description of the validation failure, including
+            which validation rules failed and any parsing errors encountered.
+    """
 
     def __init__(self, message: str):
+        """Initialize the validation error.
+
+        Args:
+            message: Description of the validation failure.
+        """
         self.message = message
         super().__init__(self.message)
 
 
 @dataclass
 class ChainLink:
-    """Represents a link in a task chain"""
+    """Represents a link in a task chain for conditional task routing.
+
+    ChainLink enables creating conditional workflows where the next task
+    to execute depends on the output of the current task. It supports
+    both success and fallback paths, allowing for branching task execution.
+
+    Attributes:
+        condition: Optional callable that takes the task output string and
+            returns True if the next_task should execute, False for fallback.
+            If None, next_task is always executed.
+        next_task: The task to execute if condition returns True or is None.
+        fallback_task: The task to execute if condition returns False.
+
+    Example:
+        >>> def check_success(output: str) -> bool:
+        ...     return "success" in output.lower()
+        >>> chain = ChainLink(
+        ...     condition=check_success,
+        ...     next_task=process_results_task,
+        ...     fallback_task=handle_error_task
+        ... )
+    """
 
     condition: Callable[[str], bool] | None = None
     next_task: CortexTask | None = None
@@ -57,7 +136,35 @@ class ChainLink:
 
 @dataclass
 class CortexTaskOutput:
-    """Enhanced output from a completed task with rich formatting support"""
+    """Enhanced output container from a completed task with rich metadata.
+
+    CortexTaskOutput encapsulates the result of task execution along with
+    comprehensive metadata about the execution process, including timing,
+    validation results, tool usage statistics, and performance metrics.
+
+    Attributes:
+        task: Reference to the CortexTask that produced this output.
+        output: The primary output string from task execution.
+        agent: The CortexAgent that executed the task.
+        timestamp: Unix timestamp when the output was generated.
+        raw_output: Unprocessed output before any formatting or validation.
+        token_usage: Dictionary tracking token consumption (e.g., prompt_tokens,
+            completion_tokens, total_tokens).
+        validation_results: Dictionary of validation check results. Keys are
+            validation type names, values are boolean pass/fail or error strings.
+        pydantic_output: Parsed and validated Pydantic model instance if
+            output_json or output_pydantic was specified on the task.
+        json_dict: Dictionary representation if output was valid JSON.
+        execution_time: Total execution duration in seconds.
+        used_tools: Count of tool invocations during execution.
+        tools_errors: Count of tool invocation errors encountered.
+        delegations: Number of delegations to other agents.
+        retry_count: Number of retry attempts before success.
+        execution_metadata: Additional metadata about execution context
+            (e.g., had_human_input, security_applied, validation_applied).
+        performance_metrics: Aggregated performance statistics
+            (e.g., avg_execution_time, total_retries).
+    """
 
     task: CortexTask
     output: str
@@ -79,11 +186,22 @@ class CortexTaskOutput:
 
     @property
     def summary(self) -> str:
-        """Get a summary of the output (first 200 characters)"""
+        """Get a truncated summary of the output.
+
+        Returns:
+            The first 200 characters of the output with ellipsis if truncated,
+            or the full output if shorter than 200 characters.
+        """
         return self.output[:200] + "..." if len(self.output) > 200 else self.output
 
     def to_dict(self) -> dict:
-        """Convert output to dictionary format"""
+        """Convert the task output to a dictionary representation.
+
+        Returns:
+            Dictionary containing all task output data including task details,
+            agent information, execution metrics, and validation results.
+            Suitable for serialization or logging purposes.
+        """
         return {
             "task_description": self.task.description,
             "expected_output": self.task.expected_output,
@@ -117,7 +235,58 @@ class CortexTaskOutput:
 
 @dataclass
 class CortexTask:
-    """Enhanced task"""
+    """Task definition for execution within the Cortex framework.
+
+    CortexTask represents a unit of work to be executed by a CortexAgent.
+    It provides comprehensive configuration options for task execution
+    including output validation, retry logic, human interaction, security
+    controls, and context management.
+
+    Attributes:
+        description: Detailed description of what the task should accomplish.
+        expected_output: Description of what successful output should look like.
+        agent: The CortexAgent assigned to execute this task.
+        tools: List of CortexTool instances available for this specific task.
+        context: List of prerequisite tasks whose outputs provide context.
+        output_file: Optional file path to save the task output.
+        human_feedback: Whether to request human feedback after execution.
+        chain: Optional ChainLink for conditional task routing.
+        max_retries: Maximum retry attempts on failure (default: 3).
+        memory: CortexMemory instance for persisting task results.
+        save_to_memory: Whether to automatically save results to memory.
+        importance: Task importance score from 0.0 to 1.0 for prioritization.
+        output_json: Pydantic model class for JSON output validation.
+        output_pydantic: Pydantic model class for structured output parsing.
+        create_directory: Whether to create output directory if missing.
+        async_execution: Whether to execute asynchronously (reserved).
+        callback: Function called after successful task completion.
+        pre_execution_callback: Function called before task execution starts.
+        error_callback: Function called when an error occurs.
+        human_input: Whether to prompt for human input during execution.
+        human_input_prompt: Custom prompt for human input requests.
+        input_validator: Function to validate human input before accepting.
+        security_config: Dictionary of security-related configuration options.
+        tool_restrictions: List of allowed tool names (restricts agent tools).
+        allow_dangerous_tools: Whether to permit dangerous tool usage.
+        prompt_context: Additional context string to include in the prompt.
+        context_priority: Priority weights for context sources (higher = more important).
+        context_compression: Whether to compress context when exceeding limits.
+        max_context_length: Maximum character length for context (default: 10000).
+        dependencies: List of tasks that must complete before this task.
+        conditional_execution: Function that returns whether to execute the task.
+        retry_conditions: List of functions determining retry eligibility.
+        timeout_behavior: Action on timeout - 'fail', 'continue', or 'return_partial'.
+        timeout: Maximum execution time in seconds before timeout.
+
+    Private Attributes:
+        _output: Cached output string from last execution.
+        _execution_stats: Dictionary tracking execution statistics.
+        _start_time: Timestamp when execution started.
+        _original_description: Original description before interpolation.
+        _original_expected_output: Original expected_output before interpolation.
+        _original_output_file: Original output_file before interpolation.
+        _original_prompt_context: Original prompt_context before interpolation.
+    """
 
     description: str
     expected_output: str
@@ -214,7 +383,19 @@ class CortexTask:
                 self.prompt_context = interpolate_inputs(input_string=self._original_prompt_context, inputs=inputs)
 
     def _extract_json_from_output(self, output: str) -> str | None:
-        """Extract JSON from output that may contain thinking process or other text"""
+        """Extract JSON from output that may contain thinking process or other text.
+
+        Attempts multiple extraction strategies to find valid JSON:
+        1. JSON within markdown code blocks (```json or ```)
+        2. Regex patterns for nested JSON objects
+        3. Character-by-character brace matching
+
+        Args:
+            output: The raw output string potentially containing JSON.
+
+        Returns:
+            The extracted JSON string if found and valid, None otherwise.
+        """
         import re
 
         json_patterns = [
@@ -253,7 +434,16 @@ class CortexTask:
         return None
 
     def _extract_xml_content(self, output: str, tag: str) -> str | None:
-        """Extract content from XML tags"""
+        """Extract content from XML tags in the output.
+
+        Args:
+            output: The raw output string containing XML.
+            tag: The XML tag name to extract content from.
+
+        Returns:
+            The content between the specified tags (stripped of whitespace),
+            or None if the tag is not found.
+        """
         import re
 
         pattern = f"<{tag}>(.*?)</{tag}>"
@@ -261,7 +451,18 @@ class CortexTask:
         return match.group(1).strip() if match else None
 
     def _parse_xml_to_dict(self, xml_content: str) -> dict:
-        """Parse XML content to dictionary for Pydantic validation"""
+        """Parse XML content to dictionary for Pydantic validation.
+
+        Recursively converts XML elements to a nested dictionary structure.
+        Handles repeated elements by converting them to lists.
+
+        Args:
+            xml_content: The XML string to parse.
+
+        Returns:
+            Dictionary representation of the XML structure.
+            Returns empty dict if parsing fails.
+        """
         import xml.etree.ElementTree as ET
 
         try:
@@ -291,7 +492,20 @@ class CortexTask:
             return {}
 
     def _validate_output(self, output: str) -> tuple[bool, Any, dict]:
-        """Enhanced validation supporting JSON extraction and XML parsing"""
+        """Validate task output against configured Pydantic models.
+
+        Supports multiple extraction strategies for finding structured data
+        within unstructured output, including JSON and XML parsing.
+
+        Args:
+            output: The raw output string to validate.
+
+        Returns:
+            Tuple of (validation_passed, pydantic_output, validation_results):
+            - validation_passed: True if all validations succeeded.
+            - pydantic_output: Parsed Pydantic model instance if successful.
+            - validation_results: Dictionary with validation details and any errors.
+        """
         validation_results = {}
         pydantic_output = None
 
@@ -355,7 +569,20 @@ class CortexTask:
         return validation_passed, pydantic_output, validation_results
 
     def _execute_callback(self, callback: Callable | None, *args, **kwargs):
-        """Safely execute a callback function"""
+        """Safely execute a callback function with error handling.
+
+        If the callback raises an exception and an error_callback is configured,
+        the error is passed to the error_callback. Otherwise, the error is printed.
+
+        Args:
+            callback: The callback function to execute, or None to skip.
+            *args: Positional arguments to pass to the callback.
+            **kwargs: Keyword arguments to pass to the callback.
+
+        Returns:
+            The return value of the callback, or None if callback is None
+            or if an exception occurred.
+        """
         if callback and callable(callback):
             try:
                 return callback(*args, **kwargs)
@@ -366,14 +593,30 @@ class CortexTask:
                     print(f"Callback error: {e}")
 
     def _check_dependencies(self) -> bool:
-        """Check if all dependencies are completed"""
+        """Check if all task dependencies have been completed.
+
+        Returns:
+            True if all dependencies have output (are completed),
+            False if any dependency is still pending.
+        """
         for dep in self.dependencies:
             if not dep.output:
                 return False
         return True
 
     def _should_retry(self, error: Exception, retry_count: int) -> bool:
-        """Check if task should be retried based on conditions"""
+        """Determine if the task should be retried after an error.
+
+        Checks against max_retries limit and evaluates any custom retry
+        condition functions that have been configured.
+
+        Args:
+            error: The exception that caused the failure.
+            retry_count: Current number of retry attempts made.
+
+        Returns:
+            True if retry should be attempted, False otherwise.
+        """
         if retry_count >= self.max_retries:
             return False
 
@@ -387,7 +630,15 @@ class CortexTask:
         return True
 
     def _get_human_input(self) -> str:
-        """Get human input with validation"""
+        """Prompt for and collect human input with optional validation.
+
+        Displays the configured prompt and waits for user input. If an
+        input_validator is configured, continues prompting until valid
+        input is received.
+
+        Returns:
+            The validated user input string.
+        """
         prompt = self.human_input_prompt or "Please provide input for this task: "
 
         while True:
@@ -407,13 +658,26 @@ class CortexTask:
             return user_input
 
     def _create_output_directory(self):
-        """Create output directory if specified"""
+        """Create the output file's parent directory if it doesn't exist.
+
+        Only creates directories if both output_file is specified and
+        create_directory is True. Creates all intermediate directories
+        as needed (like mkdir -p).
+        """
         if self.output_file and self.create_directory:
             output_path = Path(self.output_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _apply_tool_restrictions(self):
-        """Apply tool restrictions based on security config"""
+        """Apply tool restrictions to the assigned agent.
+
+        Filters the agent's available tools to only include those
+        specified in tool_restrictions. This provides security control
+        over which tools can be used during task execution.
+
+        Side Effects:
+            Modifies the agent's tools list to only include allowed tools.
+        """
         if not self.tool_restrictions:
             return
 
@@ -427,7 +691,20 @@ class CortexTask:
             self.agent.tools = allowed_tools
 
     def _build_enhanced_context(self, context: str, context_outputs: list[str] | None, human_input: str) -> str:
-        """Build enhanced context with priority weighting and compression"""
+        """Build enhanced context with priority weighting and optional compression.
+
+        Combines context from multiple sources (previous task outputs, base context,
+        human input) and orders them by priority. Optionally compresses the result
+        if it exceeds max_context_length.
+
+        Args:
+            context: Base context string from previous outputs.
+            context_outputs: List of output strings from context tasks.
+            human_input: Optional human input to include in context.
+
+        Returns:
+            Combined context string, sorted by priority and optionally compressed.
+        """
         context_parts = []
 
         if context_outputs:
@@ -467,7 +744,18 @@ class CortexTask:
         return final_context
 
     def _create_empty_output(self, reason: str) -> CortexTaskOutput:
-        """Create an empty output for skipped tasks"""
+        """Create an empty output for tasks that were skipped.
+
+        Used when a task is not executed (e.g., conditional execution
+        returned False or dependencies weren't met).
+
+        Args:
+            reason: Description of why the task was skipped.
+
+        Returns:
+            CortexTaskOutput with the reason as output and skipped=True
+            in execution_metadata.
+        """
         return CortexTaskOutput(
             task=self,
             output=reason,
@@ -714,11 +1002,21 @@ class CortexTask:
             raise Exception(f"Task failed after {retries} retries: {last_error}")
 
     def get_execution_stats(self) -> dict:
-        """Get execution statistics"""
+        """Get a copy of execution statistics from the last run.
+
+        Returns:
+            Dictionary containing used_tools, tools_errors, delegations,
+            and retry_count from the most recent execution.
+        """
         return self._execution_stats.copy()
 
     def reset_stats(self):
-        """Reset execution statistics"""
+        """Reset execution statistics to initial values.
+
+        Clears all counters for tool usage, errors, delegations,
+        and retries. Should be called before re-executing a task
+        if fresh statistics are needed.
+        """
         self._execution_stats = {
             "used_tools": 0,
             "tools_errors": 0,
@@ -728,20 +1026,46 @@ class CortexTask:
 
     @property
     def output(self) -> str | None:
-        """Get the task output"""
+        """Get the cached output from the last task execution.
+
+        Returns:
+            The output string from the most recent execute() call,
+            or None if the task has not been executed.
+        """
         return self._output
 
     def add_dependency(self, task: CortexTask):
-        """Add a task dependency"""
+        """Add a task dependency that must complete before this task.
+
+        Args:
+            task: The CortexTask that must complete before this task executes.
+
+        Note:
+            Duplicate dependencies are ignored.
+        """
         if task not in self.dependencies:
             self.dependencies.append(task)
 
     def remove_dependency(self, task: CortexTask):
-        """Remove a task dependency"""
+        """Remove a task from the dependencies list.
+
+        Args:
+            task: The CortexTask to remove from dependencies.
+
+        Note:
+            Silently ignores if task is not in dependencies.
+        """
         if task in self.dependencies:
             self.dependencies.remove(task)
 
     def add_context(self, tasks: list[CortexTask] | CortexTask):
+        """Add context tasks whose outputs will be available during execution.
+
+        Args:
+            tasks: A single CortexTask or list of CortexTasks to add as context.
+                The outputs of these tasks will be included when building
+                the execution prompt.
+        """
         if not isinstance(tasks, list):
             tasks = [tasks]
         if self.context is None:
@@ -750,7 +1074,15 @@ class CortexTask:
             self.context.append(task)
 
     def set_callback(self, callback_type: str, callback: Callable):
-        """Set a callback function"""
+        """Set a callback function for task lifecycle events.
+
+        Args:
+            callback_type: One of 'pre_execution', 'post_execution', or 'error'.
+            callback: The function to call at the specified lifecycle point.
+
+        Raises:
+            ValueError: If callback_type is not a recognized type.
+        """
         if callback_type == "pre_execution":
             self.pre_execution_callback = callback
         elif callback_type == "post_execution":
@@ -761,25 +1093,54 @@ class CortexTask:
             raise ValueError(f"Unknown callback type: {callback_type}")
 
     def add_retry_condition(self, condition: Callable):
-        """Add a retry condition function"""
+        """Add a custom retry condition function.
+
+        Args:
+            condition: A callable that takes (error, retry_count, task) and
+                returns True if retry should be attempted, False otherwise.
+
+        Note:
+            Duplicate conditions are ignored.
+        """
         if condition not in self.retry_conditions:
             self.retry_conditions.append(condition)
 
     def set_security_config(self, **config):
-        """Set security configuration"""
+        """Update security configuration with provided options.
+
+        Args:
+            **config: Key-value pairs to merge into security_config.
+        """
         if self.security_config is None:
             self.security_config = {}
         self.security_config.update(config)
 
     def validate_output_with_model(self, model: type[BaseModel]):
-        """Set output validation model"""
+        """Set a Pydantic model for output validation.
+
+        Args:
+            model: A Pydantic BaseModel subclass for validating output.
+        """
         self.output_pydantic = model
 
     def set_json_output_model(self, model: type[BaseModel]):
-        """Set JSON output validation model"""
+        """Set a Pydantic model for JSON output extraction and validation.
+
+        Args:
+            model: A Pydantic BaseModel subclass. Output will be parsed
+                as JSON and validated against this model.
+        """
         self.output_json = model
 
     def create_ui(self):
+        """Launch a UI application for interacting with this task.
+
+        Creates and launches an interactive user interface that allows
+        users to execute and monitor this task visually.
+
+        Returns:
+            The launched UI application instance.
+        """
         from calute.ui import launch_application
 
         return launch_application(executor=self)

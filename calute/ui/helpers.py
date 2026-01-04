@@ -15,8 +15,21 @@
 
 """Helper utilities for processing chat messages in Calute Chainlit UI.
 
-This module provides core functionality for handling message streaming, tool execution,
-thinking panels, and UI updates in the Chainlit-based chat interface.
+This module provides core functionality for handling message streaming,
+tool execution, thinking panels, and UI updates in the Chainlit-based
+chat interface. It includes:
+- MCP (Model Context Protocol) tool discovery and execution
+- Asynchronous stream processing for LLM responses
+- Thinking tag detection and panel management
+- Tool execution visualization with progress tracking
+- Message history management and formatting
+
+The helpers work with various executor types including Calute, Cortex,
+CortexAgent, TaskCreator, and DynamicCortex.
+
+Module Attributes:
+    THINK_OPEN_PATTERN: Regex pattern for detecting thinking tag openers.
+    THINK_CLOSE_PATTERN: Regex pattern for detecting thinking tag closers.
 """
 
 from __future__ import annotations
@@ -57,8 +70,17 @@ THINK_CLOSE_PATTERN = re.compile(r"</(think|thinking|reason|reasoning)>", re.IGN
 def get_mcp_tools_for_llm() -> list[dict[str, Any]]:
     """Get all MCP tools in OpenAI function calling format.
 
+    Retrieves tools from all connected MCP servers and formats them
+    for use with OpenAI-compatible function calling APIs. Server names
+    are prefixed to tool names to avoid collisions.
+
     Returns:
-        List of tool definitions in OpenAI format.
+        List of tool definitions in OpenAI format, with each tool
+        containing 'type' and 'function' keys.
+
+    Note:
+        Tool names are prefixed with 'mcp_{server_name}_' to ensure
+        uniqueness across multiple MCP servers.
     """
     mcp_tools = cl.user_session.get("mcp_tools") or {}
     all_tools = []
@@ -103,12 +125,19 @@ def find_mcp_session_for_tool(tool_name: str) -> tuple[Any, str] | None:
 async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
     """Call an MCP tool and return the result.
 
+    Executes a tool through its associated MCP session and extracts
+    the result content in a format suitable for display or further
+    processing.
+
     Args:
-        tool_name: Name of the tool to call
-        arguments: Tool arguments
+        tool_name: Name of the tool to call (may include mcp_servername_ prefix).
+        arguments: Dictionary of tool arguments to pass.
 
     Returns:
-        Tool execution result
+        Tool execution result as a string or parsed content.
+
+    Raises:
+        ValueError: If the MCP tool is not found in any connected server.
     """
     result = find_mcp_session_for_tool(tool_name)
     if not result:
@@ -136,7 +165,18 @@ _MCP_LOOP_LOCK = threading.Lock()
 
 
 def _get_mcp_event_loop():
-    """Get or create a dedicated event loop for MCP calls."""
+    """Get or create a dedicated event loop for MCP calls.
+
+    Creates a separate event loop running in a daemon thread to handle
+    MCP tool calls without conflicting with Chainlit's main event loop.
+
+    Returns:
+        asyncio.AbstractEventLoop: A running event loop for MCP operations.
+
+    Note:
+        The loop is created lazily and persists for the lifetime of
+        the application. Thread-safe initialization is ensured.
+    """
     global _MCP_EVENT_LOOP
     with _MCP_LOOP_LOCK:
         if _MCP_EVENT_LOOP is None or not _MCP_EVENT_LOOP.is_running():
@@ -218,8 +258,17 @@ def create_mcp_tool_function(server_name: str, tool_def: dict[str, Any], session
 def get_mcp_tool_functions() -> list[callable]:
     """Get all MCP tools as callable functions for Calute agents.
 
+    Creates wrapper functions for all tools from connected MCP servers
+    that can be directly registered with Calute agents for function
+    calling.
+
     Returns:
-        List of callable functions wrapping MCP tools.
+        List of callable functions, each wrapping an MCP tool with
+        appropriate metadata for Calute's function registration.
+
+    Note:
+        Each function includes __name__, __doc__, and __calute_schema__
+        attributes for proper integration with Calute agents.
     """
     mcp_tools = cl.user_session.get("mcp_tools") or {}
     functions = []
@@ -239,15 +288,20 @@ def get_mcp_tool_functions() -> list[callable]:
 def inject_mcp_tools_to_agent(executor: Any, agent_id: str | None) -> list[callable]:
     """Inject MCP tools into an agent's function list.
 
-    This temporarily adds MCP tool functions to the agent so they
-    can be used during message processing.
+    Temporarily adds MCP tool functions to the agent so they can be
+    used during message processing. The original functions should be
+    restored after processing using restore_agent_functions().
 
     Args:
-        executor: The Calute executor instance
-        agent_id: The agent ID to inject tools into
+        executor: The Calute executor instance containing the agent.
+        agent_id: The agent ID to inject tools into, or None for current agent.
 
     Returns:
-        List of original functions (for restoration later)
+        List of original functions for restoration after processing.
+
+    Note:
+        This function is designed for temporary tool injection and should
+        be paired with restore_agent_functions() to clean up after use.
     """
     mcp_functions = get_mcp_tool_functions()
     if not mcp_functions:
@@ -283,10 +337,14 @@ def inject_mcp_tools_to_agent(executor: Any, agent_id: str | None) -> list[calla
 def restore_agent_functions(executor: Any, agent_id: str | None, original_functions: list[callable]) -> None:
     """Restore an agent's original function list after MCP injection.
 
+    Reverses the effect of inject_mcp_tools_to_agent() by restoring
+    the agent's original function list. Should be called after message
+    processing is complete.
+
     Args:
-        executor: The Calute executor instance
-        agent_id: The agent ID to restore functions for
-        original_functions: The original function list to restore
+        executor: The Calute executor instance containing the agent.
+        agent_id: The agent ID to restore functions for, or None for current agent.
+        original_functions: The original function list to restore (from inject_mcp_tools_to_agent).
     """
     # Get the agent
     agent = None
@@ -304,11 +362,19 @@ def restore_agent_functions(executor: Any, agent_id: str | None, original_functi
 async def async_stream(buffer: StreamerBuffer) -> AsyncIterator:
     """Convert synchronous StreamerBuffer to async generator.
 
+    Bridges the gap between synchronous buffer operations and async
+    iteration, allowing Chainlit handlers to consume streaming events
+    asynchronously.
+
     Args:
         buffer: The StreamerBuffer to stream from.
 
     Yields:
-        Events from the buffer.
+        Events from the buffer (StreamChunk, FunctionCallsExtracted,
+        FunctionExecutionStart, FunctionExecutionComplete, etc.).
+
+    Note:
+        Terminates when the buffer is closed and empty.
     """
     loop = asyncio.get_event_loop()
 
@@ -331,11 +397,15 @@ async def async_stream(buffer: StreamerBuffer) -> AsyncIterator:
 def format_result(result: Any) -> str:
     """Format a tool result for display.
 
+    Converts tool execution results into human-readable strings,
+    with special handling for JSON-serializable objects.
+
     Args:
-        result: The result to format.
+        result: The result to format (dict, list, string, or other).
 
     Returns:
-        Formatted string representation.
+        Formatted string representation. Dicts and lists are
+        pretty-printed as JSON; None returns "Done".
     """
     if isinstance(result, (dict, list)):
         try:
@@ -354,14 +424,23 @@ async def process_message_chainlit(
 ) -> MessagesHistory:
     """Process a user message with Chainlit streaming support.
 
+    Main entry point for handling user messages in the Chainlit UI.
+    Manages the complete message processing pipeline including:
+    - MCP tool injection and restoration
+    - Streaming response display
+    - Thinking tag detection and panel creation
+    - Tool execution visualization
+    - Message history updates
+
     Args:
         message: The user's message text.
-        calute_msgs: Existing message history.
-        executor: The executor to use for processing.
-        agent: Optional agent configuration.
+        calute_msgs: Existing message history, or None to start fresh.
+        executor: The executor instance for processing (Calute, Cortex, etc.).
+        agent: Optional agent configuration or ID for specialized behavior.
 
     Returns:
-        Updated MessagesHistory with the new exchange.
+        Updated MessagesHistory containing the new user message
+        and assistant response.
     """
     calute_msgs = calute_msgs or MessagesHistory(messages=[])
     calute_msgs.messages.append(UserMessage(content=message))
@@ -471,16 +550,21 @@ async def _process_content(
 ) -> tuple[str, bool, cl.Step | None, int]:
     """Process content chunk, handling thinking tags.
 
+    Parses streaming content for thinking/reasoning tags and routes
+    content appropriately to either the main message or a thinking
+    panel. Creates and closes thinking panels as needed.
+
     Args:
-        content: The new content chunk.
-        main_content: Accumulated main content.
+        content: The new content chunk to process.
+        main_content: Accumulated main content so far.
         in_thinking: Whether currently inside thinking tags.
-        think_step: Current thinking step if open.
-        think_count: Counter for thinking panels.
-        msg: Main message to stream to.
+        think_step: Current thinking step if open, or None.
+        think_count: Counter for numbering thinking panels.
+        msg: Main Chainlit message to stream visible content to.
 
     Returns:
-        Tuple of (updated_content, in_thinking, think_step, think_count).
+        Tuple of (updated_content, in_thinking, think_step, think_count)
+        for state tracking across chunks.
     """
     remaining = content
 
@@ -631,13 +715,20 @@ def _start_executor(
 ) -> tuple[StreamerBuffer, threading.Thread]:
     """Start the appropriate executor and return buffer + thread.
 
+    Dispatches to the correct execution method based on executor type.
+    Each executor type has different API requirements for starting
+    a streaming response.
+
     Args:
-        executor: The executor instance.
-        calute_msgs: Message history.
-        agent: Optional agent configuration.
+        executor: The executor instance (Calute, Cortex, CortexAgent, etc.).
+        calute_msgs: Message history containing the conversation.
+        agent: Optional agent configuration or LLM instance.
 
     Returns:
-        Tuple of (StreamerBuffer, Thread).
+        Tuple of (StreamerBuffer, Thread) for consuming streaming events.
+
+    Raises:
+        TypeError: If the executor type is not supported.
     """
     if isinstance(executor, Calute):
         return executor.thread_run(messages=calute_msgs, agent_id=agent)
@@ -685,11 +776,16 @@ def _start_executor(
 def _remove_thinking_tags(content: str) -> str:
     """Remove thinking tags from final content.
 
+    Strips all thinking/reasoning tag pairs and their content from
+    the final response text. Used to clean up the main message
+    before displaying to the user.
+
     Args:
-        content: Text that may contain thinking tags.
+        content: Text that may contain thinking tags
+            (e.g., <think>...</think>, <reasoning>...</reasoning>).
 
     Returns:
-        Cleaned text without thinking tags.
+        Cleaned text with all thinking tags and their content removed.
     """
     return re.sub(
         r"<(?:think|thinking|reason|reasoning)>.*?</(?:think|thinking|reason|reasoning)>",

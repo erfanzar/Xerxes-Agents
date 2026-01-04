@@ -26,107 +26,245 @@ from typing import Any
 
 
 class MemoryStorage(ABC):
-    """Abstract base class for memory storage backends"""
+    """
+    Abstract base class for memory storage backends.
+
+    Provides a common interface for different storage implementations
+    including in-memory, file-based, and database storage.
+    """
 
     @abstractmethod
     def save(self, key: str, data: Any) -> bool:
-        """Save data with a key"""
+        """
+        Save data with a key.
+
+        Args:
+            key: Unique identifier for the data
+            data: Data to store
+
+        Returns:
+            True if save was successful, False otherwise
+        """
         pass
 
     @abstractmethod
     def load(self, key: str) -> Any | None:
-        """Load data by key"""
+        """
+        Load data by key.
+
+        Args:
+            key: Unique identifier to retrieve
+
+        Returns:
+            Stored data if found, None otherwise
+        """
         pass
 
     @abstractmethod
     def delete(self, key: str) -> bool:
-        """Delete data by key"""
+        """
+        Delete data by key.
+
+        Args:
+            key: Unique identifier to delete
+
+        Returns:
+            True if deletion was successful, False if key not found
+        """
         pass
 
     @abstractmethod
     def exists(self, key: str) -> bool:
-        """Check if key exists"""
+        """
+        Check if key exists in storage.
+
+        Args:
+            key: Unique identifier to check
+
+        Returns:
+            True if key exists, False otherwise
+        """
         pass
 
     @abstractmethod
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List all stored keys, optionally filtered by pattern"""
+        """
+        List all stored keys, optionally filtered by pattern.
+
+        Args:
+            pattern: Optional substring pattern to filter keys
+
+        Returns:
+            List of matching key strings
+        """
         pass
 
     @abstractmethod
     def clear(self) -> int:
-        """Clear all stored data, return number of items cleared"""
+        """
+        Clear all stored data.
+
+        Returns:
+            Number of items cleared
+        """
         pass
 
 
 class SimpleStorage(MemoryStorage):
-    """Simple in-memory storage (non-persistent)"""
+    """
+    Simple in-memory storage (non-persistent).
+
+    Provides fast key-value storage that exists only in memory.
+    Data is lost when the process terminates. Suitable for
+    testing and short-lived applications.
+    """
 
     def __init__(self):
+        """Initialize empty in-memory storage."""
         self._data: dict[str, Any] = {}
 
     def save(self, key: str, data: Any) -> bool:
-        """Save data in memory"""
+        """
+        Save data in memory.
+
+        Args:
+            key: Unique identifier for the data
+            data: Data to store
+
+        Returns:
+            Always returns True as in-memory saves don't fail
+        """
         self._data[key] = data
         return True
 
     def load(self, key: str) -> Any | None:
-        """Load data from memory"""
+        """
+        Load data from memory.
+
+        Args:
+            key: Unique identifier to retrieve
+
+        Returns:
+            Stored data if found, None otherwise
+        """
         return self._data.get(key)
 
     def delete(self, key: str) -> bool:
-        """Delete data from memory"""
+        """
+        Delete data from memory.
+
+        Args:
+            key: Unique identifier to delete
+
+        Returns:
+            True if key was found and deleted, False otherwise
+        """
         if key in self._data:
             del self._data[key]
             return True
         return False
 
     def exists(self, key: str) -> bool:
-        """Check if key exists"""
+        """
+        Check if key exists in memory.
+
+        Args:
+            key: Unique identifier to check
+
+        Returns:
+            True if key exists, False otherwise
+        """
         return key in self._data
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List all keys, optionally filtered"""
+        """
+        List all keys, optionally filtered by pattern.
+
+        Args:
+            pattern: Optional substring pattern to filter keys
+
+        Returns:
+            List of matching key strings
+        """
         keys = list(self._data.keys())
         if pattern:
             keys = [k for k in keys if pattern in k]
         return keys
 
     def clear(self) -> int:
-        """Clear all data"""
+        """
+        Clear all data from memory.
+
+        Returns:
+            Number of items cleared
+        """
         count = len(self._data)
         self._data.clear()
         return count
 
 
 class FileStorage(MemoryStorage):
-    """File-based persistent storage using pickle"""
+    """
+    File-based persistent storage using pickle.
+
+    Stores each key-value pair as a separate pickle file, with an
+    index file tracking the key-to-file mapping. Suitable for
+    moderate-sized datasets that need persistence across restarts.
+    """
 
     def __init__(self, storage_dir: str = ".calute_memory"):
+        """
+        Initialize file storage.
+
+        Args:
+            storage_dir: Directory path for storing pickle files
+        """
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._index_file = self.storage_dir / "_index.json"
         self._index = self._load_index()
 
     def _load_index(self) -> dict[str, str]:
-        """Load the index mapping keys to files"""
+        """
+        Load the index mapping keys to files.
+
+        Returns:
+            Dictionary mapping keys to their file names
+        """
         if self._index_file.exists():
             with open(self._index_file, "r") as f:
                 return json.load(f)
         return {}
 
     def _save_index(self):
-        """Save the index"""
+        """Save the index to disk."""
         with open(self._index_file, "w") as f:
             json.dump(self._index, f)
 
     def _get_file_path(self, key: str) -> Path:
-        """Get file path for a key"""
+        """
+        Get file path for a key using MD5 hash.
+
+        Args:
+            key: The key to generate a file path for
+
+        Returns:
+            Path object for the pickle file
+        """
         key_hash = hashlib.md5(key.encode()).hexdigest()
         return self.storage_dir / f"{key_hash}.pkl"
 
     def save(self, key: str, data: Any) -> bool:
-        """Save data to file"""
+        """
+        Save data to a pickle file.
+
+        Args:
+            key: Unique identifier for the data
+            data: Data to store (must be pickle-serializable)
+
+        Returns:
+            True if save was successful, False on error
+        """
         try:
             file_path = self._get_file_path(key)
             with open(file_path, "wb") as f:
@@ -138,7 +276,15 @@ class FileStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> Any | None:
-        """Load data from file"""
+        """
+        Load data from a pickle file.
+
+        Args:
+            key: Unique identifier to retrieve
+
+        Returns:
+            Stored data if found, None otherwise
+        """
         if key not in self._index:
             return None
         file_path = self.storage_dir / self._index[key]
@@ -148,7 +294,15 @@ class FileStorage(MemoryStorage):
         return None
 
     def delete(self, key: str) -> bool:
-        """Delete file"""
+        """
+        Delete a pickle file and its index entry.
+
+        Args:
+            key: Unique identifier to delete
+
+        Returns:
+            True if key was found and deleted, False otherwise
+        """
         if key not in self._index:
             return False
         file_path = self.storage_dir / self._index[key]
@@ -159,18 +313,39 @@ class FileStorage(MemoryStorage):
         return True
 
     def exists(self, key: str) -> bool:
-        """Check if key exists"""
+        """
+        Check if key exists in the index.
+
+        Args:
+            key: Unique identifier to check
+
+        Returns:
+            True if key exists, False otherwise
+        """
         return key in self._index
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List all stored keys"""
+        """
+        List all stored keys, optionally filtered by pattern.
+
+        Args:
+            pattern: Optional substring pattern to filter keys
+
+        Returns:
+            List of matching key strings
+        """
         keys = list(self._index.keys())
         if pattern:
             keys = [k for k in keys if pattern in k]
         return keys
 
     def clear(self) -> int:
-        """Clear all files"""
+        """
+        Clear all pickle files and reset index.
+
+        Returns:
+            Number of items cleared
+        """
         count = 0
         for key in list(self._index.keys()):
             if self.delete(key):
@@ -179,9 +354,21 @@ class FileStorage(MemoryStorage):
 
 
 class SQLiteStorage(MemoryStorage):
-    """SQLite-based persistent storage"""
+    """
+    SQLite-based persistent storage.
+
+    Uses SQLite database for reliable persistent storage with ACID
+    properties. Falls back to in-memory storage when WRITE_MEMORY
+    environment variable is not set to "1".
+    """
 
     def __init__(self, db_path: str = ".calute_memory/memory.db"):
+        """
+        Initialize SQLite storage.
+
+        Args:
+            db_path: Path to the SQLite database file
+        """
         import os
 
         self.write_enabled = os.environ.get("WRITE_MEMORY", "0") == "1"
@@ -194,7 +381,7 @@ class SQLiteStorage(MemoryStorage):
             self._memory_storage = {}
 
     def _init_db(self):
-        """Initialize database schema"""
+        """Initialize database schema with memory table and indexes."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
@@ -210,7 +397,16 @@ class SQLiteStorage(MemoryStorage):
             conn.commit()
 
     def save(self, key: str, data: Any) -> bool:
-        """Save data to database or in-memory storage"""
+        """
+        Save data to database or in-memory storage.
+
+        Args:
+            key: Unique identifier for the data
+            data: Data to store (must be pickle-serializable)
+
+        Returns:
+            True if save was successful, False on error
+        """
         if not self.write_enabled:
             self._memory_storage[key] = data
             return True
@@ -232,7 +428,15 @@ class SQLiteStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> Any | None:
-        """Load data from database or in-memory storage"""
+        """
+        Load data from database or in-memory storage.
+
+        Args:
+            key: Unique identifier to retrieve
+
+        Returns:
+            Stored data if found, None otherwise
+        """
         if not self.write_enabled:
             return self._memory_storage.get(key)
 
@@ -244,7 +448,15 @@ class SQLiteStorage(MemoryStorage):
         return None
 
     def delete(self, key: str) -> bool:
-        """Delete from database or in-memory storage"""
+        """
+        Delete from database or in-memory storage.
+
+        Args:
+            key: Unique identifier to delete
+
+        Returns:
+            True if key was found and deleted, False otherwise
+        """
         if not self.write_enabled:
             if key in self._memory_storage:
                 del self._memory_storage[key]
@@ -257,7 +469,15 @@ class SQLiteStorage(MemoryStorage):
             return cursor.rowcount > 0
 
     def exists(self, key: str) -> bool:
-        """Check if key exists"""
+        """
+        Check if key exists in storage.
+
+        Args:
+            key: Unique identifier to check
+
+        Returns:
+            True if key exists, False otherwise
+        """
         if not self.write_enabled:
             return key in self._memory_storage
 
@@ -266,7 +486,15 @@ class SQLiteStorage(MemoryStorage):
             return cursor.fetchone() is not None
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List all stored keys"""
+        """
+        List all stored keys, optionally filtered by pattern.
+
+        Args:
+            pattern: Optional substring pattern to filter keys
+
+        Returns:
+            List of matching key strings, ordered by creation date (newest first)
+        """
         if not self.write_enabled:
             keys = list(self._memory_storage.keys())
             if pattern:
@@ -283,7 +511,12 @@ class SQLiteStorage(MemoryStorage):
             return [row[0] for row in cursor.fetchall()]
 
     def clear(self) -> int:
-        """Clear all data"""
+        """
+        Clear all data from storage.
+
+        Returns:
+            Number of items cleared
+        """
         if not self.write_enabled:
             count = len(self._memory_storage)
             self._memory_storage.clear()
@@ -298,14 +531,37 @@ class SQLiteStorage(MemoryStorage):
 
 
 class RAGStorage(MemoryStorage):
-    """RAG storage with vector similarity search capabilities"""
+    """
+    RAG storage with vector similarity search capabilities.
+
+    Wraps another storage backend and adds vector embedding support
+    for semantic similarity search. Uses a simple hash-based embedding
+    as a placeholder - replace with real embeddings in production.
+    """
 
     def __init__(self, backend: MemoryStorage | None = None):
+        """
+        Initialize RAG storage.
+
+        Args:
+            backend: Underlying storage backend (defaults to SimpleStorage)
+        """
         self.backend = backend or SimpleStorage()
         self.embeddings: dict[str, list[float]] = {}
 
     def _compute_embedding(self, text: str) -> list[float]:
-        """Compute text embedding (placeholder - use real embeddings in production)"""
+        """
+        Compute text embedding using hash-based placeholder.
+
+        This is a placeholder implementation. In production, use real
+        embedding models like sentence-transformers or OpenAI embeddings.
+
+        Args:
+            text: Text to compute embedding for
+
+        Returns:
+            128-dimensional embedding vector
+        """
 
         import hashlib
 
@@ -315,7 +571,16 @@ class RAGStorage(MemoryStorage):
         return embedding
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """Calculate cosine similarity"""
+        """
+        Calculate cosine similarity between two vectors.
+
+        Args:
+            vec1: First vector
+            vec2: Second vector
+
+        Returns:
+            Cosine similarity score between 0 and 1
+        """
         dot = sum(a * b for a, b in zip(vec1, vec2, strict=False))
         norm1 = sum(a * a for a in vec1) ** 0.5
         norm2 = sum(b * b for b in vec2) ** 0.5
@@ -324,7 +589,16 @@ class RAGStorage(MemoryStorage):
         return dot / (norm1 * norm2)
 
     def save(self, key: str, data: Any) -> bool:
-        """Save with embedding"""
+        """
+        Save data with computed embedding.
+
+        Args:
+            key: Unique identifier for the data
+            data: Data to store (embeddings computed for str/dict types)
+
+        Returns:
+            True if save was successful, False otherwise
+        """
         success = self.backend.save(key, data)
         if success and isinstance(data, str | dict):
             text = str(data) if not isinstance(data, str) else data
@@ -332,29 +606,76 @@ class RAGStorage(MemoryStorage):
         return success
 
     def load(self, key: str) -> Any | None:
-        """Load data"""
+        """
+        Load data from backend storage.
+
+        Args:
+            key: Unique identifier to retrieve
+
+        Returns:
+            Stored data if found, None otherwise
+        """
         return self.backend.load(key)
 
     def delete(self, key: str) -> bool:
-        """Delete data and embedding"""
+        """
+        Delete data and its embedding.
+
+        Args:
+            key: Unique identifier to delete
+
+        Returns:
+            True if key was found and deleted, False otherwise
+        """
         self.embeddings.pop(key, None)
         return self.backend.delete(key)
 
     def exists(self, key: str) -> bool:
-        """Check existence"""
+        """
+        Check if key exists in backend storage.
+
+        Args:
+            key: Unique identifier to check
+
+        Returns:
+            True if key exists, False otherwise
+        """
         return self.backend.exists(key)
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys"""
+        """
+        List keys from backend storage.
+
+        Args:
+            pattern: Optional substring pattern to filter keys
+
+        Returns:
+            List of matching key strings
+        """
         return self.backend.list_keys(pattern)
 
     def clear(self) -> int:
-        """Clear all"""
+        """
+        Clear all data and embeddings.
+
+        Returns:
+            Number of items cleared
+        """
         self.embeddings.clear()
         return self.backend.clear()
 
     def search_similar(self, query: str, limit: int = 10, threshold: float = 0.0) -> list[tuple[str, float, Any]]:
-        """Search for similar items"""
+        """
+        Search for items similar to the query.
+
+        Args:
+            query: Search query text
+            limit: Maximum number of results to return
+            threshold: Minimum similarity score (0.0 to 1.0)
+
+        Returns:
+            List of tuples (key, similarity_score, data) sorted by similarity
+        """
         query_embedding = self._compute_embedding(query)
         results = []
 

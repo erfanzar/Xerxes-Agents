@@ -13,7 +13,20 @@
 # limitations under the License.
 
 
-"""FastAPI routers for the OpenAI-compatible API endpoints."""
+"""FastAPI routers for the OpenAI-compatible API endpoints.
+
+This module provides the routing infrastructure for the Calute API server,
+including:
+- Chat completion endpoints (standard and Cortex)
+- Models listing endpoint
+- Health check endpoint
+- Unified routing for mixed agent types
+
+Each router class encapsulates the endpoint logic for a specific
+functionality group, following the modular architecture pattern.
+The routers support both streaming and non-streaming responses,
+with full OpenAI API compatibility.
+"""
 
 import time
 
@@ -30,7 +43,17 @@ from .models import HealthResponse, ModelInfo, ModelsResponse
 
 
 class ChatRouter:
-    """Router for chat completion endpoints."""
+    """Router for chat completion endpoints.
+
+    Provides the /v1/chat/completions endpoint for standard Calute agents,
+    supporting both streaming and non-streaming responses with full
+    OpenAI API compatibility.
+
+    Attributes:
+        agents: Dictionary mapping agent IDs to Agent objects.
+        completion_service: Service for handling chat completions.
+        router: FastAPI APIRouter instance with configured routes.
+    """
 
     def __init__(self, agents: dict[str, Agent], completion_service: CompletionService):
         """Initialize the chat router.
@@ -76,7 +99,15 @@ class ChatRouter:
 
 
 class ModelsRouter:
-    """Router for models endpoints."""
+    """Router for models listing endpoints.
+
+    Provides the /v1/models endpoint that lists all available agents
+    and models, following the OpenAI API specification.
+
+    Attributes:
+        agents: Dictionary mapping agent IDs to Agent objects or model configs.
+        router: FastAPI APIRouter instance with configured routes.
+    """
 
     def __init__(self, agents: dict[str, Agent]):
         """Initialize the models router.
@@ -101,7 +132,15 @@ class ModelsRouter:
 
 
 class HealthRouter:
-    """Router for health check endpoints."""
+    """Router for health check endpoints.
+
+    Provides the /health endpoint for server health monitoring,
+    returning the server status and number of registered agents.
+
+    Attributes:
+        agents: Dictionary mapping agent IDs to Agent objects.
+        router: FastAPI APIRouter instance with configured routes.
+    """
 
     def __init__(self, agents: dict[str, Agent]):
         """Initialize the health router.
@@ -123,7 +162,16 @@ class HealthRouter:
 
 
 class CortexChatRouter:
-    """Router for Cortex chat completion endpoints with multi-agent orchestration."""
+    """Router for Cortex chat completion endpoints with multi-agent orchestration.
+
+    Provides the /v1/chat/completions endpoint for Cortex-based multi-agent
+    orchestration, supporting both task mode and instruction mode with
+    various execution strategies (sequential, parallel, hierarchical).
+
+    Attributes:
+        cortex_completion_service: Service for handling Cortex completions.
+        router: FastAPI APIRouter instance with configured routes.
+    """
 
     def __init__(self, cortex_completion_service: CortexCompletionService):
         """Initialize the Cortex chat router.
@@ -180,7 +228,18 @@ class CortexChatRouter:
 
 
 class UnifiedChatRouter:
-    """Unified router that handles both standard and Cortex chat completions."""
+    """Unified router that handles both standard and Cortex chat completions.
+
+    Routes incoming requests to either standard Calute agents or Cortex
+    multi-agent orchestration based on the model name in the request.
+    This provides a single endpoint that supports all agent types.
+
+    Attributes:
+        agents: Dictionary mapping agent IDs to Agent objects.
+        completion_service: Service for standard agent completions.
+        cortex_completion_service: Service for Cortex completions.
+        router: FastAPI APIRouter instance with configured routes.
+    """
 
     def __init__(
         self,

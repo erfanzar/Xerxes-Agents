@@ -13,6 +13,50 @@
 # limitations under the License.
 
 
+"""Pre-built Planner Agent for project planning and strategic coordination.
+
+This module provides a pre-configured AI agent specialized in project planning
+and strategic coordination tasks within the Calute framework. The planner agent
+excels at breaking down complex projects, creating timelines, and providing
+structured approaches to problem-solving.
+
+The agent is equipped with tools for:
+- Processing and generating JSON structured data for plans
+- Reading files to understand project context and requirements
+- Writing files to persist plans and documentation
+
+Agent Capabilities:
+    - Task Decomposition: Breaking down complex projects into manageable tasks
+    - Timeline Planning: Creating realistic timelines and milestones
+    - Risk Assessment: Identifying and planning for potential risks
+    - Resource Optimization: Allocating resources effectively
+    - Progress Tracking: Monitoring and adjusting plans as needed
+    - Strategic Analysis: Providing insights and recommendations
+
+Planning Principles:
+    - Clear objectives and success criteria definition
+    - Specific, measurable task breakdown
+    - Dependency and critical path identification
+    - Buffer time allocation for contingencies
+    - Resource constraint consideration
+    - Regular checkpoint planning
+
+Typical usage example:
+    from calute import Calute
+    from calute.agents import planner_agent
+
+    calute = Calute(llm=your_llm)
+    response = calute.run(
+        prompt="Create a project plan for building a REST API",
+        agent_id=planner_agent
+    )
+
+Note:
+    The agent uses a low temperature (0.2) to ensure consistent and
+    deterministic planning outputs. It has a high token limit (8192)
+    to accommodate detailed project plans and comprehensive breakdowns.
+"""
+
 from ..tools import JSONProcessor, ReadFile, WriteFile
 from ..types import Agent
 

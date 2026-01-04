@@ -28,7 +28,12 @@ class UserMemory:
     """
 
     def __init__(self, storage=None):
-        """Initialize user memory manager"""
+        """
+        Initialize user memory manager.
+
+        Args:
+            storage: Storage backend for persistence
+        """
         self.storage = storage
         self.user_memories: dict[str, ContextualMemory] = {}
         self.user_entities: dict[str, EntityMemory] = {}
@@ -41,7 +46,18 @@ class UserMemory:
             self.user_preferences = self.storage.load("_user_preferences") or {}
 
     def get_or_create_user_memory(self, user_id: str) -> ContextualMemory:
-        """Get or create memory for a user"""
+        """
+        Get or create memory for a user.
+
+        Creates new contextual memory, entity memory, and default preferences
+        if the user doesn't exist yet.
+
+        Args:
+            user_id: Unique identifier for the user
+
+        Returns:
+            ContextualMemory instance for the user
+        """
         if user_id not in self.user_memories:
             self.user_memories[user_id] = ContextualMemory(long_term_storage=self.storage)
             self.user_entities[user_id] = EntityMemory(storage=self.storage)
@@ -51,7 +67,21 @@ class UserMemory:
         return self.user_memories[user_id]
 
     def save_memory(self, user_id: str, content: str, metadata: dict[str, Any] | None = None, **kwargs):
-        """Save memory for a specific user"""
+        """
+        Save memory for a specific user.
+
+        Stores the memory in both contextual and entity memory systems
+        for comprehensive tracking.
+
+        Args:
+            user_id: Unique identifier for the user
+            content: Memory content to store
+            metadata: Additional metadata for the memory
+            **kwargs: Additional fields passed to memory save
+
+        Returns:
+            Created MemoryItem
+        """
         memory = self.get_or_create_user_memory(user_id)
         metadata = metadata or {}
         metadata["user_id"] = user_id
@@ -65,12 +95,34 @@ class UserMemory:
         return item
 
     def search_user_memory(self, user_id: str, query: str, limit: int = 10, **kwargs) -> list:
-        """Search memories for a specific user"""
+        """
+        Search memories for a specific user.
+
+        Args:
+            user_id: Unique identifier for the user
+            query: Search query string
+            limit: Maximum number of results to return
+            **kwargs: Additional search parameters
+
+        Returns:
+            List of matching MemoryItem objects
+        """
         memory = self.get_or_create_user_memory(user_id)
         return memory.search(query=query, limit=limit, **kwargs)
 
     def get_user_context(self, user_id: str) -> str:
-        """Get current context for a user"""
+        """
+        Get current context for a user.
+
+        Combines user preferences, memory context summary, and known entities
+        into a formatted context string.
+
+        Args:
+            user_id: Unique identifier for the user
+
+        Returns:
+            Formatted context string containing preferences, memories, and entities
+        """
         memory = self.get_or_create_user_memory(user_id)
         entity_mem = self.user_entities.get(user_id)
 
@@ -89,7 +141,15 @@ class UserMemory:
         return "\n\n".join(context_parts)
 
     def update_user_preferences(self, user_id: str, preferences: dict[str, Any]):
-        """Update user preferences"""
+        """
+        Update user preferences.
+
+        Merges new preferences with existing ones and persists to storage.
+
+        Args:
+            user_id: Unique identifier for the user
+            preferences: Dictionary of preference keys and values to update
+        """
         if user_id not in self.user_preferences:
             self.user_preferences[user_id] = self._get_default_preferences()
 
@@ -97,11 +157,28 @@ class UserMemory:
         self._save_preferences()
 
     def get_user_preferences(self, user_id: str) -> dict[str, Any]:
-        """Get user preferences"""
+        """
+        Get user preferences.
+
+        Args:
+            user_id: Unique identifier for the user
+
+        Returns:
+            Dictionary of user preferences, or defaults if user not found
+        """
         return self.user_preferences.get(user_id, self._get_default_preferences())
 
     def get_user_statistics(self, user_id: str) -> dict[str, Any]:
-        """Get statistics for a user"""
+        """
+        Get statistics for a user.
+
+        Args:
+            user_id: Unique identifier for the user
+
+        Returns:
+            Dictionary containing memory counts, entity counts, relationships,
+            and user preferences
+        """
         stats = {
             "user_id": user_id,
             "total_memories": 0,
@@ -123,7 +200,14 @@ class UserMemory:
         return stats
 
     def clear_user_memory(self, user_id: str):
-        """Clear all memories for a user"""
+        """
+        Clear all memories for a user.
+
+        Removes contextual memory, entity memory, and preferences for the user.
+
+        Args:
+            user_id: Unique identifier for the user
+        """
         if user_id in self.user_memories:
             self.user_memories[user_id].clear()
             del self.user_memories[user_id]
@@ -137,7 +221,13 @@ class UserMemory:
             self._save_preferences()
 
     def _get_default_preferences(self) -> dict[str, Any]:
-        """Get default user preferences"""
+        """
+        Get default user preferences.
+
+        Returns:
+            Dictionary with default preference values for response style,
+            verbosity, technical level, language, timezone, and memory settings
+        """
         return {
             "response_style": "balanced",
             "verbosity": "normal",

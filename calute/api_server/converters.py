@@ -13,7 +13,23 @@
 # limitations under the License.
 
 
-"""Message conversion utilities for the API server."""
+"""Message conversion utilities for the API server.
+
+This module provides utilities for converting between OpenAI-format
+messages and Calute's internal message format. It includes:
+- Bidirectional message format conversion
+- Support for system, user, and assistant message roles
+- Proper handling of message content extraction
+
+The conversion utilities enable seamless interoperability between
+OpenAI-compatible API requests and Calute's agent processing pipeline.
+
+Example:
+    >>> from calute.api_server.converters import MessageConverter
+    >>> from calute.types.oai_protocols import ChatMessage
+    >>> messages = [ChatMessage(role="user", content="Hello")]
+    >>> history = MessageConverter.convert_openai_to_calute(messages)
+"""
 
 from calute.types import MessagesHistory
 from calute.types.messages import AssistantMessage, SystemMessage, UserMessage
@@ -21,7 +37,13 @@ from calute.types.oai_protocols import ChatMessage
 
 
 class MessageConverter:
-    """Converts between OpenAI and Calute message formats."""
+    """Converts between OpenAI and Calute message formats.
+
+    Utility class providing static methods for bidirectional
+    conversion between OpenAI-format ChatMessage objects and
+    Calute's internal MessagesHistory format. Handles role
+    mapping and content extraction for all supported message types.
+    """
 
     @staticmethod
     def convert_openai_to_calute(messages: list[ChatMessage]) -> MessagesHistory:

@@ -13,6 +13,34 @@
 # limitations under the License.
 
 
+"""Memory management system for Calute AI agents.
+
+This module provides a comprehensive memory subsystem for AI agents, enabling
+them to store, retrieve, and manage information across different contexts and
+time scales. The memory system supports multiple storage backends and memory
+types optimized for different use cases.
+
+Memory Types:
+    - ShortTermMemory: Temporary storage for current conversation context
+    - LongTermMemory: Persistent storage for important information across sessions
+    - ContextualMemory: Context-aware memory that adapts to the current situation
+    - EntityMemory: Specialized memory for tracking entities and their attributes
+    - UserMemory: User-specific memory for personalization
+
+Storage Backends:
+    - SimpleStorage: In-memory storage for development and testing
+    - SQLiteStorage: Persistent local storage using SQLite
+    - RAGStorage: Vector-based storage for semantic retrieval
+
+Example:
+    >>> from calute.memory import ShortTermMemory, MemoryItem
+    >>>
+    >>> memory = ShortTermMemory()
+    >>> item = MemoryItem(content="Important information", metadata={"source": "user"})
+    >>> memory.add(item)
+    >>> results = memory.search("information")
+"""
+
 from .base import Memory, MemoryItem
 from .compat import MemoryStore, MemoryType
 from .contextual_memory import ContextualMemory

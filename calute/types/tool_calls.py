@@ -13,6 +13,35 @@
 # limitations under the License.
 
 
+"""Tool and function call type definitions for Calute.
+
+This module defines the core data structures for representing tools
+and function calls in the Calute framework. It provides:
+- Function definitions with JSON Schema parameters
+- Tool wrappers for functions
+- Tool choice options for controlling tool selection
+- Function call representations for LLM outputs
+- Tool call structures with unique identifiers
+
+The types are designed to be compatible with OpenAI's function calling
+API format while providing additional validation and type safety through
+Pydantic models.
+
+Example:
+    >>> from calute.types.tool_calls import Tool, Function, ToolCall, FunctionCall
+    >>> tool = Tool(
+    ...     function=Function(
+    ...         name="get_weather",
+    ...         description="Get weather for a location",
+    ...         parameters={"type": "object", "properties": {"location": {"type": "string"}}}
+    ...     )
+    ... )
+    >>> tool_call = ToolCall(
+    ...     id="call_123",
+    ...     function=FunctionCall(name="get_weather", arguments='{"location": "NYC"}')
+    ... )
+"""
+
 import json
 from enum import Enum
 from typing import Any, TypeVar
@@ -114,10 +143,23 @@ class Tool(CaluteBase):
     function: Function
 
     def to_openai(self) -> dict[str, Any]:
+        """Convert the tool to OpenAI-compatible format.
+
+        Returns:
+            Dictionary representation compatible with OpenAI's API.
+        """
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, openai_tool: dict[str, Any]) -> "Tool":
+        """Create a Tool instance from an OpenAI-formatted dictionary.
+
+        Args:
+            openai_tool: Dictionary in OpenAI tool format.
+
+        Returns:
+            A new Tool instance.
+        """
         return cls.model_validate(openai_tool)
 
 
@@ -176,11 +218,25 @@ class ToolCall(CaluteBase):
     function: FunctionCall
 
     def to_openai(self) -> dict[str, Any]:
+        """Convert the tool call to OpenAI-compatible format.
+
+        Returns:
+            Dictionary representation compatible with OpenAI's API.
+        """
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, tool_call: dict[str, Any]) -> "ToolCall":
+        """Create a ToolCall instance from an OpenAI-formatted dictionary.
+
+        Args:
+            tool_call: Dictionary in OpenAI tool call format.
+
+        Returns:
+            A new ToolCall instance.
+        """
         return cls.model_validate(tool_call)
 
 
 ToolType = TypeVar("ToolType", bound=Tool)
+"""TypeVar bound to Tool for generic tool handling."""

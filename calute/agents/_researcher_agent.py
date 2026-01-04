@@ -13,6 +13,42 @@
 # limitations under the License.
 
 
+"""Research Agent for comprehensive information gathering and analysis.
+
+This module provides a pre-built research agent implementation for the Calute
+framework, specialized in conducting thorough research, source evaluation,
+information synthesis, and fact-checking. The agent leverages web search,
+content extraction, and NLP tools to gather and analyze information from
+multiple sources.
+
+Key Features:
+    - Comprehensive research with configurable depth levels (quick, standard, comprehensive)
+    - Source credibility analysis and bias assessment
+    - Multi-source information synthesis and summarization
+    - Citation generation in multiple formats (APA, MLA, Chicago)
+    - Fact-checking against reliable sources
+    - Literature review generation with structured sections
+    - Key concept extraction from text documents
+
+Module Attributes:
+    research_state (dict): Global state tracking research sessions, sources,
+        findings, citations, and knowledge base entries.
+    research_agent (Agent): Pre-configured research agent instance with all
+        research tools and capabilities enabled.
+
+Example:
+    >>> from calute.agents import research_agent
+    >>> # Use the pre-built research agent
+    >>> result = await calute.run(
+    ...     agent=research_agent,
+    ...     messages=[{"role": "user", "content": "Research AI safety trends"}]
+    ... )
+
+    >>> # Or use individual research functions
+    >>> from calute.agents._researcher_agent import conduct_research
+    >>> findings = conduct_research("machine learning", depth="comprehensive")
+"""
+
 from collections import defaultdict
 from datetime import datetime
 

@@ -26,6 +26,36 @@ agent management capabilities including:
 
 The module also includes prompt templating utilities and helper functions
 for formatting and parsing agent responses.
+
+Key components:
+- Calute: Main orchestration class for managing AI agents
+- PromptSection: Enumeration for structured prompt sections
+- PromptTemplate: Configurable template for structuring agent prompts
+
+Typical usage example:
+    from calute import Calute, Agent
+    from calute.llms import OpenAILLM
+
+    # Initialize Calute with an LLM
+    llm = OpenAILLM(api_key="your-api-key")
+    calute = Calute(llm=llm, enable_memory=True)
+
+    # Create and register an agent
+    agent = Agent(
+        id="assistant",
+        instructions="You are a helpful assistant.",
+        model="gpt-4"
+    )
+    calute.register_agent(agent)
+
+    # Generate a response (streaming)
+    for chunk in calute.run(prompt="Hello!"):
+        if chunk.content:
+            print(chunk.content, end="")
+
+    # Generate a response (non-streaming)
+    result = calute.run(prompt="Hello!", stream=False)
+    print(result.content)
 """
 
 import asyncio
@@ -84,6 +114,23 @@ class PromptSection(Enum):
     This enum defines the standard sections that can be included in a
     structured prompt template, allowing for consistent prompt organization
     across different agents and use cases.
+
+    Attributes:
+        SYSTEM: System-level instructions and configuration.
+        PERSONA: Agent personality and role definition.
+        RULES: Behavioral rules and constraints for the agent.
+        FUNCTIONS: Available function/tool definitions.
+        TOOLS: Tool usage instructions and format specifications.
+        EXAMPLES: Example interactions for few-shot learning.
+        CONTEXT: Contextual information and variables.
+        HISTORY: Conversation history from previous turns.
+        PROMPT: The actual user prompt/query.
+
+    Example:
+        >>> template = PromptTemplate(
+        ...     sections={PromptSection.SYSTEM: "INSTRUCTIONS:"},
+        ...     section_order=[PromptSection.SYSTEM, PromptSection.PROMPT]
+        ... )
     """
 
     SYSTEM = "system"
@@ -155,20 +202,46 @@ class Calute:
     memory integration, and response generation with support for both
     streaming and non-streaming modes.
 
+    The Calute class provides:
+    - Agent registration and orchestration across multiple agents
+    - Automatic function/tool calling with retry logic
+    - Memory system integration for context persistence
+    - Both synchronous (run) and asynchronous (create_response) interfaces
+    - Streaming and non-streaming response modes
+    - Prompt template customization
+    - Agent switching based on capabilities or error recovery
+
     Attributes:
         SEP: Class variable defining the separator used for indentation.
-        llm_client: The LLM backend client for generating completions.
-        template: Prompt template for structuring agent prompts.
-        orchestrator: Agent orchestrator for managing multi-agent workflows.
-        executor: Function executor for handling tool calls.
-        enable_memory: Whether memory system is enabled.
-        memory_store: Memory storage system (if enabled).
+        llm_client: The BaseLLM instance for generating completions.
+        template: PromptTemplate for structuring agent prompts.
+        orchestrator: AgentOrchestrator for managing multi-agent workflows.
+        executor: FunctionExecutor for handling tool/function calls.
+        enable_memory: Whether the memory system is enabled.
+        auto_add_memory_tools: Whether to auto-add memory tools to agents.
+        memory_store: MemoryStore instance for persistent context (if enabled).
 
     Example:
-        >>> from calute import Calute, OpenAILLM
+        Basic usage with streaming:
+
+        >>> from calute import Calute, Agent
+        >>> from calute.llms import OpenAILLM
         >>> llm = OpenAILLM(api_key="your-key")
         >>> calute = Calute(llm=llm, enable_memory=True)
-        >>> response = calute.run(prompt="Hello!")
+        >>> agent = Agent(id="helper", instructions="You are helpful.")
+        >>> calute.register_agent(agent)
+        >>> for chunk in calute.run(prompt="Hello!"):
+        ...     print(chunk.content, end="")
+
+        Non-streaming usage:
+
+        >>> result = calute.run(prompt="Hello!", stream=False)
+        >>> print(result.content)
+
+        Async usage:
+
+        >>> async for chunk in await calute.create_response(prompt="Hi"):
+        ...     print(chunk.content, end="")
     """
 
     SEP: tp.ClassVar[str] = SEP
@@ -228,12 +301,27 @@ class Calute:
             )
         self._setup_default_triggers()
 
-    def _setup_default_triggers(self):
+    def _setup_default_triggers(self) -> None:
         """Setup default agent switching triggers.
 
-        Registers default trigger functions for agent switching including:
-        - Capability-based switching: Switch to agent with required capabilities
-        - Error recovery switching: Switch to fallback agent on errors
+        Registers default trigger handler functions with the orchestrator for
+        automatic agent switching based on context conditions. These triggers
+        enable intelligent multi-agent orchestration.
+
+        Registered Triggers:
+            - CAPABILITY_BASED: Switches to an agent that has a required
+              capability when 'required_capability' is present in context.
+              Selects the agent with the highest performance score for that
+              capability.
+            - ERROR_RECOVERY: Switches to the current agent's fallback_agent_id
+              when 'execution_error' is present in context, enabling graceful
+              error recovery.
+
+        Returns:
+            None
+
+        Side Effects:
+            Registers two switch trigger handlers with self.orchestrator.
         """
 
         def capability_based_switch(context, agents, current_agent_id):  # type:ignore
@@ -265,22 +353,52 @@ class Calute:
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.CAPABILITY_BASED, capability_based_switch)
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.ERROR_RECOVERY, error_recovery_switch)
 
-    def register_agent(self, agent: Agent):
+    def register_agent(self, agent: Agent) -> None:
         """Register an agent with the orchestrator.
+
+        Registers the agent for multi-agent orchestration, optionally adding
+        memory tools if memory is enabled and auto_add_memory_tools is True.
+        The first registered agent becomes the default active agent.
 
         Args:
             agent: The Agent instance to register for orchestration.
-        """
 
+        Returns:
+            None
+
+        Side Effects:
+            - Adds memory tools to agent if memory is enabled
+            - Updates orchestrator's agent registry
+            - Sets agent as current if it's the first registered
+
+        Example:
+            >>> agent = Agent(id="helper", instructions="Be helpful")
+            >>> calute.register_agent(agent)
+        """
         if self.enable_memory and self.auto_add_memory_tools:
             self._add_memory_tools_to_agent(agent)
         self.orchestrator.register_agent(agent)
 
-    def _add_memory_tools_to_agent(self, agent: Agent):
+    def _add_memory_tools_to_agent(self, agent: Agent) -> None:
         """Add memory tools to an agent if not already present.
 
+        Imports and adds the standard memory tools (store, retrieve, etc.)
+        to the agent's function list, enabling the agent to interact with
+        the memory system during conversations.
+
         Args:
-            agent: The agent to add memory tools to.
+            agent: The Agent instance to add memory tools to.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Initializes agent.functions to empty list if None
+            - Appends memory tools not already present in agent.functions
+
+        Note:
+            This method checks for existing functions by name to avoid
+            duplicate tool registrations.
         """
         from .tools.memory_tool import MEMORY_TOOLS
 
@@ -299,14 +417,29 @@ class Calute:
         agent_id: str,
         context_variables: dict | None = None,
         function_calls: list[RequestFunctionCall] | None = None,
-    ):
+    ) -> None:
         """Update memory system based on agent response.
+
+        Stores the agent's response and any function calls in the memory
+        system for future context retrieval. Response content is stored
+        as short-term memory, while function calls are stored as working
+        memory with higher importance.
 
         Args:
             content: The response content from the agent.
             agent_id: ID of the agent that generated the response.
             context_variables: Optional context variables to store with memory.
             function_calls: Optional list of function calls made in the response.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Adds response content to short-term memory (importance: 0.6)
+            - Adds each function call to working memory (importance: 0.7)
+
+        Note:
+            This method is a no-op if memory is not enabled.
         """
         if not self.enable_memory:
             return
@@ -330,12 +463,25 @@ class Calute:
                     tags=["function_call", call.name],
                 )
 
-    def _update_memory_from_prompt(self, prompt: str, agent_id: str):
+    def _update_memory_from_prompt(self, prompt: str, agent_id: str) -> None:
         """Update memory system from user prompt.
 
+        Stores the user's prompt in short-term memory with high importance
+        for context retrieval in subsequent interactions.
+
         Args:
-            prompt: The user's input prompt.
+            prompt: The user's input prompt text.
             agent_id: ID of the agent receiving the prompt.
+
+        Returns:
+            None
+
+        Side Effects:
+            - Adds user prompt to short-term memory (importance: 0.8)
+            - Tags the memory entry with "user_input"
+
+        Note:
+            This method is a no-op if memory is not enabled.
         """
         if not self.enable_memory:
             return
@@ -354,9 +500,24 @@ class Calute:
         content: str | list[str] | None,
         item_prefix: str | None = "- ",
     ) -> str | None:
-        """
-        Formats a section of the prompt with a header and indented content.
-        Returns None if the content is empty.
+        """Format a section of the prompt with a header and indented content.
+
+        Creates a formatted prompt section with proper indentation and
+        optional item prefixes for list content.
+
+        Args:
+            header: The section header text (e.g., "RULES:", "CONTEXT:").
+            content: The section content as a string or list of strings.
+            item_prefix: Optional prefix for list items (default: "- ").
+                Set to None to disable prefixing.
+
+        Returns:
+            Formatted section string with header and indented content,
+            or None if content is empty or None.
+
+        Example:
+            >>> calute._format_section("RULES:", ["Be helpful", "Be concise"])
+            'RULES:\\n  - Be helpful\\n  - Be concise'
         """
         if not content:
             return None
@@ -372,17 +533,26 @@ class Calute:
         indented = textwrap.indent(content_str, SEP)
         return f"{header}\n{indented}" if header else indented
 
-    def _extract_from_markdown(self, content: str, field: str) -> list[RequestFunctionCall]:
-        """Extract function calls from markdown code blocks.
+    def _extract_from_markdown(self, content: str, field: str) -> list[str]:
+        """Extract content from markdown code blocks with a specific field identifier.
+
+        Searches for all markdown code blocks with the specified field identifier
+        and extracts their raw content as strings.
 
         Args:
-            content: The response content to search.
-            field: The markdown field identifier (e.g., 'tool_call').
+            content: The response content to search through.
+            field: The markdown field identifier (e.g., 'tool_call', 'json').
+                This is matched after the opening triple backticks.
 
         Returns:
-            List of extracted function call strings from markdown blocks.
-        """
+            List of extracted content strings from matching markdown blocks.
+            Returns empty list if no matching blocks are found.
 
+        Example:
+            >>> content = '```tool_call\\n{"name": "func"}\\n```'
+            >>> calute._extract_from_markdown(content, "tool_call")
+            ['{"name": "func"}']
+        """
         pattern = rf"```{field}\s*\n(.*?)\n```"
         return re.findall(pattern, content, re.DOTALL)
 
@@ -771,18 +941,31 @@ class Calute:
     def extract_from_markdown(format: str, string: str) -> str | None | dict:  # noqa:A002
         """Extract content from a markdown code block with specific format.
 
+        Searches for a markdown code block with the specified format identifier
+        and extracts its content. If the content is valid JSON, it is parsed
+        and returned as a dictionary.
+
         Args:
-            format: The markdown format identifier to search for.
-            string: The string containing the markdown block.
+            format: The markdown format identifier to search for (e.g., 'json',
+                'python', 'xml'). This is matched after the opening triple backticks.
+            string: The string containing the markdown block to search.
 
         Returns:
-            Parsed JSON dictionary if valid JSON, raw string if not JSON,
-            or None if format not found.
+            - dict: If the block content is valid JSON
+            - str: If the block content is not valid JSON
+            - None: If no matching format block is found
 
         Example:
-            >>> content = '```json\n{"key": "value"}\n```'
+            >>> content = '```json\\n{"key": "value"}\\n```'
             >>> Calute.extract_from_markdown("json", content)
             {'key': 'value'}
+
+            >>> content = '```python\\nprint("hello")\\n```'
+            >>> Calute.extract_from_markdown("python", content)
+            'print("hello")'
+
+        Note:
+            Only the first matching block is extracted if multiple exist.
         """
         pattern = rf"```{re.escape(format)}\s*\n(.*?)\n```"
         m = re.search(pattern, string, re.DOTALL)
@@ -1985,6 +2168,27 @@ class Calute:
         return streamer_buffer, task
 
     def create_ui(self, target_agent: Agent = None):
+        """Create and launch a user interface for interactive agent chat.
+
+        Launches a graphical user interface for interacting with the Calute
+        agent system. The UI provides a chat-like interface for sending
+        prompts and viewing streaming responses.
+
+        Args:
+            target_agent: Optional specific Agent to use in the UI.
+                If None, uses the current active agent from the orchestrator.
+
+        Returns:
+            The launched application instance from the UI module.
+
+        Example:
+            >>> calute = Calute(llm=my_llm)
+            >>> calute.register_agent(my_agent)
+            >>> calute.create_ui()  # Launches interactive UI
+
+        Note:
+            Requires the UI module dependencies to be installed.
+        """
         from .ui import launch_application
 
         return launch_application(executor=self, agent=target_agent)

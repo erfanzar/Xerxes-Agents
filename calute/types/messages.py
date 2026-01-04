@@ -13,6 +13,25 @@
 # limitations under the License.
 
 
+"""Message type definitions for Calute.
+
+This module provides a comprehensive message system for handling
+conversations with LLM models. It includes:
+- Content chunk types for text, images, and image URLs
+- Message types for different conversation roles (system, user, assistant, tool)
+- Message history management with OpenAI format conversion
+- Support for multimodal content including images and text
+
+The message system follows a type-safe design using Pydantic models
+with discriminated unions for proper serialization and validation.
+
+Example:
+    >>> from calute.types.messages import UserMessage, MessagesHistory
+    >>> user_msg = UserMessage(content="Hello, how can I help you?")
+    >>> history = MessagesHistory(messages=[user_msg])
+    >>> openai_format = history.to_openai()
+"""
+
 import re
 import textwrap
 from enum import Enum
@@ -135,6 +154,13 @@ class ImageURLChunk(BaseContentChunk):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def get_url(self) -> str:
+        """Extract the URL string from the image_url attribute.
+
+        Handles both ImageURL objects and plain string URLs.
+
+        Returns:
+            The URL string for the image.
+        """
         if isinstance(self.image_url, ImageURL):
             return self.image_url.url
         return self.image_url
@@ -180,10 +206,28 @@ class TextChunk(BaseContentChunk):
         return cls.model_validate(messages)
 
 
+#: Discriminated union of all content chunk types for multimodal message content.
 ContentChunk = Annotated[TextChunk | ImageChunk | ImageURLChunk, Field(discriminator="type")]
 
 
 def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[str, str]]) -> ContentChunk:
+    """Convert an OpenAI format content chunk to the appropriate Calute content chunk type.
+
+    This internal function handles the conversion of content chunks from the OpenAI
+    message format to their corresponding Calute ContentChunk types based on the
+    'type' field.
+
+    Args:
+        openai_content_chunks: A dictionary representing an OpenAI format content chunk.
+            Must contain a 'type' field indicating the chunk type.
+
+    Returns:
+        The appropriate ContentChunk subclass instance (TextChunk, ImageURLChunk,
+        or ImageChunk) based on the chunk type.
+
+    Raises:
+        ValueError: If the content chunk has no 'type' field or an unknown type.
+    """
     content_type_str = openai_content_chunks.get("type")
 
     if content_type_str is None:
@@ -394,16 +438,38 @@ class ToolMessage(BaseMessage):
         return tool_message
 
 
+# Internal mapping from message class types to their corresponding roles.
 _map_type_to_role = {
     ToolMessage: Roles.tool,
     UserMessage: Roles.user,
     AssistantMessage: Roles.assistant,
     SystemMessage: Roles.system,
 }
+
+# Internal reverse mapping from roles to their corresponding message class types.
 _map_role_to_type = {v: k for k, v in _map_type_to_role.items()}
 
 
 class MessagesHistory(CaluteBase):
+    """Container for managing a sequence of chat messages.
+
+    Provides a structured container for storing and manipulating chat
+    conversation history. Supports conversion to/from OpenAI format
+    and generation of instruction prompts for model input.
+
+    Attributes:
+        messages: List of chat messages in the conversation. Each message
+            is discriminated by its role (system, user, assistant, or tool).
+
+    Example:
+        >>> from calute.types.messages import UserMessage, AssistantMessage, MessagesHistory
+        >>> history = MessagesHistory(messages=[
+        ...     UserMessage(content="Hello!"),
+        ...     AssistantMessage(content="Hi there! How can I help you?"),
+        ... ])
+        >>> openai_format = history.to_openai()
+    """
+
     messages: list[
         Annotated[
             SystemMessage | UserMessage | AssistantMessage | ToolMessage,
@@ -427,6 +493,26 @@ class MessagesHistory(CaluteBase):
         cls,
         openai_messages: list[dict[str, str | list[dict[str, str | dict[str, Any]]]]],
     ) -> "MessagesHistory":
+        """Create a MessagesHistory from OpenAI format messages.
+
+        Converts a list of OpenAI format message dictionaries into a
+        MessagesHistory instance with properly typed message objects.
+
+        Args:
+            openai_messages: List of message dictionaries in OpenAI format.
+                Each dictionary must contain a 'role' field to determine
+                the message type.
+
+        Returns:
+            A MessagesHistory instance containing the converted messages.
+
+        Example:
+            >>> openai_msgs = [
+            ...     {"role": "user", "content": "Hello!"},
+            ...     {"role": "assistant", "content": "Hi there!"},
+            ... ]
+            >>> history = MessagesHistory.from_openai(openai_msgs)
+        """
         messages = []
         for message in openai_messages:
             messages.append(_map_role_to_type[message.get("role")].from_openai(message))
@@ -437,10 +523,21 @@ class MessagesHistory(CaluteBase):
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
     ) -> str:
-        """
-        Formats the entire message history into a single, human-readable string
-        while ensuring any tool calls are rendered in the canonical XML format
-        so the LLM continues to use it.
+        """Format the message history into a human-readable instruction prompt.
+
+        Converts the entire message history into a single, structured string
+        suitable for LLM input. Tool calls are rendered in canonical XML format
+        to encourage the LLM to follow the same pattern.
+
+        Args:
+            conversation_name_holder: The section header name for the conversation
+                history section (default: "Messages").
+            mention_last_turn: Whether to append a summary of the last message
+                at the end of the prompt (default: True).
+
+        Returns:
+            A formatted string containing the instruction prompt with all
+            messages properly structured and indented.
         """
         ind1 = "  "
         prompt_parts: list[str] = []
@@ -505,10 +602,23 @@ class MessagesHistory(CaluteBase):
         return "\n\n".join(prompt_parts)
 
 
+#: Discriminated union of all chat message types, keyed by role.
 ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
+
+#: Generic type variable for any chat message type.
 ChatMessageType = TypeVar("ChatMessageType", bound=ChatMessage)
+
+#: Generic type variable bound to UserMessage.
 UserMessageType = TypeVar("UserMessageType", bound=UserMessage)
+
+#: Generic type variable bound to AssistantMessage.
 AssistantMessageType = TypeVar("AssistantMessageType", bound=AssistantMessage)
+
+#: Generic type variable bound to ToolMessage.
 ToolMessageType = TypeVar("ToolMessageType", bound=ToolMessage)
+
+#: Generic type variable bound to SystemMessage.
 SystemMessageType = TypeVar("SystemMessageType", bound=SystemMessage)
+
+#: Type alias for a list of chat messages representing a conversation.
 ConversionType: TypeAlias = list[ChatMessage]

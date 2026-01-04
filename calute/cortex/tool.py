@@ -13,7 +13,34 @@
 # limitations under the License.
 
 
-"""Tool definition for Cortex agents"""
+"""Tool definition for Cortex agents.
+
+This module provides the CortexTool class, which represents callable tools
+that can be used by Cortex agents to perform specific actions. Tools wrap
+Python functions and automatically generate OpenAI-compatible function
+schemas for integration with LLM function calling capabilities.
+
+Key features:
+- Automatic JSON schema generation from function signatures
+- OpenAI function calling format compatibility
+- Factory method for easy tool creation from existing functions
+- Customizable parameter schemas for complex tool definitions
+
+Typical usage example:
+    # Create tool with auto-generated schema
+    @CortexTool.from_function
+    def search_database(query: str, limit: int = 10) -> list:
+        '''Search the database for matching records.'''
+        return db.search(query, limit)
+
+    # Or create manually with custom schema
+    tool = CortexTool(
+        name="calculate",
+        description="Perform arithmetic calculations",
+        function=calculate_fn,
+        parameters={"type": "object", "properties": {...}}
+    )
+"""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -24,7 +51,33 @@ from ..utils import function_to_json
 
 @dataclass
 class CortexTool:
-    """Tool that can be used by agents"""
+    """Tool that can be used by Cortex agents.
+
+    CortexTool wraps a Python callable function and provides metadata
+    and schema information required for integration with LLM function
+    calling APIs. It can automatically generate parameter schemas from
+    function signatures or accept custom schema definitions.
+
+    Attributes:
+        name: The name of the tool as it will appear to the LLM.
+        description: Human-readable description of what the tool does.
+            This is used by the LLM to decide when to use the tool.
+        function: The Python callable that implements the tool's functionality.
+        parameters: Optional dictionary defining the JSON schema for tool
+            parameters. If empty and auto_generate_schema is True, the schema
+            is automatically generated from the function signature.
+        auto_generate_schema: Whether to automatically generate the parameter
+            schema from the function signature when parameters is empty.
+            Defaults to True.
+
+    Example:
+        >>> def get_weather(city: str, units: str = "celsius") -> str:
+        ...     '''Get current weather for a city.'''
+        ...     return f"Weather in {city}: 22 {units}"
+        >>> tool = CortexTool.from_function(get_weather)
+        >>> tool.to_function_json()
+        {'type': 'function', 'function': {'name': 'get_weather', ...}}
+    """
 
     name: str
     description: str
@@ -33,11 +86,22 @@ class CortexTool:
     auto_generate_schema: bool = True
 
     def to_function_json(self) -> dict:
-        """
-        Convert tool to OpenAI function JSON format.
+        """Convert tool to OpenAI function JSON format.
 
-        If auto_generate_schema is True and no parameters are provided,
-        automatically generate the schema from the function signature.
+        Generates a dictionary conforming to the OpenAI function calling
+        schema format. If auto_generate_schema is True and no parameters
+        are provided, automatically generates the schema from the function
+        signature using type hints and docstrings.
+
+        Returns:
+            dict: A dictionary in OpenAI function format containing:
+                - type: Always "function"
+                - function: Dictionary with name, description, and parameters
+
+        Note:
+            When using auto_generate_schema, the function should have type
+            hints for best results. The tool name and description from this
+            instance will override any auto-generated values.
         """
         if self.auto_generate_schema and not self.parameters and self.function:
             schema = function_to_json(self.function)

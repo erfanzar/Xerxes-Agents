@@ -13,7 +13,20 @@
 # limitations under the License.
 
 
-"""Main API server class for the modular Calute API server."""
+"""Main API server for the modular Calute API server.
+
+This module provides the core API server infrastructure for Calute,
+including:
+- FastAPI-based HTTP server with OpenAI-compatible endpoints
+- Agent registration and management
+- Cortex multi-agent orchestration support
+- Modular router architecture for different endpoint groups
+- Completion services for both standard and Cortex agents
+
+The server supports both standard Calute agents and Cortex agents
+for multi-agent orchestration, with full compatibility with OpenAI
+client libraries.
+"""
 
 from __future__ import annotations
 
@@ -45,14 +58,14 @@ class CaluteAPIServer:
     - Centralized models for request/response handling
 
     Attributes:
-        calute: The Calute instance managing agents
-        agents: Dictionary mapping agent IDs to Agent objects
-        app: FastAPI application instance
-        completion_service: Service for handling chat completions
-
-    Methods:
-        register_agent: Register an agent to be available via API
-        run: Start the API server
+        calute: The Calute instance managing agents.
+        llm: LLM instance for Cortex agents.
+        agents: Dictionary mapping agent IDs to Agent objects.
+        cortex_agents: List of registered CortexAgent instances.
+        enable_cortex: Whether Cortex endpoints are enabled.
+        app: FastAPI application instance.
+        completion_service: Service for handling standard chat completions.
+        cortex_completion_service: Service for handling Cortex completions.
 
     Example:
         >>> from calute import Calute
@@ -122,7 +135,10 @@ class CaluteAPIServer:
         """Register an agent to be available via API.
 
         Args:
-            agent: The Agent instance to register
+            agent: The Agent instance to register.
+
+        Raises:
+            ValueError: If no Calute instance is available.
 
         Note:
             The agent will be available via its ID, name, or model as the model parameter
@@ -143,7 +159,10 @@ class CaluteAPIServer:
         """Register a CortexAgent for orchestration.
 
         Args:
-            agent: The CortexAgent instance to register
+            agent: The CortexAgent instance to register.
+
+        Raises:
+            ValueError: If Cortex is not enabled.
 
         Note:
             CortexAgents are used for multi-agent orchestration via Cortex endpoints.
@@ -161,7 +180,13 @@ class CaluteAPIServer:
             self._routers_initialized = True
 
     def _setup_routers(self) -> None:
-        """Set up FastAPI routers for the API endpoints."""
+        """Set up FastAPI routers for the API endpoints.
+
+        Configures the appropriate routers based on enabled features:
+        - UnifiedChatRouter for Cortex-enabled servers
+        - ChatRouter for standard agent servers
+        - ModelsRouter and HealthRouter for all servers
+        """
         from .routers import UnifiedChatRouter
 
         if self.enable_cortex and self.cortex_completion_service:
@@ -210,10 +235,15 @@ class CaluteAPIServer:
     def run(self, host: str = "0.0.0.0", port: int = 11881, **kwargs) -> None:
         """Run the API server.
 
+        Starts the uvicorn server with the configured FastAPI application.
+
         Args:
-            host: Host to bind the server to (default: "0.0.0.0")
-            port: Port to bind the server to (default: 11881)
-            **kwargs: Additional arguments passed to uvicorn.run()
+            host: Host to bind the server to (default: "0.0.0.0").
+            port: Port to bind the server to (default: 11881).
+            **kwargs: Additional arguments passed to uvicorn.run().
+
+        Raises:
+            RuntimeError: If no agents are registered and Cortex is not enabled.
         """
         if not self._routers_initialized:
             if self.enable_cortex and self.cortex_completion_service:
@@ -240,12 +270,13 @@ class CaluteAPIServer:
         API server, then registers the provided agents.
 
         Args:
-            client: OpenAI-compatible client instance
-            agents: List of agents to register (optional)
-            **calute_kwargs: Additional arguments passed to Calute constructor
+            client: OpenAI-compatible client instance.
+            agents: List of agents to register, or a single Agent instance.
+            can_overide_samplings: Whether to allow overriding sampling parameters.
+            **calute_kwargs: Additional arguments passed to Calute constructor.
 
         Returns:
-            CaluteAPIServer instance ready to run
+            CaluteAPIServer instance ready to run.
 
         Example:
             >>> import openai

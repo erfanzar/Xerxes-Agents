@@ -13,7 +13,13 @@
 # limitations under the License.
 
 
-"""Comprehensive coding tools for file management, git operations, and code manipulation."""
+"""Comprehensive coding tools for file management, git operations, and code manipulation.
+
+This module provides a suite of tools for file system operations, git version control,
+and code analysis. It includes functions for reading, writing, copying, and deleting files,
+as well as git operations like status, diff, log, and patch management. Additionally,
+it offers code structure analysis capabilities for multiple programming languages.
+"""
 
 import difflib
 import re
@@ -25,16 +31,26 @@ from pathlib import Path
 def read_file(
     file_path: str, start_line: int = 1, end_line: int | None = None, context_variables: dict | None = None
 ) -> str:
-    """
-    Read a file or specific lines from a file.
+    """Read a file or specific lines from a file.
+
+    Reads the contents of a file and returns it with line numbers.
+    Supports reading a specific range of lines for large files.
 
     Args:
-        file_path: Path to the file
-        start_line: Starting line number (1-based)
-        end_line: Ending line number (inclusive), None for end of file
+        file_path: Path to the file to read.
+        start_line: Starting line number (1-based indexing).
+        end_line: Ending line number (inclusive). None reads to end of file.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        File content or error message
+        The file content with line numbers, or an error message if the file
+        cannot be read.
+
+    Example:
+        >>> content = read_file("example.py", start_line=1, end_line=10)
+        >>> print(content)
+             1 | import os
+             2 | import sys
     """
     try:
         path = Path(file_path)
@@ -65,16 +81,25 @@ def read_file(
 
 
 def write_file(file_path: str, content: str, create_dirs: bool = True, context_variables: dict | None = None) -> str:
-    """
-    Write content to a file, creating directories if needed.
+    """Write content to a file, creating directories if needed.
+
+    Writes the specified content to a file at the given path. Can optionally
+    create parent directories if they don't exist.
 
     Args:
-        file_path: Path to the file
-        content: Content to write
-        create_dirs: Whether to create parent directories
+        file_path: Path to the file to write.
+        content: Content to write to the file.
+        create_dirs: Whether to create parent directories if they don't exist.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message with the number of characters and lines written,
+        or an error message if the write fails.
+
+    Example:
+        >>> result = write_file("output.txt", "Hello, World!")
+        >>> print(result)
+        Successfully wrote 13 characters (1 lines) to output.txt
     """
     try:
         path = Path(file_path)
@@ -100,18 +125,32 @@ def list_directory(
     max_depth: int = 3,
     context_variables: dict | None = None,
 ) -> str:
-    """
-    List files and directories with filtering options.
+    """List files and directories with filtering options.
+
+    Lists the contents of a directory with support for glob pattern filtering,
+    recursive traversal, and hidden file visibility control.
 
     Args:
-        directory: Directory to list
-        pattern: Glob pattern for filtering
-        recursive: Whether to list recursively
-        show_hidden: Whether to show hidden files
-        max_depth: Maximum depth for recursive listing
+        directory: Directory path to list. Defaults to current directory.
+        pattern: Glob pattern for filtering files (e.g., '*.py', '*.txt').
+        recursive: Whether to list contents recursively.
+        show_hidden: Whether to include hidden files (starting with '.').
+        max_depth: Maximum depth for recursive listing.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Directory listing or error message
+        A formatted directory listing with file sizes, or an error message
+        if the directory cannot be accessed.
+
+    Example:
+        >>> listing = list_directory("src", pattern="*.py", recursive=True)
+        >>> print(listing)
+        Directory listing for: /path/to/src
+        Pattern: *.py | Recursive: True | Hidden: False
+        ------------------------------------------------------------
+        📄 main.py (1.2KB)
+        📁 utils/
+          📄 utils/helpers.py (0.5KB)
     """
     try:
         path = Path(directory)
@@ -175,7 +214,23 @@ def list_directory(
 
 
 def format_size(size: int) -> str:
-    """Format file size in human-readable format."""
+    """Format file size in human-readable format.
+
+    Converts a byte count to a human-readable string with appropriate
+    units (B, KB, MB, GB, TB).
+
+    Args:
+        size: File size in bytes.
+
+    Returns:
+        A formatted string with the size and appropriate unit.
+
+    Example:
+        >>> format_size(1536)
+        '1.5KB'
+        >>> format_size(1048576)
+        '1.0MB'
+    """
     for unit in ["B", "KB", "MB", "GB"]:
         if size < 1024.0:
             return f"{size:.1f}{unit}"
@@ -184,16 +239,25 @@ def format_size(size: int) -> str:
 
 
 def copy_file(source: str, destination: str, overwrite: bool = False, context_variables: dict | None = None) -> str:
-    """
-    Copy a file or directory.
+    """Copy a file or directory to a new location.
+
+    Copies a file or directory from the source path to the destination path.
+    Supports both file and directory copying with optional overwrite behavior.
 
     Args:
-        source: Source path
-        destination: Destination path
-        overwrite: Whether to overwrite existing files
+        source: Path to the source file or directory.
+        destination: Path to the destination location.
+        overwrite: Whether to overwrite existing files at the destination.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message confirming the copy, or an error message if the
+        operation fails.
+
+    Example:
+        >>> result = copy_file("config.yaml", "backup/config.yaml")
+        >>> print(result)
+        Successfully copied file config.yaml to backup/config.yaml
     """
     try:
         src_path = Path(source)
@@ -218,16 +282,25 @@ def copy_file(source: str, destination: str, overwrite: bool = False, context_va
 
 
 def move_file(source: str, destination: str, overwrite: bool = False, context_variables: dict | None = None) -> str:
-    """
-    Move a file or directory.
+    """Move a file or directory to a new location.
+
+    Moves a file or directory from the source path to the destination path.
+    This effectively renames or relocates the item.
 
     Args:
-        source: Source path
-        destination: Destination path
-        overwrite: Whether to overwrite existing files
+        source: Path to the source file or directory.
+        destination: Path to the destination location.
+        overwrite: Whether to overwrite existing files at the destination.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message confirming the move, or an error message if the
+        operation fails.
+
+    Example:
+        >>> result = move_file("old_name.py", "new_name.py")
+        >>> print(result)
+        Successfully moved old_name.py to new_name.py
     """
     try:
         src_path = Path(source)
@@ -248,15 +321,24 @@ def move_file(source: str, destination: str, overwrite: bool = False, context_va
 
 
 def delete_file(path: str, force: bool = False, context_variables: dict | None = None) -> str:
-    """
-    Delete a file or directory.
+    """Delete a file or directory.
+
+    Removes a file or directory from the filesystem. For directories with
+    many items, the force flag must be set to confirm the deletion.
 
     Args:
-        path: Path to delete
-        force: Force deletion without confirmation
+        path: Path to the file or directory to delete.
+        force: Force deletion of directories with more than 10 items.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message confirming the deletion, or an error message if
+        the operation fails or requires confirmation.
+
+    Example:
+        >>> result = delete_file("temp.txt")
+        >>> print(result)
+        Successfully deleted file: temp.txt
     """
     try:
         file_path = Path(path)
@@ -281,14 +363,25 @@ def delete_file(path: str, force: bool = False, context_variables: dict | None =
 
 
 def git_status(repo_path: str = ".", context_variables: dict | None = None) -> str:
-    """
-    Get git repository status.
+    """Get the current status of a git repository.
+
+    Retrieves the git status including branch information and file
+    modifications (staged, unstaged, untracked, etc.).
 
     Args:
-        repo_path: Path to git repository
+        repo_path: Path to the git repository. Defaults to current directory.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Git status output or error
+        A formatted status output showing branch and file states, or an
+        error message if the repository is not accessible.
+
+    Example:
+        >>> status = git_status(".")
+        >>> print(status)
+        Branch: main
+          Modified (unstaged): src/main.py
+          Untracked: new_file.txt
     """
     try:
         result = subprocess.run(
@@ -341,17 +434,30 @@ def git_diff(
     context_lines: int = 3,
     context_variables: dict | None = None,
 ) -> str:
-    """
-    Get git diff for changes.
+    """Get the git diff showing changes in the repository.
+
+    Retrieves a unified diff of changes in the working directory or
+    staging area. Can be filtered to a specific file.
 
     Args:
-        repo_path: Path to git repository
-        file_path: Specific file to diff (None for all)
-        staged: Whether to show staged changes
-        context_lines: Number of context lines
+        repo_path: Path to the git repository. Defaults to current directory.
+        file_path: Specific file to show diff for. None shows all changes.
+        staged: Whether to show staged changes instead of unstaged.
+        context_lines: Number of context lines to include around changes.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Git diff output or error
+        The unified diff output showing changes, or "No changes detected"
+        if there are no modifications.
+
+    Example:
+        >>> diff = git_diff(".", file_path="src/main.py", staged=True)
+        >>> print(diff)
+        --- a/src/main.py
+        +++ b/src/main.py
+        @@ -1,3 +1,4 @@
+         import os
+        +import sys
     """
     try:
         cmd = ["git", "diff", f"-U{context_lines}"]
@@ -381,16 +487,30 @@ def git_diff(
 def git_apply_patch(
     patch_content: str, repo_path: str = ".", check_only: bool = False, context_variables: dict | None = None
 ) -> str:
-    """
-    Apply a git patch.
+    """Apply a git patch to the repository.
+
+    Applies a unified diff patch to the repository. Can optionally check
+    if the patch applies cleanly without actually applying it.
 
     Args:
-        patch_content: The patch content to apply
-        repo_path: Path to git repository
-        check_only: Only check if patch applies cleanly without applying
+        patch_content: The unified diff patch content to apply.
+        repo_path: Path to the git repository. Defaults to current directory.
+        check_only: If True, only verify the patch applies without applying.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message if the patch is applied or validated, or an error
+        message if the patch cannot be applied.
+
+    Example:
+        >>> patch = '''--- a/file.txt
+        ... +++ b/file.txt
+        ... @@ -1 +1 @@
+        ... -old line
+        ... +new line'''
+        >>> result = git_apply_patch(patch, check_only=True)
+        >>> print(result)
+        Patch can be applied cleanly
     """
     try:
         cmd = ["git", "apply"]
@@ -421,17 +541,28 @@ def git_log(
     file_path: str | None = None,
     context_variables: dict | None = None,
 ) -> str:
-    """
-    Get git commit history.
+    """Get the git commit history.
+
+    Retrieves the commit log for the repository. Can be filtered to show
+    only commits affecting a specific file.
 
     Args:
-        repo_path: Path to git repository
-        max_commits: Maximum number of commits to show
-        oneline: Whether to use oneline format
-        file_path: Specific file to show history for
+        repo_path: Path to the git repository. Defaults to current directory.
+        max_commits: Maximum number of commits to display.
+        oneline: Whether to use compact one-line format per commit.
+        file_path: Specific file to show commit history for.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Git log output or error
+        The commit log output, or an error message if the repository
+        is not accessible.
+
+    Example:
+        >>> log = git_log(".", max_commits=5)
+        >>> print(log)
+        abc1234 Add new feature
+        def5678 Fix bug in parser
+        ghi9012 Update documentation
     """
     try:
         cmd = ["git", "log", f"-{max_commits}"]
@@ -461,15 +592,24 @@ def git_log(
 
 
 def git_add(files: list[str], repo_path: str = ".", context_variables: dict | None = None) -> str:
-    """
-    Stage files for commit.
+    """Stage files for commit.
+
+    Adds the specified files to the git staging area in preparation
+    for a commit.
 
     Args:
-        files: List of file paths to stage
-        repo_path: Path to git repository
+        files: List of file paths to stage for commit.
+        repo_path: Path to the git repository. Defaults to current directory.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message or error
+        A success message with the count of staged files, or an error
+        message if the operation fails.
+
+    Example:
+        >>> result = git_add(["src/main.py", "README.md"])
+        >>> print(result)
+        Successfully staged 2 file(s)
     """
     try:
         if not files:
@@ -491,16 +631,32 @@ def git_add(files: list[str], repo_path: str = ".", context_variables: dict | No
 
 
 def create_diff(original: str, modified: str, file_name: str = "file.txt", context_variables: dict | None = None) -> str:
-    """
-    Create a unified diff between two text contents.
+    """Create a unified diff between two text contents.
+
+    Generates a unified diff format showing the differences between
+    the original and modified content.
 
     Args:
-        original: Original content
-        modified: Modified content
-        file_name: Name to use in diff header
+        original: The original text content.
+        modified: The modified text content.
+        file_name: Name to use in the diff header.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Unified diff string
+        A unified diff string showing the differences.
+
+    Example:
+        >>> original = "line1\\nline2\\nline3"
+        >>> modified = "line1\\nmodified\\nline3"
+        >>> diff = create_diff(original, modified, "example.txt")
+        >>> print(diff)
+        --- a/example.txt
+        +++ b/example.txt
+        @@ -1,3 +1,3 @@
+         line1
+        -line2
+        +modified
+         line3
     """
     try:
         original_lines = original.splitlines(keepends=True)
@@ -517,15 +673,34 @@ def create_diff(original: str, modified: str, file_name: str = "file.txt", conte
 
 
 def apply_diff(original: str, diff: str, context_variables: dict | None = None) -> str:
-    """
-    Apply a unified diff to original content.
+    """Apply a unified diff to original content.
+
+    Parses a unified diff and applies the changes to the original content
+    to produce the modified result.
 
     Args:
-        original: Original content
-        diff: Unified diff to apply
+        original: The original text content to modify.
+        diff: The unified diff to apply.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Modified content or error message
+        The modified content after applying the diff, or an error message
+        if the diff cannot be applied.
+
+    Example:
+        >>> original = "line1\\nline2\\nline3"
+        >>> diff = '''--- a/file.txt
+        ... +++ b/file.txt
+        ... @@ -1,3 +1,3 @@
+        ...  line1
+        ... -line2
+        ... +modified
+        ...  line3'''
+        >>> result = apply_diff(original, diff)
+        >>> print(result)
+        line1
+        modified
+        line3
     """
     try:
         lines = original.splitlines(keepends=True)
@@ -585,19 +760,29 @@ def find_and_replace(
     backup: bool = True,
     context_variables: dict | None = None,
 ) -> str:
-    """
-    Find and replace text in a file.
+    """Find and replace text in a file.
+
+    Searches for occurrences of a pattern in a file and replaces them
+    with the specified replacement text. Supports both literal and
+    regex-based search patterns.
 
     Args:
-        file_path: Path to the file
-        search: Text or pattern to search for
-        replace: Replacement text
-        regex: Whether to use regex for search
-        case_sensitive: Whether search is case-sensitive
-        backup: Whether to create a backup
+        file_path: Path to the file to modify.
+        search: Text or regex pattern to search for.
+        replace: Replacement text.
+        regex: Whether to interpret search as a regular expression.
+        case_sensitive: Whether the search should be case-sensitive.
+        backup: Whether to create a backup file before modifying.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Success message with replacement count or error
+        A success message with the count of replacements made, or an
+        error message if the operation fails.
+
+    Example:
+        >>> result = find_and_replace("config.py", "DEBUG=True", "DEBUG=False")
+        >>> print(result)
+        Replaced 1 occurrence(s) in config.py (backup saved as config.py.bak)
     """
     try:
         path = Path(file_path)
@@ -635,14 +820,41 @@ def find_and_replace(
 
 
 def analyze_code_structure(file_path: str, context_variables: dict | None = None) -> str:
-    """
-    Analyze the structure of a code file.
+    """Analyze the structure of a code file.
+
+    Performs static analysis on a source code file to extract structural
+    information including imports, classes, functions, and code metrics.
 
     Args:
-        file_path: Path to the code file
+        file_path: Path to the code file to analyze.
+        context_variables: Optional context dictionary for tool execution.
 
     Returns:
-        Structural analysis or error
+        A formatted analysis report showing the file's structure including
+        language detection, line counts, imports, classes, and functions,
+        or an error message if the file cannot be analyzed.
+
+    Example:
+        >>> analysis = analyze_code_structure("src/main.py")
+        >>> print(analysis)
+        Code Structure Analysis: main.py
+        Language: Python
+        Total Lines: 150
+        Blank Lines: 20
+        Comment Lines: 15
+        Code Lines: 115
+
+        Imports (5):
+          • import os
+          • from typing import Dict
+
+        Classes (2):
+          • MyClass
+          • AnotherClass
+
+        Functions (8):
+          • main
+          • helper_function
     """
     try:
         path = Path(file_path)
@@ -706,7 +918,23 @@ def analyze_code_structure(file_path: str, context_variables: dict | None = None
 
 
 def detect_language(extension: str) -> str:
-    """Detect programming language from file extension."""
+    """Detect programming language from file extension.
+
+    Maps a file extension to its corresponding programming language name.
+
+    Args:
+        extension: The file extension including the dot (e.g., '.py', '.js').
+
+    Returns:
+        The name of the programming language, or 'Unknown' if the extension
+        is not recognized.
+
+    Example:
+        >>> detect_language(".py")
+        'Python'
+        >>> detect_language(".js")
+        'JavaScript'
+    """
     lang_map = {
         ".py": "Python",
         ".js": "JavaScript",
@@ -740,8 +968,18 @@ def detect_language(extension: str) -> str:
     return lang_map.get(extension, "Unknown")
 
 
-def analyze_python(lines: list[str], analysis: dict):
-    """Analyze Python code structure."""
+def analyze_python(lines: list[str], analysis: dict) -> None:
+    """Analyze Python code structure.
+
+    Parses Python source code lines to extract structural information
+    including imports, class definitions, function definitions, and
+    comment/blank line counts.
+
+    Args:
+        lines: List of source code lines to analyze.
+        analysis: Dictionary to populate with analysis results. Modified in-place
+            with keys: 'imports', 'classes', 'functions', 'comments', 'blank_lines'.
+    """
     for _i, line in enumerate(lines):
         stripped = line.strip()
 
@@ -763,8 +1001,18 @@ def analyze_python(lines: list[str], analysis: dict):
                 analysis["classes"].append(match.group(1))
 
 
-def analyze_javascript(lines: list[str], analysis: dict):
-    """Analyze JavaScript code structure."""
+def analyze_javascript(lines: list[str], analysis: dict) -> None:
+    """Analyze JavaScript code structure.
+
+    Parses JavaScript source code lines to extract structural information
+    including imports/requires, class definitions, function definitions,
+    and comment/blank line counts.
+
+    Args:
+        lines: List of source code lines to analyze.
+        analysis: Dictionary to populate with analysis results. Modified in-place
+            with keys: 'imports', 'classes', 'functions', 'comments', 'blank_lines'.
+    """
     for line in lines:
         stripped = line.strip()
 
@@ -790,8 +1038,18 @@ def analyze_javascript(lines: list[str], analysis: dict):
                 analysis["functions"].append(match.group(1) if match.group(1) else "anonymous")
 
 
-def analyze_java(lines: list[str], analysis: dict):
-    """Analyze Java code structure."""
+def analyze_java(lines: list[str], analysis: dict) -> None:
+    """Analyze Java code structure.
+
+    Parses Java source code lines to extract structural information
+    including imports, class definitions, method definitions, and
+    comment/blank line counts.
+
+    Args:
+        lines: List of source code lines to analyze.
+        analysis: Dictionary to populate with analysis results. Modified in-place
+            with keys: 'imports', 'classes', 'functions', 'comments', 'blank_lines'.
+    """
     for line in lines:
         stripped = line.strip()
 

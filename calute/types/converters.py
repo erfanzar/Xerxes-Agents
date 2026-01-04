@@ -13,6 +13,25 @@
 # limitations under the License.
 
 
+"""OpenAI format conversion utilities for Calute.
+
+This module provides utilities for converting between OpenAI API formats
+and Calute's internal message and tool representations. It includes:
+- Message conversion from OpenAI format to Calute ChatMessage types
+- Tool conversion from OpenAI format to Calute Tool types
+- Field name validation for OpenAI compatibility checks
+
+The converters ensure seamless interoperability with OpenAI-compatible
+APIs and models while maintaining Calute's type safety.
+
+Example:
+    >>> from calute.types.converters import convert_openai_messages, convert_openai_tools
+    >>> openai_messages = [{"role": "user", "content": "Hello"}]
+    >>> calute_messages = convert_openai_messages(openai_messages)
+    >>> openai_tools = [{"type": "function", "function": {"name": "test", "parameters": {}}}]
+    >>> calute_tools = convert_openai_tools(openai_tools)
+"""
+
 from typing import Any
 
 from .messages import AssistantMessage, ChatMessage, SystemMessage, ToolMessage, UserMessage
@@ -95,6 +114,14 @@ def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> 
 
 
 def is_openai_field_name(name: str) -> bool:
+    """Check if a name is a valid OpenAI completion field name.
+
+    Args:
+        name: The field name to check.
+
+    Returns:
+        True if the name is a valid OpenAI completion field, False otherwise.
+    """
     return name in _OPENAI_COMPLETION_FIELDS
 
 

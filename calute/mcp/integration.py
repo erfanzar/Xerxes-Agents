@@ -13,7 +13,22 @@
 # limitations under the License.
 
 
-"""Integration helpers for MCP with Calute agents."""
+"""Integration helpers for MCP with Calute agents.
+
+This module provides utilities for integrating Model Context Protocol (MCP)
+tools with Calute agents, enabling seamless use of external MCP servers
+and their tools within the Calute framework.
+
+Key features:
+- Convert MCP tools to Calute-compatible functions
+- Add MCP tools to existing agents dynamically
+- Create MCP-enabled agents with automatic tool integration
+- Handle synchronous/asynchronous execution transparently
+
+The integration preserves the MCP tool's input schema, allowing Calute's
+function introspection to properly extract parameter signatures for
+LLM function calling.
+"""
 
 from collections.abc import Callable
 from typing import Any
@@ -29,15 +44,28 @@ logger = get_logger()
 def mcp_tool_to_calute_function(tool: MCPTool, manager: MCPManager) -> Callable:
     """Convert an MCP tool to a Calute-compatible function.
 
-    Creates a function with explicit parameters based on the MCP tool's input schema,
-    so that Calute's function_to_json can properly extract the signature.
+    Creates a synchronous wrapper function with explicit parameters based on
+    the MCP tool's input schema, enabling Calute's function_to_json to properly
+    extract the signature for LLM function calling.
+
+    The generated function:
+    - Has a dynamic signature matching the MCP tool's input schema
+    - Includes proper type annotations for all parameters
+    - Contains a docstring with parameter descriptions and server info
+    - Handles async-to-sync conversion transparently
 
     Args:
-        tool: MCP tool to convert
-        manager: MCP manager instance for executing the tool
+        tool: The MCP tool to convert, containing name, description,
+            and input schema.
+        manager: The MCP manager instance responsible for executing
+            the tool on its server.
 
     Returns:
-        Callable function compatible with Calute agents
+        A callable function compatible with Calute agents that wraps
+        the MCP tool execution.
+
+    Raises:
+        Exception: Re-raised from MCP tool execution failures after logging.
     """
     import inspect
 
@@ -74,7 +102,20 @@ def mcp_tool_to_calute_function(tool: MCPTool, manager: MCPManager) -> Callable:
             param_docs.append(f"{param_name}: {param_info['description']}")
 
     def sync_wrapper(**kwargs) -> Any:
-        """Synchronous wrapper for MCP tool execution."""
+        """Synchronous wrapper for MCP tool execution.
+
+        Executes the MCP tool call synchronously by wrapping the async
+        manager.call_tool method with run_sync.
+
+        Args:
+            **kwargs: Arguments to pass to the MCP tool.
+
+        Returns:
+            The result from the MCP tool execution.
+
+        Raises:
+            Exception: Re-raised after logging if tool execution fails.
+        """
         try:
             return run_sync(manager.call_tool(tool.name, kwargs))
         except Exception as e:
@@ -101,11 +142,15 @@ def mcp_tool_to_calute_function(tool: MCPTool, manager: MCPManager) -> Callable:
 def _map_schema_type(json_type: str) -> type:
     """Map JSON schema type to Python type.
 
+    Converts JSON Schema type strings to their corresponding Python type
+    objects for use in function signatures and type annotations.
+
     Args:
-        json_type: JSON schema type string
+        json_type: JSON Schema type string (e.g., "string", "number",
+            "integer", "boolean", "array", "object").
 
     Returns:
-        Python type
+        The corresponding Python type. Defaults to str for unknown types.
     """
     type_mapping = {
         "string": str,
@@ -121,11 +166,27 @@ def _map_schema_type(json_type: str) -> type:
 async def add_mcp_tools_to_agent(agent: Any, manager: MCPManager, server_names: list[str] | None = None) -> None:
     """Add MCP tools to a Calute agent.
 
+    Dynamically extends an agent's function list with tools from MCP servers.
+    Supports both direct Agent instances and CortexAgent wrappers that use
+    an internal agent.
+
+    The function converts each MCP tool to a Calute-compatible function and
+    appends it to the agent's functions list.
+
     Args:
-        agent: CortexAgent or Calute Agent instance
-        manager: MCP manager instance
+        agent: A CortexAgent or Calute Agent instance. Must have either
+            a 'functions' attribute or an '_internal_agent' with 'functions'.
+        manager: The MCP manager instance containing connected servers
+            and their available tools.
         server_names: Optional list of server names to filter tools from.
-                     If None, adds tools from all servers.
+            If None, adds tools from all connected servers.
+
+    Returns:
+        None. The agent is modified in-place.
+
+    Note:
+        If the agent does not support adding functions (missing expected
+        attributes), a warning is logged and no tools are added.
     """
     logger = get_logger()
 
@@ -164,14 +225,33 @@ def create_mcp_enabled_agent(
 ) -> Any:
     """Create an agent with MCP tools automatically added.
 
+    Factory function that instantiates an agent and automatically adds
+    MCP tools from the specified servers. This provides a convenient
+    one-step method for creating MCP-enabled agents.
+
     Args:
-        agent_class: Agent class to instantiate (CortexAgent or Agent)
-        manager: MCP manager instance
-        server_names: Optional list of server names to get tools from
-        **agent_kwargs: Additional arguments for agent initialization
+        agent_class: The agent class to instantiate. Should be either
+            CortexAgent or Agent, or any compatible class.
+        manager: The MCP manager instance containing connected servers
+            and their available tools.
+        server_names: Optional list of server names to filter tools from.
+            If None, adds tools from all connected servers.
+        **agent_kwargs: Additional keyword arguments passed directly to
+            the agent class constructor.
 
     Returns:
-        Agent instance with MCP tools added
+        An instantiated agent with MCP tools added to its functions list.
+
+    Example:
+        >>> manager = MCPManager()
+        >>> await manager.connect_server("my-server", server_config)
+        >>> agent = create_mcp_enabled_agent(
+        ...     Agent,
+        ...     manager,
+        ...     server_names=["my-server"],
+        ...     name="MyAgent",
+        ...     model="gpt-4",
+        ... )
     """
 
     agent = agent_class(**agent_kwargs)

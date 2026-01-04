@@ -13,7 +13,24 @@
 # limitations under the License.
 
 
-"""Data processing and manipulation tools."""
+"""Data processing and manipulation tools for Calute agents.
+
+This module provides a comprehensive set of data processing tools
+for the Calute framework. It includes:
+- JSON data processing with load, save, query, and validation operations
+- CSV file processing with read, write, analyze, and convert capabilities
+- Advanced text processing with statistics, extraction, and formatting
+- Data format conversion between JSON, YAML, Base64, Hex, and hashes
+- Date and time processing with parsing, formatting, and delta calculations
+
+Each tool is implemented as a class inheriting from AgentBaseFn,
+making them directly usable as agent tools for data manipulation tasks.
+
+Example:
+    >>> processor = JSONProcessor()
+    >>> result = processor(operation="load", file_path="data.json")
+    >>> print(result["data"])
+"""
 
 from __future__ import annotations
 
@@ -29,7 +46,19 @@ from ..types import AgentBaseFn
 
 
 class JSONProcessor(AgentBaseFn):
-    """JSON data processing and manipulation."""
+    """JSON data processing and manipulation tool.
+
+    Provides operations for loading, saving, validating, querying,
+    and transforming JSON data. Supports both file-based and in-memory
+    JSON operations with simple dot-notation queries.
+
+    Supported operations:
+        load: Load JSON data from a file.
+        save: Save JSON data to a file.
+        validate: Check if data is valid JSON.
+        query: Extract data using dot-notation paths (e.g., "user.name").
+        transform: Get metadata and formatted output of JSON data.
+    """
 
     @staticmethod
     def static_call(
@@ -119,7 +148,17 @@ class JSONProcessor(AgentBaseFn):
 
 
 class CSVProcessor(AgentBaseFn):
-    """CSV data processing and manipulation."""
+    """CSV data processing and manipulation tool.
+
+    Provides operations for reading, writing, analyzing, and converting
+    CSV files. Supports custom delimiters, headers, and row limits.
+
+    Supported operations:
+        read: Read CSV file into a list of dictionaries.
+        write: Write list of dictionaries to a CSV file.
+        analyze: Get statistics about a CSV file structure.
+        convert: Convert CSV data to JSON format.
+    """
 
     @staticmethod
     def static_call(
@@ -235,7 +274,20 @@ class CSVProcessor(AgentBaseFn):
 
 
 class TextProcessor(AgentBaseFn):
-    """Advanced text processing and manipulation."""
+    """Advanced text processing and manipulation tool.
+
+    Provides operations for analyzing, cleaning, extracting patterns,
+    replacing content, and formatting text. Supports regular expressions
+    for pattern matching and extraction.
+
+    Supported operations:
+        stats: Get text statistics (length, word count, character frequency).
+        clean: Remove extra whitespace and optionally matched patterns.
+        extract: Extract patterns like emails, URLs, phone numbers, or custom regex.
+        replace: Replace patterns in text using regex.
+        split: Split text by pattern or whitespace.
+        format: Apply formatting (title, upper, lower, sentence case).
+    """
 
     @staticmethod
     def static_call(
@@ -356,7 +408,19 @@ class TextProcessor(AgentBaseFn):
 
 
 class DataConverter(AgentBaseFn):
-    """Convert data between different formats."""
+    """Convert data between different formats.
+
+    Provides conversion between various data formats including
+    JSON, YAML, Base64, hexadecimal, and cryptographic hashes.
+    Supports bidirectional conversion where applicable.
+
+    Supported formats:
+        json: JSON string format.
+        yaml: YAML format (requires PyYAML).
+        base64: Base64 encoded string.
+        hex: Hexadecimal string representation.
+        hash: Generate MD5, SHA1, SHA256, and SHA512 hashes (output only).
+    """
 
     @staticmethod
     def static_call(
@@ -461,7 +525,18 @@ class DataConverter(AgentBaseFn):
 
 
 class DateTimeProcessor(AgentBaseFn):
-    """Date and time processing utilities."""
+    """Date and time processing utilities.
+
+    Provides operations for parsing, formatting, and manipulating
+    dates and times. Supports multiple date formats and time delta
+    calculations.
+
+    Supported operations:
+        now: Get current date and time in various formats.
+        parse: Parse a date string into components.
+        delta: Add or subtract time from a date.
+        format: Format a date in various output styles.
+    """
 
     @staticmethod
     def static_call(

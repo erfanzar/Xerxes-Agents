@@ -13,7 +13,22 @@
 # limitations under the License.
 
 
-"""Request and response models for the OpenAI-compatible API."""
+"""Request and response models for the OpenAI-compatible API.
+
+This module provides Pydantic models for the API server's request
+and response handling. It includes:
+- Model information and listing responses
+- Health check response models
+- OpenAI-compatible data structures
+
+All models follow the OpenAI API specification for compatibility
+with existing OpenAI client libraries and tools.
+
+Example:
+    >>> from calute.api_server.models import ModelInfo, ModelsResponse
+    >>> model = ModelInfo(id="my-agent", created=1234567890)
+    >>> response = ModelsResponse(data=[model])
+"""
 
 from pydantic import BaseModel
 
@@ -21,11 +36,15 @@ from pydantic import BaseModel
 class ModelInfo(BaseModel):
     """Information about an available model/agent.
 
+    Represents metadata for a single model or agent registered
+    with the Calute API server. Follows the OpenAI model object
+    specification for compatibility.
+
     Attributes:
-        id: Unique identifier for the model/agent
-        object: Always "model" for OpenAI compatibility
-        created: Unix timestamp when model was created
-        owned_by: Owner of the model (always "calute")
+        id: Unique identifier for the model/agent.
+        object: Object type, always "model" for OpenAI compatibility.
+        created: Unix timestamp when model was created.
+        owned_by: Owner of the model (always "calute").
     """
 
     id: str
@@ -37,9 +56,13 @@ class ModelInfo(BaseModel):
 class ModelsResponse(BaseModel):
     """Response containing list of available models/agents.
 
+    Standard response format for the /v1/models endpoint,
+    providing a list of all registered agents. Follows the
+    OpenAI list response specification.
+
     Attributes:
-        object: Always "list" for OpenAI compatibility
-        data: List of ModelInfo objects
+        object: Object type, always "list" for OpenAI compatibility.
+        data: List of ModelInfo objects representing available agents.
     """
 
     object: str = "list"
@@ -49,9 +72,13 @@ class ModelsResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response model.
 
+    Response format for the /health endpoint, providing basic
+    health status information about the API server and its
+    registered agents.
+
     Attributes:
-        status: Health status string
-        agents: Number of registered agents
+        status: Health status string (e.g., "healthy", "degraded").
+        agents: Number of registered agents currently available.
     """
 
     status: str

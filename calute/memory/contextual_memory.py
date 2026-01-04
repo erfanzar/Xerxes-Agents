@@ -13,7 +13,13 @@
 # limitations under the License.
 
 
-"""Contextual memory for maintaining conversation and task context"""
+"""
+Contextual memory for maintaining conversation and task context.
+
+Provides a hybrid memory system that combines short-term and long-term
+storage with context-aware retrieval and automatic memory promotion
+based on access patterns and importance scores.
+"""
 
 from datetime import datetime
 from typing import Any
@@ -25,8 +31,11 @@ from .short_term_memory import ShortTermMemory
 
 class ContextualMemory(Memory):
     """
-    Hybrid memory combining short-term and long-term memories
-    with context-aware retrieval and automatic promotion.
+    Hybrid memory combining short-term and long-term memories.
+
+    Provides context-aware retrieval and automatic promotion of memories
+    from short-term to long-term based on access patterns and importance
+    scores. Maintains a context stack for tracking conversation state.
     """
 
     def __init__(
@@ -40,10 +49,10 @@ class ContextualMemory(Memory):
         Initialize contextual memory.
 
         Args:
-            short_term_capacity: Capacity of short-term memory
-            long_term_storage: Storage for long-term memories
-            promotion_threshold: Access count to promote to long-term
-            importance_threshold: Importance score to auto-promote
+            short_term_capacity: Maximum items in short-term memory
+            long_term_storage: Storage backend for long-term memories
+            promotion_threshold: Access count required to promote to long-term
+            importance_threshold: Importance score (0-1) to auto-promote
         """
         super().__init__()
         self.short_term = ShortTermMemory(capacity=short_term_capacity)
@@ -53,7 +62,13 @@ class ContextualMemory(Memory):
         self.context_stack: list[dict[str, Any]] = []
 
     def push_context(self, context_type: str, context_data: dict[str, Any]):
-        """Push a new context onto the stack"""
+        """
+        Push a new context onto the stack.
+
+        Args:
+            context_type: Type identifier for the context (e.g., "task", "conversation")
+            context_data: Dictionary containing context information
+        """
         self.context_stack.append(
             {
                 "type": context_type,
@@ -63,11 +78,21 @@ class ContextualMemory(Memory):
         )
 
     def pop_context(self) -> dict[str, Any] | None:
-        """Pop the most recent context from stack"""
+        """
+        Pop the most recent context from stack.
+
+        Returns:
+            The popped context dictionary, or None if stack is empty
+        """
         return self.context_stack.pop() if self.context_stack else None
 
     def get_current_context(self) -> dict[str, Any] | None:
-        """Get current context without removing it"""
+        """
+        Get current context without removing it.
+
+        Returns:
+            The current context dictionary, or None if stack is empty
+        """
         return self.context_stack[-1] if self.context_stack else None
 
     def save(
@@ -152,7 +177,20 @@ class ContextualMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve from both memory stores"""
+        """
+        Retrieve from both memory stores.
+
+        Searches short-term first, then long-term. Accessing items
+        may trigger promotion to long-term memory.
+
+        Args:
+            memory_id: Specific memory ID to retrieve
+            filters: Filter criteria for retrieval
+            limit: Maximum number of items to return
+
+        Returns:
+            Single MemoryItem if memory_id specified, list otherwise
+        """
         if memory_id:
             item = self.short_term.retrieve(memory_id)
             if item:
@@ -173,7 +211,18 @@ class ContextualMemory(Memory):
         return results[:limit]
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update in appropriate memory store"""
+        """
+        Update in appropriate memory store.
+
+        Tries short-term first, then long-term.
+
+        Args:
+            memory_id: ID of the memory to update
+            updates: Dictionary of fields to update
+
+        Returns:
+            True if update was successful, False otherwise
+        """
 
         if self.short_term.update(memory_id, updates):
             return True
@@ -181,20 +230,37 @@ class ContextualMemory(Memory):
         return self.long_term.update(memory_id, updates)
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete from both stores"""
+        """
+        Delete from both memory stores.
+
+        Args:
+            memory_id: Specific memory ID to delete
+            filters: Filter criteria for deletion
+
+        Returns:
+            Total number of items deleted from both stores
+        """
         count = 0
         count += self.short_term.delete(memory_id, filters)
         count += self.long_term.delete(memory_id, filters)
         return count
 
     def clear(self) -> None:
-        """Clear all memories and context"""
+        """Clear all memories and context stack."""
         self.short_term.clear()
         self.long_term.clear()
         self.context_stack.clear()
 
     def get_context_summary(self) -> str:
-        """Get a summary of current context and recent memories"""
+        """
+        Get a summary of current context and recent memories.
+
+        Combines current context stack, recent activity from short-term
+        memory, and important memories from long-term memory.
+
+        Returns:
+            Formatted summary string, or "No context available."
+        """
         lines = []
 
         if self.context_stack:
@@ -217,7 +283,15 @@ class ContextualMemory(Memory):
         return "\n".join(lines) if lines else "No context available."
 
     def _check_promotion(self, item: MemoryItem):
-        """Check if item should be promoted to long-term memory"""
+        """
+        Check if item should be promoted to long-term memory.
+
+        Promotes items that have been accessed enough times
+        (exceeding promotion_threshold).
+
+        Args:
+            item: Memory item to check for promotion
+        """
         if item.access_count >= self.promotion_threshold:
             self.long_term.save(
                 content=item.content,
@@ -231,7 +305,18 @@ class ContextualMemory(Memory):
             item.metadata["promoted"] = True
 
     def _rerank_by_context(self, results: list[MemoryItem]) -> list[MemoryItem]:
-        """Re-rank results based on current context"""
+        """
+        Re-rank results based on current context.
+
+        Boosts relevance scores for items that match the current
+        context type and share common words with context data.
+
+        Args:
+            results: List of memory items to re-rank
+
+        Returns:
+            Re-ranked list of memory items with updated relevance scores
+        """
         current_context = self.get_current_context()
         if not current_context:
             return results

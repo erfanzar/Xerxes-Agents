@@ -56,7 +56,19 @@ class ShortTermMemory(Memory):
     ) -> MemoryItem:
         """
         Save to short-term memory.
-        Oldest items are automatically removed when capacity is reached.
+
+        Oldest items are automatically removed when capacity is reached (FIFO behavior).
+
+        Args:
+            content: The content to store in memory
+            metadata: Additional metadata to attach to the memory item
+            agent_id: Identifier of the agent creating this memory
+            user_id: Identifier of the user associated with this memory
+            conversation_id: Identifier of the conversation context
+            **kwargs: Additional fields to include in metadata
+
+        Returns:
+            The created MemoryItem instance
         """
         metadata = metadata or {}
         metadata.update(kwargs)
@@ -83,7 +95,19 @@ class ShortTermMemory(Memory):
     ) -> list[MemoryItem]:
         """
         Search short-term memory using keyword matching and filters.
-        Returns most recent matches first.
+
+        Performs case-insensitive keyword matching and returns most recent matches first.
+        Supports filtering by agent_id, user_id, and conversation_id.
+
+        Args:
+            query: Search query string for keyword matching
+            limit: Maximum number of results to return
+            filters: Filter criteria (supports agent_id, user_id, conversation_id)
+            min_relevance: Minimum relevance score threshold (0.0 to 1.0)
+            **kwargs: Additional search parameters (unused)
+
+        Returns:
+            List of matching MemoryItem instances sorted by relevance and timestamp
         """
         query_lower = query.lower()
         matches = []
@@ -126,7 +150,21 @@ class ShortTermMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve specific memories"""
+        """
+        Retrieve specific memories by ID or filter criteria.
+
+        When memory_id is provided, returns the specific item. Otherwise,
+        filters through memories and returns matching items (most recent first).
+
+        Args:
+            memory_id: Specific memory ID to retrieve
+            filters: Filter criteria to match against memory attributes
+            limit: Maximum number of items to return when using filters
+
+        Returns:
+            Single MemoryItem if memory_id provided, list of MemoryItem if filters used,
+            or None if memory_id not found
+        """
         if memory_id:
             item = self._index.get(memory_id)
             if item:
@@ -155,7 +193,16 @@ class ShortTermMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update a memory item"""
+        """
+        Update a memory item with new values.
+
+        Args:
+            memory_id: ID of the memory item to update
+            updates: Dictionary of field names and new values to apply
+
+        Returns:
+            True if the update was successful, False if memory_id not found
+        """
         if memory_id not in self._index:
             return False
 
@@ -170,7 +217,16 @@ class ShortTermMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete memory items"""
+        """
+        Delete memory items by ID or filter criteria.
+
+        Args:
+            memory_id: Specific memory ID to delete
+            filters: Filter criteria to match items for deletion
+
+        Returns:
+            Number of items deleted
+        """
         count = 0
 
         if memory_id:
@@ -202,7 +258,11 @@ class ShortTermMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear all short-term memories"""
+        """
+        Clear all short-term memories.
+
+        Removes all items from memory and storage backend if configured.
+        """
         if self.storage:
             for item in self._items:
                 self.storage.delete(f"stm_{item.memory_id}")
@@ -211,12 +271,28 @@ class ShortTermMemory(Memory):
         self._index.clear()
 
     def get_recent(self, n: int = 5) -> list[MemoryItem]:
-        """Get n most recent items"""
+        """
+        Get the most recent memory items.
+
+        Args:
+            n: Number of recent items to retrieve
+
+        Returns:
+            List of the n most recent MemoryItem instances
+        """
         items = list(self._items)
         return items[-n:] if len(items) > n else items
 
     def summarize(self) -> str:
-        """Create a summary of short-term memory"""
+        """
+        Create a summary of short-term memory.
+
+        Groups memories by conversation and produces a human-readable summary
+        of recent activity.
+
+        Returns:
+            Formatted string summary of recent memory contents
+        """
         if not self._items:
             return "No recent memories."
 

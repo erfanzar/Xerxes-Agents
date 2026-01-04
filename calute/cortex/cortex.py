@@ -13,7 +13,35 @@
 # limitations under the License.
 
 
-"""Main Cortex cortex orchestration"""
+"""Main Cortex orchestration module for multi-agent collaboration.
+
+This module provides the core Cortex orchestrator class that coordinates multiple
+AI agents to accomplish complex tasks through various execution strategies. It serves
+as the central hub for managing agent lifecycles, task execution, memory integration,
+and output collection.
+
+The Cortex orchestrator supports multiple process types:
+    - SEQUENTIAL: Tasks are executed one after another, with context passing
+    - PARALLEL: Independent tasks run concurrently for faster execution
+    - HIERARCHICAL: A manager agent delegates tasks to worker agents
+    - CONSENSUS: All agents contribute to each task, then reach agreement
+    - PLANNED: An AI planner creates an optimized execution plan
+
+Key Components:
+    - Cortex: Main orchestrator class managing agents, tasks, and execution
+    - CortexOutput: Structured output container with execution metadata
+    - MemoryConfig: TypedDict for configuring memory system parameters
+
+Typical usage example:
+    >>> from calute.cortex import Cortex, CortexAgent, CortexTask
+    >>> from calute.llms import OpenAILLM
+    >>>
+    >>> llm = OpenAILLM(api_key="your-key")
+    >>> agent = CortexAgent(role="Writer", goal="Write content", backstory="Expert writer")
+    >>> task = CortexTask(description="Write an article", expected_output="Article text", agent=agent)
+    >>> cortex = Cortex(agents=[agent], tasks=[task], llm=llm)
+    >>> result = cortex.kickoff()
+"""
 
 from __future__ import annotations
 
@@ -43,7 +71,32 @@ from .templates import PromptTemplate
 
 
 class MemoryConfig(TypedDict, total=False):
-    """Configuration for memory system"""
+    """Configuration dictionary for the Cortex memory system.
+
+    This TypedDict defines the configuration options for both CortexMemory
+    and Calute's internal memory systems. All fields are optional and will
+    use sensible defaults if not specified.
+
+    Attributes:
+        max_short_term: Maximum entries in Calute's short-term memory. Defaults to 100.
+        max_working: Maximum entries in Calute's working memory. Defaults to 10.
+        max_long_term: Maximum entries in Calute's long-term memory. Defaults to 1000.
+        enable_short_term: Enable CortexMemory short-term storage. Defaults to True.
+        enable_long_term: Enable CortexMemory long-term storage. Defaults to True.
+        enable_entity: Enable entity tracking in CortexMemory. Defaults to True.
+        enable_user: Enable user-specific memory in CortexMemory. Defaults to False.
+        persistence_path: File path for persisting memory to disk. Defaults to None.
+        short_term_capacity: Maximum entries in CortexMemory short-term. Defaults to 50.
+        long_term_capacity: Maximum entries in CortexMemory long-term. Defaults to 5000.
+
+    Example:
+        >>> config: MemoryConfig = {
+        ...     "enable_short_term": True,
+        ...     "enable_long_term": True,
+        ...     "short_term_capacity": 100,
+        ...     "persistence_path": "./memory.db"
+        ... }
+    """
 
     max_short_term: NotRequired[int]
     max_working: NotRequired[int]
@@ -59,7 +112,74 @@ class MemoryConfig(TypedDict, total=False):
 
 
 class Cortex:
-    """Main orchestrator for multi-agent collaboration"""
+    """Main orchestrator for multi-agent collaboration and task execution.
+
+    Cortex is the central coordination hub that manages multiple AI agents working
+    together on complex tasks. It handles task distribution, execution flow, memory
+    management, and result collection across different execution strategies.
+
+    The orchestrator supports five distinct process types:
+        - SEQUENTIAL: Execute tasks one after another, passing context between them
+        - PARALLEL: Run independent tasks concurrently for improved performance
+        - HIERARCHICAL: Use a manager agent to delegate and review worker tasks
+        - CONSENSUS: Gather contributions from all agents and synthesize agreement
+        - PLANNED: Use AI-powered planning to optimize task execution order
+
+    Attributes:
+        agents: List of CortexAgent instances available for task execution.
+        tasks: List of CortexTask instances to be executed.
+        process: The ProcessType determining execution strategy.
+        manager_agent: Optional agent for hierarchical process management.
+        verbose: Whether to enable detailed logging output.
+        max_iterations: Maximum retry attempts for failed task executions.
+        reinvoke_after_function: Whether to reinvoke LLM after tool execution.
+        enable_calute_memory: Whether to enable Calute's internal memory system.
+        cortex_name: Display name for the Cortex instance in logs.
+        cortex_memory: CortexMemory instance for shared memory across agents.
+        memory: MemoryStore instance for basic memory operations.
+        memory_type: Type of memory to use for context management.
+        task_outputs: List of CortexTaskOutput from completed tasks.
+        logger: Logger instance for verbose output.
+        template_engine: PromptTemplate instance for generating prompts.
+        planner: CortexPlanner instance for PLANNED process type (if applicable).
+        llm: BaseLLM instance for language model interactions.
+        calute: Calute instance managing agent registrations and execution.
+
+    Example:
+        >>> from calute.cortex import Cortex, CortexAgent, CortexTask, ProcessType
+        >>> from calute.llms import OpenAILLM
+        >>>
+        >>> llm = OpenAILLM(api_key="your-key")
+        >>> writer = CortexAgent(
+        ...     role="Content Writer",
+        ...     goal="Create engaging content",
+        ...     backstory="Professional writer with 10 years experience"
+        ... )
+        >>> editor = CortexAgent(
+        ...     role="Editor",
+        ...     goal="Polish and improve content",
+        ...     backstory="Detail-oriented editor"
+        ... )
+        >>> write_task = CortexTask(
+        ...     description="Write an article about AI",
+        ...     expected_output="Draft article",
+        ...     agent=writer
+        ... )
+        >>> edit_task = CortexTask(
+        ...     description="Edit and improve the article",
+        ...     expected_output="Polished article",
+        ...     agent=editor,
+        ...     context=True  # Uses output from previous task
+        ... )
+        >>> cortex = Cortex(
+        ...     agents=[writer, editor],
+        ...     tasks=[write_task, edit_task],
+        ...     llm=llm,
+        ...     process=ProcessType.SEQUENTIAL
+        ... )
+        >>> result = cortex.kickoff()
+        >>> print(result.raw_output)
+    """
 
     def __init__(
         self,
@@ -77,7 +197,33 @@ class Cortex:
         reinvoke_after_function: bool = True,
         enable_calute_memory: bool = False,
         cortex_name: str = "CorTex",
-    ):
+    ) -> None:
+        """Initialize a new Cortex orchestrator instance.
+
+        Sets up the orchestration environment including agent registration,
+        memory configuration, and process-specific components like planners
+        or manager agents.
+
+        Args:
+            agents: List of CortexAgent instances to participate in execution.
+            tasks: List of CortexTask instances defining the work to be done.
+            llm: BaseLLM instance for language model operations.
+            process: Execution strategy to use. Defaults to SEQUENTIAL.
+            manager_agent: Agent for hierarchical delegation. Auto-created if
+                needed but not provided.
+            memory_type: Type of memory for context management.
+            verbose: Enable detailed logging. Defaults to True.
+            max_iterations: Maximum retry attempts. Defaults to 10.
+            model: Default model identifier for agents. Defaults to "gpt-4".
+            memory: Pre-configured CortexMemory instance. Created if not provided.
+            memory_config: Configuration dict for memory systems.
+            reinvoke_after_function: Reinvoke LLM after tool calls. Defaults to True.
+            enable_calute_memory: Enable Calute's memory. Defaults to False.
+            cortex_name: Display name for logging. Defaults to "CorTex".
+
+        Raises:
+            ValueError: If a task has no assigned agent and process is not HIERARCHICAL.
+        """
         self.agents = agents
         self.tasks = tasks
         self.process = process
@@ -345,9 +491,25 @@ class Cortex:
         main_buffer: StreamerBuffer,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> str:
-        """Helper method to execute agent with streaming and collect output.
+        """Execute an agent with streaming support and collect output.
 
-        This consolidates the repeated streaming logic used across different execution modes.
+        This helper method consolidates the streaming logic used across different
+        execution modes. It handles stream chunk collection, callback invocation,
+        and thread synchronization for streaming agent execution.
+
+        Args:
+            agent: The CortexAgent to execute the task.
+            task_description: The description of the task to perform.
+            context: Optional context string from previous task outputs.
+            main_buffer: StreamerBuffer for collecting streaming output.
+            stream_callback: Optional callback invoked for each stream chunk.
+
+        Returns:
+            The collected output content as a concatenated string.
+
+        Note:
+            This method blocks until the agent's streaming execution completes
+            and all output has been collected from the buffer.
         """
 
         agent.execute(
@@ -398,7 +560,19 @@ class Cortex:
         return "".join(collected_content) if collected_content else ""
 
     def _run_sequential(self) -> str:
-        """Run tasks sequentially, passing context between them"""
+        """Execute tasks sequentially with context passing between them.
+
+        Tasks are executed one after another, with each task potentially
+        receiving context from previously completed tasks. Supports task
+        dependencies and conditional chaining.
+
+        Returns:
+            The output string from the last completed task.
+
+        Note:
+            Task dependencies are resolved before execution. If a task has
+            a chain defined, conditional branching may insert additional tasks.
+        """
         context_outputs = []
 
         for i, task in enumerate(self.tasks):
@@ -441,7 +615,18 @@ class Cortex:
         buffer: StreamerBuffer,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> str:
-        """Run tasks sequentially with streaming support"""
+        """Execute tasks sequentially with streaming output support.
+
+        Similar to _run_sequential but with real-time streaming of agent
+        outputs. Each task's output is streamed as it's generated.
+
+        Args:
+            buffer: StreamerBuffer for collecting streaming output chunks.
+            stream_callback: Optional callback invoked for each stream chunk.
+
+        Returns:
+            The output string from the last completed task.
+        """
         context_outputs = []
         all_content = []
 
@@ -510,7 +695,21 @@ class Cortex:
         return context_outputs[-1] if context_outputs else ""
 
     def _run_parallel(self, streamer_buffer: StreamerBuffer | None = None) -> str:
-        """Run tasks in parallel using asyncio with optional streaming"""
+        """Execute tasks in parallel using asyncio for concurrent processing.
+
+        Independent tasks (those without context dependencies) run concurrently,
+        while dependent tasks wait for their prerequisites to complete.
+
+        Args:
+            streamer_buffer: Optional StreamerBuffer for streaming output.
+
+        Returns:
+            The output string from the last completed task.
+
+        Note:
+            Uses asyncio.gather for concurrent execution. Tasks with context=True
+            are executed after independent tasks complete.
+        """
 
         cortex_self = self
 
@@ -562,7 +761,20 @@ class Cortex:
         return asyncio.run(run_all_tasks())
 
     def _run_hierarchical(self) -> str:
-        """Run tasks with a manager agent delegating to workers"""
+        """Execute tasks with a manager agent delegating to worker agents.
+
+        The manager agent creates an execution plan, assigns tasks to appropriate
+        worker agents, monitors progress, and reviews outputs for quality. The
+        manager may request improvements if outputs don't meet expectations.
+
+        Returns:
+            A final summary from the manager agent after all tasks complete.
+
+        Raises:
+            ValueError: If no manager agent is configured or if the manager's
+                execution plan is invalid.
+            RuntimeError: If the manager fails to create a valid plan or review.
+        """
         if not self.manager_agent:
             raise ValueError("Hierarchical process requires a manager agent")
 
@@ -768,7 +980,18 @@ class Cortex:
         return final_outputs[-1] if final_outputs else ""
 
     def _run_planned(self) -> str:
-        """Run tasks using XML-based planning"""
+        """Execute tasks using AI-powered planning for optimized sequencing.
+
+        The CortexPlanner creates an intelligent execution plan based on task
+        descriptions and available agents, then executes steps according to
+        the plan's recommended order and agent assignments.
+
+        Returns:
+            The result from the final step in the execution plan.
+
+        Raises:
+            ValueError: If the planner is not initialized or no tasks are provided.
+        """
         if not self.planner:
             raise ValueError("Planner not initialized for PLANNED process type")
 
@@ -818,7 +1041,22 @@ class Cortex:
         buffer: StreamerBuffer,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> str:
-        """Run hierarchical process with proper streaming support"""
+        """Execute hierarchical process with streaming output support.
+
+        Similar to _run_hierarchical but with real-time streaming of all
+        agent outputs including the manager's planning and delegation.
+
+        Args:
+            buffer: StreamerBuffer for collecting streaming output chunks.
+            stream_callback: Optional callback invoked for each stream chunk.
+
+        Returns:
+            The output from the last completed task.
+
+        Raises:
+            ValueError: If no manager agent is configured or agent assignment fails.
+            RuntimeError: If the manager fails to create a valid execution plan.
+        """
         if not self.manager_agent:
             raise ValueError("Hierarchical process requires a manager agent")
 
@@ -897,7 +1135,22 @@ class Cortex:
         buffer: StreamerBuffer,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> str:
-        """Run planned process with proper streaming support"""
+        """Execute planned process with streaming output support.
+
+        Similar to _run_planned but with real-time streaming of all agent
+        outputs as the execution plan is carried out.
+
+        Args:
+            buffer: StreamerBuffer for collecting streaming output chunks.
+            stream_callback: Optional callback invoked for each stream chunk.
+
+        Returns:
+            The output from the last completed task, or a default message
+            if no tasks were executed.
+
+        Raises:
+            ValueError: If the planner is not initialized or no tasks are provided.
+        """
         if not self.planner:
             raise ValueError("Planner not initialized for PLANNED process type")
 
@@ -976,7 +1229,38 @@ class Cortex:
         memory_config: MemoryConfig | None = None,
         reinvoke_after_function: bool = True,
         enable_calute_memory: bool = False,
-    ):
+    ) -> "Cortex":
+        """Create a Cortex instance from tasks with auto-detected agents and LLM.
+
+        Factory method that automatically extracts agents from the provided tasks
+        and infers the LLM from the first task's agent. Useful when tasks have
+        already been configured with their assigned agents.
+
+        Args:
+            tasks: List of CortexTask instances with agents already assigned.
+            llm: Optional BaseLLM instance. If None, extracted from first task's agent.
+            agents: Optional agent list. If None, extracted from all tasks.
+            process: Execution strategy to use. Defaults to SEQUENTIAL.
+            manager_agent: Optional agent for hierarchical delegation.
+            memory_type: Type of memory for context management.
+            verbose: Enable detailed logging. Defaults to True.
+            max_iterations: Maximum retry attempts. Defaults to 10.
+            model: Default model identifier. Defaults to "gpt-4".
+            memory: Pre-configured CortexMemory instance.
+            memory_config: Configuration dict for memory systems.
+            reinvoke_after_function: Reinvoke LLM after tool calls. Defaults to True.
+            enable_calute_memory: Enable Calute's memory. Defaults to False.
+
+        Returns:
+            A configured Cortex instance with name "AutoCortex".
+
+        Example:
+            >>> from calute.cortex import Cortex, CortexTask, TaskCreator
+            >>> creator = TaskCreator(llm=llm, agents=[agent1, agent2])
+            >>> tasks = creator.create_tasks("Build a website")
+            >>> cortex = Cortex.from_task_creator(tasks)
+            >>> result = cortex.kickoff()
+        """
         if llm is None:
             agent = tasks[0].agent
             if isinstance(agent, list):
@@ -1008,23 +1292,49 @@ class Cortex:
         )
 
     def get_memory_summary(self) -> str:
-        """Get a summary of the cortex's memory"""
+        """Get a human-readable summary of the Cortex's memory state.
+
+        Returns:
+            A formatted string summarizing short-term, long-term, and entity
+            memories currently stored in the CortexMemory system.
+        """
         return self.cortex_memory.get_summary()
 
     def save_memory(self, persistence_path: str | None = None) -> None:
-        """Save the cortex's memory to disk"""
+        """Save the Cortex's memory to disk for later retrieval.
+
+        Args:
+            persistence_path: Optional file path for saving. If provided,
+                updates the storage path before saving.
+        """
         if persistence_path and self.cortex_memory.storage:
             self.cortex_memory.storage.db_path = Path(persistence_path)
 
     def clear_short_term_memory(self) -> None:
-        """Clear the cortex's short-term memory"""
+        """Clear the Cortex's short-term memory while preserving long-term memories.
+
+        Useful for starting fresh between sessions while retaining
+        important learned information.
+        """
         self.cortex_memory.reset_short_term()
 
     def clear_all_memory(self) -> None:
-        """Clear all cortex memory"""
+        """Clear all Cortex memory including short-term, long-term, and entity memories.
+
+        Warning:
+            This operation is irreversible. All stored memories will be permanently deleted.
+        """
         self.cortex_memory.reset_all()
 
-    def create_ui(self):
+    def create_ui(self) -> Any:
+        """Create and launch a user interface for the Cortex.
+
+        Launches an interactive UI application that allows users to
+        interact with the Cortex through a graphical interface.
+
+        Returns:
+            The UI application instance from calute.ui.
+        """
         from calute.ui import launch_application
 
         return launch_application(executor=self)
@@ -1032,17 +1342,49 @@ class Cortex:
 
 @dataclass
 class CortexOutput:
-    """Output from Cortex execution"""
+    """Structured output container from Cortex execution.
+
+    Contains the final output from a Cortex execution along with metadata
+    about each individual task's output, timing information, and agent
+    assignments. Provides convenient methods for accessing and serializing
+    the execution results.
+
+    Attributes:
+        raw_output: The final output string from the last completed task.
+        task_outputs: List of CortexTaskOutput instances for each completed task.
+        execution_time: Total execution time in seconds for the entire workflow.
+
+    Example:
+        >>> result = cortex.kickoff()
+        >>> print(result.raw_output)
+        >>> print(f"Completed in {result.execution_time:.2f}s")
+        >>> for task_output in result.task_outputs:
+        ...     print(f"{task_output.agent.role}: {task_output.output[:100]}...")
+    """
 
     raw_output: str
     task_outputs: list[CortexTaskOutput]
     execution_time: float
 
     def __str__(self) -> str:
+        """Return the raw output when converted to string.
+
+        Returns:
+            The raw_output string from the execution.
+        """
         return self.raw_output
 
     def to_dict(self) -> dict:
-        """Convert output to dictionary"""
+        """Convert the output to a serializable dictionary format.
+
+        Creates a dictionary representation of the execution results
+        suitable for JSON serialization or API responses.
+
+        Returns:
+            Dictionary containing raw_output, task_outputs with task
+            descriptions, outputs, agent roles, timestamps, and
+            the total execution_time.
+        """
         return {
             "raw_output": self.raw_output,
             "task_outputs": [

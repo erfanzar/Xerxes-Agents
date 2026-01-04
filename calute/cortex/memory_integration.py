@@ -13,7 +13,47 @@
 # limitations under the License.
 
 
-"""Memory integration for Cortex framework"""
+"""Memory integration for Cortex framework.
+
+This module provides the CortexMemory class, a unified memory system for
+Cortex agents and tasks. It integrates multiple memory types (short-term,
+long-term, entity, user, and contextual) to provide comprehensive context
+management for AI agent operations.
+
+The memory system supports:
+- Short-term memory for recent interactions and temporary context
+- Long-term memory for persistent knowledge storage
+- Entity memory for tracking and relating entities mentioned in conversations
+- User memory for personalized user-specific context
+- Contextual memory for comprehensive search across all memory types
+
+Memory persistence is optional and controlled via environment variables
+and configuration parameters, allowing for both ephemeral and persistent
+memory operations.
+
+Typical usage example:
+    memory = CortexMemory(
+        enable_short_term=True,
+        enable_long_term=True,
+        persistence_path="./memory.db",
+        short_term_capacity=50,
+        long_term_capacity=5000
+    )
+
+    # Build context for a task
+    context = memory.build_context_for_task(
+        task_description="Analyze sales data",
+        agent_role="Data Analyst"
+    )
+
+    # Save task results
+    memory.save_task_result(
+        task_description="Analyze sales data",
+        result="Sales increased 15% this quarter",
+        agent_role="Data Analyst",
+        importance=0.8
+    )
+"""
 
 from dataclasses import dataclass
 from typing import Any
@@ -30,9 +70,46 @@ from ..memory import (
 
 @dataclass
 class CortexMemory:
-    """
-    Unified memory system for Cortex cortexs.
-    Manages different memory types and provides context for agents and tasks.
+    """Unified memory system for Cortex agents and tasks.
+
+    CortexMemory integrates multiple memory types to provide comprehensive
+    context management for AI agents operating within the Cortex framework.
+    It aggregates short-term, long-term, entity, user, and contextual memories
+    to build rich context for task execution and maintain persistent knowledge.
+
+    The memory system is designed to:
+    - Provide relevant context for task execution
+    - Store and retrieve task results and agent interactions
+    - Track entities and their relationships across conversations
+    - Maintain user-specific context for personalization
+    - Support both ephemeral and persistent storage
+
+    Attributes:
+        storage: Optional SQLiteStorage instance for persistence.
+            Only created if persistence_path is provided and WRITE_MEMORY
+            environment variable is set to "1".
+        short_term: Optional ShortTermMemory for recent interactions.
+            Enabled by default with configurable capacity.
+        long_term: Optional LongTermMemory for persistent knowledge.
+            Enabled by default with configurable maximum items.
+        entity_memory: Optional EntityMemory for tracking entities.
+            Enabled by default for entity extraction and relationship tracking.
+        user_memory: Optional UserMemory for user-specific context.
+            Disabled by default, must be explicitly enabled.
+        contextual: ContextualMemory for comprehensive cross-memory search.
+            Always enabled, integrates with other memory types.
+
+    Example:
+        memory = CortexMemory(
+            enable_short_term=True,
+            enable_long_term=True,
+            persistence_path="./cortex_memory.db"
+        )
+
+        context = memory.build_context_for_task(
+            task_description="Write unit tests",
+            agent_role="Test Engineer"
+        )
     """
 
     def __init__(
@@ -45,7 +122,36 @@ class CortexMemory:
         short_term_capacity: int = 50,
         long_term_capacity: int = 5000,
     ):
-        """Initialize Cortex memory system"""
+        """Initialize the Cortex memory system.
+
+        Creates a new CortexMemory instance with the specified memory types
+        enabled. Each memory type can be individually enabled or disabled.
+        Persistence is controlled by both the persistence_path parameter
+        and the WRITE_MEMORY environment variable.
+
+        Args:
+            enable_short_term: Whether to enable short-term memory for
+                recent interactions. Defaults to True.
+            enable_long_term: Whether to enable long-term memory for
+                persistent knowledge storage. Defaults to True.
+            enable_entity: Whether to enable entity memory for tracking
+                entities mentioned in conversations. Defaults to True.
+            enable_user: Whether to enable user memory for user-specific
+                context. Defaults to False.
+            persistence_path: Optional path to SQLite database file for
+                persistent storage. Requires WRITE_MEMORY=1 environment
+                variable to be set. Defaults to None (no persistence).
+            short_term_capacity: Maximum number of items to store in
+                short-term memory. Defaults to 50.
+            long_term_capacity: Maximum number of items to store in
+                long-term memory. Defaults to 5000.
+
+        Note:
+            Persistence is only enabled when both persistence_path is
+            provided AND the WRITE_MEMORY environment variable is set
+            to "1". This provides an additional safety mechanism to
+            prevent unintended writes.
+        """
         import os
 
         write_memory = os.environ.get("WRITE_MEMORY", "0") == "1"
@@ -66,9 +172,35 @@ class CortexMemory:
         additional_context: str | None = None,
         max_items: int = 10,
     ) -> str:
-        """
-        Build contextual information for a task.
-        Aggregates relevant memories from all memory types.
+        """Build contextual information for a task.
+
+        Aggregates relevant memories from all enabled memory types to
+        provide comprehensive context for task execution. The context
+        includes recent interactions, relevant long-term knowledge,
+        known entities, and related memories from contextual search.
+
+        Args:
+            task_description: Description of the task to build context for.
+                Used as the search query for retrieving relevant memories.
+            agent_role: Optional role identifier for filtering agent-specific
+                memories. When provided, memories are filtered to those
+                associated with this agent.
+            additional_context: Optional background information to include
+                at the beginning of the context. Useful for providing
+                domain-specific information.
+            max_items: Maximum number of items to retrieve from contextual
+                memory search. Defaults to 10.
+
+        Returns:
+            Formatted string containing aggregated context from all memory
+            types. Includes sections for background, recent context, relevant
+            knowledge, known entities, and related memories. Returns empty
+            string if no context is available.
+
+        Note:
+            Content from individual memory items is truncated to prevent
+            context overflow (200 chars for short/long-term, 150 chars for
+            contextual memories).
         """
         context_parts = []
 
@@ -117,7 +249,31 @@ class CortexMemory:
         importance: float = 0.5,
         task_metadata: dict[str, Any] | None = None,
     ):
-        """Save task execution result to memory"""
+        """Save task execution result to memory.
+
+        Stores the result of a completed task across multiple memory types
+        based on its importance level. Short-term memory always receives the
+        result, while long-term storage is reserved for high-importance items.
+
+        Args:
+            task_description: Description of the completed task. Truncated
+                to 100 characters in stored metadata.
+            result: The result or output of the task execution. Truncated
+                to 200 characters for short-term storage.
+            agent_role: Role identifier of the agent that executed the task.
+                Used for filtering and retrieval.
+            importance: Importance score from 0.0 to 1.0 indicating the
+                significance of this result. Results with importance >= 0.7
+                are stored in long-term memory. Defaults to 0.5.
+            task_metadata: Optional dictionary of additional metadata to
+                store with the result. Merged with auto-generated metadata.
+
+        Side Effects:
+            - Saves to short-term memory (if enabled)
+            - Saves to long-term memory if importance >= 0.7 (if enabled)
+            - Extracts and saves entities (if entity memory enabled)
+            - Saves to contextual memory
+        """
         metadata = task_metadata or {}
         metadata["task"] = task_description[:100]
         metadata["agent_role"] = agent_role
@@ -138,7 +294,26 @@ class CortexMemory:
         self.contextual.save(content=result, metadata=metadata, importance=importance, agent_id=agent_role)
 
     def save_agent_interaction(self, agent_role: str, action: str, content: str, importance: float = 0.3):
-        """Save agent interaction to memory"""
+        """Save agent interaction to memory.
+
+        Records an agent's interaction or action for future reference.
+        Interactions are formatted as "[agent_role] action: content" and
+        stored in short-term memory. High-importance interactions are
+        also persisted to long-term memory.
+
+        Args:
+            agent_role: Role identifier of the agent performing the action.
+            action: Type of action being performed (e.g., "thinking",
+                "delegating", "tool_call").
+            content: Content or details of the interaction.
+            importance: Importance score from 0.0 to 1.0. Interactions with
+                importance >= 0.6 are stored in long-term memory.
+                Defaults to 0.3.
+
+        Side Effects:
+            - Saves to short-term memory (if enabled)
+            - Saves to long-term memory if importance >= 0.6 (if enabled)
+        """
         interaction = f"[{agent_role}] {action}: {content}"
 
         if self.short_term:
@@ -148,7 +323,24 @@ class CortexMemory:
             self.long_term.save(content=interaction, agent_id=agent_role, importance=importance)
 
     def save_cortex_decision(self, decision: str, context: str, outcome: str | None = None, importance: float = 0.7):
-        """Save cortex-level decisions"""
+        """Save cortex-level decisions to memory.
+
+        Records strategic decisions made at the Cortex orchestration level.
+        These are typically high-importance items that affect overall task
+        execution flow and are persisted to long-term memory.
+
+        Args:
+            decision: Description of the decision that was made.
+            context: Background context that led to this decision.
+            outcome: Optional outcome or result of the decision. If provided,
+                appended to the stored content.
+            importance: Importance score from 0.0 to 1.0. Defaults to 0.7
+                (high importance) as cortex decisions are typically significant.
+
+        Side Effects:
+            - Saves to long-term memory with agent_id "cortex_manager"
+            - Saves to contextual memory for cross-memory search
+        """
         content = f"Decision: {decision}\nContext: {context}"
         if outcome:
             content += f"\nOutcome: {outcome}"
@@ -161,7 +353,21 @@ class CortexMemory:
         self.contextual.save(content=content, metadata=metadata, importance=importance)
 
     def get_agent_history(self, agent_role: str, limit: int = 20) -> list[str]:
-        """Get history for a specific agent"""
+        """Get history for a specific agent.
+
+        Retrieves the interaction and task history for a specific agent
+        from both short-term and long-term memory. Short-term memory is
+        searched first, then long-term memory fills remaining slots.
+
+        Args:
+            agent_role: Role identifier of the agent to get history for.
+            limit: Maximum number of history items to return. Defaults to 20.
+
+        Returns:
+            List of content strings from the agent's history, up to the
+            specified limit. Items from short-term memory appear first,
+            followed by long-term memory items.
+        """
         history = []
 
         if self.short_term:
@@ -176,18 +382,49 @@ class CortexMemory:
         return history[:limit]
 
     def get_user_context(self, user_id: str) -> str:
-        """Get user-specific context"""
+        """Get user-specific context.
+
+        Retrieves personalized context for a specific user from user memory.
+        This context can be used to customize agent responses based on
+        user preferences, history, and characteristics.
+
+        Args:
+            user_id: Unique identifier for the user.
+
+        Returns:
+            String containing user-specific context. Returns empty string
+            if user memory is not enabled or no context exists for the user.
+        """
         if self.user_memory:
             return self.user_memory.get_user_context(user_id)
         return ""
 
     def reset_short_term(self):
-        """Clear short-term memory"""
+        """Clear short-term memory.
+
+        Removes all items from short-term memory while preserving other
+        memory types. Useful for starting a new conversation or session
+        without losing long-term knowledge.
+
+        Side Effects:
+            - Clears all items from short-term memory (if enabled)
+        """
         if self.short_term:
             self.short_term.clear()
 
     def reset_all(self):
-        """Clear all memories"""
+        """Clear all memories.
+
+        Removes all items from all enabled memory types, including short-term,
+        long-term, entity, and contextual memory. Use with caution as this
+        operation is irreversible and will delete all stored knowledge.
+
+        Side Effects:
+            - Clears short-term memory (if enabled)
+            - Clears long-term memory (if enabled)
+            - Clears entity memory (if enabled)
+            - Clears contextual memory
+        """
         if self.short_term:
             self.short_term.clear()
         if self.long_term:
@@ -198,7 +435,19 @@ class CortexMemory:
             self.contextual.clear()
 
     def get_summary(self) -> str:
-        """Get a summary of all memories"""
+        """Get a summary of all memories.
+
+        Generates a consolidated summary of the current memory state
+        across all enabled memory types. Includes summaries from short-term
+        memory, consolidated long-term knowledge, and entity statistics.
+
+        Returns:
+            Multi-line string containing summaries from each memory type,
+            separated by blank lines. Includes:
+            - Short-term memory summary (if enabled)
+            - Long-term memory consolidation (if enabled)
+            - Entity tracking statistics (if enabled and has items)
+        """
         parts = []
 
         if self.short_term:

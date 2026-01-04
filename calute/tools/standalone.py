@@ -13,6 +13,27 @@
 # limitations under the License.
 
 
+"""Standalone tool classes for agent file and system operations.
+
+This module provides a collection of standalone tool classes that extend
+AgentBaseFn for common file system and code execution operations.
+These tools are designed to be used by agents to interact with the
+file system and execute code in a controlled manner.
+
+Available tools:
+- ReadFile: Read text files with optional truncation
+- WriteFile: Write text to files with directory creation
+- ListDir: List directory contents with optional filtering
+- ExecutePythonCode: Execute Python code in a subprocess
+- ExecuteShell: Execute shell commands
+- AppendFile: Append text to files
+
+Example:
+    >>> from calute.tools.standalone import ReadFile, WriteFile
+    >>> content = ReadFile.static_call("config.yaml")
+    >>> WriteFile.static_call("output.txt", "Hello, World!")
+"""
+
 from __future__ import annotations
 
 import subprocess
@@ -25,6 +46,17 @@ from ..types import AgentBaseFn
 
 
 class ReadFile(AgentBaseFn):
+    """Tool for reading text files.
+
+    Reads the contents of a text file and returns them as a string.
+    Supports optional truncation for large files and configurable
+    character encoding and error handling.
+
+    Example:
+        >>> content = ReadFile.static_call("config.yaml")
+        >>> content = ReadFile.static_call("large_file.txt", max_chars=1000)
+    """
+
     @staticmethod
     def static_call(
         file_path: str,
@@ -68,6 +100,17 @@ class ReadFile(AgentBaseFn):
 
 
 class WriteFile(AgentBaseFn):
+    """Tool for writing text to files.
+
+    Writes text content to a file, automatically creating parent
+    directories if they do not exist. Supports optional overwrite
+    protection and configurable character encoding.
+
+    Example:
+        >>> WriteFile.static_call("output.txt", "Hello, World!")
+        >>> WriteFile.static_call("existing.txt", "New content", overwrite=True)
+    """
+
     @staticmethod
     def static_call(
         file_path: str,
@@ -103,6 +146,17 @@ class WriteFile(AgentBaseFn):
 
 
 class ListDir(AgentBaseFn):
+    """Tool for listing directory contents.
+
+    Lists files in a directory with optional filtering by file
+    extension. Returns a sorted list of file names (directories
+    are excluded from results).
+
+    Example:
+        >>> files = ListDir.static_call("./src")
+        >>> python_files = ListDir.static_call("./src", extension_filter=".py")
+    """
+
     @staticmethod
     def static_call(
         directory_path: str = ".",
@@ -139,6 +193,21 @@ class ListDir(AgentBaseFn):
 
 
 class ExecutePythonCode(AgentBaseFn):
+    """Tool for executing Python code in a subprocess.
+
+    Executes arbitrary Python code in a separate subprocess with
+    optional timeout protection. Captures stdout and stderr for
+    inspection of execution results.
+
+    Warning:
+        The executed code runs with full system privileges. Use only
+        in trusted environments or inside a sandbox (Docker, firejail, etc.).
+
+    Example:
+        >>> result = ExecutePythonCode.static_call("print('Hello')")
+        >>> print(result["stdout"])  # "Hello\\n"
+    """
+
     @staticmethod
     def static_call(
         code: str,
@@ -183,6 +252,21 @@ class ExecutePythonCode(AgentBaseFn):
 
 
 class ExecuteShell(AgentBaseFn):
+    """Tool for executing shell commands.
+
+    Executes shell commands with optional timeout and working
+    directory configuration. Captures stdout and stderr for
+    inspection of command results.
+
+    Warning:
+        Shell commands run with full system privileges. Use only
+        in trusted environments or with proper input sanitization.
+
+    Example:
+        >>> result = ExecuteShell.static_call("ls -la")
+        >>> result = ExecuteShell.static_call("pwd", cwd="/tmp")
+    """
+
     @staticmethod
     def static_call(
         command: str,
@@ -220,6 +304,17 @@ class ExecuteShell(AgentBaseFn):
 
 
 class AppendFile(AgentBaseFn):
+    """Tool for appending text to files.
+
+    Appends text content to the end of a file, creating the file
+    and parent directories if they do not exist. Supports configurable
+    encoding and newline characters.
+
+    Example:
+        >>> AppendFile.static_call("log.txt", "New log entry")
+        >>> AppendFile.static_call("data.csv", "row1,row2,row3", newline="\\r\\n")
+    """
+
     @staticmethod
     def static_call(
         file_path: str,

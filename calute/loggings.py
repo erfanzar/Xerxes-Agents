@@ -13,7 +13,25 @@
 # limitations under the License.
 
 
-"""Lightweight logging system for Calute using ANSI colors"""
+"""Lightweight logging system for Calute using ANSI colors.
+
+This module provides a centralized, color-coded logging system for the
+Calute framework. It includes:
+- ANSI color support for terminal output
+- Thread-safe singleton logger implementation
+- Colored log level formatting
+- Utility functions for common logging patterns
+- Streaming callback for real-time event display
+
+The logging system automatically detects TTY terminals and applies
+ANSI colors accordingly, falling back to plain text in non-TTY contexts.
+
+Example:
+    >>> from calute.loggings import get_logger, log_step
+    >>> logger = get_logger()
+    >>> logger.info("Starting process")
+    >>> log_step("INIT", "Initializing components", color="GREEN")
+"""
 
 import datetime
 import json
@@ -74,7 +92,24 @@ LEVEL_COLORS = {
 
 
 class ColorFormatter(logging.Formatter):
+    """Custom log formatter that adds ANSI color codes to log output.
+
+    This formatter colorizes log messages based on their severity level
+    and adds timestamps and logger names with appropriate styling.
+
+    The formatter handles multi-line messages by prepending the formatted
+    name to each line, ensuring consistent visual alignment.
+    """
+
     def format(self, record: logging.LogRecord) -> str:
+        """Format a log record with ANSI color codes.
+
+        Args:
+            record: The log record to format.
+
+        Returns:
+            Formatted string with ANSI color codes applied based on log level.
+        """
         orig_levelname = record.levelname
         color = LEVEL_COLORS.get(record.levelname, COLORS["RESET"])
         record.levelname = f"{color}{record.levelname:<8}{COLORS['RESET']}"
@@ -90,12 +125,29 @@ class ColorFormatter(logging.Formatter):
 
 
 class CaluteLogger:
-    """Centralized logger for Calute with colored output support"""
+    """Centralized logger for Calute with colored output support.
+
+    Thread-safe singleton logger that provides colored console output
+    with configurable log levels. Uses the singleton pattern to ensure
+    a single logger instance across the application.
+
+    Attributes:
+        logger: The underlying Python logging.Logger instance.
+
+    Note:
+        Log level can be configured via the CALUTE_LOG_LEVEL environment
+        variable. Defaults to INFO if not set.
+    """
 
     _instance = None
     _lock = threading.Lock()
 
     def __new__(cls):
+        """Create or return the singleton logger instance.
+
+        Returns:
+            The singleton CaluteLogger instance.
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -103,14 +155,17 @@ class CaluteLogger:
         return cls._instance
 
     def __init__(self):
-        """Initialize the logger"""
+        """Initialize the logger if not already initialized."""
         if not hasattr(self, "_initialized"):
             self._initialized = True
             self._setup_logger()
 
     def _setup_logger(self):
-        """Set up the main logger"""
+        """Set up the main logger with colored console handler.
 
+        Configures the internal logger with a ColorFormatter and sets
+        the log level from environment variables.
+        """
         self.logger = logging.getLogger("Calute")
         self.logger.setLevel(logging.DEBUG)
 
@@ -123,32 +178,71 @@ class CaluteLogger:
         self.logger.addHandler(console_handler)
 
     def _get_log_level(self) -> int:
-        """Get log level from environment variable"""
+        """Get log level from CALUTE_LOG_LEVEL environment variable.
+
+        Returns:
+            Integer log level corresponding to the environment variable
+            value, defaulting to INFO if not set or invalid.
+        """
         level_str = os.environ.get("CALUTE_LOG_LEVEL", "INFO").upper()
         return getattr(logging, level_str, logging.INFO)
 
     def debug(self, message: str, *args, **kwargs):
-        """Log debug message"""
+        """Log a message at DEBUG level.
+
+        Args:
+            message: The message to log.
+            *args: Positional arguments for string formatting.
+            **kwargs: Keyword arguments passed to the logger.
+        """
         self.logger.debug(message, *args, **kwargs)
 
     def info(self, message: str, *args, **kwargs):
-        """Log info message"""
+        """Log a message at INFO level.
+
+        Args:
+            message: The message to log.
+            *args: Positional arguments for string formatting.
+            **kwargs: Keyword arguments passed to the logger.
+        """
         self.logger.info(message, *args, **kwargs)
 
     def warning(self, message: str, *args, **kwargs):
-        """Log warning message"""
+        """Log a message at WARNING level.
+
+        Args:
+            message: The message to log.
+            *args: Positional arguments for string formatting.
+            **kwargs: Keyword arguments passed to the logger.
+        """
         self.logger.warning(message, *args, **kwargs)
 
     def error(self, message: str, *args, **kwargs):
-        """Log error message"""
+        """Log a message at ERROR level.
+
+        Args:
+            message: The message to log.
+            *args: Positional arguments for string formatting.
+            **kwargs: Keyword arguments passed to the logger.
+        """
         self.logger.error(message, *args, **kwargs)
 
     def critical(self, message: str, *args, **kwargs):
-        """Log critical message"""
+        """Log a message at CRITICAL level.
+
+        Args:
+            message: The message to log.
+            *args: Positional arguments for string formatting.
+            **kwargs: Keyword arguments passed to the logger.
+        """
         self.logger.critical(message, *args, **kwargs)
 
     def set_level(self, level: str):
-        """Set logging level"""
+        """Set the logging level for the logger and all handlers.
+
+        Args:
+            level: Log level name ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
+        """
         numeric_level = getattr(logging, level.upper(), logging.INFO)
         self.logger.setLevel(numeric_level)
         for handler in self.logger.handlers:
@@ -156,27 +250,46 @@ class CaluteLogger:
 
 
 def get_logger() -> CaluteLogger:
-    """Get the singleton CaluteLogger instance"""
+    """Get the singleton CaluteLogger instance.
+
+    Returns:
+        The global CaluteLogger singleton instance.
+
+    Example:
+        >>> logger = get_logger()
+        >>> logger.info("Application started")
+    """
     return CaluteLogger()
 
 
 def set_verbosity(level: str):
-    """Set the global verbosity level
+    """Set the global verbosity level for the Calute logger.
 
     Args:
-        level: One of 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
+        level: Log level name ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
+
+    Example:
+        >>> set_verbosity('DEBUG')  # Enable verbose output
+        >>> set_verbosity('ERROR')  # Only show errors
     """
     logger = get_logger()
     logger.set_level(level)
 
 
 def log_step(step_name: str, description: str = "", color: str = "CYAN"):
-    """Log a step in the process with formatting
+    """Log a step in the process with formatted, colored output.
+
+    Displays a step name in brackets with optional description.
+    Colors are applied only when output is to a TTY terminal.
 
     Args:
-        step_name: Name of the step
-        description: Optional description
-        color: Color name from COLORS dict
+        step_name: Name of the step (displayed in brackets).
+        description: Optional description following the step name.
+        color: Color name from COLORS dict (default: "CYAN").
+
+    Example:
+        >>> log_step("INIT", "Loading configuration")
+        >>> log_step("BUILD", "Compiling assets", color="GREEN")
     """
     logger = get_logger()
     color_code = COLORS.get(color.upper(), COLORS["CYAN"])
@@ -195,7 +308,14 @@ def log_step(step_name: str, description: str = "", color: str = "CYAN"):
 
 
 def log_thinking(agent_name: str):
-    """Log a thinking message with green color"""
+    """Log an agent's thinking state with colored brain emoji.
+
+    Displays a visual indicator that an agent is processing or thinking,
+    with blue/purple coloring in TTY terminals.
+
+    Args:
+        agent_name: Name of the agent that is currently thinking.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         logger.info(
@@ -206,7 +326,11 @@ def log_thinking(agent_name: str):
 
 
 def log_success(message: str):
-    """Log a success message with green color"""
+    """Log a success message with rocket emoji and blue color.
+
+    Args:
+        message: The success message to display.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         logger.info(f"{COLORS['BLUE']}🚀 {message}{COLORS['RESET']}")
@@ -215,7 +339,11 @@ def log_success(message: str):
 
 
 def log_error(message: str):
-    """Log an error message with red color"""
+    """Log an error message with cross emoji and red color.
+
+    Args:
+        message: The error message to display.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         logger.error(f"{COLORS['LIGHT_RED']}❌ {message}{COLORS['RESET']}")
@@ -224,7 +352,11 @@ def log_error(message: str):
 
 
 def log_warning(message: str):
-    """Log a warning message with yellow color"""
+    """Log a warning message with warning emoji and yellow color.
+
+    Args:
+        message: The warning message to display.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         logger.warning(f"{COLORS['YELLOW']}⚠️ {message}{COLORS['RESET']}")
@@ -233,7 +365,13 @@ def log_warning(message: str):
 
 
 def log_retry(attempt: int, max_attempts: int, error: str):
-    """Log a retry attempt"""
+    """Log a retry attempt with attempt counter and error details.
+
+    Args:
+        attempt: Current attempt number (1-based).
+        max_attempts: Maximum number of attempts allowed.
+        error: Description of the error that triggered the retry.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['YELLOW']}⏳ Retry {attempt}/{max_attempts}: {COLORS['LIGHT_RED']}{error}{COLORS['RESET']}"
@@ -243,7 +381,15 @@ def log_retry(attempt: int, max_attempts: int, error: str):
 
 
 def log_delegation(from_agent: str, to_agent: str):
-    """Log agent delegation"""
+    """Log an agent delegation event with arrow visualization.
+
+    Displays a formatted message showing control transfer from
+    one agent to another.
+
+    Args:
+        from_agent: Name of the delegating agent.
+        to_agent: Name of the agent receiving delegation.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         message = (
@@ -257,7 +403,11 @@ def log_delegation(from_agent: str, to_agent: str):
 
 
 def log_agent_start(agent: str | None = None):
-    """Log the start of a agent"""
+    """Log the initialization of an agent.
+
+    Args:
+        agent: Name of the agent being started.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         message = f" {COLORS['BLUE_PURPLE']}{agent} Agent is started.{COLORS['RESET']}"
@@ -267,7 +417,12 @@ def log_agent_start(agent: str | None = None):
 
 
 def log_task_start(task_name: str, agent: str | None = None):
-    """Log the start of a task"""
+    """Log the start of a task with optional agent context.
+
+    Args:
+        task_name: Name or description of the task being started.
+        agent: Optional name of the agent executing the task.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['BLUE']} Task Started: {COLORS['BOLD']}{task_name}{COLORS['RESET']}"
@@ -281,7 +436,12 @@ def log_task_start(task_name: str, agent: str | None = None):
 
 
 def log_task_complete(task_name: str, duration: float | None = None):
-    """Log task completion"""
+    """Log task completion with optional duration.
+
+    Args:
+        task_name: Name of the completed task.
+        duration: Optional execution duration in seconds.
+    """
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['GREEN']}🚀 Task Completed: {task_name}{COLORS['RESET']}"
@@ -298,7 +458,31 @@ logger = get_logger()
 
 
 def stream_callback(chunk):
-    """Purple-accented streaming callback. Keeps your exact tool-call style; adds timing, pretty results, and clean spacing."""
+    """Purple-accented streaming callback for real-time event display.
+
+    Handles various event types from the Calute streaming system and
+    displays them with appropriate formatting, colors, and timing
+    information. Maintains internal state for tracking tool calls
+    and execution times.
+
+    Supports the following event types:
+    - StreamChunk: Content streaming and tool call arguments
+    - FunctionDetection: Detection of function calls in output
+    - FunctionCallsExtracted: List of extracted function calls
+    - FunctionExecutionStart: Beginning of function execution
+    - FunctionExecutionComplete: Completion of function execution
+    - AgentSwitch: Agent transition events
+    - ReinvokeSignal: Re-invocation signals
+    - Completion: Task/pipeline completion events
+
+    Args:
+        chunk: Event object from the streaming system. Can be any of
+            the supported event types defined in calute.types.
+
+    Note:
+        Uses internal state to track tool call headers, indentation,
+        and execution timing across multiple calls.
+    """
 
     COL = COLORS
     ACCENT = COL["BLUE_PURPLE"]

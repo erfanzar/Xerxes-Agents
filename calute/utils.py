@@ -30,6 +30,7 @@ from typing import Any, TypeVar, Union, get_args, get_origin
 from pydantic import BaseModel, ConfigDict
 
 T = TypeVar("T")
+"""Generic type variable for type-safe operations."""
 
 
 def run_sync(coro: Coroutine[Any, Any, T]) -> T:
@@ -67,8 +68,23 @@ def run_sync(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class CaluteBase(BaseModel):
-    r"""
-    Forbids extra attributes, validates default values and use enum values.
+    """Base Pydantic model for Calute configuration classes.
+
+    This class provides a strict configuration base that enforces data validation
+    and prevents accidental attribute errors. All Calute configuration models
+    should inherit from this class.
+
+    Attributes:
+        model_config: Pydantic configuration that forbids extra attributes,
+            validates default values, and uses enum values directly.
+
+    Example:
+        >>> class MyConfig(CaluteBase):
+        ...     name: str
+        ...     count: int = 0
+        >>> config = MyConfig(name="test")
+        >>> config.name
+        'test'
     """
 
     model_config = ConfigDict(extra="forbid", validate_default=True, use_enum_values=True)
@@ -136,6 +152,13 @@ def merge_chunk(final_response: dict, delta: dict) -> None:
     Note:
         This function is specifically designed for merging streaming API
         response chunks that may contain tool calls.
+
+    Example:
+        >>> response = {"content": "Hello", "tool_calls": [{"name": "func"}]}
+        >>> delta = {"content": " World"}
+        >>> merge_chunk(response, delta)
+        >>> print(response["content"])
+        Hello World
     """
     delta.pop("role", None)
     merge_fields(final_response, delta)

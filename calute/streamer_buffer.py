@@ -13,6 +13,20 @@
 # limitations under the License.
 
 
+"""Streaming buffer utilities for response handling.
+
+This module provides buffering infrastructure for streaming responses in Calute,
+including:
+- Thread-safe queue-based buffering for streaming data
+- Support for both synchronous and asynchronous consumption
+- Graceful shutdown and cleanup mechanisms
+- Debug logging for troubleshooting streaming issues
+
+The StreamerBuffer class enables efficient streaming of responses from
+background threads or async tasks to the main consumer, with proper
+lifecycle management and error handling.
+"""
+
 import os
 import queue
 import threading
@@ -32,7 +46,20 @@ KILL_TAG = "/<[KILL-LOOP]>/"
 
 
 class StreamerBuffer:
-    """Simple buffer for streaming responses with put/get interface."""
+    """Thread-safe buffer for streaming responses with put/get interface.
+
+    Provides a queue-based buffering mechanism for streaming responses from
+    background threads or async tasks. Supports both blocking and non-blocking
+    access patterns, and handles graceful shutdown via a kill signal.
+
+    Attributes:
+        thread: Optional thread running the streaming producer.
+        task: Optional asyncio task for async streaming operations.
+        result_holder: Optional list to store the final result.
+        exception_holder: Optional list to store exceptions during streaming.
+        get_result: Optional callable to retrieve the final result synchronously.
+        aget_result: Optional callable to retrieve the final result asynchronously.
+    """
 
     def __init__(self, maxsize: int = 0):
         """
@@ -53,11 +80,17 @@ class StreamerBuffer:
         self.aget_result: tp.Callable[[], tp.Awaitable[tp.Any]] | None = None
 
     def put(self, item: StreamingResponseType | None) -> None:
-        """
-        Put an item into the buffer.
+        """Put an item into the buffer.
+
+        Adds a streaming response item to the internal queue. If the buffer
+        is closed, the item will be dropped (with a warning if debug mode
+        is enabled).
 
         Args:
-            item: The streaming response to buffer (None signals end of current stream)
+            item: The streaming response to buffer (None signals end of current stream).
+
+        Returns:
+            None
         """
         if DEBUG_STREAMING:
             import sys
@@ -74,14 +107,17 @@ class StreamerBuffer:
             print("[StreamerBuffer] WARNING: Buffer closed, dropping item", file=sys.stderr)
 
     def get(self, timeout: float | None = None) -> StreamingResponseType | None:
-        """
-        Get an item from the buffer.
+        """Get an item from the buffer.
+
+        Retrieves and removes an item from the internal queue. Blocks until
+        an item is available or the timeout expires.
 
         Args:
-            timeout: Timeout in seconds (None for blocking)
+            timeout: Timeout in seconds (None for blocking indefinitely).
 
         Returns:
-            The streaming response or None if stream ended
+            The streaming response item, or None if the timeout expired
+            without an item becoming available.
         """
         try:
             return self._queue.get(timeout=timeout)
@@ -89,11 +125,14 @@ class StreamerBuffer:
             return None
 
     def stream(self) -> Generator[StreamingResponseType, None, None]:
-        """
-        Generator that yields all items from buffer until None.
+        """Generator that yields all items from buffer until terminated.
+
+        Continuously retrieves items from the buffer and yields them until
+        a kill signal (KILL_TAG) is received. Automatically tracks when
+        a Completion item is encountered to support graceful shutdown.
 
         Yields:
-            Streaming responses from the buffer
+            StreamingResponseType: Streaming response items from the buffer.
         """
         while True:
             try:
@@ -111,7 +150,15 @@ class StreamerBuffer:
                 continue
 
     def close(self) -> None:
-        """Permanently close the buffer."""
+        """Permanently close the buffer.
+
+        Marks the buffer as closed and sends a kill signal to terminate
+        any active stream consumers. This operation is thread-safe and
+        idempotent - calling close() multiple times has no additional effect.
+
+        Returns:
+            None
+        """
         with self._lock:
             if not self._closed:
                 self._closed = True
@@ -119,10 +166,27 @@ class StreamerBuffer:
 
     @property
     def closed(self) -> bool:
-        """Check if buffer is closed."""
+        """Check if buffer is closed.
+
+        Returns:
+            True if the buffer has been permanently closed, False otherwise.
+        """
         return self._closed
 
-    def maybe_finish(self, arg):
+    def maybe_finish(self, arg: tp.Any) -> None:
+        """Conditionally close the buffer based on completion state.
+
+        Closes the buffer if the provided argument is None and a Completion
+        item has been previously encountered during streaming. This enables
+        automatic cleanup when the stream has naturally completed.
+
+        Args:
+            arg: The argument to check. If None and a completion was seen,
+                the buffer will be closed.
+
+        Returns:
+            None
+        """
         if arg is None and self._finish_hit:
             self.close()
 

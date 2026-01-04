@@ -13,6 +13,28 @@
 # limitations under the License.
 
 
+"""Pre-built agents for specialized tasks within the Calute framework.
+
+This module provides a collection of ready-to-use agent configurations optimized
+for specific domains and use cases. These pre-built agents can be used directly
+or serve as templates for creating custom specialized agents.
+
+Available Agents:
+    - code_agent: Specialized for code generation, review, and debugging tasks
+    - data_analyst_agent: Optimized for data analysis and visualization tasks
+    - planner_agent: Designed for task planning and project management
+    - research_agent: Configured for research and information gathering
+    - CompactionAgent: Agent for memory compaction and summarization
+
+Example:
+    >>> from calute.agents import code_agent, research_agent
+    >>> from calute import OpenAILLM
+    >>>
+    >>> llm = OpenAILLM(api_key="your-api-key")
+    >>> coder = code_agent(llm=llm)
+    >>> response = coder.query("Write a Python function to sort a list")
+"""
+
 from . import compaction_agent
 from ._coder_agent import code_agent
 from ._data_analyst_agent import data_analyst_agent

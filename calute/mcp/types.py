@@ -13,7 +13,27 @@
 # limitations under the License.
 
 
-"""Type definitions for MCP integration."""
+"""Type definitions for Model Context Protocol (MCP) integration.
+
+This module provides data structures and type definitions for MCP
+(Model Context Protocol) integration within the Calute framework. It includes:
+- Transport type enumeration for different communication protocols
+- Server configuration dataclass for MCP server connections
+- Tool, resource, and prompt dataclasses for MCP primitives
+
+MCP enables standardized communication between AI agents and external
+tools/services. These types form the foundation for the MCP client
+implementation in Calute.
+
+Example:
+    >>> from calute.mcp.types import MCPServerConfig, MCPTransportType
+    >>> config = MCPServerConfig(
+    ...     name="filesystem",
+    ...     command="npx",
+    ...     args=["-y", "@modelcontextprotocol/server-filesystem"],
+    ...     transport=MCPTransportType.STDIO
+    ... )
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,11 +41,23 @@ from typing import Any
 
 
 class MCPTransportType(Enum):
-    """MCP transport types.
+    """Enumeration of available MCP transport types.
 
-    STDIO: Local subprocess communication (for npx, uvx style servers)
-    SSE: Server-Sent Events over HTTP (legacy 2024-11-05 protocol)
-    STREAMABLE_HTTP: Streamable HTTP transport (recommended for 2025+)
+    Defines the communication protocols supported for connecting
+    to MCP servers. Each transport type has different use cases
+    and performance characteristics.
+
+    Transport Types:
+        STDIO: Local subprocess communication via standard input/output.
+            Best for local tools like npx or uvx style servers.
+        SSE: Server-Sent Events over HTTP (legacy 2024-11-05 protocol).
+            Suitable for remote servers with one-way streaming.
+        STREAMABLE_HTTP: Streamable HTTP transport (recommended for 2025+).
+            Modern bidirectional streaming protocol for remote servers.
+
+    Note:
+        HTTP and WEBSOCKET are deprecated aliases maintained for
+        backwards compatibility. Use SSE or STREAMABLE_HTTP instead.
     """
 
     STDIO = "stdio"
@@ -41,17 +73,29 @@ class MCPTransportType(Enum):
 class MCPServerConfig:
     """Configuration for an MCP server connection.
 
+    Defines all settings required to establish and manage a connection
+    to an MCP server. Supports both local subprocess (STDIO) and remote
+    HTTP-based transports with configurable timeouts and authentication.
+
     Attributes:
-        name: Unique name for this MCP server
-        command: Command to start the server (for stdio transport)
-        args: Arguments for the server command
-        env: Environment variables for the server
-        transport: Transport type (stdio, sse, streamable_http)
-        url: Server URL (for SSE/Streamable HTTP transports)
-        headers: HTTP headers for authentication
-        enabled: Whether this server is enabled
-        timeout: Timeout for HTTP operations in seconds (default 30)
-        sse_read_timeout: Timeout for SSE event stream in seconds (default 300)
+        name: Unique identifier name for this MCP server.
+        command: Command to start the server (required for STDIO transport).
+        args: Command-line arguments for the server process.
+        env: Environment variables to set for the server process.
+        transport: Communication protocol type (STDIO, SSE, or STREAMABLE_HTTP).
+        url: Server URL (required for SSE/Streamable HTTP transports).
+        headers: HTTP headers for authentication and custom metadata.
+        enabled: Whether this server connection is active.
+        timeout: Timeout in seconds for HTTP operations (default: 30.0).
+        sse_read_timeout: Timeout in seconds for SSE event stream reads (default: 300.0).
+
+    Example:
+        >>> config = MCPServerConfig(
+        ...     name="github",
+        ...     url="https://mcp.github.com/sse",
+        ...     transport=MCPTransportType.SSE,
+        ...     headers={"Authorization": "Bearer token"}
+        ... )
     """
 
     name: str
@@ -70,11 +114,23 @@ class MCPServerConfig:
 class MCPTool:
     """Represents an MCP tool that can be called by agents.
 
+    Encapsulates the metadata and schema for an MCP tool, enabling
+    agents to discover and invoke external capabilities exposed by
+    MCP servers. Tools are the primary mechanism for agent actions.
+
     Attributes:
-        name: Tool name
-        description: Tool description
-        input_schema: JSON schema for tool input
-        server_name: Name of the MCP server providing this tool
+        name: Unique identifier for the tool within its server.
+        description: Human-readable description of tool functionality.
+        input_schema: JSON Schema defining required and optional parameters.
+        server_name: Name of the MCP server that provides this tool.
+
+    Example:
+        >>> tool = MCPTool(
+        ...     name="read_file",
+        ...     description="Read contents of a file",
+        ...     input_schema={"type": "object", "properties": {"path": {"type": "string"}}},
+        ...     server_name="filesystem"
+        ... )
     """
 
     name: str
@@ -87,12 +143,25 @@ class MCPTool:
 class MCPResource:
     """Represents an MCP resource (data) accessible to agents.
 
+    Encapsulates metadata for data resources exposed by MCP servers.
+    Resources provide read-only access to contextual information that
+    agents can use to inform their responses and decisions.
+
     Attributes:
-        uri: Resource URI
-        name: Resource name
-        description: Resource description
-        mime_type: MIME type of the resource
-        server_name: Name of the MCP server providing this resource
+        uri: Unique resource identifier URI for accessing the resource.
+        name: Human-readable display name for the resource.
+        description: Detailed description of the resource content.
+        mime_type: MIME type indicating the resource format (e.g., 'text/plain').
+        server_name: Name of the MCP server that provides this resource.
+
+    Example:
+        >>> resource = MCPResource(
+        ...     uri="file:///path/to/document.txt",
+        ...     name="Document",
+        ...     description="Project documentation file",
+        ...     mime_type="text/plain",
+        ...     server_name="filesystem"
+        ... )
     """
 
     uri: str
@@ -106,11 +175,23 @@ class MCPResource:
 class MCPPrompt:
     """Represents an MCP prompt template.
 
+    Encapsulates reusable prompt templates exposed by MCP servers.
+    Prompts allow servers to provide pre-defined interaction patterns
+    that agents can invoke with specific arguments to generate responses.
+
     Attributes:
-        name: Prompt name
-        description: Prompt description
-        arguments: Expected prompt arguments
-        server_name: Name of the MCP server providing this prompt
+        name: Unique identifier for the prompt template.
+        description: Human-readable description of the prompt purpose.
+        arguments: List of argument definitions with name, type, and description.
+        server_name: Name of the MCP server that provides this prompt.
+
+    Example:
+        >>> prompt = MCPPrompt(
+        ...     name="summarize",
+        ...     description="Summarize the given text",
+        ...     arguments=[{"name": "text", "type": "string", "required": True}],
+        ...     server_name="text-tools"
+        ... )
     """
 
     name: str

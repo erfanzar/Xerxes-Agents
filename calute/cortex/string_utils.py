@@ -13,7 +13,35 @@
 # limitations under the License.
 
 
-"""String utility functions for template interpolation"""
+"""String utility functions for template interpolation.
+
+This module provides utilities for working with template strings that use
+simple placeholder syntax (e.g., {variable_name}). It includes:
+- Template variable interpolation with type-safe value substitution
+- Template variable extraction for validation
+- Input validation against template requirements
+
+Unlike the Jinja2-based PromptTemplate class, these utilities use a simpler
+placeholder syntax that is compatible with Python's str.format() but with
+additional type safety and validation features.
+
+Example:
+    >>> from calute.cortex.string_utils import interpolate_inputs
+    >>> result = interpolate_inputs(
+    ...     "Hello {name}, you have {count} messages.",
+    ...     {"name": "Alice", "count": 5}
+    ... )
+    >>> print(result)
+    Hello Alice, you have 5 messages.
+
+    >>> from calute.cortex.string_utils import validate_inputs_for_template
+    >>> is_valid, errors = validate_inputs_for_template(
+    ...     "Hello {name}",
+    ...     {"name": "World"}
+    ... )
+    >>> print(is_valid)
+    True
+"""
 
 import re
 from typing import Any

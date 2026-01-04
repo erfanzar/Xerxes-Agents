@@ -13,6 +13,27 @@
 # limitations under the License.
 
 
+"""DuckDuckGo search engine integration for Calute agents.
+
+This module provides a comprehensive DuckDuckGo search tool for Calute agents,
+enabling web searches with advanced filtering and customization options. It includes:
+- Text, image, video, news, and map searches
+- Domain and keyword filtering
+- Safe search and time range filtering
+- Multi-source search across different content types
+- Search suggestions and query translation
+- Lazy loading of dependencies to avoid import errors
+
+The search tool is implemented as an AgentBaseFn subclass for seamless
+integration with Calute agents. Requires the optional 'ddgs' package,
+which can be installed with: pip install calute[search]
+
+Example:
+    >>> from calute.tools.duckduckgo_engine import DuckDuckGoSearch
+    >>> results = DuckDuckGoSearch.static_call("Python programming", n_results=5)
+    >>> news = DuckDuckGoSearch.static_call("AI news", search_type="news")
+"""
+
 from datetime import datetime
 from typing import Literal
 
@@ -24,7 +45,14 @@ _DDGS_AVAILABLE = None
 
 
 def _get_ddgs():
-    """Lazy import of DDGS to avoid crashing if not installed."""
+    """Lazy import of DDGS to avoid crashing if not installed.
+
+    Returns:
+        The DDGS class from the ddgs package.
+
+    Raises:
+        ImportError: If the ddgs package is not installed.
+    """
     global _DDGS, _DDGS_AVAILABLE
     if _DDGS_AVAILABLE is None:
         try:
@@ -42,6 +70,32 @@ def _get_ddgs():
 
 
 class DuckDuckGoSearch(AgentBaseFn):
+    """DuckDuckGo search tool for web, image, video, news, and map searches.
+
+    Provides comprehensive search capabilities through the DuckDuckGo API
+    with support for filtering, safe search, time limits, and domain
+    restrictions. Implements lazy loading of the ddgs package.
+
+    Attributes:
+        SearchType: Literal type for search categories (text, images, videos, news, maps).
+        TimeFilter: Literal type for time range filtering (day, week, month, year, None).
+        SafeSearch: Literal type for safe search levels (strict, moderate, off).
+
+    Methods:
+        static_call: Perform a search with full filtering options.
+        search_multiple_sources: Search across multiple content types.
+        get_suggestions: Get search query suggestions.
+        translate_query: Translate a query to another language.
+
+    Example:
+        >>> results = DuckDuckGoSearch.static_call(
+        ...     query="machine learning",
+        ...     search_type="text",
+        ...     n_results=10,
+        ...     timelimit="month"
+        ... )
+    """
+
     SearchType = Literal["text", "images", "videos", "news", "maps"]
 
     TimeFilter = Literal["day", "week", "month", "year", None]
@@ -50,12 +104,28 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def _maybe_truncate(text: str, limit: int | None) -> str:
-        """Return the full text if limit is None, else the first `limit` chars."""
+        """Return the full text if limit is None, else the first `limit` chars.
+
+        Args:
+            text: The text to potentially truncate.
+            limit: Maximum character limit, or None for no limit.
+
+        Returns:
+            The original text or truncated version.
+        """
         return text if limit is None else text[:limit]
 
     @staticmethod
     def _filter_by_domain(results: list[dict], domains: list[str] | None) -> list[dict]:
-        """Filter results to only include specified domains."""
+        """Filter results to only include specified domains.
+
+        Args:
+            results: List of search result dictionaries.
+            domains: List of domain strings to filter by, or None.
+
+        Returns:
+            Filtered list containing only results from specified domains.
+        """
         if not domains:
             return results
 
@@ -68,7 +138,16 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def _filter_by_keywords(results: list[dict], keywords: list[str] | None, exclude: bool = False) -> list[dict]:
-        """Filter results by keywords in title or snippet."""
+        """Filter results by keywords in title or snippet.
+
+        Args:
+            results: List of search result dictionaries.
+            keywords: List of keywords to filter by, or None.
+            exclude: If True, exclude results containing keywords.
+
+        Returns:
+            Filtered list based on keyword presence.
+        """
         if not keywords:
             return results
 

@@ -13,6 +13,27 @@
 # limitations under the License.
 
 
+"""OpenAI API protocol definitions for Calute.
+
+This module provides Pydantic models that mirror the OpenAI API protocol
+structures. It includes:
+- Request models for chat completions and text completions
+- Response models for both streaming and non-streaming responses
+- Message types for chat conversations
+- Tool and function calling structures
+- Usage and metrics tracking
+
+These models enable Calute to provide OpenAI-compatible API endpoints
+and facilitate integration with OpenAI-compatible clients and tools.
+
+Example:
+    >>> from calute.types.oai_protocols import ChatCompletionRequest, ChatMessage
+    >>> request = ChatCompletionRequest(
+    ...     model="gpt-4",
+    ...     messages=[ChatMessage(role="user", content="Hello!")]
+    ... )
+"""
+
 import time
 import typing as tp
 import uuid
@@ -22,12 +43,33 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIBaseModel(BaseModel):
+    """Base model for OpenAI-compatible protocol structures.
+
+    Extends Pydantic BaseModel with support for extra fields and
+    automatic field name caching for validation purposes.
+
+    Attributes:
+        field_names: Class-level cache of valid field names including aliases.
+    """
+
     model_config = ConfigDict(extra="allow")
     field_names: tp.ClassVar[set[str] | None] = None
 
     @model_validator(mode="wrap")
     @classmethod
     def __log_extra_fields__(cls, data, handler):
+        """Validate and cache field names for the model.
+
+        Wraps the standard validation to build a cache of valid field names
+        including any aliases defined on fields.
+
+        Args:
+            data: The input data to validate.
+            handler: The standard Pydantic validation handler.
+
+        Returns:
+            The validated model instance.
+        """
         result = handler(data)
         if not isinstance(data, dict):
             return result
@@ -75,7 +117,13 @@ class DeltaMessage(OpenAIBaseModel):
 
 
 class Function(OpenAIBaseModel):
-    """Function definition for OpenAI-compatible function calling."""
+    """Function definition for OpenAI-compatible function calling.
+
+    Attributes:
+        name: The function name.
+        description: Description of what the function does.
+        parameters: JSON Schema defining the function parameters.
+    """
 
     name: str
     description: str | None = None
@@ -83,18 +131,41 @@ class Function(OpenAIBaseModel):
 
 
 class Tool(OpenAIBaseModel):
-    """Tool definition supporting function calling."""
+    """Tool definition supporting function calling.
+
+    Attributes:
+        type: Tool type, currently only "function" is supported.
+        function: The function definition for this tool.
+    """
 
     type: str = "function"
     function: Function
 
 
 class DeltaFunctionCall(OpenAIBaseModel):
+    """Represents incremental updates to a function call during streaming.
+
+    Attributes:
+        name: Function name (sent in first chunk only).
+        arguments: Incremental arguments string to append.
+    """
+
     name: str | None = None
     arguments: str | None = None
 
 
 class DeltaToolCall(OpenAIBaseModel):
+    """Represents incremental updates to a tool call during streaming.
+
+    Used in streaming responses to send tool call information in chunks.
+
+    Attributes:
+        id: Tool call ID (sent in first chunk only).
+        type: Tool type, always "function".
+        index: Index of this tool call in the list.
+        function: Incremental function call updates.
+    """
+
     id: str | None = None
     type: tp.Literal["function"] | None = None
     index: int
@@ -143,9 +214,33 @@ class ToolDefinition(OpenAIBaseModel):
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
-    """
-    Represents a request to the chat completion endpoint.
-    Mirrors the OpenAI ChatCompletion request structure.
+    """Represents a request to the chat completion endpoint.
+
+    Mirrors the OpenAI ChatCompletion request structure with additional
+    parameters for extended functionality.
+
+    Attributes:
+        model: Model identifier to use for completion.
+        messages: List of messages in the conversation.
+        max_tokens: Maximum tokens to generate.
+        presence_penalty: Penalty for token presence (0.0-2.0).
+        frequency_penalty: Penalty for token frequency (0.0-2.0).
+        repetition_penalty: Repetition penalty multiplier.
+        temperature: Sampling temperature (0.0-2.0).
+        top_p: Nucleus sampling probability threshold.
+        top_k: Top-k sampling parameter.
+        min_p: Minimum probability threshold for sampling.
+        suppress_tokens: Token IDs to suppress during generation.
+        functions: Legacy function definitions (deprecated).
+        function_call: Legacy function call control (deprecated).
+        tools: Tool definitions for function calling.
+        tool_choice: Tool selection strategy.
+        n: Number of completions to generate.
+        stream: Whether to stream the response.
+        stop: Stop sequences to end generation.
+        logit_bias: Token logit adjustments.
+        user: Unique user identifier for tracking.
+        chat_template_kwargs: Additional template rendering arguments.
     """
 
     model: str
@@ -217,9 +312,28 @@ class CountTokenRequest(OpenAIBaseModel):
 
 
 class CompletionRequest(OpenAIBaseModel):
-    """
-    Represents a request to the completions endpoint.
-    Mirrors the OpenAI Completion request structure.
+    """Represents a request to the completions endpoint.
+
+    Mirrors the OpenAI Completion request structure for text completion
+    (non-chat) endpoints.
+
+    Attributes:
+        model: Model identifier to use for completion.
+        prompt: Text prompt(s) to complete.
+        max_tokens: Maximum tokens to generate.
+        presence_penalty: Penalty for token presence (0.0-2.0).
+        frequency_penalty: Penalty for token frequency (0.0-2.0).
+        repetition_penalty: Repetition penalty multiplier.
+        temperature: Sampling temperature (0.0-2.0).
+        top_p: Nucleus sampling probability threshold.
+        top_k: Top-k sampling parameter.
+        min_p: Minimum probability threshold for sampling.
+        suppress_tokens: Token IDs to suppress during generation.
+        n: Number of completions to generate.
+        stream: Whether to stream the response.
+        stop: Stop sequences to end generation.
+        logit_bias: Token logit adjustments.
+        user: Unique user identifier for tracking.
     """
 
     model: str
@@ -290,14 +404,25 @@ class CompletionStreamResponse(OpenAIBaseModel):
 
 
 class FunctionCall(OpenAIBaseModel):
-    """Represents a function call in the OpenAI format."""
+    """Represents a function call in the OpenAI format.
+
+    Attributes:
+        name: Name of the function to call.
+        arguments: JSON-encoded string of function arguments.
+    """
 
     name: str
     arguments: str
 
 
 class Function(OpenAIBaseModel):
-    """Function definition for OpenAI-compatible function calling."""
+    """Function definition for OpenAI-compatible function calling.
+
+    Attributes:
+        name: The function name.
+        description: Description of what the function does.
+        parameters: JSON Schema defining the function parameters.
+    """
 
     name: str
     description: str | None = None
@@ -305,7 +430,13 @@ class Function(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    """Represents a tool call in responses."""
+    """Represents a tool call in responses.
+
+    Attributes:
+        id: Unique identifier for this tool call.
+        type: Tool type, always "function".
+        function: The function call details.
+    """
 
     id: str
     type: str = "function"
@@ -335,6 +466,17 @@ class FunctionCallFormat(str, Enum):
 
 
 class ExtractedToolCallInformation(OpenAIBaseModel):
+    """Container for extracted tool call information from model output.
+
+    Used to parse and store tool calls extracted from various model output
+    formats.
+
+    Attributes:
+        tools_called: Whether any tools were called.
+        tool_calls: List of extracted tool calls.
+        content: Any remaining content after tool extraction.
+    """
+
     tools_called: bool
     tool_calls: list[ToolCall]
     content: str | None = None

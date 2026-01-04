@@ -13,16 +13,41 @@
 # limitations under the License.
 
 
-"""
-Coder Agent - An intelligent code generation and analysis agent.
+"""Pre-built Coder Agent for intelligent code generation and analysis.
 
-This agent specializes in:
-- Code generation and refactoring
-- Code review and optimization
-- Bug fixing and debugging
-- Test generation
-- Documentation generation
-- Code analysis and metrics
+This module provides a pre-configured AI agent specialized in software development
+tasks within the Calute framework. The coder agent is designed to assist with
+various programming tasks including writing, reviewing, debugging, and optimizing
+code across different programming languages.
+
+The agent is equipped with specialized tools for:
+- Executing Python code in a sandboxed environment
+- Reading and writing files for code manipulation
+- Executing shell commands for build and test operations
+- File system operations for project navigation
+
+Agent Capabilities:
+    - Code Generation: Writing clean, efficient, and maintainable code
+    - Debugging: Identifying and fixing complex issues in codebases
+    - Refactoring: Restructuring code for better organization and readability
+    - Test Generation: Creating comprehensive test suites
+    - Documentation: Generating clear code documentation
+    - Code Review: Analyzing code quality and suggesting improvements
+
+Typical usage example:
+    from calute import Calute
+    from calute.agents import code_agent
+
+    calute = Calute(llm=your_llm)
+    response = calute.run(
+        prompt="Write a function to calculate fibonacci numbers",
+        agent_id=code_agent
+    )
+
+Note:
+    The agent uses a moderate temperature (0.6) to balance creativity with
+    accuracy in code generation. It has a higher token limit (4096) to
+    accommodate complex code outputs.
 """
 
 from ..tools import ExecutePythonCode, ExecuteShell, FileSystemTools, ReadFile, WriteFile

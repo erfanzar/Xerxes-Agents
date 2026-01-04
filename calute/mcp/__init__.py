@@ -17,7 +17,27 @@
 
 This module provides integration with MCP servers, allowing Calute agents
 to access external resources, tools, and prompts through the standardized
-Model Context Protocol.
+Model Context Protocol. The MCP integration enables agents to connect to
+external services, databases, and APIs through a unified protocol.
+
+Key Features:
+    - Multiple transport support (STDIO, SSE, Streamable HTTP)
+    - Multi-server management with unified tool access
+    - Automatic capability discovery (tools, resources, prompts)
+    - Asynchronous connection handling
+    - Server configuration with environment variables and headers
+
+Example:
+    >>> from calute.mcp import MCPManager, MCPServerConfig
+    >>>
+    >>> manager = MCPManager()
+    >>> config = MCPServerConfig(
+    ...     name="my-server",
+    ...     command="npx",
+    ...     args=["-y", "@modelcontextprotocol/server-example"]
+    ... )
+    >>> # await manager.add_server(config)
+    >>> # tools = manager.get_all_tools()
 """
 
 from .client import MCPClient

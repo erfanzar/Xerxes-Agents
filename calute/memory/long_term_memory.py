@@ -186,7 +186,21 @@ class LongTermMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve specific memories"""
+        """
+        Retrieve specific memories by ID or filter criteria.
+
+        When memory_id is provided, returns the specific item and updates its
+        access count. Otherwise, filters through memories and returns matches.
+
+        Args:
+            memory_id: Specific memory ID to retrieve
+            filters: Filter criteria to match against memory attributes and metadata
+            limit: Maximum number of items to return when using filters
+
+        Returns:
+            Single MemoryItem if memory_id provided, list of MemoryItem if filters used,
+            or None if memory_id not found
+        """
         if memory_id:
             item = self._index.get(memory_id)
             if item:
@@ -212,7 +226,18 @@ class LongTermMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update a memory item"""
+        """
+        Update a memory item with new values.
+
+        Persists changes to storage backend if configured.
+
+        Args:
+            memory_id: ID of the memory item to update
+            updates: Dictionary of field names and new values to apply
+
+        Returns:
+            True if the update was successful, False if memory_id not found
+        """
         if memory_id not in self._index:
             return False
 
@@ -227,7 +252,18 @@ class LongTermMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete memory items"""
+        """
+        Delete memory items by ID or filter criteria.
+
+        Removes items from both memory and storage backend if configured.
+
+        Args:
+            memory_id: Specific memory ID to delete
+            filters: Filter criteria to match items for deletion
+
+        Returns:
+            Number of items deleted
+        """
         count = 0
 
         if memory_id:
@@ -254,7 +290,12 @@ class LongTermMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear all long-term memories"""
+        """
+        Clear all long-term memories.
+
+        Removes all items from memory and storage backend. This operation
+        permanently deletes all stored memories.
+        """
         if self.storage:
             for key in self.storage.list_keys("ltm_"):
                 self.storage.delete(key)
@@ -263,7 +304,14 @@ class LongTermMemory(Memory):
         self._index.clear()
 
     def _cleanup_old_memories(self):
-        """Remove expired or low-importance memories"""
+        """
+        Remove expired or low-importance memories.
+
+        Cleanup strategy:
+        1. Remove memories older than retention_days
+        2. Remove low-importance (<0.3) and rarely accessed (<2 times) memories
+        3. If insufficient cleanup, remove bottom 20% based on composite score
+        """
         cutoff_date = datetime.now() - timedelta(days=self.retention_days)
         to_remove = []
 
@@ -291,7 +339,18 @@ class LongTermMemory(Memory):
                 self.storage.delete(f"ltm_{item.memory_id}")
 
     def _matches_filters(self, item: MemoryItem, filters: dict[str, Any]) -> bool:
-        """Check if item matches all filters"""
+        """
+        Check if item matches all filter criteria.
+
+        Checks both direct attributes and metadata fields.
+
+        Args:
+            item: Memory item to check
+            filters: Dictionary of field names to required values
+
+        Returns:
+            True if item matches all filters, False otherwise
+        """
         for key, value in filters.items():
             if hasattr(item, key):
                 if getattr(item, key) != value:
@@ -302,7 +361,18 @@ class LongTermMemory(Memory):
         return True
 
     def _calculate_relevance(self, content: str, query: str) -> float:
-        """Calculate relevance score"""
+        """
+        Calculate keyword-based relevance score.
+
+        Uses exact match and word overlap to compute relevance.
+
+        Args:
+            content: Content string to search within
+            query: Query string (should be lowercase)
+
+        Returns:
+            Relevance score between 0.0 and 1.0
+        """
         content_lower = content.lower()
         if query in content_lower:
             return 1.0
@@ -317,7 +387,12 @@ class LongTermMemory(Memory):
     def consolidate(self) -> str:
         """
         Consolidate memories into a coherent summary.
-        Useful for generating context or reports.
+
+        Groups memories by conversation or agent and produces a human-readable
+        summary. Useful for generating context or reports.
+
+        Returns:
+            Formatted string summary of long-term memory contents
         """
         if not self._items:
             return "No long-term memories available."

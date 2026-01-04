@@ -13,7 +13,35 @@
 # limitations under the License.
 
 
-"""Context compaction strategies for managing conversation history."""
+"""Context compaction strategies for managing conversation history.
+
+This module provides various strategies for compacting conversation
+history when context length exceeds token limits. Each strategy
+implements a different approach to reducing context size while
+preserving relevant information.
+
+The strategies range from simple truncation to intelligent
+summarization using LLM capabilities, allowing for flexible
+context management based on requirements and available resources.
+
+Key Components:
+    - BaseCompactionStrategy: Abstract base class defining the interface
+    - SummarizationStrategy: LLM-based conversation summarization
+    - SlidingWindowStrategy: Recent message retention with window
+    - PriorityBasedStrategy: Importance-based message selection
+    - SmartCompactionStrategy: Hybrid adaptive strategy
+    - TruncateStrategy: Simple truncation for emergency cases
+
+Example:
+    >>> from calute.context_management import get_compaction_strategy
+    >>> from calute.types import CompactionStrategy
+    >>> strategy = get_compaction_strategy(
+    ...     strategy=CompactionStrategy.SLIDING_WINDOW,
+    ...     target_tokens=4000,
+    ...     model="gpt-4"
+    ... )
+    >>> compacted, stats = strategy.compact(messages)
+"""
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -24,7 +52,19 @@ from .token_counter import SmartTokenCounter
 
 
 class BaseCompactionStrategy(ABC):
-    """Base class for context compaction strategies."""
+    """Base class for context compaction strategies.
+
+    Provides the foundational interface and common functionality
+    for all compaction strategies. Subclasses must implement the
+    compact() method to define their specific compaction logic.
+
+    Attributes:
+        target_tokens: Target number of tokens after compaction.
+        model: Model name for accurate token counting.
+        preserve_system: Whether to preserve system messages during compaction.
+        preserve_recent: Number of recent messages to always preserve.
+        token_counter: SmartTokenCounter instance for token counting.
+    """
 
     def __init__(
         self,
@@ -97,7 +137,17 @@ class BaseCompactionStrategy(ABC):
 
 
 class SummarizationStrategy(BaseCompactionStrategy):
-    """Compaction strategy that uses LLM to summarize older messages."""
+    """Compaction strategy that uses LLM to summarize older messages.
+
+    This strategy leverages an LLM client to intelligently summarize
+    older portions of conversation history, creating a condensed
+    representation that preserves key information while reducing
+    token count significantly.
+
+    Attributes:
+        llm_client: LLM client instance for generating summaries.
+        compaction_agent: Optional compaction agent for advanced summarization.
+    """
 
     def __init__(self, llm_client: Any | None = None, **kwargs):
         """Initialize summarization strategy.
@@ -177,7 +227,14 @@ class SummarizationStrategy(BaseCompactionStrategy):
         return compacted, stats
 
     def _format_conversation(self, messages: list[dict[str, str]]) -> str:
-        """Format messages as conversation text."""
+        """Format messages as conversation text for summarization.
+
+        Args:
+            messages: List of message dictionaries to format.
+
+        Returns:
+            Formatted conversation text with role prefixes.
+        """
         lines = []
         for msg in messages:
             role = msg.get("role", "unknown").capitalize()
@@ -186,7 +243,17 @@ class SummarizationStrategy(BaseCompactionStrategy):
         return "\n\n".join(lines)
 
     def _generate_summary(self, conversation: str) -> str:
-        """Generate summary using LLM or fallback method."""
+        """Generate summary using LLM or fallback method.
+
+        Falls back to a simple truncation-based summary if no LLM
+        client is available.
+
+        Args:
+            conversation: Formatted conversation text to summarize.
+
+        Returns:
+            Summarized version of the conversation.
+        """
         if self.llm_client:
             pass
 
@@ -198,7 +265,15 @@ class SummarizationStrategy(BaseCompactionStrategy):
 
 
 class SlidingWindowStrategy(BaseCompactionStrategy):
-    """Compaction strategy that keeps only recent messages."""
+    """Compaction strategy that keeps only recent messages.
+
+    Implements a sliding window approach where older messages are
+    progressively removed to stay within token limits, while always
+    preserving the most recent messages for context continuity.
+
+    This strategy is efficient and doesn't require an LLM client,
+    making it suitable for cost-sensitive applications.
+    """
 
     def compact(
         self,
@@ -271,7 +346,15 @@ class SlidingWindowStrategy(BaseCompactionStrategy):
 
 
 class PriorityBasedStrategy(BaseCompactionStrategy):
-    """Compaction strategy based on message priority/importance."""
+    """Compaction strategy based on message priority and importance.
+
+    Scores messages based on their importance and retains high-priority
+    messages while removing lower-priority ones. This allows for more
+    intelligent compaction that preserves critical conversation elements.
+
+    Attributes:
+        priority_scorer: Callable that scores message priority (0-1).
+    """
 
     def __init__(self, priority_scorer: Callable | None = None, **kwargs):
         """Initialize priority-based strategy.
@@ -364,7 +447,20 @@ class PriorityBasedStrategy(BaseCompactionStrategy):
 
 
 class SmartCompactionStrategy(BaseCompactionStrategy):
-    """Hybrid strategy combining multiple approaches."""
+    """Hybrid strategy combining multiple compaction approaches.
+
+    Automatically selects the most appropriate compaction strategy
+    based on the required compression ratio. Uses summarization for
+    high compression needs, sliding window for moderate needs, and
+    priority-based selection for light compression.
+
+    Attributes:
+        llm_client: Optional LLM client for summarization.
+        summarizer: SummarizationStrategy instance.
+        windower: SlidingWindowStrategy instance.
+        prioritizer: PriorityBasedStrategy instance.
+        truncator: TruncateStrategy instance for fallback.
+    """
 
     def __init__(self, llm_client: Any | None = None, **kwargs):
         """Initialize smart compaction strategy.
@@ -426,7 +522,16 @@ class SmartCompactionStrategy(BaseCompactionStrategy):
 
 
 class TruncateStrategy(BaseCompactionStrategy):
-    """Simple truncation strategy."""
+    """Simple truncation strategy for emergency compaction.
+
+    Provides a straightforward truncation approach that removes
+    older messages and truncates long message content. This is
+    the simplest and fastest strategy, suitable when more
+    sophisticated approaches are not needed or available.
+
+    Does not require an LLM client and has minimal computational
+    overhead, making it ideal for resource-constrained situations.
+    """
 
     def compact(
         self,

@@ -13,7 +13,33 @@
 # limitations under the License.
 
 
-"""Memory management tools for agents to read and write memories autonomously."""
+"""Memory management tools for agents to read and write memories autonomously.
+
+This module provides a complete memory management toolkit for Calute agents,
+enabling them to store, retrieve, search, and manage memories. It includes:
+- Save and retrieve memory entries with categorization and tagging
+- Search memories by query, type, tags, and time range
+- Consolidate and summarize agent memories
+- Delete memories by various criteria
+- Get memory statistics and tag information
+- Helper functions to add memory tools to existing agents
+
+The memory tools integrate with the Calute memory store system and support
+multiple memory types: short_term, long_term, working, episodic, semantic,
+and procedural.
+
+Example:
+    >>> from calute.tools.memory_tool import save_memory, search_memory
+    >>> result = save_memory(
+    ...     content="User prefers dark mode",
+    ...     tags=["preference", "ui"],
+    ...     context_variables={"memory_store": store}
+    ... )
+    >>> memories = search_memory(
+    ...     query="preferences",
+    ...     context_variables={"memory_store": store}
+    ... )
+"""
 
 from datetime import datetime
 from enum import Enum
@@ -24,7 +50,19 @@ from ..types import Agent
 
 
 class MemoryOperation(Enum):
-    """Types of memory operations agents can perform."""
+    """Types of memory operations agents can perform.
+
+    Enumeration of available memory operations for tracking
+    and categorizing memory-related actions.
+
+    Attributes:
+        SAVE: Store a new memory entry.
+        SEARCH: Search for memories by query and filters.
+        RETRIEVE: Retrieve specific memories.
+        DELETE: Remove memories from the store.
+        SUMMARIZE: Generate summaries of memories.
+        CONSOLIDATE: Consolidate related memories.
+    """
 
     SAVE = "save"
     SEARCH = "search"
@@ -560,17 +598,38 @@ def create_memory_enabled_agent(
 
 
 class MemoryToolContext:
-    """
-    Context manager for memory tools in function execution.
-    Automatically provides memory_store in context_variables.
+    """Context manager for memory tools in function execution.
+
+    Automatically provides memory_store in context_variables for
+    memory tool functions. Use this to wrap function calls and
+    ensure the memory store is always available.
+
+    Attributes:
+        memory_store: The memory store instance to inject into context.
+
+    Example:
+        >>> context = MemoryToolContext(memory_store)
+        >>> result = context.wrap_function_call(save_memory, content="test")
     """
 
     def __init__(self, memory_store):
+        """Initialize the memory tool context.
+
+        Args:
+            memory_store: The memory store instance to use for operations.
+        """
         self.memory_store = memory_store
 
     def wrap_function_call(self, func, *args, **kwargs):
-        """
-        Wrap a function call to inject memory_store into context_variables.
+        """Wrap a function call to inject memory_store into context_variables.
+
+        Args:
+            func: The memory tool function to call.
+            *args: Positional arguments to pass to the function.
+            **kwargs: Keyword arguments to pass to the function.
+
+        Returns:
+            The result of calling the wrapped function.
         """
         if "context_variables" not in kwargs:
             kwargs["context_variables"] = {}

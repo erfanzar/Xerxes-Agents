@@ -13,6 +13,30 @@
 # limitations under the License.
 
 
+"""Type definitions for function execution and streaming responses.
+
+This module provides comprehensive type definitions for the function
+execution system in Calute, including:
+- Execution strategies (sequential, parallel, pipeline)
+- Agent switching triggers and capabilities
+- Function call request and result types
+- Streaming response chunk types
+- Execution status and completion types
+
+These types form the foundation for type-safe function execution,
+agent orchestration, and streaming response handling throughout
+the Calute framework.
+
+Example:
+    >>> from calute.types.function_execution_types import (
+    ...     ExecutionStatus,
+    ...     RequestFunctionCall,
+    ...     StreamChunk,
+    ... )
+    >>> call = RequestFunctionCall(name="search", arguments={"query": "test"})
+    >>> call.status = ExecutionStatus.SUCCESS
+"""
+
 import re
 import typing as tp
 from dataclasses import dataclass, field
@@ -24,7 +48,17 @@ from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
 
 class FunctionCallStrategy(Enum):
-    """Strategies for handling function calls"""
+    """Enumeration of strategies for handling function calls.
+
+    Defines how multiple function calls should be executed
+    when an agent needs to invoke several functions.
+
+    Attributes:
+        SEQUENTIAL: Execute functions one after another in order.
+        PARALLEL: Execute all functions concurrently.
+        CONDITIONAL: Execute functions based on conditions/dependencies.
+        PIPELINE: Execute functions in a pipeline where output flows to input.
+    """
 
     SEQUENTIAL = "sequential"
     PARALLEL = "parallel"
@@ -33,7 +67,18 @@ class FunctionCallStrategy(Enum):
 
 
 class AgentSwitchTrigger(Enum):
-    """Triggers for agent switching"""
+    """Enumeration of triggers for agent switching.
+
+    Defines the conditions or events that can trigger
+    switching from one agent to another during execution.
+
+    Attributes:
+        EXPLICIT: Manual/explicit switch requested by code or user.
+        CAPABILITY_BASED: Switch based on required capabilities.
+        LOAD_BALANCING: Switch to balance load across agents.
+        CONTEXT_BASED: Switch based on conversation context.
+        ERROR_RECOVERY: Switch triggered by error recovery mechanism.
+    """
 
     EXPLICIT = "explicit"
     CAPABILITY_BASED = "capability"
@@ -43,7 +88,18 @@ class AgentSwitchTrigger(Enum):
 
 
 class ExecutionStatus(Enum):
-    """Status of function/agent execution"""
+    """Enumeration of function/agent execution status values.
+
+    Represents the current state or outcome of a function
+    or agent execution operation.
+
+    Attributes:
+        SUCCESS: Execution completed successfully.
+        FAILURE: Execution failed with an error.
+        PARTIAL: Execution partially completed (some steps succeeded).
+        PENDING: Execution is pending/not yet started.
+        CANCELLED: Execution was cancelled before completion.
+    """
 
     SUCCESS = "success"
     FAILURE = "failure"
@@ -53,7 +109,18 @@ class ExecutionStatus(Enum):
 
 
 class CompactionStrategy(Enum):
-    """Strategy for context compaction"""
+    """Enumeration of strategies for context compaction.
+
+    Defines how conversation context should be reduced when
+    it exceeds token limits or needs optimization.
+
+    Attributes:
+        SUMMARIZE: Compress context by generating a summary.
+        SLIDING_WINDOW: Keep only recent context within a window.
+        PRIORITY_BASED: Keep high-priority context, remove low-priority.
+        SMART: Use intelligent analysis to determine what to keep.
+        TRUNCATE: Simply truncate context to fit limits.
+    """
 
     SUMMARIZE = "summarize"
     SLIDING_WINDOW = "sliding_window"
@@ -64,7 +131,24 @@ class CompactionStrategy(Enum):
 
 @dataclass
 class RequestFunctionCall:
-    """Enhanced function call representation"""
+    """Enhanced representation of a function call request.
+
+    Encapsulates all information needed to execute a function call,
+    including execution parameters, retry configuration, and status tracking.
+
+    Attributes:
+        name: Name of the function to call.
+        arguments: Dictionary of arguments to pass to the function.
+        id: Unique identifier for this function call.
+        agent_id: ID of the agent making the call, if applicable.
+        dependencies: List of function call IDs this call depends on.
+        timeout: Optional timeout in seconds for execution.
+        retry_count: Current number of retry attempts made.
+        max_retries: Maximum number of retry attempts allowed.
+        status: Current execution status of the function call.
+        result: Result value from successful execution.
+        error: Error message if execution failed.
+    """
 
     name: str
     arguments: dict
@@ -81,7 +165,18 @@ class RequestFunctionCall:
 
 @dataclass
 class AgentCapability:
-    """Defines what an agent is capable of doing"""
+    """Definition of an agent's capability.
+
+    Describes a specific capability that an agent possesses,
+    including the functions it can execute and performance metrics.
+
+    Attributes:
+        name: Human-readable name of the capability.
+        description: Detailed description of what the capability enables.
+        function_names: List of function names associated with this capability.
+        context_requirements: Required context variables for this capability.
+        performance_score: Performance rating for this capability (0.0-1.0).
+    """
 
     name: str
     description: str
@@ -92,7 +187,16 @@ class AgentCapability:
 
 @dataclass
 class ExecutionResult:
-    """Result of function execution"""
+    """Result container for function execution.
+
+    Holds the outcome of a function execution attempt,
+    including status, result value, and any error information.
+
+    Attributes:
+        status: The execution status (success, failure, etc.).
+        result: The return value from successful execution.
+        error: Error message if execution failed.
+    """
 
     status: ExecutionStatus
     result: tp.Any | None = None
@@ -101,7 +205,16 @@ class ExecutionResult:
 
 @dataclass
 class SwitchContext:
-    """Context for agent switching decisions"""
+    """Context information for agent switching decisions.
+
+    Provides the context needed to make decisions about
+    switching between agents during execution.
+
+    Attributes:
+        function_results: Results from recent function executions.
+        execution_error: Whether an error occurred during execution.
+        buffered_content: Any buffered response content.
+    """
 
     function_results: list[ExecutionResult]
     execution_error: bool
@@ -110,7 +223,19 @@ class SwitchContext:
 
 @dataclass
 class ToolCallStreamChunk:
-    """Represents a streaming chunk of a tool/function call"""
+    """Streaming chunk for a tool/function call.
+
+    Represents a partial chunk of a tool or function call
+    received during streaming responses.
+
+    Attributes:
+        id: Unique identifier for this tool call.
+        type: Type of tool call (default: "function").
+        function_name: Name of the function being called.
+        arguments: JSON string of arguments (may be partial during streaming).
+        index: Index of this tool call in the response.
+        is_complete: Whether the tool call is complete.
+    """
 
     id: str
     type: str = "function"
@@ -122,7 +247,22 @@ class ToolCallStreamChunk:
 
 @dataclass
 class StreamChunk:
-    """Represents a streaming chunk response"""
+    """Streaming chunk response from an LLM provider.
+
+    Encapsulates a streaming response chunk, supporting both
+    OpenAI and Gemini response formats with tool call tracking.
+
+    Attributes:
+        type: Type identifier for this chunk (default: "stream_chunk").
+        chunk: Raw chunk from OpenAI or Gemini API.
+        agent_id: ID of the agent that produced this chunk.
+        content: Text content extracted from the chunk.
+        buffered_content: Accumulated content from all chunks so far.
+        function_calls_detected: Whether function calls were detected.
+        reinvoked: Whether the agent was reinvoked after function execution.
+        tool_calls: Completed tool calls extracted from the response.
+        streaming_tool_calls: Tool calls still being streamed.
+    """
 
     type: str = "stream_chunk"
     chunk: ChatCompletionChunk | GenerateContentResponse | None = None
@@ -135,6 +275,7 @@ class StreamChunk:
     streaming_tool_calls: list[ToolCallStreamChunk] | None = None
 
     def __post_init__(self):
+        """Initialize the chunk, ensuring content fields are properly set."""
         if self.chunk is not None:
             if hasattr(self.chunk, "choices"):
                 for idx, chose in enumerate(self.chunk.choices):
@@ -142,7 +283,12 @@ class StreamChunk:
                         self.chunk.choices[idx].delta.content = ""
 
     @property
-    def gemini_content(self):
+    def gemini_content(self) -> str | None:
+        """Extract content from a Gemini response chunk.
+
+        Returns:
+            The text content from the Gemini response, or None if unavailable.
+        """
         if hasattr(self.chunk, "_result") and self.chunk._result:
             if hasattr(self.chunk._result, "text"):
                 return self.chunk._result.text
@@ -153,7 +299,14 @@ class StreamChunk:
 
     @property
     def is_thinking(self) -> bool:
-        """Check if currently inside thinking/reasoning tags."""
+        """Check if currently inside thinking/reasoning tags.
+
+        Detects whether the buffered content is within thinking
+        or reasoning XML-style tags (e.g., <think>, <reasoning>).
+
+        Returns:
+            True if inside thinking tags, False otherwise.
+        """
         if not self.buffered_content:
             return False
         opens = len(re.findall(r"<(think|thinking|reason|reasoning)>", self.buffered_content, re.I))
@@ -163,7 +316,16 @@ class StreamChunk:
 
 @dataclass
 class FunctionDetection:
-    """Notification of function call detection"""
+    """Notification event for function call detection.
+
+    Emitted when the system detects that an LLM response
+    contains function/tool calls that need to be executed.
+
+    Attributes:
+        type: Event type identifier (default: "function_detection").
+        message: Human-readable message about the detection.
+        agent_id: ID of the agent whose response contained the calls.
+    """
 
     type: str = "function_detection"
     message: str = ""
@@ -172,7 +334,15 @@ class FunctionDetection:
 
 @dataclass
 class FunctionCallInfo:
-    """Basic information about a function call"""
+    """Basic identifying information for a function call.
+
+    Lightweight container for function call identification,
+    used in event notifications and tracking.
+
+    Attributes:
+        name: Name of the function being called.
+        id: Unique identifier for this specific call.
+    """
 
     name: str
     id: str
@@ -180,7 +350,16 @@ class FunctionCallInfo:
 
 @dataclass
 class FunctionCallsExtracted:
-    """Information about extracted function calls"""
+    """Event containing extracted function call information.
+
+    Emitted after function calls have been parsed and extracted
+    from an LLM response, before execution begins.
+
+    Attributes:
+        type: Event type identifier (default: "function_calls_extracted").
+        function_calls: List of extracted function call information.
+        agent_id: ID of the agent that requested the function calls.
+    """
 
     type: str = "function_calls_extracted"
     function_calls: list[FunctionCallInfo] = field(default_factory=list)
@@ -189,7 +368,18 @@ class FunctionCallsExtracted:
 
 @dataclass
 class FunctionExecutionStart:
-    """Notification of function execution start"""
+    """Event notification for function execution start.
+
+    Emitted when a function begins execution, allowing
+    for progress tracking and monitoring.
+
+    Attributes:
+        type: Event type identifier (default: "function_execution_start").
+        function_name: Name of the function being executed.
+        function_id: Unique identifier for this function call.
+        progress: Progress indicator (e.g., "1/3" for first of three).
+        agent_id: ID of the agent executing the function.
+    """
 
     type: str = "function_execution_start"
     function_name: str = ""
@@ -200,7 +390,20 @@ class FunctionExecutionStart:
 
 @dataclass
 class FunctionExecutionComplete:
-    """Result of function execution"""
+    """Event notification for function execution completion.
+
+    Emitted when a function finishes execution, containing
+    the result or error information.
+
+    Attributes:
+        type: Event type identifier (default: "function_execution_complete").
+        function_name: Name of the executed function.
+        function_id: Unique identifier for this function call.
+        status: Execution status string (e.g., "success", "error").
+        result: Return value from successful execution.
+        error: Error message if execution failed.
+        agent_id: ID of the agent that executed the function.
+    """
 
     type: str = "function_execution_complete"
     function_name: str = ""
@@ -213,7 +416,17 @@ class FunctionExecutionComplete:
 
 @dataclass
 class AgentSwitch:
-    """Information about an agent switch"""
+    """Event notification for an agent switch.
+
+    Emitted when execution switches from one agent to another,
+    recording the transition details.
+
+    Attributes:
+        type: Event type identifier (default: "agent_switch").
+        from_agent: ID of the agent being switched from.
+        to_agent: ID of the agent being switched to.
+        reason: Human-readable reason for the switch.
+    """
 
     type: str = "agent_switch"
     from_agent: str = ""
@@ -223,7 +436,18 @@ class AgentSwitch:
 
 @dataclass
 class Completion:
-    """Final completion information"""
+    """Final completion event for a response.
+
+    Emitted when the entire response cycle completes,
+    including all function executions and agent responses.
+
+    Attributes:
+        type: Event type identifier (default: "completion").
+        final_content: The final accumulated response content.
+        function_calls_executed: Total number of function calls executed.
+        agent_id: ID of the agent that produced the final response.
+        execution_history: List of execution events that occurred.
+    """
 
     type: str = "completion"
     final_content: str = ""
@@ -234,7 +458,20 @@ class Completion:
 
 @dataclass
 class ResponseResult:
-    """Result of a non-streaming response"""
+    """Complete result from a non-streaming response.
+
+    Contains all information from a completed non-streaming
+    agent response, including content and execution details.
+
+    Attributes:
+        content: The text content of the response.
+        response: Raw ChatCompletion response from the LLM.
+        completion: Completion event with summary information.
+        function_calls: List of function calls that were executed.
+        agent_id: ID of the agent that produced the response.
+        execution_history: List of all execution events.
+        reinvoked: Whether the agent was reinvoked after function execution.
+    """
 
     content: str
     response: ChatCompletion
@@ -247,13 +484,25 @@ class ResponseResult:
 
 @dataclass
 class ReinvokeSignal:
-    """Signal that the agent is being reinvoked with function results"""
+    """Signal that the agent is being reinvoked with function results.
+
+    Emitted when the agent is called again after function execution,
+    allowing it to process the function results and continue.
+
+    Attributes:
+        message: Informational message about the reinvocation.
+        agent_id: ID of the agent being reinvoked.
+        type: Event type identifier (default: "reinvoke_signal").
+    """
 
     message: str
     agent_id: str
     type: str = "reinvoke_signal"
 
 
+#: Type alias for all possible streaming response event types.
+#: Used to type-hint generators and async generators that yield
+#: streaming events during agent execution.
 StreamingResponseType: tp.TypeAlias = (
     StreamChunk
     | FunctionDetection

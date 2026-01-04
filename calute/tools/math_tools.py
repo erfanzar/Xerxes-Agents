@@ -13,7 +13,24 @@
 # limitations under the License.
 
 
-"""Mathematical and statistical tools for calculations and analysis."""
+"""Mathematical and statistical tools for calculations and analysis.
+
+This module provides a comprehensive set of mathematical tools
+for the Calute framework. It includes:
+- Advanced calculator with expression evaluation and basic operations
+- Statistical analysis with descriptive statistics and correlation
+- Mathematical functions including trigonometric, logarithmic, and more
+- Number theory operations like prime checking, factorization, GCD, and LCM
+- Unit conversion between different measurement systems
+
+Each tool is implemented as a class inheriting from AgentBaseFn,
+making them directly usable as agent tools for mathematical computations.
+
+Example:
+    >>> calc = Calculator()
+    >>> result = calc(expression="sqrt(16) + pow(2, 3)")
+    >>> print(result["result"])  # 12.0
+"""
 
 from __future__ import annotations
 
@@ -26,7 +43,19 @@ from ..types import AgentBaseFn
 
 
 class Calculator(AgentBaseFn):
-    """Advanced calculator with various mathematical operations."""
+    """Advanced calculator with various mathematical operations.
+
+    Provides two modes of operation: expression evaluation using
+    a safe subset of mathematical functions, and named operations
+    on lists of operands. Supports configurable decimal precision.
+
+    Expression mode supports:
+        sin, cos, tan, log, sqrt, abs, pow, exp and basic arithmetic.
+
+    Operation mode supports:
+        add, multiply, mean, median, mode, stdev, variance, min, max,
+        range, sum_of_squares, root_mean_square, geometric_mean, harmonic_mean.
+    """
 
     @staticmethod
     def static_call(
@@ -128,7 +157,17 @@ class Calculator(AgentBaseFn):
 
 
 class StatisticalAnalyzer(AgentBaseFn):
-    """Statistical analysis and descriptive statistics."""
+    """Statistical analysis and descriptive statistics tool.
+
+    Provides comprehensive statistical analysis including descriptive
+    statistics, distribution analysis, and correlation calculations.
+    Automatically calculates quartiles, outliers, and confidence intervals.
+
+    Supported analysis types:
+        descriptive: Mean, median, mode, std dev, quartiles, outliers.
+        distribution: Skewness, kurtosis, frequency distribution.
+        correlation: Pearson correlation for paired data.
+    """
 
     @staticmethod
     def static_call(
@@ -261,7 +300,19 @@ class StatisticalAnalyzer(AgentBaseFn):
 
 
 class MathematicalFunctions(AgentBaseFn):
-    """Advanced mathematical functions and operations."""
+    """Advanced mathematical functions and operations.
+
+    Provides a wide range of mathematical function evaluations
+    including trigonometric, logarithmic, exponential, and rounding
+    functions. Supports additional parameters for certain functions.
+
+    Supported functions:
+        Trigonometric: sin, cos, tan, asin, acos, atan, sinh, cosh, tanh.
+        Logarithmic: log (with custom base), log10.
+        Exponential: exp, pow (with custom exponent).
+        Rounding: floor, ceil, round (with decimal places).
+        Other: sqrt, abs, factorial.
+    """
 
     @staticmethod
     def static_call(
@@ -366,7 +417,20 @@ class MathematicalFunctions(AgentBaseFn):
 
 
 class NumberTheory(AgentBaseFn):
-    """Number theory and discrete mathematics functions."""
+    """Number theory and discrete mathematics functions.
+
+    Provides operations for prime number checking, factorization,
+    greatest common divisor, least common multiple, and mathematical
+    sequences like Fibonacci and Collatz.
+
+    Supported operations:
+        prime: Check if a number is prime.
+        factors: Get all factors and prime factorization.
+        gcd: Calculate greatest common divisor of multiple numbers.
+        lcm: Calculate least common multiple of multiple numbers.
+        fibonacci: Generate Fibonacci sequence up to n terms.
+        collatz: Generate Collatz sequence starting from n.
+    """
 
     @staticmethod
     def static_call(
@@ -533,7 +597,20 @@ class NumberTheory(AgentBaseFn):
 
 
 class UnitConverter(AgentBaseFn):
-    """Convert between different units of measurement."""
+    """Convert between different units of measurement.
+
+    Provides conversion between units across multiple measurement
+    categories. Automatically detects the category based on units
+    when not explicitly specified. Special handling for temperature.
+
+    Supported categories:
+        length: meter, centimeter, millimeter, kilometer, inch, foot, yard, mile.
+        weight: gram, kilogram, pound, ounce, stone, ton.
+        volume: liter, milliliter, gallon, quart, pint, cup, fluid_ounce.
+        area: square_meter, square_centimeter, square_kilometer, square_foot, acre, hectare.
+        speed: meter_per_second, kilometer_per_hour, mile_per_hour, knot.
+        temperature: celsius, fahrenheit, kelvin.
+    """
 
     @staticmethod
     def static_call(

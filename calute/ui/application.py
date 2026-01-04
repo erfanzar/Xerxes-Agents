@@ -16,7 +16,23 @@
 """Chainlit application entry point for Calute UI.
 
 This module provides the main application setup and message handling
-for the Chainlit-based chat interface.
+for the Chainlit-based chat interface. It includes:
+- ChainlitLauncher class with Gradio-compatible .launch() API
+- Chainlit lifecycle handlers (on_chat_start, on_message, etc.)
+- Chat profile management for multi-agent selection
+- Settings management for runtime configuration
+- MCP (Model Context Protocol) connection handlers
+
+The module supports dual operation modes: as a library import for
+application setup, and as a Chainlit module when loaded by the
+Chainlit runtime.
+
+Example:
+    >>> from calute.ui import launch_application
+    >>> from calute import Calute
+    >>> calute = Calute(llm=my_llm, agents=[my_agent])
+    >>> app = launch_application(executor=calute)
+    >>> app.launch(server_port=8000)
 """
 
 from __future__ import annotations
@@ -46,12 +62,28 @@ _EXECUTOR_CONFIG_KEY = "_calute_executor_config"
 
 
 def _get_executor_config() -> dict:
-    """Get executor config from builtins (survives module reimport)."""
+    """Get executor config from builtins (survives module reimport).
+
+    Retrieves the executor configuration stored in builtins. This
+    mechanism is used because Chainlit reimports this module,
+    which would lose normal module-level variables.
+
+    Returns:
+        Dictionary with 'executor' and 'agent' keys.
+    """
     return getattr(builtins, _EXECUTOR_CONFIG_KEY, {"executor": None, "agent": None})
 
 
 def _set_executor_config(executor, agent) -> None:
-    """Set executor config in builtins."""
+    """Set executor config in builtins.
+
+    Stores the executor configuration in builtins so it persists
+    across module reimports by Chainlit's load_module().
+
+    Args:
+        executor: The Calute executor instance to store.
+        agent: The agent configuration to store.
+    """
     setattr(builtins, _EXECUTOR_CONFIG_KEY, {"executor": executor, "agent": agent})
 
 
@@ -59,7 +91,12 @@ class ChainlitLauncher:
     """Wrapper class to provide Gradio-like .launch() API for Chainlit.
 
     This class enables backward compatibility with existing code that expects
-    a .launch() method to be called on the UI object.
+    a .launch() method to be called on the UI object. It handles the setup
+    of theme configuration and Chainlit server initialization.
+
+    Attributes:
+        executor: The Calute executor instance for processing conversations.
+        agent: Optional agent configuration for specialized behavior.
     """
 
     def __init__(
@@ -84,13 +121,21 @@ class ChainlitLauncher:
     ):
         """Launch the Chainlit application.
 
+        Starts the Chainlit server with the configured executor and theme.
+        This method blocks until the server is stopped (e.g., by Ctrl+C).
+
         Args:
-            server_name: Host to bind the server to.
-            server_port: Port to run the server on.
-            **kwargs: Additional arguments (watch, headless).
+            server_name: Host to bind the server to (default: "localhost").
+            server_port: Port to run the server on (default: 8000).
+            **kwargs: Additional arguments (watch, headless) - currently unused.
 
         Returns:
             None - runs the server until stopped.
+
+        Note:
+            The method sets up theme files and environment variables before
+            starting Chainlit. The executor config is stored in builtins to
+            survive module reimport by Chainlit.
         """
         # Set executor config in builtins BEFORE chainlit loads this module
         # This survives module reimport by chainlit's load_module
@@ -122,19 +167,26 @@ def launch_application(
 ):
     """Launch the Chainlit application with the given executor.
 
-    This function can be called directly to launch the application, or it returns
-    a ChainlitLauncher object that provides a .launch() method for backward
-    compatibility with Gradio-style API.
+    Factory function that creates a ChainlitLauncher configured with
+    the given executor. Returns a launcher object for deferred launch,
+    allowing the caller to customize server settings before starting.
 
     Args:
         executor: Calute instance or Cortex component for managing conversations.
-        agent: Optional agent configuration for specialized behavior.
-        server_name: Host to bind the server to (only used if called directly).
-        server_port: Port to run the server on (only used if called directly).
-        **kwargs: Additional arguments passed to Chainlit.
+            Supported types include Calute, CortexAgent, CortexTask, Cortex,
+            TaskCreator, and DynamicCortex.
+        agent: Optional agent configuration for specialized behavior. Can be
+            an Agent instance, Cortex, DynamicCortex, or agent ID string.
+        server_name: Host to bind the server to (passed to launcher).
+        server_port: Port to run the server on (passed to launcher).
+        **kwargs: Additional arguments passed to the launcher.
 
     Returns:
-        ChainlitLauncher object with .launch() method.
+        ChainlitLauncher object with .launch() method for starting the server.
+
+    Example:
+        >>> app = launch_application(executor=calute, agent=my_agent)
+        >>> app.launch(server_port=3000)  # Start on custom port
     """
     return ChainlitLauncher(executor=executor, agent=agent)
 
@@ -160,7 +212,19 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
     }
 
     def _get_agents_from_executor(executor) -> dict:
-        """Extract registered agents from executor."""
+        """Extract registered agents from executor.
+
+        Supports multiple executor patterns for agent discovery:
+        - Calute's orchestrator.agents
+        - Direct _agents attribute
+        - Cortex agents list/dict
+
+        Args:
+            executor: The executor instance to extract agents from.
+
+        Returns:
+            Dictionary mapping agent IDs to agent objects.
+        """
         # Check for Calute's orchestrator.agents pattern
         if hasattr(executor, "orchestrator") and hasattr(executor.orchestrator, "agents"):
             return executor.orchestrator.agents
@@ -176,7 +240,16 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         return {}
 
     def _apply_settings_to_agent(executor, agent_id, settings: dict) -> None:
-        """Apply settings to the active agent."""
+        """Apply settings to the active agent.
+
+        Updates agent parameters based on UI settings. Supports
+        temperature, max_tokens, and top_p parameters.
+
+        Args:
+            executor: The executor instance containing agents.
+            agent_id: ID of the agent to configure, or None for default.
+            settings: Dictionary of settings from ChatSettings widget.
+        """
         agents = _get_agents_from_executor(executor)
         agent = agents.get(agent_id) if agent_id else None
 
@@ -197,7 +270,15 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.set_chat_profiles
     async def set_chat_profiles():
-        """Define available chat profiles based on registered agents."""
+        """Define available chat profiles based on registered agents.
+
+        Creates a "Default" profile plus one profile for each registered
+        agent in the executor. Profiles allow users to select which agent
+        to interact with from the Chainlit UI.
+
+        Returns:
+            List of ChatProfile objects for the profile selector.
+        """
         config = _get_executor_config()
         executor = config.get("executor")
 
@@ -229,7 +310,15 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.on_chat_start
     async def on_chat_start():
-        """Initialize session state when a new chat starts."""
+        """Initialize session state when a new chat starts.
+
+        Sets up the user session with:
+        - Empty message history
+        - Executor reference from config
+        - Selected agent based on chat profile
+        - ChatSettings widgets for runtime configuration
+        - Welcome message with profile info
+        """
         # Get executor config from builtins (set before chainlit loaded this module)
         config = _get_executor_config()
         executor = config["executor"]
@@ -307,7 +396,14 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.on_settings_update
     async def on_settings_update(settings: dict):
-        """Handle settings updates from the UI."""
+        """Handle settings updates from the UI.
+
+        Called when users modify ChatSettings widgets. Updates
+        the session settings and applies them to the active agent.
+
+        Args:
+            settings: Dictionary of updated settings values.
+        """
         cl.user_session.set("settings", settings)
 
         executor = cl.user_session.get("executor")
@@ -318,7 +414,14 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.action_callback("regenerate")
     async def on_regenerate(action: cl.Action):
-        """Regenerate the last assistant response."""
+        """Regenerate the last assistant response.
+
+        Removes the last assistant message and re-processes the
+        last user message to generate a fresh response.
+
+        Args:
+            action: The Chainlit action that triggered this callback.
+        """
         calute_msgs = cl.user_session.get("calute_msgs")
 
         if not calute_msgs or len(calute_msgs.messages) < 2:
@@ -344,13 +447,24 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.action_callback("clear_history")
     async def on_clear_history(action: cl.Action):
-        """Clear the conversation history."""
+        """Clear the conversation history.
+
+        Resets the message history to an empty state and notifies
+        the user.
+
+        Args:
+            action: The Chainlit action that triggered this callback.
+        """
         cl.user_session.set("calute_msgs", MessagesHistory(messages=[]))
         await cl.Message(content="Conversation history cleared.", author="system").send()
 
     @cl.on_message
     async def on_message(message: cl.Message):
         """Handle incoming user messages.
+
+        Processes user messages through the configured executor with
+        streaming support. Applies current settings, processes the
+        message, and updates the session history.
 
         Args:
             message: The incoming Chainlit message from the user.
@@ -383,13 +497,21 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
     @cl.on_stop
     async def on_stop():
-        """Handle when the user stops a response generation."""
+        """Handle when the user stops a response generation.
+
+        Called when the user clicks the stop button during streaming.
+        Placeholder for cleanup of pending operations.
+        """
         # Clean up any pending operations if needed
         pass
 
     @cl.on_chat_end
     async def on_chat_end():
-        """Handle when a chat session ends."""
+        """Handle when a chat session ends.
+
+        Cleans up all session state including message history,
+        executor reference, agent configuration, and MCP tools.
+        """
         cl.user_session.set("calute_msgs", None)
         cl.user_session.set("executor", None)
         cl.user_session.set("agent", None)

@@ -13,7 +13,39 @@
 # limitations under the License.
 
 
-"""Calute Tools - A comprehensive collection of tools for AI agents."""
+"""Calute Tools: A comprehensive collection of tools for AI agents.
+
+This module provides a unified interface to various tool categories that enhance
+AI agent capabilities. Tools are organized into logical categories and can be
+easily integrated with Calute agents for file operations, web interactions,
+data processing, mathematical computations, and more.
+
+Key Features:
+    - File System Tools: Read, write, append, and manage files and directories
+    - Execution Tools: Execute Python code and shell commands safely
+    - Web Tools: Search, scrape, and interact with web content
+    - Data Tools: Process JSON, CSV, text, and perform data conversions
+    - AI Tools: Text embedding, similarity, classification, and summarization
+    - Math Tools: Calculations, statistics, and unit conversions
+    - System Tools: System information, process management, and environment handling
+    - Memory Tools: Persistent memory storage and retrieval for agents
+
+Example:
+    >>> from calute.tools import get_available_tools, ReadFile, Calculator
+    >>>
+    >>> # Get all available tools by category
+    >>> tools = get_available_tools()
+    >>> print(tools.keys())
+    dict_keys(['file_system', 'execution', 'web', 'data', 'ai', 'math', 'system', 'memory'])
+    >>>
+    >>> # Use individual tools
+    >>> content = ReadFile.static_call(file_path="config.json")
+    >>> result = Calculator.static_call(expression="2 + 2")
+
+Note:
+    Some tools require additional dependencies. Use ``get_tool_info(tool_name)``
+    to check requirements for a specific tool.
+"""
 
 from .coding_tools import (
     analyze_code_structure,
@@ -136,7 +168,7 @@ if _SYSTEM_TOOLS_AVAILABLE:
     )
 
 
-TOOL_CATEGORIES = {
+TOOL_CATEGORIES: dict[str, list[str]] = {
     "file_system": ["ReadFile", "WriteFile", "AppendFile", "ListDir", "FileSystemTools", "TempFileManager"],
     "execution": ["ExecutePythonCode", "ExecuteShell", "ProcessManager"],
     "web": ["DuckDuckGoSearch", "WebScraper", "APIClient", "RSSReader", "URLAnalyzer"],
@@ -146,9 +178,21 @@ TOOL_CATEGORIES = {
     "system": ["SystemInfo", "EnvironmentManager", "ProcessManager"],
     "memory": ["save_memory", "search_memory", "consolidate_agent_memories", "delete_memory", "get_memory_statistics"],
 }
+"""Mapping of tool category names to their constituent tool names.
+
+Categories include:
+    - file_system: File and directory operations
+    - execution: Code and command execution
+    - web: Web scraping, search, and API interaction
+    - data: Data format processing and conversion
+    - ai: AI-powered text processing tools
+    - math: Mathematical and statistical operations
+    - system: System information and management
+    - memory: Agent memory persistence and retrieval
+"""
 
 
-TOOL_REQUIREMENTS = {
+TOOL_REQUIREMENTS: dict[str, str] = {
     "WebScraper": "calute[search]",
     "APIClient": "httpx (included in core)",
     "RSSReader": "feedparser",
@@ -158,10 +202,32 @@ TOOL_REQUIREMENTS = {
     "TextEmbedder": "calute[vectors] for advanced methods",
     "TextSimilarity": "calute[vectors] for semantic similarity",
 }
+"""Mapping of tool names to their installation requirements.
+
+Tools not listed here are available in the core package without
+additional dependencies. Use this mapping to determine what extras
+need to be installed for specific tool functionality.
+"""
 
 
-def get_available_tools() -> dict:
-    """Get list of available tools organized by category."""
+def get_available_tools() -> dict[str, list[str]]:
+    """Get a dictionary of available tools organized by category.
+
+    This function inspects the module's global namespace to determine
+    which tools are currently available (successfully imported) and
+    organizes them by their respective categories.
+
+    Returns:
+        A dictionary mapping category names to lists of available tool names.
+        Only tools that are successfully imported are included.
+
+    Example:
+        >>> tools = get_available_tools()
+        >>> print(tools["file_system"])
+        ['ReadFile', 'WriteFile', 'AppendFile', 'ListDir']
+        >>> print(tools["math"])
+        ['Calculator', 'StatisticalAnalyzer', 'MathematicalFunctions', 'NumberTheory', 'UnitConverter']
+    """
     available = {}
 
     for category, tools in TOOL_CATEGORIES.items():
@@ -173,8 +239,35 @@ def get_available_tools() -> dict:
     return available
 
 
-def get_tool_info(tool_name: str) -> dict:
-    """Get information about a specific tool."""
+def get_tool_info(tool_name: str) -> dict[str, str | bool | None]:
+    """Get detailed information about a specific tool.
+
+    Retrieves metadata about a tool including its category, availability
+    status, installation requirements, and description (if available).
+
+    Args:
+        tool_name: The name of the tool to get information about.
+
+    Returns:
+        A dictionary containing tool information with the following keys:
+            - name: The tool name
+            - category: The category the tool belongs to (or None)
+            - available: Whether the tool is currently available
+            - requirements: Installation requirements for the tool
+            - description: First line of the tool's docstring (if available)
+            - error: Error message if the tool was not found
+
+    Example:
+        >>> info = get_tool_info("Calculator")
+        >>> print(info["category"])
+        'math'
+        >>> print(info["requirements"])
+        'core'
+        >>>
+        >>> info = get_tool_info("NonExistentTool")
+        >>> print(info.get("error"))
+        'Tool NonExistentTool not found'
+    """
     if tool_name not in __all__:
         return {"error": f"Tool {tool_name} not found"}
 
@@ -203,8 +296,35 @@ def get_tool_info(tool_name: str) -> dict:
     return info
 
 
-def list_tools_by_category(category: str | None = None) -> list:
-    """List tools by category."""
+def list_tools_by_category(category: str | None = None) -> list[str] | dict[str, list[str]]:
+    """List available tools, optionally filtered by category.
+
+    This function returns tools that are both defined in TOOL_CATEGORIES
+    and exported in __all__. It can either return tools for a specific
+    category or all tools organized by category.
+
+    Args:
+        category: The category to filter by. If None, returns all tools
+            organized by category. Valid categories are: 'file_system',
+            'execution', 'web', 'data', 'ai', 'math', 'system', 'memory'.
+
+    Returns:
+        If category is specified: A list of tool names in that category.
+        If category is None: A dictionary mapping category names to lists
+        of tool names.
+        Returns an empty list if the specified category does not exist.
+
+    Example:
+        >>> # Get tools for a specific category
+        >>> math_tools = list_tools_by_category("math")
+        >>> print(math_tools)
+        ['Calculator', 'StatisticalAnalyzer', 'MathematicalFunctions', 'NumberTheory', 'UnitConverter']
+        >>>
+        >>> # Get all tools organized by category
+        >>> all_tools = list_tools_by_category()
+        >>> print(all_tools.keys())
+        dict_keys(['file_system', 'execution', 'web', 'data', 'ai', 'math', 'system', 'memory'])
+    """
     if category:
         if category not in TOOL_CATEGORIES:
             return []

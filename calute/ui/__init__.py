@@ -16,7 +16,21 @@
 """Calute UI module for creating Chainlit-based chat interfaces.
 
 This module provides components for building interactive chat applications
-with the Calute framework using Chainlit.
+with the Calute framework using Chainlit. It includes:
+- Application launcher with Gradio-compatible API
+- Theme configuration and styling utilities
+- Message streaming and tool execution handlers
+- MCP (Model Context Protocol) integration support
+
+The UI module requires the optional 'chainlit' dependency, which can be
+installed with: pip install calute[ui]
+
+Example:
+    >>> from calute.ui import launch_application
+    >>> from calute import Calute
+    >>> calute = Calute(...)
+    >>> app = launch_application(executor=calute)
+    >>> app.launch(server_port=8000)
 """
 
 try:

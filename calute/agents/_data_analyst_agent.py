@@ -13,6 +13,43 @@
 # limitations under the License.
 
 
+"""Data Analyst Agent for statistical analysis and business intelligence.
+
+This module provides a pre-built data analyst agent implementation for the Calute
+framework, specialized in data analysis, pattern detection, forecasting, and
+business insight generation. The agent can process structured datasets, perform
+statistical analysis, clean data, and create visualization specifications.
+
+Key Features:
+    - Comprehensive dataset analysis (descriptive, diagnostic, predictive)
+    - Data cleaning and preprocessing with configurable operations
+    - Pattern detection for trends, cycles, and anomalies
+    - Business insight generation with actionable recommendations
+    - Dashboard specification creation for data visualization
+    - Time series forecasting with multiple methods (linear, exponential, moving average)
+
+Module Attributes:
+    analysis_state (dict): Global state tracking datasets, analyses, reports,
+        and visualization configurations.
+    data_analyst_agent (Agent): Pre-configured data analyst agent instance with
+        statistical tools and data processing capabilities enabled.
+
+Example:
+    >>> from calute.agents import data_analyst_agent
+    >>> # Use the pre-built data analyst agent
+    >>> result = await calute.run(
+    ...     agent=data_analyst_agent,
+    ...     messages=[{"role": "user", "content": "Analyze this sales data"}]
+    ... )
+
+    >>> # Or use individual analysis functions
+    >>> from calute.agents._data_analyst_agent import analyze_dataset
+    >>> report = analyze_dataset(
+    ...     data=[{"sales": 100}, {"sales": 150}],
+    ...     analysis_type="descriptive"
+    ... )
+"""
+
 import json
 from collections import defaultdict
 from datetime import datetime

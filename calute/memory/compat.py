@@ -13,7 +13,12 @@
 # limitations under the License.
 
 
-"""Compatibility layer for old memory API"""
+"""
+Compatibility layer for old memory API.
+
+Provides backward-compatible interfaces for the legacy memory system,
+allowing existing code to work with the new contextual memory architecture.
+"""
 
 from enum import Enum
 
@@ -22,7 +27,12 @@ from .storage import SQLiteStorage
 
 
 class MemoryType(Enum):
-    """Memory type enum for backward compatibility"""
+    """
+    Memory type enum for backward compatibility.
+
+    Defines the different types of memories that can be stored,
+    mapping to the appropriate storage tier in the new system.
+    """
 
     SHORT_TERM = "short_term"
     LONG_TERM = "long_term"
@@ -35,7 +45,10 @@ class MemoryType(Enum):
 class MemoryStore(ContextualMemory):
     """
     Backward compatible MemoryStore that wraps ContextualMemory.
-    Provides the old API while using the new memory system.
+
+    Provides the old API while using the new memory system internally.
+    This allows existing code to continue working without modifications
+    while benefiting from the improved memory architecture.
     """
 
     def __init__(
@@ -50,7 +63,20 @@ class MemoryStore(ContextualMemory):
         cache_size: int = 100,
         memory_type: MemoryType | None = None,
     ):
-        """Initialize with backward compatible parameters"""
+        """
+        Initialize with backward compatible parameters.
+
+        Args:
+            max_short_term: Maximum items in short-term memory
+            max_working: Maximum items in working memory (legacy)
+            max_long_term: Maximum items in long-term memory (legacy)
+            enable_vector_search: Enable vector similarity search (legacy)
+            embedding_dimension: Dimension of embeddings (legacy)
+            enable_persistence: Enable persistent storage
+            persistence_path: Path for SQLite database
+            cache_size: Cache size for memory retrieval (legacy)
+            memory_type: Default memory type (legacy)
+        """
         import os
 
         write_memory = os.environ.get("WRITE_MEMORY", "0") == "1"
@@ -82,7 +108,21 @@ class MemoryStore(ContextualMemory):
         tags: list | None = None,
         **kwargs,
     ):
-        """Add memory using old API"""
+        """
+        Add memory using old API.
+
+        Args:
+            content: Memory content to store
+            memory_type: Type of memory (determines storage tier)
+            agent_id: ID of the agent creating the memory
+            context: Optional context dictionary
+            importance_score: Importance score from 0.0 to 1.0
+            tags: Optional list of tags for categorization
+            **kwargs: Additional fields passed to save
+
+        Returns:
+            Created MemoryItem
+        """
         metadata = context or {}
         if tags:
             metadata["tags"] = tags
@@ -107,7 +147,20 @@ class MemoryStore(ContextualMemory):
         min_importance: float = 0.0,
         query_embedding=None,
     ):
-        """Retrieve memories using old API"""
+        """
+        Retrieve memories using old API.
+
+        Args:
+            memory_types: Filter by memory types (legacy, unused)
+            agent_id: Filter by agent ID
+            tags: Filter by tags (also used as search query)
+            limit: Maximum number of results
+            min_importance: Minimum importance score filter
+            query_embedding: Query embedding vector (legacy, unused)
+
+        Returns:
+            List of MemoryItem objects matching criteria
+        """
         filters = {}
         if agent_id:
             filters["agent_id"] = agent_id
@@ -126,7 +179,18 @@ class MemoryStore(ContextualMemory):
         return filtered[:limit]
 
     def consolidate_memories(self, agent_id: str) -> str:
-        """Consolidate memories for an agent"""
+        """
+        Consolidate memories for an agent into a summary.
+
+        Combines important facts and recent context into a formatted
+        string suitable for including in agent prompts.
+
+        Args:
+            agent_id: ID of the agent to consolidate memories for
+
+        Returns:
+            Formatted summary string of important and recent memories
+        """
 
         filters = {"agent_id": agent_id}
         memories = self.search(query="", limit=20, filters=filters)
@@ -153,7 +217,13 @@ class MemoryStore(ContextualMemory):
         return "\n".join(summary_parts)
 
     def get_statistics(self) -> dict:
-        """Get memory statistics"""
+        """
+        Get memory statistics.
+
+        Returns:
+            Dictionary containing memory statistics including
+            total_memories and cache_hit_rate (legacy)
+        """
         stats = super().get_statistics()
 
         stats["total_memories"] = len(self.short_term) + len(self.long_term)

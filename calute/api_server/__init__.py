@@ -13,7 +13,32 @@
 # limitations under the License.
 
 
-"""Modular OpenAI-compatible API server for Calute agents with Cortex support."""
+"""Modular OpenAI-compatible API server for Calute agents with Cortex support.
+
+This module provides a FastAPI-based server that exposes Calute agents through
+HTTP endpoints following the OpenAI API specification. This allows seamless
+integration with any OpenAI-compatible client library. The server supports
+both single-agent operations and multi-agent orchestration through Cortex.
+
+Key Features:
+    - OpenAI-compatible API endpoints (/v1/chat/completions, /v1/models)
+    - Support for streaming and non-streaming responses
+    - Multi-agent orchestration via Cortex integration
+    - Modular router architecture for extensibility
+    - Health check and model listing endpoints
+
+Example:
+    >>> from calute import Calute, OpenAILLM
+    >>> from calute.api_server import CaluteAPIServer
+    >>> from calute.types import Agent
+    >>>
+    >>> llm = OpenAILLM(api_key="your-api-key")
+    >>> calute = Calute(client=llm.client)
+    >>> agent = Agent(id="assistant", model="gpt-4", instructions="Help users")
+    >>> server = CaluteAPIServer(calute)
+    >>> server.register_agent(agent)
+    >>> server.run(port=8000)
+"""
 
 from .cortex_completion_service import CortexCompletionService
 from .server import CaluteAPIServer

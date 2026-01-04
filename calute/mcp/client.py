@@ -13,7 +13,20 @@
 # limitations under the License.
 
 
-"""MCP client implementation for connecting to MCP servers."""
+"""MCP client implementation for connecting to MCP servers.
+
+This module provides the core MCP client functionality for Calute,
+including:
+- Connection management for multiple transport types (STDIO, SSE, Streamable HTTP)
+- JSON-RPC 2.0 message handling for the MCP protocol
+- Tool discovery and invocation
+- Resource reading and prompt fetching
+- Session lifecycle management
+
+The client supports both subprocess-based (STDIO) communication for local
+MCP servers and HTTP-based transports for remote servers. SSE and Streamable
+HTTP transports require the optional `mcp` SDK package.
+"""
 
 import asyncio
 import json
@@ -29,7 +42,14 @@ _MCP_SDK_AVAILABLE: bool | None = None
 
 
 def _check_mcp_sdk() -> bool:
-    """Check if the MCP SDK is installed."""
+    """Check if the MCP SDK is installed.
+
+    This function lazily checks for the presence of the `mcp` package,
+    caching the result for subsequent calls.
+
+    Returns:
+        True if the MCP SDK is installed, False otherwise.
+    """
     global _MCP_SDK_AVAILABLE
     if _MCP_SDK_AVAILABLE is None:
         try:
@@ -84,15 +104,29 @@ class MCPClient:
         self._exit_stack: AsyncExitStack | None = None
 
     def _next_request_id(self) -> int:
-        """Generate unique JSON-RPC request ID (thread-safe via GIL)."""
+        """Generate unique JSON-RPC request ID.
+
+        Uses a class-level counter that is thread-safe via Python's GIL.
+        Each call returns a monotonically increasing integer.
+
+        Returns:
+            A unique integer ID for the JSON-RPC request.
+        """
         MCPClient._request_id_counter += 1
         return MCPClient._request_id_counter
 
     async def connect(self) -> bool:
         """Connect to the MCP server.
 
+        Establishes a connection using the transport type specified in the
+        configuration. Handles deprecated transport aliases (HTTP -> SSE,
+        WEBSOCKET -> STREAMABLE_HTTP) for backward compatibility.
+
         Returns:
-            True if connection successful, False otherwise
+            True if connection successful, False otherwise.
+
+        Note:
+            After successful connection, use `disconnect()` to clean up resources.
         """
         try:
             transport = self.config.transport
@@ -116,7 +150,22 @@ class MCPClient:
             return False
 
     async def _connect_stdio(self) -> bool:
-        """Connect using stdio transport."""
+        """Connect using stdio transport.
+
+        Spawns the MCP server as a subprocess and communicates via stdin/stdout.
+        This is the standard transport for local MCP servers invoked via npx, uvx,
+        or similar package runners.
+
+        The connection process:
+        1. Spawns the subprocess with configured command and arguments
+        2. Sends JSON-RPC initialize request
+        3. Waits for and validates the server response
+        4. Sends initialized notification
+        5. Discovers server capabilities (tools, resources, prompts)
+
+        Returns:
+            True if connection successful, False otherwise.
+        """
         if not self.config.command:
             self.logger.error(f"No command specified for stdio MCP server {self.config.name}")
             return False
@@ -197,7 +246,14 @@ class MCPClient:
         for MCP protocol version 2024-11-05. For newer deployments, prefer
         STREAMABLE_HTTP transport.
 
-        Requires the optional `mcp` package: pip install calute[mcp]
+        Returns:
+            True if connection successful, False otherwise.
+
+        Raises:
+            ImportError: If the MCP SDK is not installed.
+
+        Note:
+            Requires the optional `mcp` package: pip install calute[mcp]
         """
         if not _check_mcp_sdk():
             raise ImportError(
@@ -255,7 +311,14 @@ class MCPClient:
         This is the recommended transport for new MCP deployments. It uses
         standard HTTP with streaming support for bidirectional communication.
 
-        Requires the optional `mcp` package: pip install calute[mcp]
+        Returns:
+            True if connection successful, False otherwise.
+
+        Raises:
+            ImportError: If the MCP SDK is not installed.
+
+        Note:
+            Requires the optional `mcp` package: pip install calute[mcp]
         """
         if not _check_mcp_sdk():
             raise ImportError(
@@ -309,7 +372,15 @@ class MCPClient:
             return False
 
     async def _discover_capabilities_sdk(self) -> None:
-        """Discover tools, resources, and prompts using the SDK session."""
+        """Discover tools, resources, and prompts using the SDK session.
+
+        Queries the MCP server for available capabilities and populates
+        the `tools`, `resources`, and `prompts` attributes. This method
+        is used for SSE and Streamable HTTP transports that use the MCP SDK.
+
+        Failures in discovering individual capability types are logged but
+        do not cause the entire operation to fail.
+        """
         if not self._session:
             return
 
@@ -363,7 +434,17 @@ class MCPClient:
             self.logger.debug(f"Failed to list prompts: {e}")
 
     def _write_message(self, message: dict[str, Any]) -> None:
-        """Write a message to the MCP server (stdio)."""
+        """Write a message to the MCP server via stdio.
+
+        Serializes the message to JSON and writes it to the subprocess stdin,
+        followed by a newline character.
+
+        Args:
+            message: Dictionary containing the JSON-RPC message to send.
+
+        Raises:
+            RuntimeError: If the MCP server process is not available.
+        """
         if not self.process or not self.process.stdin:
             raise RuntimeError("MCP server process not available")
 
@@ -372,7 +453,15 @@ class MCPClient:
         self.process.stdin.flush()
 
     async def _read_message(self) -> dict[str, Any] | None:
-        """Read a message from the MCP server (stdio)."""
+        """Read a message from the MCP server via stdio.
+
+        Reads a line from the subprocess stdout and parses it as JSON.
+        Uses asyncio to avoid blocking the event loop while waiting.
+
+        Returns:
+            Parsed JSON message as a dictionary, or None if no message
+            was received or parsing failed.
+        """
         if not self.process or not self.process.stdout:
             return None
 
@@ -403,8 +492,14 @@ class MCPClient:
             return None
 
     async def _discover_capabilities(self) -> None:
-        """Discover tools, resources, and prompts from the server."""
+        """Discover tools, resources, and prompts from the server.
 
+        Sends JSON-RPC requests to list available tools, resources, and prompts
+        from the MCP server. Populates the `tools`, `resources`, and `prompts`
+        attributes with the discovered capabilities.
+
+        This method is used for STDIO transport connections.
+        """
         tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": self._next_request_id()}
         self._write_message(tools_request)
         tools_response = await self._read_message()
@@ -460,12 +555,18 @@ class MCPClient:
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Call a tool on the MCP server.
 
+        Invokes a tool by name with the provided arguments. Uses the SDK session
+        for SSE/Streamable HTTP transports or JSON-RPC for STDIO transport.
+
         Args:
-            tool_name: Name of the tool to call
-            arguments: Tool arguments
+            tool_name: Name of the tool to call.
+            arguments: Dictionary of arguments to pass to the tool.
 
         Returns:
-            Tool execution result
+            Tool execution result content.
+
+        Raises:
+            RuntimeError: If not connected to the server or tool call fails.
         """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -496,11 +597,17 @@ class MCPClient:
     async def read_resource(self, uri: str) -> Any:
         """Read a resource from the MCP server.
 
+        Fetches the content of a resource identified by its URI. Uses the SDK
+        session for SSE/Streamable HTTP transports or JSON-RPC for STDIO transport.
+
         Args:
-            uri: Resource URI
+            uri: Resource URI to read.
 
         Returns:
-            Resource content
+            Resource content as returned by the server.
+
+        Raises:
+            RuntimeError: If not connected to the server or resource read fails.
         """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -526,12 +633,19 @@ class MCPClient:
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Get a prompt from the MCP server.
 
+        Retrieves and renders a prompt template with the provided arguments.
+        Uses the SDK session for SSE/Streamable HTTP transports or JSON-RPC
+        for STDIO transport.
+
         Args:
-            name: Prompt name
-            arguments: Prompt arguments
+            name: Name of the prompt to retrieve.
+            arguments: Optional dictionary of arguments for prompt rendering.
 
         Returns:
-            Rendered prompt text
+            Rendered prompt text as a string.
+
+        Raises:
+            RuntimeError: If not connected to the server or prompt fetch fails.
         """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -569,7 +683,14 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
+        """Disconnect from the MCP server.
+
+        Gracefully closes the connection and cleans up resources. For SDK-based
+        transports (SSE, Streamable HTTP), closes the async exit stack. For
+        STDIO transport, terminates the subprocess.
+
+        This method is safe to call multiple times.
+        """
         # Clean up SDK session and exit stack (for SSE/Streamable HTTP)
         if self._exit_stack:
             try:
@@ -594,7 +715,12 @@ class MCPClient:
         self.logger.info(f"Disconnected from MCP server {self.config.name}")
 
     def __del__(self):
-        """Cleanup on deletion."""
+        """Cleanup subprocess on object deletion.
+
+        Ensures the subprocess is terminated if still running when the
+        client object is garbage collected. This is a fallback; prefer
+        using `disconnect()` for explicit cleanup.
+        """
         if self.process and self.process.poll() is None:
             try:
                 self.process.terminate()

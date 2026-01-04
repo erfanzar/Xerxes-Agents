@@ -13,7 +13,25 @@
 # limitations under the License.
 
 
-"""Structured logging configuration for Calute."""
+"""Structured logging configuration for Calute.
+
+This module provides an advanced logging configuration system for the
+Calute framework with support for:
+- Structured logging via structlog (when available)
+- OpenTelemetry distributed tracing integration
+- Prometheus metrics for observability
+- JSON logging format support
+- Rotating file handlers for log persistence
+
+The module gracefully degrades when optional dependencies are not installed,
+providing fallback implementations where necessary.
+
+Example:
+    >>> from calute.logging_config import get_logger, configure_logging
+    >>> configure_logging(level="DEBUG", enable_json=True)
+    >>> logger = get_logger()
+    >>> logger.log_function_call("agent1", "search", {"query": "test"})
+"""
 
 import logging
 import logging.handlers
@@ -52,21 +70,32 @@ except ImportError:
     HAS_PROMETHEUS = False
 
     class DummyMetric:
+        """No-op metric implementation for when prometheus_client is not installed.
+
+        Provides the same interface as Prometheus metrics but performs no
+        actual operations, allowing code to function without the dependency.
+        """
+
         def labels(self, **kwargs):
+            """Return self for method chaining compatibility."""
             return self
 
         def inc(self, amount=1):
+            """No-op increment operation."""
             pass
 
         def dec(self, amount=1):
+            """No-op decrement operation."""
             pass
 
         def observe(self, value):
+            """No-op observation operation."""
             pass
 
     Counter = Histogram = Gauge = lambda *args, **kwargs: DummyMetric()
 
     def generate_latest():
+        """Return empty bytes when prometheus_client is not installed."""
         return b""
 
 
@@ -103,7 +132,23 @@ ERROR_COUNTER = Counter("calute_errors_total", "Total number of errors", ["error
 
 
 class CaluteLogger:
-    """Enhanced logger with structured logging and tracing."""
+    """Enhanced logger with structured logging and tracing.
+
+    Provides a comprehensive logging solution that integrates with
+    structlog for structured logging, OpenTelemetry for distributed
+    tracing, and Prometheus for metrics collection.
+
+    Attributes:
+        name: Logger name identifier.
+        level: Numeric logging level.
+        log_file: Optional path to log file for persistence.
+        enable_json: Whether JSON output format is enabled.
+        enable_tracing: Whether OpenTelemetry tracing is enabled.
+        logger: The underlying logger instance (structlog or standard).
+
+    Note:
+        Falls back to standard Python logging if structlog is not installed.
+    """
 
     def __init__(
         self,
@@ -114,6 +159,16 @@ class CaluteLogger:
         enable_tracing: bool = False,
         trace_endpoint: str | None = None,
     ):
+        """Initialize the CaluteLogger with the specified configuration.
+
+        Args:
+            name: Logger name for identification in logs.
+            level: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
+            log_file: Optional path for file-based log persistence.
+            enable_json: Whether to format logs as JSON.
+            enable_tracing: Whether to enable OpenTelemetry tracing.
+            trace_endpoint: OTLP endpoint for trace export.
+        """
         self.name = name
         self.level = getattr(logging, level.upper())
         self.log_file = log_file
@@ -135,7 +190,15 @@ class CaluteLogger:
             self._use_structlog = False
 
     def _setup_structlog(self):
-        """Configure structured logging."""
+        """Configure structlog for structured logging output.
+
+        Sets up the structlog processor chain including log level filtering,
+        timestamp formatting, stack info rendering, and output formatting
+        (JSON or console-friendly).
+
+        Note:
+            This method is a no-op if structlog is not installed.
+        """
         if not HAS_STRUCTLOG:
             return
 
@@ -164,7 +227,12 @@ class CaluteLogger:
         )
 
     def _setup_standard_logging(self):
-        """Setup standard Python logging."""
+        """Configure standard Python logging with console and optional file handlers.
+
+        Sets up the root logger with appropriate formatters based on
+        configuration. Includes support for JSON formatting and rotating
+        file handlers for log persistence.
+        """
         root_logger = logging.getLogger()
         root_logger.setLevel(self.level)
 
@@ -198,7 +266,18 @@ class CaluteLogger:
             root_logger.addHandler(file_handler)
 
     def _setup_tracing(self, endpoint: str | None):
-        """Setup OpenTelemetry tracing."""
+        """Configure OpenTelemetry distributed tracing.
+
+        Sets up a TracerProvider with OTLP export capabilities for
+        distributed tracing across service boundaries.
+
+        Args:
+            endpoint: OTLP endpoint URL for trace export. If None,
+                tracing is set up without an exporter.
+
+        Note:
+            This method is a no-op if OpenTelemetry is not installed.
+        """
         if not HAS_OTEL:
             return
 
@@ -222,8 +301,19 @@ class CaluteLogger:
 
     @staticmethod
     def _add_context_processor(logger, log_method, event_dict):
-        """Add contextual information to logs."""
+        """Add contextual information to log events.
 
+        Structlog processor that enriches log events with timestamps
+        and OpenTelemetry trace context for correlation.
+
+        Args:
+            logger: The structlog logger instance.
+            log_method: The log method being called.
+            event_dict: The event dictionary to enrich.
+
+        Returns:
+            The enriched event dictionary with timestamp and trace IDs.
+        """
         if "timestamp" not in event_dict:
             event_dict["timestamp"] = datetime.utcnow().isoformat()
 
@@ -245,7 +335,19 @@ class CaluteLogger:
         error: Exception | None = None,
         duration: float = 0.0,
     ):
-        """Log function call with metrics."""
+        """Log a function call with metrics and structured data.
+
+        Records function execution details including arguments, results,
+        and timing. Updates Prometheus metrics for monitoring.
+
+        Args:
+            agent_id: Identifier of the agent executing the function.
+            function_name: Name of the function being called.
+            arguments: Dictionary of function arguments.
+            result: Optional function result (truncated to 200 chars in logs).
+            error: Optional exception if the function failed.
+            duration: Execution duration in seconds.
+        """
         status = "success" if error is None else "error"
 
         FUNCTION_CALLS.labels(agent_id=agent_id, function_name=function_name, status=status).inc()
@@ -283,7 +385,16 @@ class CaluteLogger:
         to_agent: str,
         reason: str | None = None,
     ):
-        """Log agent switch with metrics."""
+        """Log an agent switch event with metrics.
+
+        Records when control transfers from one agent to another,
+        updating the agent switch counter for monitoring.
+
+        Args:
+            from_agent: Name of the agent relinquishing control.
+            to_agent: Name of the agent receiving control.
+            reason: Optional reason for the switch.
+        """
         AGENT_SWITCHES.labels(from_agent=from_agent, to_agent=to_agent).inc()
 
         if self._use_structlog:
@@ -306,7 +417,19 @@ class CaluteLogger:
         duration: float,
         error: Exception | None = None,
     ):
-        """Log LLM request with metrics."""
+        """Log an LLM API request with token and timing metrics.
+
+        Records LLM request details for monitoring and cost tracking,
+        updating Prometheus counters for requests and tokens.
+
+        Args:
+            provider: LLM provider name (e.g., 'openai', 'anthropic').
+            model: Model identifier (e.g., 'gpt-4', 'claude-3').
+            prompt_tokens: Number of tokens in the prompt.
+            completion_tokens: Number of tokens in the completion.
+            duration: Request duration in seconds.
+            error: Optional exception if the request failed.
+        """
         status = "success" if error is None else "error"
 
         LLM_REQUESTS.labels(provider=provider, model=model, status=status).inc()
@@ -349,7 +472,18 @@ class CaluteLogger:
         entry_count: int = 1,
         error: Exception | None = None,
     ):
-        """Log memory operation with metrics."""
+        """Log a memory store operation with metrics.
+
+        Records memory operations (add, remove) and updates the
+        memory usage gauge for monitoring.
+
+        Args:
+            operation: Type of operation ('add' or 'remove').
+            memory_type: Type of memory (e.g., 'short_term', 'long_term').
+            agent_id: Identifier of the agent performing the operation.
+            entry_count: Number of entries affected by the operation.
+            error: Optional exception if the operation failed.
+        """
         if operation == "add":
             MEMORY_USAGE.labels(memory_type=memory_type, agent_id=agent_id).inc(entry_count)
         elif operation == "remove":
@@ -378,7 +512,22 @@ class CaluteLogger:
 
     @contextmanager
     def span(self, name: str, **attributes):
-        """Create a tracing span."""
+        """Create a tracing span context manager.
+
+        Creates an OpenTelemetry span for distributed tracing. The span
+        automatically records exceptions and sets error status on failure.
+
+        Args:
+            name: Name for the span.
+            **attributes: Additional attributes to attach to the span.
+
+        Yields:
+            The created span object, or None if tracing is disabled.
+
+        Example:
+            >>> with logger.span("process_request", user_id="123"):
+            ...     process_data()
+        """
         if self.enable_tracing and HAS_OTEL:
             tracer = trace.get_tracer(self.name)
             with tracer.start_as_current_span(name, attributes=attributes) as span:
@@ -392,7 +541,11 @@ class CaluteLogger:
             yield None
 
     def get_metrics(self) -> bytes:
-        """Get Prometheus metrics."""
+        """Get Prometheus metrics in text format.
+
+        Returns:
+            Prometheus metrics formatted for HTTP exposition.
+        """
         return generate_latest()
 
 
@@ -400,7 +553,22 @@ _logger: CaluteLogger | None = None
 
 
 def get_logger(name: str | None = None, **kwargs) -> CaluteLogger:
-    """Get or create a logger instance."""
+    """Get or create the global CaluteLogger instance.
+
+    Lazily initializes the logger using configuration from the global
+    Calute config. Subsequent calls return the same instance.
+
+    Args:
+        name: Optional logger name (used only on first initialization).
+        **kwargs: Additional keyword arguments (currently unused).
+
+    Returns:
+        The global CaluteLogger instance.
+
+    Example:
+        >>> logger = get_logger()
+        >>> logger.log_function_call("agent1", "search", {"q": "test"})
+    """
     global _logger
 
     if _logger is None:
@@ -421,6 +589,22 @@ def get_logger(name: str | None = None, **kwargs) -> CaluteLogger:
 
 
 def configure_logging(**kwargs):
-    """Configure global logging settings."""
+    """Configure global logging settings with custom parameters.
+
+    Creates a new CaluteLogger with the specified settings and sets
+    it as the global logger instance.
+
+    Args:
+        **kwargs: Configuration options passed to CaluteLogger:
+            - name: Logger name identifier.
+            - level: Log level string.
+            - log_file: Optional Path for log file.
+            - enable_json: Whether to use JSON format.
+            - enable_tracing: Whether to enable tracing.
+            - trace_endpoint: OTLP endpoint for traces.
+
+    Example:
+        >>> configure_logging(level="DEBUG", enable_json=False)
+    """
     global _logger
     _logger = CaluteLogger(**kwargs)
