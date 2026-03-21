@@ -34,7 +34,7 @@ Example:
 
 import json
 import os
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,7 @@ except ImportError:
 from pydantic import BaseModel, Field, field_validator
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """Enumeration of available logging levels.
 
     Standard Python logging levels for controlling
@@ -63,7 +63,7 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
-class EnvironmentType(str, Enum):
+class EnvironmentType(StrEnum):
     """Enumeration of deployment environment types.
 
     Used to configure different behaviors and settings
@@ -76,7 +76,7 @@ class EnvironmentType(str, Enum):
     PRODUCTION = "production"
 
 
-class LLMProvider(str, Enum):
+class LLMProvider(StrEnum):
     """Enumeration of supported LLM provider backends.
 
     Defines the available LLM providers that can be configured

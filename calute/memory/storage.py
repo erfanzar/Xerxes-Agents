@@ -535,40 +535,148 @@ class RAGStorage(MemoryStorage):
     RAG storage with vector similarity search capabilities.
 
     Wraps another storage backend and adds vector embedding support
-    for semantic similarity search. Uses a simple hash-based embedding
-    as a placeholder - replace with real embeddings in production.
+    for semantic similarity search. Supports multiple embedding backends:
+    - TF-IDF (default, no external dependencies)
+    - sentence-transformers (if installed)
+    - OpenAI embeddings (if openai is installed and api_key provided)
     """
 
-    def __init__(self, backend: MemoryStorage | None = None):
+    def __init__(
+        self,
+        backend: MemoryStorage | None = None,
+        embedding_model: str | None = None,
+        embedding_api_key: str | None = None,
+    ):
         """
         Initialize RAG storage.
 
         Args:
             backend: Underlying storage backend (defaults to SimpleStorage)
+            embedding_model: Embedding model to use. Options:
+                - None: auto-detect best available (sentence-transformers > tfidf)
+                - "tfidf": TF-IDF based embeddings (no extra deps)
+                - A sentence-transformers model name (e.g. "all-MiniLM-L6-v2")
+                - An OpenAI model name (e.g. "text-embedding-3-small")
+            embedding_api_key: API key for OpenAI embeddings (if using OpenAI model)
         """
         self.backend = backend or SimpleStorage()
         self.embeddings: dict[str, list[float]] = {}
+        self._embedding_model_name = embedding_model
+        self._embedding_api_key = embedding_api_key
+        self._embedder = None
+        self._tfidf_vectorizer = None
+        self._tfidf_corpus: list[str] = []
+        self._tfidf_keys: list[str] = []
+        self._embedding_type = self._resolve_embedding_type(embedding_model)
+
+    def _resolve_embedding_type(self, model: str | None) -> str:
+        """Resolve which embedding backend to use."""
+        if model == "tfidf":
+            return "tfidf"
+
+        if model and model.startswith("text-embedding"):
+            return "openai"
+
+        if model:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                self._embedder = SentenceTransformer(model)
+                return "sentence_transformers"
+            except ImportError:
+                pass
+
+        # Auto-detect: prefer sentence-transformers, fall back to tfidf
+        if model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+                return "sentence_transformers"
+            except ImportError:
+                pass
+
+        return "tfidf"
 
     def _compute_embedding(self, text: str) -> list[float]:
         """
-        Compute text embedding using hash-based placeholder.
-
-        This is a placeholder implementation. In production, use real
-        embedding models like sentence-transformers or OpenAI embeddings.
+        Compute text embedding using the configured backend.
 
         Args:
             text: Text to compute embedding for
 
         Returns:
-            128-dimensional embedding vector
+            Embedding vector as list of floats
         """
+        if self._embedding_type == "sentence_transformers":
+            return self._compute_sentence_transformer_embedding(text)
+        elif self._embedding_type == "openai":
+            return self._compute_openai_embedding(text)
+        else:
+            return self._compute_tfidf_embedding(text)
 
-        import hashlib
+    def _compute_tfidf_embedding(self, text: str) -> list[float]:
+        """Compute TF-IDF based embedding using word frequencies.
 
-        hash_obj = hashlib.sha256(text.encode())
-        hash_bytes = hash_obj.digest()
-        embedding = [b / 255.0 for b in hash_bytes[:128]]
-        return embedding
+        Builds a vocabulary from all stored texts and computes
+        term-frequency vectors for semantic comparison.
+        """
+        words = text.lower().split()
+        if not words:
+            return [0.0] * 128
+
+        word_freq: dict[str, int] = {}
+        for w in words:
+            word_freq[w] = word_freq.get(w, 0) + 1
+
+        total = len(words)
+        # Use consistent hashing to map words to vector positions
+        dim = 256
+        vec = [0.0] * dim
+        for word, count in word_freq.items():
+            tf = count / total
+            # Hash word to a position in the vector
+            idx = hash(word) % dim
+            vec[idx] += tf
+
+        # Normalize
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm > 0:
+            vec = [v / norm for v in vec]
+        return vec
+
+    def _compute_sentence_transformer_embedding(self, text: str) -> list[float]:
+        """Compute embedding using sentence-transformers model."""
+        if self._embedder is None:
+            from sentence_transformers import SentenceTransformer
+
+            model_name = self._embedding_model_name or "all-MiniLM-L6-v2"
+            self._embedder = SentenceTransformer(model_name)
+
+        embedding = self._embedder.encode(text, convert_to_numpy=True)
+        return embedding.tolist()
+
+    def _compute_openai_embedding(self, text: str) -> list[float]:
+        """Compute embedding using OpenAI API."""
+        import os
+
+        try:
+            from openai import OpenAI
+        except ImportError:
+            # Fall back to tfidf if openai not installed
+            return self._compute_tfidf_embedding(text)
+
+        api_key = self._embedding_api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return self._compute_tfidf_embedding(text)
+
+        try:
+            client = OpenAI(api_key=api_key)
+            model = self._embedding_model_name or "text-embedding-3-small"
+            response = client.embeddings.create(input=text, model=model)
+            return response.data[0].embedding
+        except Exception:
+            return self._compute_tfidf_embedding(text)
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
         """

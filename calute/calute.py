@@ -1396,6 +1396,7 @@ class Calute:
             )
         else:
             collected_content = []
+            collected_reasoning = ""
             function_calls = []
             execution_history = []
             async for chunk in self._handle_streaming_with_functions(
@@ -1410,6 +1411,10 @@ class Calute:
             ):
                 if hasattr(chunk, "content") and chunk.content:
                     collected_content.append(chunk.content)
+                if hasattr(chunk, "buffered_reasoning_content") and chunk.buffered_reasoning_content:
+                    collected_reasoning = chunk.buffered_reasoning_content
+                if hasattr(chunk, "reasoning_content") and chunk.reasoning_content and not collected_reasoning:
+                    collected_reasoning = chunk.reasoning_content
                 if hasattr(chunk, "function_calls"):
                     function_calls = chunk.function_calls
                 if hasattr(chunk, "result"):
@@ -1418,6 +1423,7 @@ class Calute:
             final_content = "".join(collected_content)
             return ResponseResult(
                 content=final_content,
+                reasoning_content=collected_reasoning,
                 response=response,
                 function_calls=function_calls,
                 agent_id=agent.id or "default",
@@ -1455,6 +1461,7 @@ class Calute:
             StreamingResponseType objects including chunks, function notifications, etc.
         """
         buffered_content = ""
+        buffered_reasoning_content = ""
         function_calls_detected = False
         function_calls = []
         # Track tool IDs across streaming chunks to ensure consistency
@@ -1465,6 +1472,7 @@ class Calute:
             async for chunk_data in stream_generator:
                 content = chunk_data.get("content")
                 buffered_content = chunk_data.get("buffered_content", buffered_content)
+                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
                 streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
                 tool_call_chunks = []
@@ -1497,6 +1505,8 @@ class Calute:
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
+                    reasoning_content=chunk_data.get("reasoning_content"),
+                    buffered_reasoning_content=buffered_reasoning_content or None,
                     function_calls_detected=function_calls_detected,
                     reinvoked=reinvoked_runtime,
                     tool_calls=None,
@@ -1515,6 +1525,7 @@ class Calute:
             for chunk_data in stream_generator:
                 content = chunk_data.get("content")
                 buffered_content = chunk_data.get("buffered_content", buffered_content)
+                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
                 streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
                 tool_call_chunks = []
@@ -1552,6 +1563,8 @@ class Calute:
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
+                    reasoning_content=chunk_data.get("reasoning_content"),
+                    buffered_reasoning_content=buffered_reasoning_content or None,
                     function_calls_detected=function_calls_detected,
                     reinvoked=reinvoked_runtime,
                     tool_calls=None,
@@ -1689,6 +1702,7 @@ class Calute:
 
         out = Completion(
             final_content=buffered_content,
+            reasoning_content=buffered_reasoning_content,
             function_calls_executed=len(function_calls),
             agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-3:],
@@ -1719,18 +1733,22 @@ class Calute:
             StreamChunk and Completion objects.
         """
         buffered_content = ""
+        buffered_reasoning_content = ""
 
         if hasattr(response, "__aiter__"):
             stream_generator = self.llm_client.astream_completion(response, agent)
             async for chunk_data in stream_generator:
                 content = chunk_data.get("content")
                 buffered_content = chunk_data.get("buffered_content", buffered_content)
+                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
                 out = StreamChunk(
                     chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
+                    reasoning_content=chunk_data.get("reasoning_content"),
+                    buffered_reasoning_content=buffered_reasoning_content or None,
                     function_calls_detected=False,
                     reinvoked=reinvoked_runtime,
                 )
@@ -1742,12 +1760,15 @@ class Calute:
             for chunk_data in stream_generator:
                 content = chunk_data.get("content")
                 buffered_content = chunk_data.get("buffered_content", buffered_content)
+                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
                 out = StreamChunk(
                     chunk=chunk_data.get("raw_chunk"),
                     agent_id=agent.id or "default",
                     content=content,
                     buffered_content=buffered_content,
+                    reasoning_content=chunk_data.get("reasoning_content"),
+                    buffered_reasoning_content=buffered_reasoning_content or None,
                     function_calls_detected=False,
                     reinvoked=reinvoked_runtime,
                 )
@@ -1756,6 +1777,7 @@ class Calute:
                 yield out
         out = Completion(
             final_content=buffered_content,
+            reasoning_content=buffered_reasoning_content,
             function_calls_executed=0,
             agent_id=agent.id or "default",
             execution_history=self.orchestrator.execution_history[-3:],

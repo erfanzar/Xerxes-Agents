@@ -191,6 +191,7 @@ def _get_mcp_event_loop():
             thread.start()
             # Give loop time to start
             import time
+
             time.sleep(0.1)
         return _MCP_EVENT_LOOP
 
@@ -462,6 +463,7 @@ async def process_message_chainlit(
     tool_steps: dict[str, cl.Step] = {}
     think_step: cl.Step | None = None
     in_thinking = False
+    thinking_mode: str | None = None
     think_count = 0
     main_content = ""
 
@@ -477,13 +479,34 @@ async def process_message_chainlit(
                     if tc.id and tc.function_name:
                         await _handle_tool_args_stream(tc.id, tc.function_name, tc.arguments or "", tool_steps)
 
+            if event.reasoning_content:
+                if think_step is None:
+                    think_count += 1
+                    title = "Thinking..." if think_count == 1 else f"Thinking... ({think_count})"
+                    think_step = cl.Step(name=title, type="llm")
+                    await think_step.__aenter__()
+                    think_step.output = ""
+
+                think_step.output = (think_step.output or "") + event.reasoning_content
+                if thinking_mode != "tags":
+                    thinking_mode = "reasoning"
+
             # Handle text content with thinking detection
             # Use content or buffered_content - chunk is the raw ChatCompletionChunk object
             content = event.content or ""
             if content:
+                if thinking_mode == "reasoning" and think_step:
+                    await _close_think_step(think_step)
+                    think_step = None
+                    thinking_mode = None
+
                 main_content, in_thinking, think_step, think_count = await _process_content(
                     content, main_content, in_thinking, think_step, think_count, msg
                 )
+                if think_step and in_thinking:
+                    thinking_mode = "tags"
+                elif not in_thinking and thinking_mode == "tags":
+                    thinking_mode = None
 
         elif isinstance(event, FunctionCallsExtracted):
             # Create steps for extracted function calls
@@ -502,16 +525,19 @@ async def process_message_chainlit(
 
         elif isinstance(event, ReinvokeSignal):
             # Close any open thinking panel
-            if in_thinking and think_step:
+            if think_step:
                 await _close_think_step(think_step)
                 think_step = None
                 in_thinking = False
+                thinking_mode = None
 
         elif isinstance(event, Completion):
             # Close any open thinking step
-            if in_thinking and think_step:
+            if think_step:
                 await _close_think_step(think_step)
                 think_step = None
+                in_thinking = False
+                thinking_mode = None
 
             # Close all pending tool steps
             for step in list(tool_steps.values()):

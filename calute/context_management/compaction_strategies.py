@@ -255,7 +255,52 @@ class SummarizationStrategy(BaseCompactionStrategy):
             Summarized version of the conversation.
         """
         if self.llm_client:
-            pass
+            try:
+                import asyncio
+
+                prompt = (
+                    "Summarize the following conversation concisely. "
+                    "Preserve key facts, decisions, and outcomes. "
+                    "Remove redundant information.\n\n"
+                    f"CONVERSATION:\n{conversation}\n\nSUMMARY:"
+                )
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Already in async context, use run_sync utility
+                        from ..utils import run_sync
+
+                        response = run_sync(
+                            self.llm_client.generate_completion(
+                                prompt=prompt, temperature=0.3, max_tokens=1024, stream=False
+                            )
+                        )
+                    else:
+                        response = loop.run_until_complete(
+                            self.llm_client.generate_completion(
+                                prompt=prompt, temperature=0.3, max_tokens=1024, stream=False
+                            )
+                        )
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    response = loop.run_until_complete(
+                        self.llm_client.generate_completion(
+                            prompt=prompt, temperature=0.3, max_tokens=1024, stream=False
+                        )
+                    )
+
+                # Extract content from response
+                if hasattr(self.llm_client, "extract_content"):
+                    return self.llm_client.extract_content(response)
+                elif hasattr(response, "choices") and response.choices:
+                    return response.choices[0].message.content
+                elif isinstance(response, str):
+                    return response
+                return str(response)
+            except Exception:
+                pass  # Fall through to fallback
 
         lines = conversation.split("\n")
         if len(lines) > 10:

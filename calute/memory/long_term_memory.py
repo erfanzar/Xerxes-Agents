@@ -343,21 +343,29 @@ class LongTermMemory(Memory):
         Check if item matches all filter criteria.
 
         Checks both direct attributes and metadata fields.
+        Supports callable filter values for custom comparisons
+        (e.g., ``{"importance": lambda x: x >= 0.8}``).
 
         Args:
             item: Memory item to check
-            filters: Dictionary of field names to required values
+            filters: Dictionary of field names to required values or callables
 
         Returns:
             True if item matches all filters, False otherwise
         """
         for key, value in filters.items():
             if hasattr(item, key):
-                if getattr(item, key) != value:
-                    return False
+                actual = getattr(item, key)
             elif key in item.metadata:
-                if item.metadata[key] != value:
+                actual = item.metadata[key]
+            else:
+                return False
+
+            if callable(value):
+                if not value(actual):
                     return False
+            elif actual != value:
+                return False
         return True
 
     def _calculate_relevance(self, content: str, query: str) -> float:
@@ -384,20 +392,30 @@ class LongTermMemory(Memory):
 
         return 0.0
 
-    def consolidate(self) -> str:
+    def consolidate(self, merge_similar: bool = True, similarity_threshold: float = 0.8) -> str:
         """
-        Consolidate memories into a coherent summary.
+        Consolidate memories by merging similar entries and producing a summary.
 
-        Groups memories by conversation or agent and produces a human-readable
-        summary. Useful for generating context or reports.
+        Groups memories by conversation or agent, merges similar entries
+        to reduce redundancy, removes low-value items, and produces a
+        human-readable summary. When merge_similar is True, entries with
+        high word overlap are combined into single entries.
+
+        Args:
+            merge_similar: Whether to merge entries with similar content
+            similarity_threshold: Word overlap ratio to consider entries similar (0-1)
 
         Returns:
-            Formatted string summary of long-term memory contents
+            Formatted string summary of consolidated long-term memory contents
         """
         if not self._items:
             return "No long-term memories available."
 
-        grouped = {}
+        # Merge similar memories to reduce redundancy
+        if merge_similar:
+            self._merge_similar_memories(similarity_threshold)
+
+        grouped: dict[str, list[MemoryItem]] = {}
         for item in self._items:
             key = item.conversation_id or item.agent_id or "general"
             if key not in grouped:
@@ -411,6 +429,61 @@ class LongTermMemory(Memory):
 
             summary.append(f"\n{key.title()}:")
             for item in items[:5]:
-                summary.append(f"  • {item.content[:150]}")
+                importance = item.metadata.get("importance", 0.5)
+                access_info = f"(importance: {importance:.1f}, accessed: {item.access_count}x)"
+                summary.append(f"  - {item.content[:150]} {access_info}")
 
         return "\n".join(summary)
+
+    def _merge_similar_memories(self, threshold: float = 0.8):
+        """Merge memories with similar content to reduce redundancy.
+
+        Compares word sets between items and merges those exceeding the
+        similarity threshold. The merged item retains the higher importance
+        and combined access count.
+
+        Args:
+            threshold: Minimum word overlap ratio to trigger a merge (0-1)
+        """
+        if len(self._items) < 2:
+            return
+
+        merged_ids: set[str] = set()
+
+        for i, item_a in enumerate(self._items):
+            if item_a.memory_id in merged_ids:
+                continue
+            words_a = set(item_a.content.lower().split())
+            if not words_a:
+                continue
+
+            for j in range(i + 1, len(self._items)):
+                item_b = self._items[j]
+                if item_b.memory_id in merged_ids:
+                    continue
+                words_b = set(item_b.content.lower().split())
+                if not words_b:
+                    continue
+
+                overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
+                if overlap >= threshold:
+                    # Keep the longer/more important one, absorb the other
+                    keep = item_a if len(item_a.content) >= len(item_b.content) else item_b
+                    discard = item_b if keep is item_a else item_a
+
+                    keep.access_count += discard.access_count
+                    keep_importance = keep.metadata.get("importance", 0.5)
+                    discard_importance = discard.metadata.get("importance", 0.5)
+                    keep.metadata["importance"] = max(keep_importance, discard_importance)
+
+                    merged_ids.add(discard.memory_id)
+
+        # Remove merged items
+        if merged_ids:
+            for mid in merged_ids:
+                if mid in self._index:
+                    item = self._index[mid]
+                    self._items.remove(item)
+                    del self._index[mid]
+                    if self.storage:
+                        self.storage.delete(f"ltm_{mid}")

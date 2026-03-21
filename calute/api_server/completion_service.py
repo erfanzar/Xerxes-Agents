@@ -94,12 +94,18 @@ class CompletionService:
                 agent.temperature = request.temperature
             if request.top_p is not None:
                 agent.top_p = request.top_p
+            if request.top_k is not None:
+                agent.top_k = request.top_k
+            if request.min_p is not None:
+                agent.min_p = request.min_p
             if request.stop:
                 agent.stop = request.stop
             if request.presence_penalty is not None:
                 agent.presence_penalty = request.presence_penalty
             if request.frequency_penalty is not None:
                 agent.frequency_penalty = request.frequency_penalty
+            if request.repetition_penalty is not None:
+                agent.repetition_penalty = request.repetition_penalty
 
     async def create_completion(
         self,

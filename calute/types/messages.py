@@ -34,7 +34,7 @@ Example:
 
 import re
 import textwrap
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import ConfigDict, Field
@@ -44,7 +44,7 @@ from ..utils import CaluteBase
 from .tool_calls import ToolCall
 
 
-class ChunkTypes(str, Enum):
+class ChunkTypes(StrEnum):
     r"""Enum for the types of chunks that can be sent to the model.
 
     Attributes:
@@ -245,7 +245,7 @@ def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[s
         raise ValueError(f"Unknown content chunk type: {content_type}")
 
 
-class Roles(str, Enum):
+class Roles(StrEnum):
     r"""Enum for the roles of the messages.
 
     Attributes:

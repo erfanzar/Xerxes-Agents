@@ -256,9 +256,7 @@ class MCPClient:
             Requires the optional `mcp` package: pip install calute[mcp]
         """
         if not _check_mcp_sdk():
-            raise ImportError(
-                "SSE transport requires the MCP SDK. Install with: pip install calute[mcp]"
-            )
+            raise ImportError("SSE transport requires the MCP SDK. Install with: pip install calute[mcp]")
 
         if not self.config.url:
             self.logger.error(f"No URL specified for SSE MCP server {self.config.name}")
@@ -285,9 +283,7 @@ class MCPClient:
             read_stream, write_stream = sse_transport
 
             # Create and initialize the MCP session
-            self._session = await self._exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             await self._session.initialize()
 
             self.session_id = str(id(self))
@@ -321,9 +317,7 @@ class MCPClient:
             Requires the optional `mcp` package: pip install calute[mcp]
         """
         if not _check_mcp_sdk():
-            raise ImportError(
-                "Streamable HTTP transport requires the MCP SDK. Install with: pip install calute[mcp]"
-            )
+            raise ImportError("Streamable HTTP transport requires the MCP SDK. Install with: pip install calute[mcp]")
 
         if not self.config.url:
             self.logger.error(f"No URL specified for Streamable HTTP MCP server {self.config.name}")
@@ -349,9 +343,7 @@ class MCPClient:
             read_stream, write_stream, get_session_id = http_transport
 
             # Create and initialize the MCP session
-            self._session = await self._exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             await self._session.initialize()
 
             # Get session ID from transport if available

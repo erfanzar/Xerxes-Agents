@@ -377,6 +377,7 @@ class Cortex:
 
         if log_process and stream_callback is None:
             from calute.loggings import stream_callback as default_stream_callback
+
             stream_callback = default_stream_callback
 
         if use_streaming:
@@ -1229,7 +1230,7 @@ class Cortex:
         memory_config: MemoryConfig | None = None,
         reinvoke_after_function: bool = True,
         enable_calute_memory: bool = False,
-    ) -> "Cortex":
+    ) -> Cortex:
         """Create a Cortex instance from tasks with auto-detected agents and LLM.
 
         Factory method that automatically extracts agents from the provided tasks

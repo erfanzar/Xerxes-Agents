@@ -63,9 +63,7 @@ def _get_ddgs():
         except ModuleNotFoundError:
             _DDGS_AVAILABLE = False
     if not _DDGS_AVAILABLE:
-        raise ImportError(
-            "`ddgs` package not found. Please install with: pip install calute[search]"
-        )
+        raise ImportError("`ddgs` package not found. Please install with: pip install calute[search]")
     return _DDGS
 
 

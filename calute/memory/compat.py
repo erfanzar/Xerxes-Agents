@@ -178,19 +178,24 @@ class MemoryStore(ContextualMemory):
         filtered = [r for r in results if r.metadata.get("importance", 0.5) >= min_importance]
         return filtered[:limit]
 
-    def consolidate_memories(self, agent_id: str) -> str:
+    def consolidate_memories(self, agent_id: str, merge_similar: bool = True) -> str:
         """
         Consolidate memories for an agent into a summary.
 
-        Combines important facts and recent context into a formatted
-        string suitable for including in agent prompts.
+        Merges similar memories to reduce redundancy, then combines
+        important facts and recent context into a formatted string
+        suitable for including in agent prompts.
 
         Args:
             agent_id: ID of the agent to consolidate memories for
+            merge_similar: Whether to merge similar long-term memories first
 
         Returns:
             Formatted summary string of important and recent memories
         """
+        # First, run real consolidation on long-term memory to merge duplicates
+        if merge_similar:
+            self.long_term.consolidate(merge_similar=True)
 
         filters = {"agent_id": agent_id}
         memories = self.search(query="", limit=20, filters=filters)
@@ -206,7 +211,8 @@ class MemoryStore(ContextualMemory):
         if important:
             summary_parts.append("Important facts:")
             for mem in important[:5]:
-                summary_parts.append(f"- {mem.content}")
+                importance = mem.metadata.get("importance", 0.5)
+                summary_parts.append(f"- [{importance:.1f}] {mem.content}")
 
         if recent:
             summary_parts.append("\nRecent context:")

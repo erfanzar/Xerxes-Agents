@@ -665,5 +665,3 @@ class LocalLLM(OllamaLLM):
     See Also:
         OllamaLLM: The primary class for Ollama integration.
     """
-
-    pass

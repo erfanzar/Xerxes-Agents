@@ -43,7 +43,7 @@ Example:
 """
 
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Any, TypeVar
 
 from pydantic import field_validator
@@ -82,7 +82,7 @@ class Function(CaluteBase):
     parameters: dict[str, Any]
 
 
-class ToolTypes(str, Enum):
+class ToolTypes(StrEnum):
     r"""Enum of tool types.
 
     Attributes:
@@ -95,7 +95,7 @@ class ToolTypes(str, Enum):
     function = "function"
 
 
-class ToolChoice(str, Enum):
+class ToolChoice(StrEnum):
     r"""Enum of tool choice types.
 
     Attributes:

@@ -527,7 +527,8 @@ Respond ONLY with the XML plan, no additional text.
                 agent = available_agents[0]
 
             dependencies = [
-                cortex_tasks[dep_id - 1] for dep_id in task_def.dependencies
+                cortex_tasks[dep_id - 1]
+                for dep_id in task_def.dependencies
                 if dep_id > 0 and dep_id - 1 < len(cortex_tasks)
             ]
 

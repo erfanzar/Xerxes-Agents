@@ -77,10 +77,12 @@ class LLMConfig:
             probability mass are considered for sampling.
         top_k: Top-k sampling parameter. Only the top k most likely tokens
             are considered. Set to None to disable.
+        min_p: Minimum probability threshold for sampling.
         frequency_penalty: Penalizes tokens based on their frequency in the
             text so far, reducing repetition. Range: -2.0 to 2.0.
         presence_penalty: Penalizes tokens that have appeared at all in the
             text so far, encouraging topic diversity. Range: -2.0 to 2.0.
+        repetition_penalty: Multiplicative penalty for token repetition.
         stop: List of sequences where the model should stop generating.
         stream: Whether to stream the response token by token.
         api_key: API key for the provider. Can also be set via environment.
@@ -110,8 +112,10 @@ class LLMConfig:
     max_tokens: int = 2048
     top_p: float = 0.95
     top_k: int | None = None
+    min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    repetition_penalty: float = 1.0
     stop: list[str] | None = None
     stream: bool = False
     api_key: str | None = None

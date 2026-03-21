@@ -491,12 +491,17 @@ class GeminiLLM(BaseLLM):
                         chunk_data["content"] = text
                         chunk_data["buffered_content"] = buffered_content
 
-            try:
-                chunk_data["is_final"] = False
-            except StopIteration:
-                chunk_data["is_final"] = True
-
             yield chunk_data
+
+        # After the loop ends, yield a final chunk to signal completion
+        yield {
+            "content": None,
+            "buffered_content": buffered_content,
+            "function_calls": [],
+            "tool_calls": None,
+            "raw_chunk": None,
+            "is_final": True,
+        }
 
     async def astream_completion(
         self,
@@ -563,6 +568,16 @@ class GeminiLLM(BaseLLM):
 
             yield chunk_data
 
+        # Signal stream completion
+        yield {
+            "content": None,
+            "buffered_content": buffered_content,
+            "function_calls": [],
+            "tool_calls": None,
+            "raw_chunk": None,
+            "is_final": True,
+        }
+
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
         """Parse tool/function calls from Gemini response format.
 
@@ -600,11 +615,22 @@ class GeminiLLM(BaseLLM):
                     for part in candidate.content.parts:
                         if hasattr(part, "function_call"):
                             fc = part.function_call
+                            import json as _json
+
+                            args = getattr(fc, "args", None)
+                            if args is not None:
+                                try:
+                                    # Convert MapComposite/proto objects to dict then JSON
+                                    args_str = _json.dumps(dict(args))
+                                except (TypeError, ValueError):
+                                    args_str = str(args)
+                            else:
+                                args_str = "{}"
                             tool_calls.append(
                                 {
                                     "id": getattr(fc, "id", None),
                                     "name": fc.name,
-                                    "arguments": str(fc.args) if hasattr(fc, "args") else "",
+                                    "arguments": args_str,
                                 }
                             )
         return tool_calls

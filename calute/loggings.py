@@ -566,6 +566,11 @@ def stream_callback(chunk):
         print(paint("─" * left, ACCENT) + paint(title_str, LWHITE, BOLD) + paint("─" * right, ACCENT), flush=True)
 
     if isinstance(chunk, StreamChunk):
+        if getattr(chunk, "reasoning_content", None):
+            write(paint(chunk.reasoning_content, COL["MAGENTA"]))
+            if chunk.reasoning_content.endswith("\n"):
+                state["open_line"] = False
+
         if getattr(chunk, "content", None):
             if hasattr(chunk, "is_thinking") and chunk.is_thinking:
                 write(paint(chunk.content, COL["MAGENTA"]))

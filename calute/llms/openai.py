@@ -69,6 +69,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
+from urllib.parse import urlparse
 
 from .base import BaseLLM, LLMConfig
 
@@ -220,6 +221,21 @@ class OpenAILLM(BaseLLM):
 
         self._auto_fetch_model_info()
 
+    def _supports_openai_compatible_sampling_params(self) -> bool:
+        """Return True when targeting a non-OpenAI compatible endpoint."""
+        if not self.config.base_url:
+            return False
+
+        hostname = (urlparse(self.config.base_url).hostname or "").lower()
+        if not hostname:
+            return True
+
+        official_hosts = {
+            "api.openai.com",
+            "openai.azure.com",
+        }
+        return hostname not in official_hosts and not hostname.endswith(".openai.azure.com")
+
     async def generate_completion(
         self,
         prompt: str | list[dict[str, str]],
@@ -302,6 +318,26 @@ class OpenAILLM(BaseLLM):
         else:
             messages = prompt
 
+        compat_top_k = kwargs.pop("top_k", None)
+        if compat_top_k is None:
+            compat_top_k = self.config.top_k
+
+        compat_min_p = kwargs.pop("min_p", None)
+        if compat_min_p is None:
+            compat_min_p = self.config.min_p
+
+        compat_repetition_penalty = kwargs.pop("repetition_penalty", None)
+        if compat_repetition_penalty is None:
+            compat_repetition_penalty = self.config.repetition_penalty
+
+        request_extra_body = kwargs.pop("extra_body", None)
+        config_extra_body = self.config.extra_params.get("extra_body", {})
+        merged_extra_body = {}
+        if isinstance(config_extra_body, dict):
+            merged_extra_body.update(config_extra_body)
+        if isinstance(request_extra_body, dict):
+            merged_extra_body.update(request_extra_body)
+
         params = {
             "model": model or self.config.model,
             "messages": messages,
@@ -325,16 +361,142 @@ class OpenAILLM(BaseLLM):
 
             params["tool_choice"] = "auto"
 
-        openai_unsupported = {"top_k", "min_p", "repetition_penalty"}
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in openai_unsupported and v is not None}
+        if self._supports_openai_compatible_sampling_params():
+            if compat_top_k is not None:
+                merged_extra_body["top_k"] = compat_top_k
+            if compat_min_p is not None:
+                merged_extra_body["min_p"] = compat_min_p
+            if compat_repetition_penalty is not None:
+                merged_extra_body["repetition_penalty"] = compat_repetition_penalty
+
+        filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         params.update(filtered_kwargs)
-        params.update(self.config.extra_params)
+
+        config_extra_params = {k: v for k, v in self.config.extra_params.items() if k != "extra_body"}
+        params.update(config_extra_params)
+
+        if merged_extra_body:
+            params["extra_body"] = merged_extra_body
 
         if params["stream"]:
             return self.client.chat.completions.create(**params)
         else:
             response = self.client.chat.completions.create(**params)
             return response
+
+    @staticmethod
+    def _get_openai_field(obj: Any, field: str) -> Any:
+        """Read a field from dicts, typed SDK models, or model extras."""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(field)
+
+        value = getattr(obj, field, None)
+        if value is not None:
+            return value
+
+        model_extra = getattr(obj, "model_extra", None)
+        if isinstance(model_extra, dict):
+            return model_extra.get(field)
+        return None
+
+    @classmethod
+    def _stringify_reasoning(cls, value: Any) -> str:
+        """Convert provider-specific reasoning payloads into plain text."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple)):
+            return "".join(part for item in value if (part := cls._stringify_reasoning(item)))
+        if isinstance(value, dict):
+            for key in (
+                "text",
+                "content",
+                "summary_text",
+                "summary",
+                "reasoning_text",
+                "reasoning_content",
+                "reasoning",
+                "delta_reasoning",
+                "delta",
+                "value",
+            ):
+                if key in value:
+                    text = cls._stringify_reasoning(value[key])
+                    if text:
+                        return text
+            return "".join(part for item in value.values() if (part := cls._stringify_reasoning(item)))
+
+        for key in (
+            "text",
+            "content",
+            "summary_text",
+            "summary",
+            "reasoning_text",
+            "reasoning_content",
+            "reasoning",
+            "delta_reasoning",
+            "delta",
+            "value",
+        ):
+            nested = cls._get_openai_field(value, key)
+            if nested is not None and nested is not value:
+                text = cls._stringify_reasoning(nested)
+                if text:
+                    return text
+
+        return ""
+
+    @classmethod
+    def _extract_reasoning_from_message(cls, message: Any) -> str:
+        """Extract reasoning from chat-completions style message payloads."""
+        for field in ("reasoning_content", "reasoning", "delta_reasoning"):
+            text = cls._stringify_reasoning(cls._get_openai_field(message, field))
+            if text:
+                return text
+
+        content = cls._get_openai_field(message, "content")
+        if isinstance(content, (list, tuple)):
+            parts: list[str] = []
+            for item in content:
+                item_type = str(cls._get_openai_field(item, "type") or "").lower()
+                if "reasoning" in item_type:
+                    text = cls._stringify_reasoning(item)
+                    if text:
+                        parts.append(text)
+            return "".join(parts)
+
+        return ""
+
+    @classmethod
+    def _extract_reasoning_from_chunk(cls, chunk: Any) -> str:
+        """Extract reasoning deltas from chat chunks and Responses API events."""
+        event_type = str(cls._get_openai_field(chunk, "type") or "")
+        if event_type in {
+            "response.reasoning.delta",
+            "response.reasoning_text.delta",
+            "response.reasoning_summary.delta",
+            "response.reasoning_summary_text.delta",
+        }:
+            return cls._stringify_reasoning(cls._get_openai_field(chunk, "delta"))
+
+        choices = cls._get_openai_field(chunk, "choices")
+        if choices:
+            choice0 = choices[0]
+            delta = cls._get_openai_field(choice0, "delta")
+            if delta is not None:
+                for field in ("reasoning_content", "reasoning", "delta_reasoning"):
+                    text = cls._stringify_reasoning(cls._get_openai_field(delta, field))
+                    if text:
+                        return text
+
+        delta_reasoning = cls._get_openai_field(chunk, "delta_reasoning")
+        if delta_reasoning is not None:
+            return cls._stringify_reasoning(delta_reasoning)
+
+        return ""
 
     def extract_content(self, response: Any) -> str:
         """Extract text content from an OpenAI ChatCompletion response.
@@ -379,16 +541,47 @@ class OpenAILLM(BaseLLM):
 
         return ""
 
+    def extract_reasoning_content(self, response: Any) -> str:
+        """Extract reasoning/thinking content from an OpenAI response.
+
+        Extracts reasoning tokens from reasoning models (o1, o3, etc.)
+        in non-streaming responses. These models may include internal
+        chain-of-thought reasoning separately from the main content.
+
+        Args:
+            response: OpenAI ChatCompletion response object.
+
+        Returns:
+            The reasoning content string, or empty string if not present.
+
+        Example:
+            response = await llm.generate_completion("Solve this math problem")
+            reasoning = llm.extract_reasoning_content(response)
+            if reasoning:
+                print(f"Model reasoning: {reasoning}")
+            content = llm.extract_content(response)
+            print(f"Answer: {content}")
+        """
+        if hasattr(response, "choices") and response.choices:
+            message = response.choices[0].message
+            reasoning = self._extract_reasoning_from_message(message)
+            if reasoning:
+                return reasoning
+        return ""
+
     async def process_streaming_response(self, response: Any, callback: Callable[[str, Any], None]) -> str:
         """Process a streaming response from OpenAI with a callback for each chunk.
 
         Iterates through all chunks in a streaming response, extracts text content
-        from each delta, accumulates the full response, and invokes the callback
-        for each content chunk received.
+        and reasoning tokens from each delta, accumulates the full response, and
+        invokes the callback for each content chunk received.
 
         This method is useful for displaying streaming output in real-time while
         also capturing the complete response. The callback receives both the
         individual chunk content and the raw chunk object for additional processing.
+
+        Note: Reasoning tokens (from o1/o3 models) are included in the callback
+        via the raw chunk object. Access them via chunk.choices[0].delta.reasoning_content.
 
         Args:
             response: OpenAI streaming response iterator. Should be the result of
@@ -412,6 +605,10 @@ class OpenAILLM(BaseLLM):
         accumulated_content = ""
 
         for chunk in response:
+            reasoning = self._extract_reasoning_from_chunk(chunk)
+            if reasoning:
+                callback(reasoning, chunk)
+
             if chunk.choices and chunk.choices[0].delta:
                 delta = chunk.choices[0].delta
                 if hasattr(delta, "content") and delta.content:
@@ -464,6 +661,7 @@ class OpenAILLM(BaseLLM):
                         print(f"Args: {call['arguments']}")
         """
         buffered_content = ""
+        buffered_reasoning_content = ""
         function_calls = []
         tool_call_accumulator = {}
 
@@ -471,12 +669,20 @@ class OpenAILLM(BaseLLM):
             chunk_data = {
                 "content": None,
                 "buffered_content": buffered_content,
+                "reasoning_content": None,
+                "buffered_reasoning_content": buffered_reasoning_content,
                 "function_calls": [],
                 "tool_calls": None,
                 "streaming_tool_calls": None,
                 "raw_chunk": chunk,
                 "is_final": False,
             }
+
+            reasoning = self._extract_reasoning_from_chunk(chunk)
+            if reasoning:
+                buffered_reasoning_content += reasoning
+                chunk_data["reasoning_content"] = reasoning
+                chunk_data["buffered_reasoning_content"] = buffered_reasoning_content
 
             if hasattr(chunk, "choices") and chunk.choices:
                 delta = chunk.choices[0].delta
@@ -592,6 +798,7 @@ class OpenAILLM(BaseLLM):
                     print()  # Newline at end
         """
         buffered_content = ""
+        buffered_reasoning_content = ""
         function_calls = []
         tool_call_accumulator = {}
 
@@ -599,12 +806,20 @@ class OpenAILLM(BaseLLM):
             chunk_data = {
                 "content": None,
                 "buffered_content": buffered_content,
+                "reasoning_content": None,
+                "buffered_reasoning_content": buffered_reasoning_content,
                 "function_calls": [],
                 "tool_calls": None,
                 "streaming_tool_calls": None,
                 "raw_chunk": chunk,
                 "is_final": False,
             }
+
+            reasoning = self._extract_reasoning_from_chunk(chunk)
+            if reasoning:
+                buffered_reasoning_content += reasoning
+                chunk_data["reasoning_content"] = reasoning
+                chunk_data["buffered_reasoning_content"] = buffered_reasoning_content
 
             if hasattr(chunk, "choices") and chunk.choices:
                 delta = chunk.choices[0].delta

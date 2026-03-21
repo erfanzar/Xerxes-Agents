@@ -274,7 +274,9 @@ class ContextualMemory(Memory):
             for item in recent:
                 lines.append(f"  - {item.content[:100]}")
 
-        important = self.long_term.search(query="", limit=3, filters={"importance": lambda x: x >= 0.8})
+        # Retrieve all recent long-term memories and filter by importance
+        all_lt = self.long_term.search(query="", limit=20)
+        important = [item for item in all_lt if item.metadata.get("importance", 0.5) >= 0.8][:3]
         if important:
             lines.append("\nImportant memories:")
             for item in important:

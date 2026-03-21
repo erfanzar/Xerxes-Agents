@@ -269,6 +269,8 @@ class StreamChunk:
     agent_id: str = ""
     content: str | None = None
     buffered_content: str | None = None
+    reasoning_content: str | None = None
+    buffered_reasoning_content: str | None = None
     function_calls_detected: bool | None = None
     reinvoked: bool = False
     tool_calls: list[ToolCallStreamChunk] | None = None
@@ -444,6 +446,7 @@ class Completion:
     Attributes:
         type: Event type identifier (default: "completion").
         final_content: The final accumulated response content.
+        reasoning_content: Accumulated reasoning/thinking tokens from the model.
         function_calls_executed: Total number of function calls executed.
         agent_id: ID of the agent that produced the final response.
         execution_history: List of execution events that occurred.
@@ -451,6 +454,7 @@ class Completion:
 
     type: str = "completion"
     final_content: str = ""
+    reasoning_content: str = ""
     function_calls_executed: int = 0
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)
@@ -476,6 +480,7 @@ class ResponseResult:
     content: str
     response: ChatCompletion
     completion: Completion
+    reasoning_content: str = ""
     function_calls: list[RequestFunctionCall] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)

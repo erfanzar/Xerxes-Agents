@@ -208,6 +208,11 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         "temperature": 0.7,
         "max_tokens": 8192,
         "top_p": 0.95,
+        "top_k": 0,
+        "min_p": 0.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "repetition_penalty": 1.0,
         "streaming": True,
     }
 
@@ -243,7 +248,7 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         """Apply settings to the active agent.
 
         Updates agent parameters based on UI settings. Supports
-        temperature, max_tokens, and top_p parameters.
+        sampling and penalty parameters.
 
         Args:
             executor: The executor instance containing agents.
@@ -267,6 +272,44 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             agent.max_tokens = int(settings.get("max_tokens", DEFAULT_SETTINGS["max_tokens"]))
         if hasattr(agent, "top_p"):
             agent.top_p = settings.get("top_p", DEFAULT_SETTINGS["top_p"])
+        if hasattr(agent, "top_k"):
+            agent.top_k = int(settings.get("top_k", DEFAULT_SETTINGS["top_k"]))
+        if hasattr(agent, "min_p"):
+            agent.min_p = settings.get("min_p", DEFAULT_SETTINGS["min_p"])
+        if hasattr(agent, "presence_penalty"):
+            agent.presence_penalty = settings.get("presence_penalty", DEFAULT_SETTINGS["presence_penalty"])
+        if hasattr(agent, "frequency_penalty"):
+            agent.frequency_penalty = settings.get("frequency_penalty", DEFAULT_SETTINGS["frequency_penalty"])
+        if hasattr(agent, "repetition_penalty"):
+            agent.repetition_penalty = settings.get("repetition_penalty", DEFAULT_SETTINGS["repetition_penalty"])
+
+    def _build_initial_settings(executor, agent_id) -> dict:
+        """Build UI settings from defaults overridden by the active agent."""
+        settings = dict(DEFAULT_SETTINGS)
+        agents = _get_agents_from_executor(executor)
+        agent = agents.get(agent_id) if agent_id else None
+
+        if agent is None and hasattr(executor, "default_agent"):
+            agent = executor.default_agent
+
+        if agent is None:
+            return settings
+
+        for key in (
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "top_k",
+            "min_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "repetition_penalty",
+        ):
+            value = getattr(agent, key, None)
+            if value is not None:
+                settings[key] = value
+
+        return settings
 
     @cl.set_chat_profiles
     async def set_chat_profiles():
@@ -343,13 +386,15 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
         cl.user_session.set("agent", selected_agent)
 
+        initial_settings = _build_initial_settings(executor, selected_agent)
+
         # Setup ChatSettings
         settings = await cl.ChatSettings(
             [
                 Slider(
                     id="temperature",
                     label="Temperature",
-                    initial=DEFAULT_SETTINGS["temperature"],
+                    initial=initial_settings["temperature"],
                     min=0,
                     max=2,
                     step=0.1,
@@ -358,7 +403,7 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
                 Slider(
                     id="max_tokens",
                     label="Max Tokens",
-                    initial=DEFAULT_SETTINGS["max_tokens"],
+                    initial=initial_settings["max_tokens"],
                     min=-1,
                     max=131072,
                     step=1024,
@@ -367,16 +412,61 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
                 Slider(
                     id="top_p",
                     label="Top P",
-                    initial=DEFAULT_SETTINGS["top_p"],
+                    initial=initial_settings["top_p"],
                     min=0,
                     max=1,
                     step=0.05,
                     description="Nucleus sampling threshold",
                 ),
+                Slider(
+                    id="top_k",
+                    label="Top K",
+                    initial=initial_settings["top_k"],
+                    min=0,
+                    max=200,
+                    step=1,
+                    description="Limit sampling to the top K candidate tokens",
+                ),
+                Slider(
+                    id="min_p",
+                    label="Min P",
+                    initial=initial_settings["min_p"],
+                    min=0,
+                    max=1,
+                    step=0.01,
+                    description="Minimum probability threshold for sampling",
+                ),
+                Slider(
+                    id="presence_penalty",
+                    label="Presence Penalty",
+                    initial=initial_settings["presence_penalty"],
+                    min=-2,
+                    max=2,
+                    step=0.1,
+                    description="Penalize tokens that have already appeared",
+                ),
+                Slider(
+                    id="frequency_penalty",
+                    label="Frequency Penalty",
+                    initial=initial_settings["frequency_penalty"],
+                    min=-2,
+                    max=2,
+                    step=0.1,
+                    description="Penalize repeated token frequency",
+                ),
+                Slider(
+                    id="repetition_penalty",
+                    label="Repetition Penalty",
+                    initial=initial_settings["repetition_penalty"],
+                    min=0.5,
+                    max=2,
+                    step=0.05,
+                    description="Multiplicative repetition penalty",
+                ),
                 Switch(
                     id="streaming",
                     label="Enable Streaming",
-                    initial=DEFAULT_SETTINGS["streaming"],
+                    initial=initial_settings["streaming"],
                     description="Stream responses token by token",
                 ),
             ]
@@ -500,10 +590,21 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         """Handle when the user stops a response generation.
 
         Called when the user clicks the stop button during streaming.
-        Placeholder for cleanup of pending operations.
+        Cleans up any active streaming buffers and signals cancellation.
         """
-        # Clean up any pending operations if needed
-        pass
+        executor = cl.user_session.get("executor")
+
+        # Stop active streamer buffers
+        if executor and hasattr(executor, "streamer_buffer"):
+            buf = executor.streamer_buffer
+            if buf and hasattr(buf, "kill"):
+                buf.kill()
+
+        # Also check for any streamer stored in session
+        streamer = cl.user_session.get("active_streamer")
+        if streamer and hasattr(streamer, "kill"):
+            streamer.kill()
+            cl.user_session.set("active_streamer", None)
 
     @cl.on_chat_end
     async def on_chat_end():
