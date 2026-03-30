@@ -30,7 +30,7 @@ from calute.context.token_counter import TIKTOKEN_AVAILABLE, ProviderTokenCounte
 
 ENV_PY_LLM_CONFIG = {
     "provider": "openai",
-    "base_url": "http://35.186.39.100:11556/v1/",
+    "base_url": "http://XXX:11556/v1/",
     "api_key": "sk-xxx",
 }
 DEFAULT_MODEL = "qwen3-8.19b"

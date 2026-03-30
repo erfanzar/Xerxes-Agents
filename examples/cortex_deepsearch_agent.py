@@ -23,14 +23,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from calute import Cortex, CortexOutput, CortexAgent, CortexTask, ProcessType, create_llm
+from calute import Cortex, CortexAgent, CortexOutput, CortexTask, ProcessType, create_llm
 from calute.logging.console import stream_callback
 from calute.tools import DuckDuckGoSearch, WebScraper
 
 # Keep the same LLM connection settings that are already used in env.py.
 ENV_PY_LLM_CONFIG = {
     "provider": "openai",
-    "base_url": "http://35.186.39.100:11556/v1/",
+    "base_url": "http://XXX:11556/v1/",
     "api_key": "sk-xxx",
 }
 DEFAULT_MODEL = "qwen3-8.19b"
@@ -47,7 +47,9 @@ TRACK_LIBRARY = [
     },
     {
         "name": "primary-sources",
-        "focus": "Prioritize official docs, company blogs, source repos, product pages, papers, or first-party statements.",
+        "focus": (
+            "Prioritize official docs, company blogs, source repos, product pages, papers, or first-party statements."
+        ),
     },
     {
         "name": "benchmarks-and-data",
@@ -55,7 +57,9 @@ TRACK_LIBRARY = [
     },
     {
         "name": "open-source-ecosystem",
-        "focus": "Investigate open-source projects, libraries, integrations, and implementation patterns around the topic.",
+        "focus": (
+            "Investigate open-source projects, libraries, integrations, and implementation patterns around the topic."
+        ),
     },
     {
         "name": "real-world-adoption",
@@ -160,7 +164,9 @@ def build_research_tracks(parallel_researchers: int) -> list[dict[str, str]]:
             tracks.append(
                 {
                     "name": f"{template['name']}-pass-{cycle + 1}",
-                    "focus": template["focus"] + " Search for different sources and a different angle than earlier passes.",
+                    "focus": (
+                        template["focus"] + " Search for different sources and a different angle than earlier passes."
+                    ),
                 }
             )
     return tracks
@@ -190,7 +196,9 @@ def create_strategist_agent(llm, model: str) -> CortexAgent:
     )
 
 
-def create_researcher_agent(llm, model: str, worker_index: int, total_workers: int, track: dict[str, str]) -> CortexAgent:
+def create_researcher_agent(
+    llm, model: str, worker_index: int, total_workers: int, track: dict[str, str]
+) -> CortexAgent:
     """Create one parallel researcher."""
     return CortexAgent(
         role=f"Web Researcher {worker_index}",
