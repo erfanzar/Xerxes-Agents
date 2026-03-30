@@ -35,6 +35,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import time
 import traceback
 import typing as tp
@@ -43,6 +44,10 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .core.utils import get_callable_public_name
+from .runtime.loop_detection import LoopDetector, LoopSeverity, ToolLoopError
+from .security.policy import PolicyAction, ToolPolicyViolation
+from .security.sandbox import ExecutionContext, SandboxExecutionUnavailableError
 from .types.function_execution_types import (
     AgentSwitchTrigger,
     ExecutionStatus,
@@ -51,6 +56,7 @@ from .types.function_execution_types import (
 )
 
 if tp.TYPE_CHECKING:
+    from .runtime.features import RuntimeFeaturesState
     from .types import Agent
 
 logger = logging.getLogger(__name__)
@@ -88,7 +94,7 @@ class FunctionRegistry:
             agent_id: ID of the agent that owns this function.
             metadata: Optional metadata about the function.
         """
-        func_name = func.__name__
+        func_name = get_callable_public_name(func)
         self._functions[func_name] = func
         self._function_agents[func_name] = agent_id
         self._function_metadata[func_name] = metadata or {}
@@ -207,6 +213,7 @@ class AgentOrchestrator:
 
         self.execution_history.append(
             {
+                "action": "agent_switch",
                 "type": "agent_switch",
                 "from": old_agent,
                 "to": target_agent_id,
@@ -241,27 +248,27 @@ class AgentOrchestrator:
 
 @dataclass
 class FunctionExecutionHistory:
-    """History of function executions and their results"""
+    """History of function executions and their results."""
 
     executions: list[RequestFunctionCall] = field(default_factory=list)
     execution_map: dict[str, RequestFunctionCall] = field(default_factory=dict)
 
-    def add_execution(self, call: RequestFunctionCall):
-        """Add an execution to the history"""
+    def add_execution(self, call: RequestFunctionCall) -> None:
+        """Add a completed function call to the history, indexing it by ID and name."""
         self.executions.append(call)
         self.execution_map[call.id] = call
         self.execution_map[call.name] = call
 
     def get_by_id(self, call_id: str) -> RequestFunctionCall | None:
-        """Get function call by ID"""
+        """Return the function call matching call_id, or None if not found."""
         return self.execution_map.get(call_id)
 
     def get_by_name(self, name: str) -> RequestFunctionCall | None:
-        """Get latest function call by name"""
+        """Return the most recently recorded function call with the given name, or None."""
         return self.execution_map.get(name)
 
     def get_successful_results(self) -> dict[str, tp.Any]:
-        """Get all successful results as a dictionary of function_name -> result"""
+        """Return a mapping of function_name to result for all successful calls."""
         return {
             call.name: call.result
             for call in self.executions
@@ -269,7 +276,7 @@ class FunctionExecutionHistory:
         }
 
     def as_context_dict(self) -> dict:
-        """Convert execution history to a context dictionary for prompt generation"""
+        """Convert execution history to a context dictionary suitable for prompt generation."""
         return {
             "function_history": [
                 {
@@ -287,9 +294,10 @@ class FunctionExecutionHistory:
 
 
 class FunctionExecutor:
-    """Handles function execution with various strategies"""
+    """Handles function execution with various strategies."""
 
-    def __init__(self, orchestrator: AgentOrchestrator):
+    def __init__(self, orchestrator: AgentOrchestrator) -> None:
+        """Initialize the FunctionExecutor with a backing AgentOrchestrator."""
         self.orchestrator = orchestrator
         self.execution_queue: list[RequestFunctionCall] = []
         self.completed_calls: dict[str, RequestFunctionCall] = {}
@@ -301,19 +309,45 @@ class FunctionExecutor:
         strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL,
         context_variables: dict | None = None,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute function calls using the specified strategy"""
+        """Execute function calls using the specified strategy.
+
+        Args:
+            calls: List of function calls to execute.
+            strategy: Execution strategy (SEQUENTIAL, PARALLEL, PIPELINE, CONDITIONAL).
+            context_variables: Optional context variables to pass to functions.
+            agent: Optional agent instance for function lookup.
+            runtime_features_state: Optional runtime features for policy/hooks/audit.
+            loop_detector: Optional loop detector to guard against repetitive tool calls.
+
+        Returns:
+            List of RequestFunctionCall instances with populated results and statuses.
+        """
         context_variables = context_variables or {}
         context_variables.update(self.execution_history.as_context_dict())
 
         if strategy == FunctionCallStrategy.SEQUENTIAL:
-            results = await self._execute_sequential(calls, context_variables, agent)
+            results = await self._execute_sequential(
+                calls, context_variables, agent, runtime_features_state, loop_detector
+            )
         elif strategy == FunctionCallStrategy.PARALLEL:
-            results = await self._execute_parallel(calls, context_variables, agent)
+            results = await self._execute_parallel(
+                calls, context_variables, agent, runtime_features_state, loop_detector
+            )
         elif strategy == FunctionCallStrategy.PIPELINE:
-            results = await self._execute_pipeline(calls, context_variables, agent)
+            results = await self._execute_pipeline(
+                calls, context_variables, agent, runtime_features_state, loop_detector
+            )
         elif strategy == FunctionCallStrategy.CONDITIONAL:
-            results = await self._execute_conditional(calls, context_variables, agent)
+            results = await self._execute_conditional(
+                calls,
+                context_variables,
+                agent,
+                runtime_features_state,
+                loop_detector,
+            )
         else:
             raise ValueError(f"Unknown execution strategy: {strategy}")
 
@@ -327,12 +361,14 @@ class FunctionExecutor:
         calls: list[RequestFunctionCall],
         context: dict,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls one after another"""
+        """Execute calls one after another, passing context updates between them."""
         results = []
         for call in calls:
             try:
-                result = await self._execute_single_call(call, context, agent)
+                result = await self._execute_single_call(call, context, agent, runtime_features_state, loop_detector)
                 results.append(result)
                 if hasattr(result.result, "context_variables"):
                     context.update(result.result.context_variables)
@@ -347,11 +383,16 @@ class FunctionExecutor:
         calls: list[RequestFunctionCall],
         context: dict,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls in parallel"""
+        """Execute calls in parallel using asyncio.gather."""
 
         context_dict = context if isinstance(context, dict) else {}
-        tasks = [self._execute_single_call(call, context_dict.copy(), agent) for call in calls]
+        tasks = [
+            self._execute_single_call(call, context_dict.copy(), agent, runtime_features_state, loop_detector)
+            for call in calls
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         final_results: list[RequestFunctionCall] = []
         for call, result in zip(calls, results, strict=False):
@@ -372,15 +413,23 @@ class FunctionExecutor:
         calls: list[RequestFunctionCall],
         context: dict,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls in a pipeline where output of one feeds into next"""
+        """Execute calls in a pipeline where the output of one feeds into the next."""
         results = []
 
         context_dict = context if isinstance(context, dict) else {}
         current_context = context_dict.copy()
 
         for call in calls:
-            result = await self._execute_single_call(call, current_context, agent)
+            result = await self._execute_single_call(
+                call,
+                current_context,
+                agent,
+                runtime_features_state,
+                loop_detector,
+            )
             results.append(result)
 
             if result.status == ExecutionStatus.SUCCESS and result.result:
@@ -396,14 +445,22 @@ class FunctionExecutor:
         calls: list[RequestFunctionCall],
         context: dict,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls based on conditions and dependencies"""
+        """Execute calls in topological dependency order, skipping unsatisfied deps."""
         sorted_calls = self._topological_sort(calls)
         results: list[RequestFunctionCall] = []
 
         for call in sorted_calls:
             if self._dependencies_satisfied(call, results):
-                result = await self._execute_single_call(call, context, agent)
+                result = await self._execute_single_call(
+                    call,
+                    context,
+                    agent,
+                    runtime_features_state,
+                    loop_detector,
+                )
                 results.append(result)
                 self.completed_calls[call.id] = result
 
@@ -414,34 +471,36 @@ class FunctionExecutor:
         call: RequestFunctionCall,
         context: dict,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
+        audit_turn_id: str | None = None,
     ) -> RequestFunctionCall:
-        """Execute a single function call with error handling and retries"""
+        """Execute a single function call with error handling and retries.
+
+        Applies loop detection, policy checks, before/after hooks, sandbox routing,
+        and emits audit events throughout the lifecycle of the call.
+
+        Args:
+            call: The function call to execute.
+            context: Context variables for the call.
+            agent: Optional agent used for direct function lookup.
+            runtime_features_state: Runtime state supplying policy, hooks, and audit.
+            loop_detector: Optional detector for repetitive tool-call patterns.
+            audit_turn_id: Optional turn identifier for audit trail correlation.
+
+        Returns:
+            The updated RequestFunctionCall with result/status/error populated.
+        """
         call.status = ExecutionStatus.PENDING
 
         for attempt in range(call.max_retries + 1):
+            agent_id = agent.id if agent is not None else None
+            _audit = runtime_features_state.audit_emitter if runtime_features_state is not None else None
             try:
-                if agent is not None:
-                    func, agent_id = {fn.__name__: fn for fn in agent.functions}.get(call.name, None), agent.id
+                func, agent_id = self._resolve_function_and_agent(call, agent)
+                args = self._normalize_call_arguments(call)
+                args = self._resolve_argument_templates(args)
 
-                else:
-                    func_result = self.orchestrator.function_registry.get_function(call.name)
-                    func, agent_id = func_result if func_result else (None, None)
-
-                    if agent_id != self.orchestrator.current_agent_id:
-                        self.orchestrator.switch_agent(agent_id, f"Function {call.name} requires agent {agent_id}")
-
-                if not func:
-                    raise ValueError(f"Function {call.name} not found")
-                if isinstance(call.arguments, dict):
-                    args = call.arguments.copy()
-                elif isinstance(call.arguments, str):
-                    if call.arguments == "":
-                        args = {}
-                    else:
-                        try:
-                            args = json.loads(call.arguments)
-                        except json.JSONDecodeError:
-                            args = json.loads(call.arguments + "}")
                 if __CTX_VARS_NAME__ in func.__code__.co_varnames:
                     args[__CTX_VARS_NAME__] = context
                     if self.execution_history.executions:
@@ -452,25 +511,177 @@ class FunctionExecutor:
                             if previous_call.status == ExecutionStatus.SUCCESS:
                                 args[__CTX_VARS_NAME__]["prior_result"] = previous_call.result
 
-                if call.timeout:
-                    result = await asyncio.wait_for(self._run_function(func, args), timeout=call.timeout)
-                else:
-                    result = await self._run_function(func, args)
+                if loop_detector is not None:
+                    loop_event = loop_detector.record_call(call.name, args)
+                    logger.info(
+                        "loop_detection tool=%s severity=%s pattern=%s",
+                        call.name,
+                        loop_event.severity.value,
+                        loop_event.pattern,
+                    )
+                    if _audit is not None and loop_event.severity.value != "none":
+                        if loop_event.severity == LoopSeverity.CRITICAL:
+                            _audit.emit_tool_loop_block(
+                                call.name,
+                                pattern=loop_event.pattern,
+                                count=loop_event.call_count,
+                                agent_id=agent_id,
+                                turn_id=audit_turn_id,
+                            )
+                        else:
+                            _audit.emit_tool_loop_warning(
+                                call.name,
+                                pattern=loop_event.pattern,
+                                severity=loop_event.severity.value,
+                                count=loop_event.call_count,
+                                agent_id=agent_id,
+                                turn_id=audit_turn_id,
+                            )
+                    if loop_event.severity == LoopSeverity.CRITICAL:
+                        raise ToolLoopError(loop_event)
 
+                if runtime_features_state is not None:
+                    policy_action = runtime_features_state.policy_engine.check(call.name, agent_id)
+                    logger.info("tool_policy tool=%s agent=%s action=%s", call.name, agent_id, policy_action.value)
+                    if _audit is not None:
+                        _audit.emit_tool_policy_decision(
+                            call.name,
+                            agent_id=agent_id,
+                            action=policy_action.value,
+                            turn_id=audit_turn_id,
+                        )
+                    if policy_action == PolicyAction.DENY:
+                        raise ToolPolicyViolation(call.name, agent_id)
+
+                    if runtime_features_state.hook_runner.has_hooks("before_tool_call"):
+                        original_args = args
+                        args = runtime_features_state.hook_runner.run(
+                            "before_tool_call",
+                            tool_name=call.name,
+                            arguments=args,
+                            agent_id=agent_id,
+                        )
+                        if args != original_args:
+                            logger.info("hook_mutation hook=before_tool_call tool=%s agent=%s", call.name, agent_id)
+                            if _audit is not None:
+                                _audit.emit_hook_mutation(
+                                    "before_tool_call",
+                                    tool_name=call.name,
+                                    agent_id=agent_id,
+                                    field="arguments",
+                                    turn_id=audit_turn_id,
+                                )
+
+                if _audit is not None:
+                    _audit.emit_tool_call_attempt(
+                        call.name,
+                        args=str(args)[:200],
+                        agent_id=agent_id,
+                        turn_id=audit_turn_id,
+                    )
+                _exec_start = time.perf_counter()
+
+                router = (
+                    runtime_features_state.get_sandbox_router(agent_id) if runtime_features_state is not None else None
+                )
+                if router is not None:
+                    decision = router.decide(call.name)
+                    logger.info(
+                        "sandbox_routing tool=%s agent=%s context=%s reason=%s",
+                        call.name,
+                        agent_id,
+                        decision.context.value,
+                        decision.reason,
+                    )
+                    if _audit is not None:
+                        _audit.emit_sandbox_decision(
+                            call.name,
+                            context=decision.context.value,
+                            reason=decision.reason,
+                            agent_id=agent_id,
+                            turn_id=audit_turn_id,
+                        )
+                    if decision.context == ExecutionContext.SANDBOX:
+                        result = await self._run_function_in_sandbox(router, call.name, func, args, call.timeout)
+                    else:
+                        result = await self._run_function_with_timeout(func, args, call.timeout)
+                else:
+                    result = await self._run_function_with_timeout(func, args, call.timeout)
+
+                if runtime_features_state is not None and runtime_features_state.hook_runner.has_hooks(
+                    "after_tool_call"
+                ):
+                    original_result = result
+                    result = runtime_features_state.hook_runner.run(
+                        "after_tool_call",
+                        tool_name=call.name,
+                        arguments=args,
+                        result=result,
+                        agent_id=agent_id,
+                    )
+                    if result != original_result:
+                        logger.info("hook_mutation hook=after_tool_call tool=%s agent=%s", call.name, agent_id)
+                        if _audit is not None:
+                            _audit.emit_hook_mutation(
+                                "after_tool_call",
+                                tool_name=call.name,
+                                agent_id=agent_id,
+                                field="result",
+                                turn_id=audit_turn_id,
+                            )
+
+                _exec_duration_ms = (time.perf_counter() - _exec_start) * 1000
                 call.result = result
                 call.status = ExecutionStatus.SUCCESS
                 self.execution_history.add_execution(call)
+                if _audit is not None:
+                    _audit.emit_tool_call_complete(
+                        call.name,
+                        status="success",
+                        duration_ms=_exec_duration_ms,
+                        result=str(result)[:200],
+                        agent_id=agent_id,
+                        turn_id=audit_turn_id,
+                    )
                 break
 
             except TimeoutError:
                 call.retry_count += 1
                 call.error = f"Function timed out after {call.timeout}s"
+                if _audit is not None:
+                    _audit.emit_tool_call_failure(
+                        call.name,
+                        error_type="TimeoutError",
+                        error_msg=call.error,
+                        agent_id=agent_id,
+                        turn_id=audit_turn_id,
+                    )
                 if attempt < call.max_retries:
                     await asyncio.sleep(2**attempt)
+            except (ToolLoopError, ToolPolicyViolation, SandboxExecutionUnavailableError) as e:
+                call.retry_count += 1
+                call.error = str(e)
+                if _audit is not None:
+                    _audit.emit_tool_call_failure(
+                        call.name,
+                        error_type=type(e).__name__,
+                        error_msg=str(e),
+                        agent_id=agent_id,
+                        turn_id=audit_turn_id,
+                    )
+                break
             except Exception as e:
                 traceback.print_exc()
                 call.retry_count += 1
                 call.error = str(e)
+                if _audit is not None:
+                    _audit.emit_tool_call_failure(
+                        call.name,
+                        error_type=type(e).__name__,
+                        error_msg=str(e),
+                        agent_id=agent_id,
+                        turn_id=audit_turn_id,
+                    )
                 if attempt < call.max_retries:
                     await asyncio.sleep(2**attempt)
 
@@ -480,16 +691,165 @@ class FunctionExecutor:
 
         return call
 
-    async def _run_function(self, func: tp.Callable, args: dict):
-        """Run function async or sync"""
+    def _resolve_function_and_agent(
+        self, call: RequestFunctionCall, agent: Agent | None
+    ) -> tuple[tp.Callable, str | None]:
+        """Resolve the callable and owning agent ID for a function call.
+
+        Args:
+            call: The function call whose name will be looked up.
+            agent: Optional agent to search first; falls back to the orchestrator registry.
+
+        Returns:
+            Tuple of (callable, agent_id). Triggers an agent switch if the function
+            belongs to a different agent than the currently active one.
+
+        Raises:
+            ValueError: If the function name is not found in the agent or registry.
+        """
+        if agent is not None:
+            func = {get_callable_public_name(fn): fn for fn in agent.functions}.get(call.name, None)
+            agent_id = agent.id
+        else:
+            func_result = self.orchestrator.function_registry.get_function(call.name)
+            func, agent_id = func_result if func_result else (None, None)
+
+            if agent_id and agent_id != self.orchestrator.current_agent_id:
+                self.orchestrator.switch_agent(agent_id, f"Function {call.name} requires agent {agent_id}")
+
+        if not func:
+            raise ValueError(f"Function {call.name} not found")
+        return func, agent_id
+
+    @staticmethod
+    def _normalize_call_arguments(call: RequestFunctionCall) -> dict:
+        """Normalize call arguments to a plain dict, parsing JSON strings if needed."""
+        if isinstance(call.arguments, dict):
+            return call.arguments.copy()
+        if isinstance(call.arguments, str):
+            if call.arguments == "":
+                return {}
+            try:
+                return json.loads(call.arguments)
+            except json.JSONDecodeError:
+                return json.loads(call.arguments + "}")
+        return {}
+
+    def _resolve_argument_templates(self, arguments: dict) -> dict:
+        """Resolve template references like ``{call_id.attr}`` within argument values.
+
+        Supports whole-value replacement (e.g. ``"{prev.result}"``) and
+        inline interpolation (e.g. ``"prefix {prev.result} suffix"``).
+
+        Args:
+            arguments: Raw argument dictionary potentially containing template strings.
+
+        Returns:
+            A new dictionary with template references resolved to concrete values.
+        """
+        pattern = re.compile(r"^\{([^{}]+)\}$")
+
+        def _lookup(reference: str) -> tp.Any:
+            """Look up a dotted reference (call_id.attr) in execution history."""
+            parts = reference.split(".")
+            if len(parts) != 2:
+                return None
+            call_id, attr = parts
+            call = self.execution_history.get_by_id(call_id)
+            if call is None:
+                return None
+            return getattr(call, attr, None)
+
+        def _resolve(value: tp.Any) -> tp.Any:
+            """Recursively resolve template references in a value."""
+            if isinstance(value, str):
+                whole_match = pattern.match(value)
+                if whole_match:
+                    resolved = _lookup(whole_match.group(1))
+                    return resolved if resolved is not None else value
+
+                return re.sub(
+                    r"\{([^{}]+)\}",
+                    lambda match: str(
+                        _lookup(match.group(1)) if _lookup(match.group(1)) is not None else match.group(0)
+                    ),
+                    value,
+                )
+            if isinstance(value, list):
+                return [_resolve(item) for item in value]
+            if isinstance(value, dict):
+                return {key: _resolve(item) for key, item in value.items()}
+            return value
+
+        return {key: _resolve(value) for key, value in arguments.items()}
+
+    async def _run_function(self, func: tp.Callable, args: dict) -> tp.Any:
+        """Run a function, awaiting it if it is a coroutine function or offloading to a thread otherwise."""
         if asyncio.iscoroutinefunction(func):
             return await func(**args)
         else:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(None, lambda: func(**args))
 
+    async def _run_function_with_timeout(self, func: tp.Callable, args: dict, timeout: float | None) -> tp.Any:
+        """Run a function with an optional timeout, raising asyncio.TimeoutError if exceeded."""
+        if timeout:
+            return await asyncio.wait_for(self._run_function(func, args), timeout=timeout)
+        return await self._run_function(func, args)
+
+    async def _run_function_in_sandbox(
+        self,
+        router: tp.Any,
+        tool_name: str,
+        func: tp.Callable,
+        args: dict,
+        timeout: float | None,
+    ) -> tp.Any:
+        """Execute a function via the sandbox router, applying the optional timeout.
+
+        Args:
+            router: SandboxRouter instance that provides the sandbox backend.
+            tool_name: Name of the tool being executed (used for backend dispatch).
+            func: The callable to execute inside or outside the sandbox.
+            args: Keyword arguments to pass to the function.
+            timeout: Optional wall-clock timeout in seconds.
+
+        Returns:
+            The function's return value.
+
+        Raises:
+            SandboxExecutionUnavailableError: If no sandbox backend is configured.
+            asyncio.TimeoutError: If the execution exceeds the timeout.
+        """
+
+        async def _sandbox_runner() -> tp.Any:
+            if router.backend is None:
+                raise SandboxExecutionUnavailableError(tool_name)
+            if asyncio.iscoroutinefunction(func):
+                backend_result = router.backend.execute(tool_name, func, args)
+                if inspect.isawaitable(backend_result):
+                    return await backend_result
+                return backend_result
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(None, lambda: router.execute_in_sandbox(tool_name, func, args))
+
+        if timeout:
+            return await asyncio.wait_for(_sandbox_runner(), timeout=timeout)
+        return await _sandbox_runner()
+
     def _topological_sort(self, calls: list[RequestFunctionCall]) -> list[RequestFunctionCall]:
-        """Sort function calls based on dependencies"""
+        """Sort function calls into a dependency-safe execution order.
+
+        Args:
+            calls: List of function calls, each potentially listing other call IDs
+                in their ``dependencies`` attribute.
+
+        Returns:
+            The same calls reordered so that dependencies come before dependents.
+
+        Raises:
+            ValueError: If a circular dependency is detected.
+        """
         sorted_calls = []
         remaining = calls.copy()
 
@@ -507,13 +867,13 @@ class FunctionExecutor:
         return sorted_calls
 
     def _dependencies_satisfied(self, call: RequestFunctionCall, completed: list[RequestFunctionCall]) -> bool:
-        """Check if call's dependencies are satisfied"""
+        """Return True if all dependencies of call have been successfully completed."""
         completed_ids = {c.id for c in completed if c.status == ExecutionStatus.SUCCESS}
         return all(dep in completed_ids for dep in call.dependencies)
 
 
 try:
-    from .errors import (
+    from .core.errors import (
         AgentError,
         CaluteTimeoutError,
         FunctionExecutionError,
@@ -522,20 +882,32 @@ try:
 except ImportError:
 
     class AgentError(Exception):  # type: ignore[no-redef]
-        def __init__(self, agent_id: str, message: str):
+        """Raised when an agent-level error occurs."""
+
+        def __init__(self, agent_id: str, message: str) -> None:
+            """Initialize with the agent ID and error message."""
             super().__init__(f"Agent {agent_id}: {message}")
 
     class CaluteTimeoutError(Exception):  # type: ignore[no-redef]
-        def __init__(self, func_name: str, timeout: float):
+        """Raised when a function execution exceeds its time limit."""
+
+        def __init__(self, func_name: str, timeout: float) -> None:
+            """Initialize with the function name and timeout duration."""
             super().__init__(f"Function {func_name} timed out after {timeout}s")
 
     class FunctionExecutionError(Exception):  # type: ignore[no-redef]
-        def __init__(self, func_name: str, message: str, original_error=None):
+        """Raised when a function call fails during execution."""
+
+        def __init__(self, func_name: str, message: str, original_error: BaseException | None = None) -> None:
+            """Initialize with the function name, error message, and optional original exception."""
             super().__init__(f"Function {func_name}: {message}")
             self.original_error = original_error
 
     class ValidationError(Exception):  # type: ignore[no-redef]
-        def __init__(self, param_name: str, message: str):
+        """Raised when function argument validation fails."""
+
+        def __init__(self, param_name: str, message: str) -> None:
+            """Initialize with the parameter name and validation message."""
             super().__init__(f"Validation error for {param_name}: {message}")
 
 
@@ -549,7 +921,16 @@ class RetryPolicy:
         max_delay: float = 60.0,
         exponential_base: float = 2.0,
         jitter: bool = True,
-    ):
+    ) -> None:
+        """Initialize the RetryPolicy with backoff parameters.
+
+        Args:
+            max_retries: Maximum number of retry attempts after the initial try.
+            initial_delay: Delay in seconds before the first retry.
+            max_delay: Maximum delay cap in seconds.
+            exponential_base: Base for exponential backoff calculation.
+            jitter: If True, apply random jitter to the delay to avoid thundering herd.
+        """
         self.max_retries = max_retries
         self.initial_delay = initial_delay
         self.max_delay = max_delay
@@ -568,7 +949,11 @@ class RetryPolicy:
 
 @dataclass
 class ExecutionMetrics:
-    """Metrics for function execution."""
+    """Metrics for function execution.
+
+    Tracks aggregate statistics across all recorded executions including
+    success/failure counts, call counts, and duration statistics.
+    """
 
     total_calls: int = 0
     successful_calls: int = 0
@@ -579,8 +964,13 @@ class ExecutionMetrics:
     max_duration: float = 0.0
     min_duration: float = float("inf")
 
-    def record_execution(self, duration: float, status: ExecutionStatus):
-        """Record execution metrics."""
+    def record_execution(self, duration: float, status: ExecutionStatus) -> None:
+        """Record a single execution result into the running metrics.
+
+        Args:
+            duration: Wall-clock time for the execution in seconds.
+            status: The terminal status of the execution.
+        """
         self.total_calls += 1
         self.total_duration += duration
 
@@ -597,7 +987,8 @@ class ExecutionMetrics:
 class EnhancedFunctionRegistry:
     """Enhanced registry with validation and metadata management."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the EnhancedFunctionRegistry with empty internal stores."""
         self._functions: dict[str, tp.Callable] = {}
         self._function_agents: dict[str, str] = {}
         self._function_metadata: dict[str, dict] = {}
@@ -610,9 +1001,17 @@ class EnhancedFunctionRegistry:
         agent_id: str,
         metadata: dict | None = None,
         validator: tp.Callable | None = None,
-    ):
-        """Register a function with validation."""
-        func_name = func.__name__
+    ) -> None:
+        """Register a function with optional argument validator.
+
+        Args:
+            func: The callable to register.
+            agent_id: ID of the owning agent.
+            metadata: Optional metadata dictionary for the function.
+            validator: Optional callable that receives the arguments dict and raises
+                on invalid input.
+        """
+        func_name = get_callable_public_name(func)
 
         sig = inspect.signature(func)
         if not sig.parameters:
@@ -627,7 +1026,16 @@ class EnhancedFunctionRegistry:
         logger.info(f"Registered function {func_name} for agent {agent_id}")
 
     def validate_arguments(self, func_name: str, arguments: dict) -> None:
-        """Validate function arguments."""
+        """Validate that all required parameters are present and pass the custom validator.
+
+        Args:
+            func_name: Name of the registered function to validate against.
+            arguments: Argument dictionary to check.
+
+        Raises:
+            ValidationError: If the function is not registered, a required parameter
+                is missing, or the custom validator rejects the arguments.
+        """
         if func_name not in self._functions:
             raise ValidationError(func_name, "Function not registered")
 
@@ -653,7 +1061,13 @@ class EnhancedFunctionRegistry:
 class EnhancedAgentOrchestrator:
     """Enhanced orchestrator with better error handling and monitoring."""
 
-    def __init__(self, max_agents: int = 100, enable_metrics: bool = True):
+    def __init__(self, max_agents: int = 100, enable_metrics: bool = True) -> None:
+        """Initialize the EnhancedAgentOrchestrator.
+
+        Args:
+            max_agents: Maximum number of agents that may be registered simultaneously.
+            enable_metrics: Whether to record per-function execution metrics.
+        """
         self.agents: dict[str, Agent] = {}
         self.function_registry = EnhancedFunctionRegistry()
         self.switch_triggers: dict[AgentSwitchTrigger, tp.Callable] = {}
@@ -681,7 +1095,7 @@ class EnhancedAgentOrchestrator:
                 try:
                     self.function_registry.register(func, agent_id)
                 except Exception as e:
-                    logger.error(f"Failed to register function {func.__name__}: {e}")
+                    logger.error(f"Failed to register function {get_callable_public_name(func)}: {e}")
                     raise AgentError(agent_id, f"Function registration failed: {e}") from e
 
             if self.current_agent_id is None:
@@ -737,7 +1151,15 @@ class EnhancedFunctionExecutor:
         default_timeout: float = 30.0,
         retry_policy: RetryPolicy | None = None,
         max_concurrent_executions: int = 10,
-    ):
+    ) -> None:
+        """Initialize the EnhancedFunctionExecutor.
+
+        Args:
+            orchestrator: The EnhancedAgentOrchestrator used for function and agent lookup.
+            default_timeout: Default wall-clock timeout in seconds for each function call.
+            retry_policy: Retry policy to apply. Defaults to a standard RetryPolicy.
+            max_concurrent_executions: Maximum number of functions that may execute concurrently.
+        """
         self.orchestrator = orchestrator
         self.default_timeout = default_timeout
         self.retry_policy = retry_policy or RetryPolicy()
@@ -751,7 +1173,20 @@ class EnhancedFunctionExecutor:
         arguments: dict,
         timeout: float | None = None,
     ) -> tp.Any:
-        """Execute function with timeout."""
+        """Execute a function with a timeout, wrapping exceptions in framework types.
+
+        Args:
+            func: The callable to execute.
+            arguments: Keyword arguments passed to the function.
+            timeout: Maximum execution time in seconds; defaults to self.default_timeout.
+
+        Returns:
+            The function's return value.
+
+        Raises:
+            CaluteTimeoutError: If execution exceeds the timeout.
+            FunctionExecutionError: If the function raises any other exception.
+        """
         timeout = timeout or self.default_timeout
 
         try:
@@ -763,9 +1198,9 @@ class EnhancedFunctionExecutor:
                 return await asyncio.wait_for(future, timeout=timeout)
 
         except TimeoutError:
-            raise CaluteTimeoutError(func.__name__, timeout) from None
+            raise CaluteTimeoutError(get_callable_public_name(func), timeout) from None
         except Exception as e:
-            raise FunctionExecutionError(func.__name__, str(e), original_error=e) from e
+            raise FunctionExecutionError(get_callable_public_name(func), str(e), original_error=e) from e
 
     async def execute_with_retry(
         self,
@@ -774,7 +1209,21 @@ class EnhancedFunctionExecutor:
         timeout: float | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> tp.Any:
-        """Execute function with retry logic."""
+        """Execute a function with automatic retries on FunctionExecutionError.
+
+        Args:
+            func: The callable to execute.
+            arguments: Keyword arguments to pass to the function.
+            timeout: Per-attempt timeout; passed to execute_with_timeout.
+            retry_policy: Override the instance-level retry policy for this call.
+
+        Returns:
+            The function's return value.
+
+        Raises:
+            CaluteTimeoutError: Propagated immediately without retrying.
+            FunctionExecutionError: Re-raised after all retry attempts are exhausted.
+        """
         policy = retry_policy or self.retry_policy
         last_error = None
 
@@ -789,10 +1238,14 @@ class EnhancedFunctionExecutor:
                 last_error = e
                 if attempt < policy.max_retries:
                     delay = policy.get_delay(attempt)
-                    logger.warning(f"Function {func.__name__} failed (attempt {attempt + 1}), retrying in {delay}s")
+                    logger.warning(
+                        f"Function {get_callable_public_name(func)} failed (attempt {attempt + 1}), retrying in {delay}s"
+                    )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error(f"Function {func.__name__} failed after {policy.max_retries + 1} attempts")
+                    logger.error(
+                        f"Function {get_callable_public_name(func)} failed after {policy.max_retries + 1} attempts"
+                    )
 
         if last_error:
             raise last_error
@@ -908,14 +1361,14 @@ class EnhancedFunctionExecutor:
         return results
 
     @asynccontextmanager
-    async def batch_execution(self):
-        """Context manager for batch execution with cleanup."""
+    async def batch_execution(self) -> tp.AsyncGenerator[EnhancedFunctionExecutor, None]:
+        """Async context manager for a batch execution session with guaranteed cleanup."""
         try:
             yield self
         finally:
             await asyncio.sleep(0)
 
-    def __del__(self):
-        """Cleanup thread pool on deletion."""
+    def __del__(self) -> None:
+        """Shut down the thread pool executor on garbage collection."""
         if hasattr(self, "thread_pool"):
             self.thread_pool.shutdown(wait=False)

@@ -1,0 +1,107 @@
+"""Tests for calute.types.messages module — focus on uncovered branches."""
+
+from calute.types.messages import (
+    AssistantMessage,
+    MessagesHistory,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
+
+
+class TestMessagesHistory:
+    def test_creation(self):
+        msgs = MessagesHistory(messages=[
+            SystemMessage(content="system"),
+            UserMessage(content="hello"),
+        ])
+        assert len(msgs.messages) == 2
+
+    def test_from_openai(self):
+        openai_msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        history = MessagesHistory.from_openai(openai_msgs)
+        assert len(history.messages) == 3
+
+    def test_make_instruction_prompt_basic(self):
+        msgs = MessagesHistory(messages=[
+            SystemMessage(content="You are helpful"),
+            UserMessage(content="Hello"),
+            AssistantMessage(content="Hi there"),
+        ])
+        prompt = msgs.make_instruction_prompt()
+        assert "Instruction" in prompt
+        assert "Hello" in prompt
+
+    def test_make_instruction_prompt_no_system(self):
+        msgs = MessagesHistory(messages=[
+            UserMessage(content="Hello"),
+        ])
+        prompt = msgs.make_instruction_prompt()
+        assert "No system prompt" in prompt
+
+    def test_make_instruction_prompt_with_tool_message(self):
+        msgs = MessagesHistory(messages=[
+            UserMessage(content="Do something"),
+            ToolMessage(content="Result data", tool_call_id="tc_1"),
+        ])
+        prompt = msgs.make_instruction_prompt()
+        assert "Result data" in prompt or "Tool Result" in prompt
+
+    def test_make_instruction_prompt_no_last_turn(self):
+        msgs = MessagesHistory(messages=[
+            UserMessage(content="Hello"),
+        ])
+        prompt = msgs.make_instruction_prompt(mention_last_turn=False)
+        assert "Last Message" not in prompt
+
+    def test_make_instruction_prompt_custom_holder(self):
+        msgs = MessagesHistory(messages=[
+            UserMessage(content="Hello"),
+        ])
+        prompt = msgs.make_instruction_prompt(conversation_name_holder="Chat")
+        assert "Chat" in prompt
+
+
+class TestUserMessage:
+    def test_from_openai_string_content(self):
+        msg = UserMessage.from_openai({"role": "user", "content": "Hello"})
+        assert msg.content == "Hello"
+
+    def test_from_openai_list_content(self):
+        msg = UserMessage.from_openai({"role": "user", "content": [
+            {"type": "text", "text": "Hi"},
+        ]})
+        assert msg.content is not None
+
+
+class TestAssistantMessage:
+    def test_from_openai(self):
+        msg = AssistantMessage.from_openai({"role": "assistant", "content": "Hi"})
+        assert msg.content == "Hi"
+
+    def test_from_openai_with_tool_calls(self):
+        msg = AssistantMessage.from_openai({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tc_1", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+            ],
+        })
+        assert msg.tool_calls is not None
+
+
+class TestSystemMessage:
+    def test_from_openai(self):
+        msg = SystemMessage.from_openai({"role": "system", "content": "Be helpful"})
+        assert msg.content == "Be helpful"
+
+
+class TestToolMessage:
+    def test_from_openai(self):
+        msg = ToolMessage.from_openai({"role": "tool", "content": "result", "tool_call_id": "tc_1"})
+        assert msg.content == "result"
+        assert msg.tool_call_id == "tc_1"

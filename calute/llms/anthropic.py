@@ -71,7 +71,6 @@ from typing import Any
 
 from .base import BaseLLM, LLMConfig
 
-# Anthropic doesn't expose context lengths via API, so we use known values
 ANTHROPIC_CONTEXT_LENGTHS = {
     "claude-3-opus": 200000,
     "claude-3-sonnet": 200000,
@@ -305,7 +304,7 @@ class AnthropicLLM(BaseLLM):
 
         try:
             if use_stream:
-                return await self._stream_completion(payload)
+                return self._stream_completion(payload)
             else:
                 response = await self.client.post("/v1/messages", json=payload)
                 response.raise_for_status()
@@ -769,7 +768,6 @@ class AnthropicLLM(BaseLLM):
             config.model_metadata and config.max_model_len.
         """
         model = self.config.model
-        # Match by prefix since Anthropic model names have date suffixes
         for prefix, context_len in ANTHROPIC_CONTEXT_LENGTHS.items():
             if model.startswith(prefix):
                 return {"max_model_len": context_len}

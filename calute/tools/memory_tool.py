@@ -80,23 +80,50 @@ def save_memory(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Save a memory entry to the memory store.
+    """Save a memory entry to the memory store.
+
+    Stores a piece of content as a memory entry with optional type
+    classification, tagging, and metadata. Automatically timestamps the
+    entry and associates it with the creating agent.
 
     Args:
-        content: The content to remember (required)
-        memory_type: Type of memory - 'short_term', 'long_term', 'working', 'episodic', 'semantic', or 'procedural'
-        tags: List of tags for categorization
-        metadata: Additional metadata to store with the memory
-        agent_id: ID of the agent creating this memory
-        context_variables: Runtime context from the agent
+        content: The text content to remember. This is the primary payload
+            of the memory entry.
+        memory_type: Classification of the memory. Determines how the
+            memory is stored and retrieved. Options:
+            - "short_term": Temporary, session-scoped memories.
+            - "long_term": Persistent, cross-session memories.
+            - "working": Active task-related memories.
+            - "episodic": Event or experience memories.
+            - "semantic": Factual knowledge memories.
+            - "procedural": How-to and process memories.
+        tags: List of string tags for categorization and filtering.
+            Used for organizing and searching memories.
+        metadata: Additional key-value metadata to store alongside the
+            memory content. A timestamp and creator agent ID are
+            automatically added.
+        agent_id: Identifier of the agent creating this memory. If not
+            provided, falls back to context_variables["agent_id"] or
+            "default".
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance. May also contain "agent_id".
 
     Returns:
-        Dictionary with memory_id and status
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - memory_id (str): Unique identifier of the saved memory
+              (on success).
+            - message (str): Human-readable status message.
 
-    Examples:
-        {"content": "User prefers dark mode", "tags": ["preference", "ui"]}
-        {"content": "Project uses Python 3.11", "memory_type": "long_term"}
+    Example:
+        >>> result = save_memory(
+        ...     content="User prefers dark mode",
+        ...     tags=["preference", "ui"],
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["status"])
+        'success'
     """
 
     memory_store = context_variables.get("memory_store") if context_variables else None
@@ -143,24 +170,50 @@ def search_memory(
     time_range: dict[str, str] | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Search for memories based on query and filters.
+    """Search for memories based on query and filters.
+
+    Retrieves memories from the store that match the given query string
+    and optional filters. Performs keyword-based matching against memory
+    content and tags, with support for type filtering, tag filtering,
+    and time range constraints.
 
     Args:
-        query: Search query string (required)
-        memory_types: List of memory types to search in
-        tags: Filter by tags
-        limit: Maximum number of results to return
-        agent_id: Filter by agent who created the memory
-        time_range: Dict with 'start' and/or 'end' ISO timestamps
-        context_variables: Runtime context from the agent
+        query: Search query string. Words in the query are matched against
+            memory content and tags using case-insensitive substring matching.
+        memory_types: List of memory type names to restrict the search to.
+            Options: "short_term", "long_term", "working", "episodic",
+            "semantic", "procedural". If None, searches all types.
+        tags: Filter results to only include memories that have at least
+            one of the specified tags.
+        limit: Maximum number of results to return. Defaults to 10.
+        agent_id: Filter results to memories created by a specific agent.
+            If not provided, falls back to context_variables["agent_id"]
+            or "default".
+        time_range: Optional time range filter as a dictionary with "start"
+            and/or "end" keys containing ISO 8601 timestamp strings.
+            Only memories within the range are returned.
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance. May also contain "agent_id".
 
     Returns:
-        Dictionary with search results
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - count (int): Number of matching memories found.
+            - memories (list[dict]): List of memory dicts, each with
+              content, tags, timestamp, and metadata.
+            - query (str): The original search query.
+            - message (str): Error message (on failure).
 
-    Examples:
-        {"query": "user preferences", "tags": ["preference"], "limit": 5}
-        {"query": "error handling", "memory_types": ["long_term"]}
+    Example:
+        >>> result = search_memory(
+        ...     query="preferences",
+        ...     tags=["ui"],
+        ...     limit=5,
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["count"])
+        2
     """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
@@ -247,20 +300,36 @@ def consolidate_agent_memories(
     max_items: int = 20,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Get a consolidated summary of memories for a specific agent.
+    """Get a consolidated summary of memories for a specific agent.
+
+    Retrieves up to ``max_items`` memories for the given agent and groups
+    them by tag into a human-readable summary. Also returns overall memory
+    store statistics.
 
     Args:
-        agent_id: ID of the agent to consolidate memories for (required)
-        max_items: Maximum number of memories to consolidate
-        context_variables: Runtime context from the agent
+        agent_id: Identifier of the agent whose memories to consolidate.
+        max_items: Maximum number of memories to include in the
+            consolidation. Defaults to 20.
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance.
 
     Returns:
-        Dictionary with consolidated memory summary
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - summary (str): Human-readable summary of memories organized
+              by tag category. Shows up to 3 items per tag with overflow
+              counts.
+            - statistics (dict): Overall memory store statistics from
+              the underlying store's get_statistics() method.
+            - message (str): Error message (on failure).
 
-    Examples:
-        {"agent_id": "research_agent", "max_items": 15}
-        {"agent_id": "default"}
+    Example:
+        >>> result = consolidate_agent_memories(
+        ...     agent_id="research_agent",
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["summary"])
     """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
@@ -314,23 +383,38 @@ def delete_memory(
     older_than: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Delete memories based on criteria.
+    """Delete memories based on one or more criteria.
+
+    Removes memories from the store matching the specified criteria.
+    At least one criterion (memory_id, tags, agent_id, or older_than)
+    must be provided. When ``memory_id`` is given, it takes precedence
+    and deletes that specific memory. Otherwise, the remaining criteria
+    are combined as filters.
 
     Args:
-        memory_id: Specific memory ID to delete
-        tags: Delete all memories with these tags
-        agent_id: Delete all memories from this agent
-        older_than: Delete memories older than this ISO timestamp
-        context_variables: Runtime context from the agent
+        memory_id: Specific memory ID to delete. If provided, deletes
+            exactly this memory regardless of other criteria.
+        tags: Delete all memories that have any of these tags.
+        agent_id: Delete all memories created by this agent.
+        older_than: Delete memories created before this ISO 8601
+            timestamp string (e.g., "2024-01-01T00:00:00").
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance.
 
     Returns:
-        Dictionary with deletion status
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - deleted_count (int): Number of memories deleted (on success).
+            - message (str): Human-readable status or error message.
 
-    Examples:
-        {"memory_id": "mem_12345"}
-        {"tags": ["temporary", "debug"]}
-        {"agent_id": "test_agent", "older_than": "2024-01-01T00:00:00"}
+    Example:
+        >>> result = delete_memory(
+        ...     tags=["temporary"],
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["deleted_count"])
+        3
     """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
@@ -339,7 +423,6 @@ def delete_memory(
     try:
         deleted_count = 0
 
-        # Build filters dict for deletion
         filters = {}
         if tags:
             filters["tags"] = tags
@@ -354,7 +437,6 @@ def delete_memory(
             except ValueError:
                 return {"status": "error", "message": f"Invalid timestamp format: {older_than}"}
 
-        # Actually perform the deletion
         if memory_id:
             deleted_count = memory_store.delete(memory_id=memory_id)
         elif filters:
@@ -375,19 +457,38 @@ def get_memory_tags_and_terms(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Get all available memory tags organized by memory type.
+    """Get all available memory tags organized by memory type.
+
+    Retrieves all tags from the memory store, grouped by memory type
+    (short_term, long_term, working, episodic, semantic, procedural).
+    Also provides tag frequency counts and overall statistics.
 
     Args:
-        agent_id: Filter tags by specific agent (optional)
-        context_variables: Runtime context from the agent
+        agent_id: Filter tags to those associated with a specific agent.
+            If not provided, falls back to context_variables["agent_id"]
+            or "default".
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance. May also contain "agent_id".
 
     Returns:
-        Dictionary with tags organized by memory type
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - tags_by_type (dict[str, list[str]]): Tags grouped by memory
+              type. Only types with tags are included.
+            - all_tags (list[str]): Sorted list of all unique tags.
+            - tag_frequency (dict[str, int]): Tag-to-count mapping sorted
+              by frequency (descending).
+            - total_unique_tags (int): Total count of unique tags.
+            - agent_id (str): The agent ID used for filtering.
+            - message (str): Error message (on failure).
 
-    Examples:
-        {}
-        {"agent_id": "main_agent"}
+    Example:
+        >>> result = get_memory_tags_and_terms(
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["all_tags"])
+        ['preference', 'ui', 'workflow']
     """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
@@ -441,19 +542,35 @@ def get_memory_statistics(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """
-    Get statistics about memory usage.
+    """Get statistics about memory usage.
+
+    Retrieves overall memory store statistics and optionally adds
+    agent-specific memory counts.
 
     Args:
-        agent_id: Get statistics for specific agent only
-        context_variables: Runtime context from the agent
+        agent_id: If provided, includes the count of memories belonging
+            to this specific agent in the returned statistics.
+        context_variables: Runtime context dictionary from the agent. Must
+            contain a "memory_store" key with an initialized memory store
+            instance.
 
     Returns:
-        Dictionary with memory statistics
+        A dictionary containing:
+            - status (str): "success" or "error".
+            - statistics (dict): Memory store statistics from the
+              underlying store's get_statistics() method. When
+              ``agent_id`` is provided, also includes:
+              - agent_memory_count (int): Number of memories for that agent.
+              - agent_id (str): The agent ID queried.
+            - message (str): Error message (on failure).
 
-    Examples:
-        {}
-        {"agent_id": "main_agent"}
+    Example:
+        >>> result = get_memory_statistics(
+        ...     agent_id="main_agent",
+        ...     context_variables={"memory_store": store}
+        ... )
+        >>> print(result["statistics"]["agent_memory_count"])
+        42
     """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
@@ -488,8 +605,18 @@ MEMORY_TOOLS = [
 ]
 
 
-def get_memory_tool_descriptions():
-    """Get descriptions of all memory tools for agent documentation."""
+def get_memory_tool_descriptions() -> list[dict[str, str]]:
+    """Get descriptions of all memory tools for agent documentation.
+
+    Iterates over the MEMORY_TOOLS list and extracts the name,
+    first-line description, and category for each tool function.
+
+    Returns:
+        A list of dictionaries, each containing:
+            - name (str): The function name of the tool.
+            - description (str): First line of the tool's docstring.
+            - category (str): Always "Memory Management".
+    """
     descriptions = []
     for tool in MEMORY_TOOLS:
         descriptions.append(
@@ -507,37 +634,33 @@ def add_memory_tools_to_agent(
     memory_store=None,
     include_tools: list[str] | None = None,
 ) -> Agent:
-    """
-    Add memory management tools to an agent's function list.
+    """Add memory management tools to an agent's function list.
+
+    Appends the selected memory tool functions to the agent's functions
+    list, avoiding duplicates. Optionally sets the memory store on the
+    agent instance if the agent has a ``_memory_store`` attribute.
 
     Args:
-        agent: The Agent to add memory tools to
-        memory_store: The memory store instance to use (will be passed in context_variables)
-        include_tools: List of specific tool names to include. If None, includes all tools.
-                      Options: ["save_memory", "search_memory", "consolidate_agent_memories",
-                               "delete_memory", "get_memory_statistics"]
+        agent: The Agent instance to add memory tools to. Its ``functions``
+            list will be modified in-place.
+        memory_store: The memory store instance to associate with the agent.
+            If the agent has a ``_memory_store`` attribute, it will be set
+            to this value.
+        include_tools: List of specific tool function names to include.
+            If None, all tools from MEMORY_TOOLS are added. Valid names:
+            "save_memory", "search_memory", "consolidate_agent_memories",
+            "delete_memory", "get_memory_statistics", "get_memory_tags_and_terms".
 
     Returns:
-        The agent with memory tools added
+        The same Agent instance with memory tools appended to its
+        functions list.
 
     Example:
         >>> from calute import Agent
-        >>> from calute.memory_integration import add_memory_tools_to_agent
-        >>>
-        >>> agent = Agent(
-        ...     id="research_agent",
-        ...     instructions="You are a research assistant",
-        ...     functions=[]
-        ... )
-        >>>
-        >>>
-        >>> agent = add_memory_tools_to_agent(agent, memory_store=my_memory_store)
-        >>>
-        >>>
+        >>> agent = Agent(id="assistant", instructions="You help users", functions=[])
+        >>> agent = add_memory_tools_to_agent(agent, memory_store=my_store)
         >>> agent = add_memory_tools_to_agent(
-        ...     agent,
-        ...     memory_store=my_memory_store,
-        ...     include_tools=["save_memory", "search_memory"]
+        ...     agent, include_tools=["save_memory", "search_memory"]
         ... )
     """
     current_functions = list(agent.functions) if agent.functions else []
@@ -567,28 +690,31 @@ def create_memory_enabled_agent(
     memory_tools: list[str] | None = None,
     **agent_kwargs,
 ) -> Agent:
-    """
-    Create a new agent with memory tools pre-configured.
+    """Create a new agent with memory tools pre-configured.
+
+    Convenience factory that creates an Agent instance and immediately
+    adds memory management tools to it via ``add_memory_tools_to_agent``.
 
     Args:
-        agent_id: ID for the agent
-        instructions: Instructions/system prompt for the agent
-        memory_store: Memory store instance to use
-        memory_tools: List of memory tool names to include (None = all)
-        **agent_kwargs: Additional arguments to pass to Agent constructor
+        agent_id: Unique identifier for the new agent.
+        instructions: System prompt / instructions for the agent.
+        memory_store: Memory store instance to associate with the agent.
+            Passed through to ``add_memory_tools_to_agent``.
+        memory_tools: List of memory tool function names to include.
+            If None, all memory tools are added. See
+            ``add_memory_tools_to_agent`` for valid names.
+        **agent_kwargs: Additional keyword arguments forwarded to the
+            Agent constructor (e.g., model, temperature).
 
     Returns:
-        New Agent instance with memory tools configured
+        A new Agent instance with the specified memory tools already
+        added to its functions list.
 
     Example:
-        >>> from calute.memory_integration import create_memory_enabled_agent
-        >>> from calute.memory import MemoryStore
-        >>>
-        >>> memory_store = MemoryStore()
         >>> agent = create_memory_enabled_agent(
         ...     agent_id="assistant",
-        ...     instructions="You are a helpful assistant that remembers past conversations",
-        ...     memory_store=memory_store,
+        ...     instructions="You remember past conversations",
+        ...     memory_store=my_store,
         ...     memory_tools=["save_memory", "search_memory"]
         ... )
     """

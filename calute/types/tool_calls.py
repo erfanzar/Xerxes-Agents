@@ -48,7 +48,7 @@ from typing import Any, TypeVar
 
 from pydantic import field_validator
 
-from ..utils import CaluteBase
+from ..core.utils import CaluteBase
 
 
 class Function(CaluteBase):

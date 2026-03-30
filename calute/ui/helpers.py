@@ -45,12 +45,13 @@ from typing import Any
 import chainlit as cl
 
 from calute.calute import Calute
+from calute.core.streamer_buffer import StreamerBuffer
+from calute.core.utils import get_callable_public_name
 from calute.cortex import Cortex, CortexAgent, CortexTask
-from calute.cortex.dynamic import DynamicCortex
-from calute.cortex.task_creator import TaskCreator
-from calute.cortex.universal_agent import UniversalAgent
+from calute.cortex.agents.universal_agent import UniversalAgent
+from calute.cortex.orchestration.dynamic import DynamicCortex
+from calute.cortex.orchestration.task_creator import TaskCreator
 from calute.llms.base import BaseLLM
-from calute.streamer_buffer import StreamerBuffer
 from calute.types import (
     Completion,
     FunctionCallsExtracted,
@@ -62,7 +63,6 @@ from calute.types import (
 from calute.types.agent_types import Agent
 from calute.types.messages import AssistantMessage, MessagesHistory, UserMessage
 
-# Regex patterns for thinking tags
 THINK_OPEN_PATTERN = re.compile(r"<(think|thinking|reason|reasoning)>", re.IGNORECASE)
 THINK_CLOSE_PATTERN = re.compile(r"</(think|thinking|reason|reasoning)>", re.IGNORECASE)
 
@@ -86,7 +86,6 @@ def get_mcp_tools_for_llm() -> list[dict[str, Any]]:
     all_tools = []
     for server_name, server_data in mcp_tools.items():
         for tool in server_data.get("tools", []):
-            # Add server prefix to avoid name collisions
             tool_copy = tool.copy()
             tool_copy["function"] = tool["function"].copy()
             tool_copy["function"]["name"] = f"mcp_{server_name}_{tool['function']['name']}"
@@ -105,7 +104,6 @@ def find_mcp_session_for_tool(tool_name: str) -> tuple[Any, str] | None:
     """
     mcp_tools = cl.user_session.get("mcp_tools") or {}
 
-    # Handle prefixed tool names (mcp_servername_toolname)
     if tool_name.startswith("mcp_"):
         parts = tool_name[4:].split("_", 1)
         if len(parts) == 2:
@@ -113,7 +111,6 @@ def find_mcp_session_for_tool(tool_name: str) -> tuple[Any, str] | None:
             if server_name in mcp_tools:
                 return mcp_tools[server_name].get("session"), original_name
 
-    # Fallback: search all servers for the tool
     for _server_name, server_data in mcp_tools.items():
         for tool in server_data.get("tools", []):
             if tool["function"]["name"] == tool_name:
@@ -145,10 +142,8 @@ async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
 
     session, original_name = result
 
-    # Call the tool via MCP session
     tool_result = await session.call_tool(original_name, arguments)
 
-    # Extract content from result
     if hasattr(tool_result, "content"):
         content = tool_result.content
         if isinstance(content, list) and len(content) > 0:
@@ -182,14 +177,22 @@ def _get_mcp_event_loop():
         if _MCP_EVENT_LOOP is None or not _MCP_EVENT_LOOP.is_running():
             import threading as _threading
 
-            def _run_loop(loop):
+            def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
+                """Run the event loop forever in a dedicated daemon thread.
+
+                Sets the given loop as the current event loop for the thread
+                and runs it indefinitely. The thread is daemonic, so it will
+                be terminated when the main process exits.
+
+                Args:
+                    loop: The asyncio event loop to run.
+                """
                 asyncio.set_event_loop(loop)
                 loop.run_forever()
 
             _MCP_EVENT_LOOP = asyncio.new_event_loop()
             thread = _threading.Thread(target=_run_loop, args=(_MCP_EVENT_LOOP,), daemon=True)
             thread.start()
-            # Give loop time to start
             import time
 
             time.sleep(0.1)
@@ -215,14 +218,32 @@ def create_mcp_tool_function(server_name: str, tool_def: dict[str, Any], session
     description = func_info.get("description", "")
     parameters = func_info.get("parameters", {})
 
-    # Create sync wrapper that runs async call
     def mcp_tool_wrapper(**kwargs):
-        """MCP tool wrapper - executes tool call via MCP session."""
+        """Execute an MCP tool call via the associated MCP session.
+
+        Wraps the asynchronous MCP tool call in a synchronous interface
+        by dispatching the coroutine to a dedicated event loop running
+        in a daemon thread. This allows Calute agents to call MCP tools
+        through the standard synchronous function-calling interface.
+
+        Args:
+            **kwargs: Keyword arguments to pass to the MCP tool as its
+                input parameters.
+
+        Returns:
+            str: The tool execution result as a string, or an error
+                message if the call fails.
+        """
         import asyncio
 
         async def _call():
+            """Invoke the MCP tool asynchronously and extract the text result.
+
+            Returns:
+                str: The text content from the tool result, or its string
+                    representation if no text attribute is available.
+            """
             tool_result = await session.call_tool(original_name, kwargs)
-            # Extract content from result
             if hasattr(tool_result, "content"):
                 content = tool_result.content
                 if isinstance(content, list) and len(content) > 0:
@@ -233,20 +254,16 @@ def create_mcp_tool_function(server_name: str, tool_def: dict[str, Any], session
                 return str(content)
             return str(tool_result)
 
-        # Use dedicated MCP event loop to avoid conflicts
         loop = _get_mcp_event_loop()
         future = asyncio.run_coroutine_threadsafe(_call(), loop)
-        # Wait for result with timeout
         try:
             return future.result(timeout=60.0)
         except Exception as e:
             return f"Error calling MCP tool: {e}"
 
-    # Set function metadata for Calute's function_to_json
     mcp_tool_wrapper.__name__ = f"mcp_{server_name}_{original_name}"
     mcp_tool_wrapper.__doc__ = f"{description}\n\nMCP Tool from server: {server_name}"
 
-    # Add schema annotation for Calute
     mcp_tool_wrapper.__calute_schema__ = {
         "name": f"mcp_{server_name}_{original_name}",
         "description": description,
@@ -308,7 +325,6 @@ def inject_mcp_tools_to_agent(executor: Any, agent_id: str | None) -> list[calla
     if not mcp_functions:
         return []
 
-    # Get the agent
     agent = None
     if hasattr(executor, "orchestrator") and hasattr(executor.orchestrator, "agents"):
         agents = executor.orchestrator.agents
@@ -320,16 +336,13 @@ def inject_mcp_tools_to_agent(executor: Any, agent_id: str | None) -> list[calla
     if not agent:
         return []
 
-    # Store original functions
     original_functions = list(agent.functions) if agent.functions else []
 
-    # Add MCP functions
     if agent.functions is None:
         agent.functions = []
 
     for mcp_func in mcp_functions:
-        # Check if already added (avoid duplicates)
-        if not any(f.__name__ == mcp_func.__name__ for f in agent.functions):
+        if not any(get_callable_public_name(f) == get_callable_public_name(mcp_func) for f in agent.functions):
             agent.functions.append(mcp_func)
 
     return original_functions
@@ -347,7 +360,6 @@ def restore_agent_functions(executor: Any, agent_id: str | None, original_functi
         agent_id: The agent ID to restore functions for, or None for current agent.
         original_functions: The original function list to restore (from inject_mcp_tools_to_agent).
     """
-    # Get the agent
     agent = None
     if hasattr(executor, "orchestrator") and hasattr(executor.orchestrator, "agents"):
         agents = executor.orchestrator.agents
@@ -380,6 +392,12 @@ async def async_stream(buffer: StreamerBuffer) -> AsyncIterator:
     loop = asyncio.get_event_loop()
 
     def get_next():
+        """Attempt to retrieve the next event from the buffer.
+
+        Returns:
+            The next event from the buffer, or None if no event is available
+            within the 0.1-second timeout.
+        """
         try:
             return buffer.get(timeout=0.1)
         except Empty:
@@ -408,7 +426,7 @@ def format_result(result: Any) -> str:
         Formatted string representation. Dicts and lists are
         pretty-printed as JSON; None returns "Done".
     """
-    if isinstance(result, (dict, list)):
+    if isinstance(result, dict | list):
         try:
             return json.dumps(result, indent=2, ensure_ascii=False)
         except (TypeError, ValueError):
@@ -446,20 +464,16 @@ async def process_message_chainlit(
     calute_msgs = calute_msgs or MessagesHistory(messages=[])
     calute_msgs.messages.append(UserMessage(content=message))
 
-    # Inject MCP tools into the agent before processing
     original_functions = inject_mcp_tools_to_agent(executor, agent)
 
-    # Create the main assistant message for streaming
     msg = cl.Message(content="")
     await msg.send()
 
-    # Add action buttons after initial send
     msg.actions = [
         cl.Action(name="regenerate", payload={}, label="Regenerate", description="Regenerate this response"),
         cl.Action(name="clear_history", payload={}, label="Clear History", description="Clear conversation"),
     ]
 
-    # State tracking
     tool_steps: dict[str, cl.Step] = {}
     think_step: cl.Step | None = None
     in_thinking = False
@@ -467,13 +481,10 @@ async def process_message_chainlit(
     think_count = 0
     main_content = ""
 
-    # Get buffer and thread from executor
     buffer, thread = _start_executor(executor, calute_msgs, agent)
 
-    # Process stream events
     async for event in async_stream(buffer):
         if isinstance(event, StreamChunk):
-            # Handle streaming tool call arguments
             if event.streaming_tool_calls:
                 for tc in event.streaming_tool_calls:
                     if tc.id and tc.function_name:
@@ -491,8 +502,6 @@ async def process_message_chainlit(
                 if thinking_mode != "tags":
                     thinking_mode = "reasoning"
 
-            # Handle text content with thinking detection
-            # Use content or buffered_content - chunk is the raw ChatCompletionChunk object
             content = event.content or ""
             if content:
                 if thinking_mode == "reasoning" and think_step:
@@ -509,7 +518,6 @@ async def process_message_chainlit(
                     thinking_mode = None
 
         elif isinstance(event, FunctionCallsExtracted):
-            # Create steps for extracted function calls
             for fc in event.function_calls:
                 if fc.id not in tool_steps:
                     step = cl.Step(name=fc.name, type="tool", show_input="json")
@@ -524,7 +532,6 @@ async def process_message_chainlit(
             await _handle_tool_complete(event, tool_steps)
 
         elif isinstance(event, ReinvokeSignal):
-            # Close any open thinking panel
             if think_step:
                 await _close_think_step(think_step)
                 think_step = None
@@ -532,14 +539,12 @@ async def process_message_chainlit(
                 thinking_mode = None
 
         elif isinstance(event, Completion):
-            # Close any open thinking step
             if think_step:
                 await _close_think_step(think_step)
                 think_step = None
                 in_thinking = False
                 thinking_mode = None
 
-            # Close all pending tool steps
             for step in list(tool_steps.values()):
                 if not step.output:
                     step.output = "Completed"
@@ -549,16 +554,13 @@ async def process_message_chainlit(
                     pass
             tool_steps.clear()
 
-        # Check if thread is done
         if not thread.is_alive():
             buffer.close()
 
-    # Clean final content - remove any thinking tags
     main_content = _remove_thinking_tags(main_content)
     msg.content = main_content
     await msg.update()
 
-    # Restore original agent functions (remove MCP tools)
     if original_functions:
         restore_agent_functions(executor, agent, original_functions)
 
@@ -596,10 +598,8 @@ async def _process_content(
 
     while remaining:
         if in_thinking:
-            # Look for closing tag
             match = THINK_CLOSE_PATTERN.search(remaining)
             if match:
-                # Add content before closing tag to think step
                 if think_step:
                     think_step.output = (think_step.output or "") + remaining[: match.start()]
                 remaining = remaining[match.end() :]
@@ -608,15 +608,12 @@ async def _process_content(
                     await _close_think_step(think_step)
                     think_step = None
             else:
-                # All remaining is thinking content
                 if think_step:
                     think_step.output = (think_step.output or "") + remaining
                 remaining = ""
         else:
-            # Look for opening tag
             match = THINK_OPEN_PATTERN.search(remaining)
             if match:
-                # Stream content before tag to main message
                 before = remaining[: match.start()]
                 if before:
                     main_content += before
@@ -624,13 +621,11 @@ async def _process_content(
                 remaining = remaining[match.end() :]
                 in_thinking = True
                 think_count += 1
-                # Open a new thinking step
                 title = "Thinking..." if think_count == 1 else f"Thinking... ({think_count})"
                 think_step = cl.Step(name=title, type="llm")
                 await think_step.__aenter__()
                 think_step.output = ""
             else:
-                # All remaining is main content
                 main_content += remaining
                 await msg.stream_token(remaining)
                 remaining = ""
@@ -675,14 +670,13 @@ async def _handle_tool_args_stream(
     step = tool_steps[tool_id]
     step.input = (step.input or "") + args_delta
 
-    # Try to format as JSON if complete
     raw = step.input.strip()
     if raw:
         try:
             parsed = json.loads(raw)
             step.input = json.dumps(parsed, indent=2)
         except json.JSONDecodeError:
-            pass  # Keep raw for incomplete JSON
+            pass
 
 
 async def _handle_tool_start(
@@ -772,11 +766,16 @@ def _start_executor(
         return executor.execute_prompt(prompt=calute_msgs.messages[-1].content, stream=True)
 
     elif isinstance(executor, TaskCreator):
-        # Handle TaskCreator special case
         if isinstance(agent, BaseLLM):
             buffer = StreamerBuffer()
 
-            def fn():
+            def fn() -> None:
+                """Create and execute tasks from the latest user message using the TaskCreator.
+
+                Uses the provided BaseLLM agent to create a TaskCreator, generate
+                tasks from the user's prompt, and execute them through a Cortex
+                instance with streaming output directed to the shared buffer.
+                """
                 _plan, tasks = TaskCreator(llm=agent).create_tasks_from_prompt(
                     prompt=calute_msgs.messages[-1].content,
                     available_agents=[UniversalAgent(llm=agent, allow_delegation=True)],
@@ -795,7 +794,6 @@ def _start_executor(
                 cortex=agent,
             )
 
-    # Fallback - should not reach here
     raise TypeError(f"Unsupported executor type: {type(executor)}")
 
 

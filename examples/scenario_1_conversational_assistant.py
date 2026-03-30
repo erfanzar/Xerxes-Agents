@@ -11,7 +11,7 @@ from pathlib import Path
 import openai
 
 from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
-from calute.config import CaluteConfig, set_config
+from calute.core.config import CaluteConfig, set_config
 from calute.memory import MemoryStore, MemoryType
 
 # Configure the system

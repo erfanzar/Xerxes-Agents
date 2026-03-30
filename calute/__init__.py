@@ -37,7 +37,9 @@ Example:
     >>> print(response.content)
 """
 
-from .calute import Calute, PromptTemplate
+from .calute import Calute
+from .core import PromptTemplate
+from .core.streamer_buffer import StreamerBuffer
 from .cortex import (
     ChainLink,
     ChainType,
@@ -54,7 +56,10 @@ from .executors import AgentOrchestrator
 from .llms import AnthropicLLM, BaseLLM, GeminiLLM, LLMConfig, LocalLLM, OllamaLLM, OpenAILLM, create_llm
 from .mcp import MCPClient, MCPManager, MCPResource, MCPServerConfig, MCPTool
 from .memory import MemoryEntry, MemoryStore, MemoryType
-from .streamer_buffer import StreamerBuffer
+from .operators.config import OperatorRuntimeConfig
+from .runtime.features import AgentRuntimeOverrides, RuntimeFeaturesConfig
+from .runtime.profiles import PromptProfile, PromptProfileConfig
+from .tui import launch_tui
 from .types import (
     Agent,
     AgentCapability,
@@ -91,6 +96,7 @@ __all__ = (
     "AgentCapability",
     "AgentFunction",
     "AgentOrchestrator",
+    "AgentRuntimeOverrides",
     "AgentSwitch",
     "AgentSwitchTrigger",
     "AnthropicLLM",
@@ -131,10 +137,14 @@ __all__ = (
     "MessagesHistory",
     "OllamaLLM",
     "OpenAILLM",
+    "OperatorRuntimeConfig",
     "ProcessType",
+    "PromptProfile",
+    "PromptProfileConfig",
     "PromptTemplate",
     "RequestFunctionCall",
     "Roles",
+    "RuntimeFeaturesConfig",
     "StreamChunk",
     "StreamerBuffer",
     "SwitchContext",
@@ -145,6 +155,7 @@ __all__ = (
     "UserMessage",
     "UserMessageType",
     "create_llm",
+    "launch_tui",
 )
 
-__version__ = "0.1.5"
+__version__ = "0.2.0"

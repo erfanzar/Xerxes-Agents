@@ -52,6 +52,7 @@ from abc import ABCMeta, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..core.utils import get_callable_public_name
 from .function_execution_types import AgentCapability, AgentSwitchTrigger, CompactionStrategy, FunctionCallStrategy
 
 if tp.TYPE_CHECKING:
@@ -335,9 +336,10 @@ class Agent(BaseModel):
         for fn in v or []:
             if isinstance(fn, type) and issubclass(fn, AgentBaseFn):
                 fn = _wrap_static_call(fn)
-            if fn.__name__ in seen_names:
-                raise ValueError(f"Duplicate function name '{fn.__name__}' detected in Agent.functions")
-            seen_names.add(fn.__name__)
+            public_name = get_callable_public_name(fn)
+            if public_name in seen_names:
+                raise ValueError(f"Duplicate function name '{public_name}' detected in Agent.functions")
+            seen_names.add(public_name)
             processed.append(fn)
 
         return processed
@@ -392,7 +394,7 @@ class Agent(BaseModel):
             >>> print(agent.get_available_functions())
             ['search_docs', 'execute_code', 'send_email']
         """
-        return [func.__name__ for func in self.functions]
+        return [get_callable_public_name(func) for func in self.functions]
 
     def get_functions_mapping(self) -> dict[str, tp.Callable]:
         """Get a mapping of function names to their callable objects.
@@ -409,7 +411,7 @@ class Agent(BaseModel):
             >>> search_fn = mapping.get('search_docs')
             >>> result = search_fn(query="python tutorials")
         """
-        return {func.__name__: func for func in self.functions}
+        return {get_callable_public_name(func): func for func in self.functions}
 
     def attach_mcp(
         self,
@@ -449,9 +451,9 @@ class Agent(BaseModel):
             >>> await manager.add_server(config2)
             >>> agent.attach_mcp(manager, server_names=["filesystem"])
         """
+        from calute.core.utils import run_sync
         from calute.mcp import MCPManager, MCPServerConfig
         from calute.mcp.integration import add_mcp_tools_to_agent
-        from calute.utils import run_sync
 
         if isinstance(mcp_servers, MCPManager):
             manager = mcp_servers

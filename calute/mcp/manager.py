@@ -28,7 +28,7 @@ MCP servers, providing a single interface for tool and resource access.
 
 from typing import Any
 
-from ..loggings import get_logger
+from ..logging.console import get_logger
 from .client import MCPClient
 from .types import MCPPrompt, MCPResource, MCPServerConfig, MCPTool
 
@@ -45,7 +45,17 @@ class MCPManager:
     """
 
     def __init__(self):
-        """Initialize the MCP manager."""
+        """Initialize the MCP manager.
+
+        Creates a new MCPManager instance with an empty server registry.
+        Use ``add_server`` to register and connect to MCP servers after
+        initialization.
+
+        Example:
+            >>> manager = MCPManager()
+            >>> await manager.add_server(MCPServerConfig(name="my-server", command="npx", args=[...]))
+            >>> tools = manager.get_all_tools()
+        """
         self.servers: dict[str, MCPClient] = {}
         self.logger = get_logger()
 

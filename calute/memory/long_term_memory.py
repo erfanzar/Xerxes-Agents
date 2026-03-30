@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Long-term memory implementation with persistence and semantic search"""
+"""Long-term memory implementation with persistence and semantic search."""
 
 from datetime import datetime, timedelta
 from typing import Any
@@ -23,28 +23,56 @@ from .storage import RAGStorage, SQLiteStorage
 
 
 class LongTermMemory(Memory):
-    """
-    Long-term memory with persistence and semantic search.
-    Stores important information for extended periods.
+    """Long-term memory with persistence and semantic search.
+
+    Designed for storing important information over extended periods.
+    Supports both keyword-based and semantic (vector similarity) search
+    depending on the storage backend. Automatically cleans up expired or
+    low-importance memories when the item limit is reached.
+
+    Attributes:
+        retention_days: Number of days a memory item is retained before it
+            becomes eligible for automatic cleanup.
+        storage: The underlying :class:`MemoryStorage` backend used for
+            persistence. May be a :class:`SQLiteStorage`,
+            :class:`RAGStorage`, or any compatible implementation.
+
+    Example:
+        >>> from calute.memory import LongTermMemory
+        >>> ltm = LongTermMemory(retention_days=90, max_items=500)
+        >>> item = ltm.save("Project deadline is March 15", importance=0.9)
+        >>> results = ltm.search("deadline")
     """
 
     def __init__(
         self,
-        storage=None,
+        storage: Any | None = None,
         enable_embeddings: bool = True,
         db_path: str | None = None,
         max_items: int = 10000,
         retention_days: int = 365,
-    ):
-        """
-        Initialize long-term memory.
+    ) -> None:
+        """Initialize long-term memory with persistence and optional embeddings.
+
+        When no ``storage`` is provided, a default backend is constructed:
+        :class:`SQLiteStorage` (at ``db_path`` or the default path) optionally
+        wrapped in :class:`RAGStorage` when ``enable_embeddings`` is ``True``.
+
+        On initialisation, any previously persisted items (keys prefixed with
+        ``ltm_``) are loaded from the storage backend into memory.
 
         Args:
-            storage: Storage backend (defaults to SQLiteStorage)
-            enable_embeddings: Enable semantic search
-            db_path: Database path for SQLite storage
-            max_items: Maximum items to store
-            retention_days: Days to retain memories before expiry
+            storage: Pre-configured :class:`MemoryStorage` backend. When
+                ``None``, a new SQLite-backed storage is created.
+            enable_embeddings: Whether to wrap the base storage in
+                :class:`RAGStorage` for semantic search capability. Only
+                effective when ``storage`` is ``None``.
+            db_path: File path for the SQLite database. Only used when
+                ``storage`` is ``None``.
+            max_items: Maximum number of items to retain. When exceeded,
+                :meth:`_cleanup_old_memories` is invoked.
+            retention_days: Number of days after which a memory is eligible
+                for automatic removal during cleanup.
         """
         if storage is None:
             if db_path:
@@ -58,8 +86,13 @@ class LongTermMemory(Memory):
         self.retention_days = retention_days
         self._load_from_storage()
 
-    def _load_from_storage(self):
-        """Load existing memories from storage"""
+    def _load_from_storage(self) -> None:
+        """Load existing memory items from the storage backend on initialisation.
+
+        Scans all keys with the ``ltm_`` prefix, deserialises each entry
+        via :meth:`MemoryItem.from_dict`, and populates both
+        :attr:`_items` and :attr:`_index`.
+        """
         if not self.storage:
             return
 
@@ -80,20 +113,26 @@ class LongTermMemory(Memory):
         importance: float = 0.5,
         **kwargs,
     ) -> MemoryItem:
-        """
-        Save to long-term memory with importance scoring.
+        """Save a new item to long-term memory with importance scoring.
+
+        Creates a :class:`MemoryItem` with ``memory_type="long_term"``,
+        stores it in both the in-memory index and the persistent storage
+        backend (if configured). If the item limit has been reached,
+        :meth:`_cleanup_old_memories` is called first to free space.
 
         Args:
-            content: Content to save
-            metadata: Additional metadata
-            agent_id: Agent identifier
-            user_id: User identifier
-            conversation_id: Conversation identifier
-            importance: Importance score (0-1)
-            **kwargs: Additional fields
+            content: Text content to store.
+            metadata: Optional key-value metadata. An ``"importance"`` key
+                is added automatically from the ``importance`` parameter.
+            agent_id: Identifier of the agent that created this memory.
+            user_id: Identifier of the user associated with this memory.
+            conversation_id: Identifier of the conversation context.
+            importance: Importance weight (0.0--1.0) used for ranking and
+                cleanup decisions.
+            **kwargs: Extra key-value pairs merged into ``metadata``.
 
         Returns:
-            Created memory item
+            The newly created :class:`MemoryItem`.
         """
         metadata = metadata or {}
         metadata["importance"] = importance
@@ -122,17 +161,29 @@ class LongTermMemory(Memory):
     def search(
         self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, use_semantic: bool = True, **kwargs
     ) -> list[MemoryItem]:
-        """
-        Search long-term memory using semantic similarity or keyword matching.
+        """Search long-term memory using semantic similarity or keyword matching.
+
+        When the storage backend is a :class:`RAGStorage` instance and
+        ``use_semantic`` is ``True``, performs vector-similarity search.
+        Otherwise, falls back to keyword matching with a composite scoring
+        formula that blends text relevance (50 %), recency (30 %), and
+        importance (20 %).
+
+        Matching items have their ``access_count`` incremented and
+        ``last_accessed`` timestamp updated as a side-effect.
 
         Args:
-            query: Search query
-            limit: Maximum results
-            filters: Filter criteria
-            use_semantic: Use semantic search if available
+            query: Natural-language or keyword search query string.
+            limit: Maximum number of results to return.
+            filters: Optional key-value criteria for narrowing results.
+                Checked against both item attributes and metadata.
+            use_semantic: When ``True`` and a :class:`RAGStorage` backend
+                is available, performs vector-based semantic search.
+            **kwargs: Additional keyword arguments (currently unused).
 
         Returns:
-            List of matching memory items
+            List of :class:`MemoryItem` instances sorted by descending
+            relevance score, with at most ``limit`` entries.
         """
 
         if use_semantic and isinstance(self.storage, RAGStorage):
@@ -303,14 +354,20 @@ class LongTermMemory(Memory):
         self._items.clear()
         self._index.clear()
 
-    def _cleanup_old_memories(self):
-        """
-        Remove expired or low-importance memories.
+    def _cleanup_old_memories(self) -> None:
+        """Remove expired or low-importance memories to free capacity.
 
-        Cleanup strategy:
-        1. Remove memories older than retention_days
-        2. Remove low-importance (<0.3) and rarely accessed (<2 times) memories
-        3. If insufficient cleanup, remove bottom 20% based on composite score
+        Applies a three-stage cleanup strategy:
+
+        1. Remove items older than :attr:`retention_days`.
+        2. Remove items with importance < 0.3 **and** access count < 2.
+        3. If the above two stages did not free at least 20 % of current
+           items, sort all items by a composite score (importance 30 %,
+           normalised access count 30 %, recency 40 %) and remove the
+           bottom 20 %.
+
+        Removed items are also deleted from the storage backend if one is
+        configured.
         """
         cutoff_date = datetime.now() - timedelta(days=self.retention_days)
         to_remove = []
@@ -411,7 +468,6 @@ class LongTermMemory(Memory):
         if not self._items:
             return "No long-term memories available."
 
-        # Merge similar memories to reduce redundancy
         if merge_similar:
             self._merge_similar_memories(similarity_threshold)
 
@@ -467,7 +523,6 @@ class LongTermMemory(Memory):
 
                 overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
                 if overlap >= threshold:
-                    # Keep the longer/more important one, absorb the other
                     keep = item_a if len(item_a.content) >= len(item_b.content) else item_b
                     discard = item_b if keep is item_a else item_a
 
@@ -478,7 +533,6 @@ class LongTermMemory(Memory):
 
                     merged_ids.add(discard.memory_id)
 
-        # Remove merged items
         if merged_ids:
             for mid in merged_ids:
                 if mid in self._index:

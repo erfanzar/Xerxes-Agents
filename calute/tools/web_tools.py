@@ -102,13 +102,12 @@ class WebScraper(AgentBaseFn):
                 - error: Error message if request failed
 
         Note:
-            Requires beautifulsoup4 for HTML parsing. Install with:
-            pip install calute[search]
+            Requires beautifulsoup4 for HTML parsing.
         """
         try:
             from bs4 import BeautifulSoup  # type:ignore
         except ImportError:
-            return {"error": "beautifulsoup4 is required. Install with: pip install calute[search]"}
+            return {"error": "beautifulsoup4 is required but missing from the environment."}
 
         async with httpx.AsyncClient() as client:
             try:

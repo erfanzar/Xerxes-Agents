@@ -47,7 +47,6 @@ from pathlib import Path
 APP_TITLE = "Calute"
 APP_SUBTITLE = "Advanced conversational AI with reasoning and tool capabilities"
 
-# OpenWebUI-inspired dark theme colors
 COLORS = {
     "background": "#171717",
     "surface": "#262626",
@@ -63,7 +62,6 @@ COLORS = {
     "code_bg": "#0d0d0d",
 }
 
-# Chainlit theme.json - HSL values without hsl() wrapper
 CHAINLIT_THEME = {
     "variables": {
         "dark": {
@@ -117,7 +115,6 @@ CHAINLIT_THEME = {
     }
 }
 
-# Custom CSS for additional styling
 CUSTOM_CSS = """
 /* Google Fonts */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -192,7 +189,6 @@ pre {
 }
 """
 
-# Chainlit config.toml content - must match chainlit's expected format
 CONFIG_TOML = f"""[project]
 user_env = []
 session_timeout = 3600
@@ -257,29 +253,23 @@ def setup_chainlit_theme(base_path: Path | str | None = None) -> None:
 
     base = Path(base_path) if base_path else Path.cwd()
 
-    # Remove existing .chainlit directory to avoid version conflicts
     chainlit_dir = base / ".chainlit"
     if chainlit_dir.exists():
         shutil.rmtree(chainlit_dir)
 
-    # Create fresh .chainlit directory
     chainlit_dir.mkdir(exist_ok=True)
 
-    # Create public directory
     public_dir = base / "public"
     public_dir.mkdir(exist_ok=True)
 
-    # Write theme.json
     theme_path = public_dir / "theme.json"
     with open(theme_path, "w") as f:
         json.dump(CHAINLIT_THEME, f, indent=2)
 
-    # Write custom.css
     css_path = public_dir / "custom.css"
     with open(css_path, "w") as f:
         f.write(CUSTOM_CSS)
 
-    # Write config.toml
     config_path = chainlit_dir / "config.toml"
     with open(config_path, "w") as f:
         f.write(CONFIG_TOML)

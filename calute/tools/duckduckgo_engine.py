@@ -25,8 +25,8 @@ enabling web searches with advanced filtering and customization options. It incl
 - Lazy loading of dependencies to avoid import errors
 
 The search tool is implemented as an AgentBaseFn subclass for seamless
-integration with Calute agents. Requires the optional 'ddgs' package,
-which can be installed with: pip install calute[search]
+integration with Calute agents. It depends on the `ddgs` package, which is
+included in Calute's core runtime dependencies.
 
 Example:
     >>> from calute.tools.duckduckgo_engine import DuckDuckGoSearch
@@ -39,13 +39,12 @@ from typing import Literal
 
 from ..types import AgentBaseFn
 
-# Lazy import flag
 _DDGS = None
 _DDGS_AVAILABLE = None
 
 
 def _get_ddgs():
-    """Lazy import of DDGS to avoid crashing if not installed.
+    """Lazy import of DDGS to avoid crashing if the environment is incomplete.
 
     Returns:
         The DDGS class from the ddgs package.
@@ -63,7 +62,7 @@ def _get_ddgs():
         except ModuleNotFoundError:
             _DDGS_AVAILABLE = False
     if not _DDGS_AVAILABLE:
-        raise ImportError("`ddgs` package not found. Please install with: pip install calute[search]")
+        raise ImportError("`ddgs` package is required but missing from the environment.")
     return _DDGS
 
 
@@ -179,24 +178,62 @@ class DuckDuckGoSearch(AgentBaseFn):
         """
         Perform an enhanced DuckDuckGo search with multiple options and filters.
 
+        Use this tool when the model needs fresh public-web information rather
+        than local workspace context. It supports regular text search plus
+        images, videos, news, and maps. The tool normalizes provider output into
+        compact result dictionaries so a model can scan titles, snippets, URLs,
+        and metadata without scraping a page first.
+
         Args:
-            query (str): Search keywords.
-            search_type (SearchType): Type of search - "text", "images", "videos", "news", "maps".
-            n_results (int, optional): 1-30 results (default 5).
-            title_length_limit (int | None): Max chars for title; None = no cut.
-            snippet_length_limit (int | None): Max chars for snippet; None = no cut.
-            region (str): Region code (e.g., "us-en", "uk-en", "fr-fr").
-            safesearch (SafeSearch): Safe search level - "strict", "moderate", "off".
-            timelimit (TimeFilter): Time filter - "day", "week", "month", "year", None.
-            allowed_domains (list[str] | None): Only return results from these domains.
-            excluded_domains (list[str] | None): Exclude results from these domains.
-            must_include_keywords (list[str] | None): Results must contain these keywords.
-            exclude_keywords (list[str] | None): Results must not contain these keywords.
-            file_type (str | None): Filter by file type (e.g., "pdf", "doc", "xls").
-            return_metadata (bool): Return metadata about the search.
+            query (str):
+                Search keywords. The query can be plain language or can include
+                search-style qualifiers. If ``file_type`` or domain filters are
+                provided, they are merged into the outgoing query automatically.
+            search_type (SearchType):
+                Search vertical to use: ``"text"``, ``"images"``, ``"videos"``,
+                ``"news"``, or ``"maps"``.
+            n_results (int, optional):
+                Number of results to return. Must be between 1 and 30.
+            title_length_limit (int | None):
+                Maximum number of characters kept from the result title. Set to
+                ``None`` to keep titles in full.
+            snippet_length_limit (int | None):
+                Maximum number of characters kept from result body text or
+                summary fields. Set to ``None`` to keep snippets in full.
+            region (str):
+                Region code such as ``"us-en"``, ``"uk-en"``, or ``"fr-fr"``.
+            safesearch (SafeSearch):
+                Safe-search level: ``"strict"``, ``"moderate"``, or ``"off"``.
+            timelimit (TimeFilter):
+                Optional recency filter such as ``"day"``, ``"week"``,
+                ``"month"``, or ``"year"``. This is especially useful for news
+                and fast-moving topics.
+            allowed_domains (list[str] | None):
+                Restrict results to these domains. This is implemented both by
+                expanding the query and by filtering the returned URLs.
+            excluded_domains (list[str] | None):
+                Remove results from these domains.
+            must_include_keywords (list[str] | None):
+                Keep only results whose title or snippet contains at least one of
+                the provided keywords.
+            exclude_keywords (list[str] | None):
+                Remove results whose title or snippet contains any of the
+                provided keywords.
+            file_type (str | None):
+                Add a file-type constraint such as ``"pdf"`` or ``"doc"`` to
+                the search query.
+            return_metadata (bool):
+                When ``True``, return a dictionary with ``results`` and
+                additional metadata such as the final query string, timestamp,
+                and filters applied. When ``False``, return only the results
+                list.
 
         Returns:
-            Union[list[dict], dict]: Search results or dict with results and metadata.
+            Union[list[dict], dict]:
+                Either a list of result dictionaries or a metadata wrapper
+                containing ``results`` and search context. Result items typically
+                include keys such as ``title``, ``snippet``, ``url``, and
+                type-specific fields like image source or publication date.
         """
         if not query.strip():
             raise ValueError("Query string must be non-empty")
@@ -364,17 +401,36 @@ class DuckDuckGoSearch(AgentBaseFn):
         n_results_per_source: int = 3,
         **kwargs,
     ) -> dict[str, list[dict]]:
-        """
-        Search across multiple source types and return categorized results.
+        """Search across multiple source types and return categorized results.
+
+        Performs separate searches for each specified source type and
+        aggregates the results into a single dictionary keyed by source.
+        Errors for individual sources are captured without failing the
+        entire operation.
 
         Args:
-            query (str): Search query.
-            sources (list[SearchType]): List of search types to query.
-            n_results_per_source (int): Number of results per source type.
-            **kwargs: Additional arguments passed to static_call.
+            query: The search query string to use across all sources.
+            sources: List of search types to query. Each must be one of
+                "text", "images", "videos", "news", "maps". Defaults to
+                ["text", "news"] if None.
+            n_results_per_source: Maximum number of results to return per
+                source type. Defaults to 3.
+            **kwargs: Additional keyword arguments forwarded to
+                ``static_call`` (e.g., region, safesearch, timelimit).
 
         Returns:
-            dict[str, list[dict]]: Results categorized by source type.
+            A dictionary mapping source type names to their respective
+            result lists. If a source fails, its value is a dict with
+            an "error" key describing the failure.
+
+        Example:
+            >>> results = DuckDuckGoSearch.search_multiple_sources(
+            ...     "Python programming",
+            ...     sources=["text", "news"],
+            ...     n_results_per_source=3
+            ... )
+            >>> print(len(results["text"]))
+            3
         """
         if sources is None:
             sources = ["text", "news"]
@@ -393,15 +449,26 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def get_suggestions(query: str, region: str = "us-en", **context_variables) -> list[str]:
-        """
-        Get search suggestions for a query.
+        """Get search query suggestions (autocomplete) for a partial query.
+
+        Retrieves search suggestions from DuckDuckGo's suggestion API,
+        useful for expanding or refining queries before performing a full
+        search.
 
         Args:
-            query (str): Partial search query.
-            region (str): Region code.
+            query: Partial or full search query to get suggestions for.
+            region: Region code for localized suggestions (e.g., "us-en",
+                "uk-en", "de-de"). Defaults to "us-en".
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            list[str]: List of suggested search queries.
+            A list of suggested search query strings. Returns an empty
+            list if no suggestions are available or if the request fails.
+
+        Example:
+            >>> suggestions = DuckDuckGoSearch.get_suggestions("python prog")
+            >>> print(suggestions)
+            ['python programming', 'python programming language', ...]
         """
         suggestions = []
 
@@ -410,7 +477,6 @@ class DuckDuckGoSearch(AgentBaseFn):
                 results = ddgs.suggestions(query, region=region)
                 suggestions = [r.get("phrase", "") for r in results if r.get("phrase")]
             except Exception as e:
-                # Return empty list but could log if logging is available
                 import logging
 
                 logging.getLogger(__name__).debug(f"Failed to get suggestions for '{query}': {e}")
@@ -419,15 +485,27 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def translate_query(query: str, to_language: str = "en", **context_variables) -> str:
-        """
-        Translate a search query to another language.
+        """Translate a search query to another language using DuckDuckGo.
+
+        Uses DuckDuckGo's translation service to convert a query from
+        its detected language to the specified target language. Falls back
+        to returning the original query if translation fails.
 
         Args:
-            query (str): Original query.
-            to_language (str): Target language code.
+            query: The original search query to translate.
+            to_language: Target language code (e.g., "en" for English,
+                "es" for Spanish, "fr" for French, "de" for German).
+                Defaults to "en".
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            str: Translated query.
+            The translated query string. If translation fails, returns
+            the original query unchanged.
+
+        Example:
+            >>> translated = DuckDuckGoSearch.translate_query("hola mundo", to_language="en")
+            >>> print(translated)
+            'hello world'
         """
         with _get_ddgs()() as ddgs:
             try:

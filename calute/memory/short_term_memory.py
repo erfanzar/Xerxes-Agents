@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Short-term memory implementation"""
+"""Short-term memory implementation."""
 
 from collections import deque
 from datetime import datetime
@@ -23,24 +23,44 @@ from .base import Memory, MemoryItem
 
 
 class ShortTermMemory(Memory):
-    """
-    Short-term memory with FIFO behavior and recent context tracking.
-    Ideal for maintaining conversation context and recent interactions.
+    """Short-term memory with FIFO eviction and recent-context tracking.
+
+    Uses a bounded :class:`collections.deque` to enforce a fixed capacity.
+    When the capacity is reached, the oldest item is silently discarded as
+    new items are appended. Ideal for maintaining conversation context and
+    recent interaction history.
+
+    Attributes:
+        storage: Optional :class:`MemoryStorage` backend for persistence.
+        max_items: Maximum capacity (mirrors the deque ``maxlen``).
+        enable_embeddings: Whether dense vector embeddings are enabled.
+        _items: Bounded deque holding :class:`MemoryItem` instances.
+        _index: Dictionary mapping memory IDs to items for O(1) lookup.
+
+    Example:
+        >>> from calute.memory import ShortTermMemory
+        >>> stm = ShortTermMemory(capacity=10)
+        >>> item = stm.save("User asked about weather")
+        >>> stm.get_recent(3)
+        [MemoryItem(...)]
     """
 
     def __init__(
         self,
         capacity: int = 20,
-        storage=None,
+        storage: Any | None = None,
         enable_embeddings: bool = False,
-    ):
-        """
-        Initialize short-term memory.
+    ) -> None:
+        """Initialize short-term memory with a fixed FIFO capacity.
 
         Args:
-            capacity: Maximum number of items to retain
-            storage: Optional storage backend
-            enable_embeddings: Whether to compute embeddings
+            capacity: Maximum number of items to retain. When this limit
+                is reached, the oldest item is automatically evicted on
+                the next :meth:`save` call.
+            storage: Optional :class:`MemoryStorage` backend for
+                persisting items beyond the process lifetime.
+            enable_embeddings: Whether to compute dense vector embeddings
+                for semantic search. Defaults to ``False``.
         """
         super().__init__(storage=storage, max_items=capacity, enable_embeddings=enable_embeddings)
         self._items = deque(maxlen=capacity)

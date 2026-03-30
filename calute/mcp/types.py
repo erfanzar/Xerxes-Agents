@@ -64,9 +64,8 @@ class MCPTransportType(Enum):
     SSE = "sse"
     STREAMABLE_HTTP = "streamable_http"
 
-    # Backwards compatibility aliases
-    HTTP = "sse"  # Deprecated: use SSE instead
-    WEBSOCKET = "streamable_http"  # Deprecated: use STREAMABLE_HTTP instead
+    HTTP = "sse"
+    WEBSOCKET = "streamable_http"
 
 
 @dataclass

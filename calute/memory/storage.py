@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Storage backends for Calute memory system"""
+"""Storage backends for Calute memory system."""
 
 import hashlib
 import json
@@ -26,11 +26,16 @@ from typing import Any
 
 
 class MemoryStorage(ABC):
-    """
-    Abstract base class for memory storage backends.
+    """Abstract base class for memory storage backends.
 
-    Provides a common interface for different storage implementations
-    including in-memory, file-based, and database storage.
+    Defines the common key-value interface that all Calute storage
+    implementations must provide. Concrete subclasses include
+    :class:`SimpleStorage` (in-memory), :class:`FileStorage`
+    (pickle files), :class:`SQLiteStorage` (database), and
+    :class:`RAGStorage` (vector-enhanced wrapper).
+
+    Subclasses must implement :meth:`save`, :meth:`load`, :meth:`delete`,
+    :meth:`exists`, :meth:`list_keys`, and :meth:`clear`.
     """
 
     @abstractmethod
@@ -111,12 +116,14 @@ class MemoryStorage(ABC):
 
 
 class SimpleStorage(MemoryStorage):
-    """
-    Simple in-memory storage (non-persistent).
+    """Simple in-memory storage (non-persistent).
 
-    Provides fast key-value storage that exists only in memory.
-    Data is lost when the process terminates. Suitable for
-    testing and short-lived applications.
+    Provides fast dictionary-backed key-value storage that exists only in
+    memory. All data is lost when the process terminates. Suitable for
+    testing, development, and short-lived applications.
+
+    Attributes:
+        _data: Internal dictionary holding all stored key-value pairs.
     """
 
     def __init__(self):
@@ -204,20 +211,33 @@ class SimpleStorage(MemoryStorage):
 
 
 class FileStorage(MemoryStorage):
-    """
-    File-based persistent storage using pickle.
+    """File-based persistent storage using pickle serialisation.
 
-    Stores each key-value pair as a separate pickle file, with an
-    index file tracking the key-to-file mapping. Suitable for
-    moderate-sized datasets that need persistence across restarts.
+    Each key-value pair is stored as a separate ``.pkl`` file named by
+    the MD5 hash of its key. An ``_index.json`` file tracks the
+    key-to-filename mapping. Suitable for moderate-sized datasets that
+    need persistence across process restarts.
+
+    Attributes:
+        storage_dir: :class:`~pathlib.Path` to the directory holding
+            pickle files and the index.
+        _index: Dictionary mapping string keys to their pickle filenames.
+
+    Example:
+        >>> from calute.memory.storage import FileStorage
+        >>> fs = FileStorage("/tmp/my_memory")
+        >>> fs.save("key1", {"data": 42})
+        True
+        >>> fs.load("key1")
+        {'data': 42}
     """
 
-    def __init__(self, storage_dir: str = ".calute_memory"):
-        """
-        Initialize file storage.
+    def __init__(self, storage_dir: str = ".calute_memory") -> None:
+        """Initialize file storage and create the storage directory.
 
         Args:
-            storage_dir: Directory path for storing pickle files
+            storage_dir: Directory path for storing pickle files and the
+                key index. Created (with parents) if it does not exist.
         """
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -225,19 +245,19 @@ class FileStorage(MemoryStorage):
         self._index = self._load_index()
 
     def _load_index(self) -> dict[str, str]:
-        """
-        Load the index mapping keys to files.
+        """Load the key-to-filename index from disk.
 
         Returns:
-            Dictionary mapping keys to their file names
+            Dictionary mapping string keys to their pickle filenames.
+            Returns an empty dict if the index file does not exist.
         """
         if self._index_file.exists():
             with open(self._index_file, "r") as f:
                 return json.load(f)
         return {}
 
-    def _save_index(self):
-        """Save the index to disk."""
+    def _save_index(self) -> None:
+        """Persist the key-to-filename index as JSON to disk."""
         with open(self._index_file, "w") as f:
             json.dump(self._index, f)
 
@@ -354,20 +374,41 @@ class FileStorage(MemoryStorage):
 
 
 class SQLiteStorage(MemoryStorage):
-    """
-    SQLite-based persistent storage.
+    """SQLite-based persistent storage with ACID guarantees.
 
-    Uses SQLite database for reliable persistent storage with ACID
-    properties. Falls back to in-memory storage when WRITE_MEMORY
-    environment variable is not set to "1".
+    Uses a local SQLite database for reliable persistent key-value
+    storage. Data is serialised with :mod:`pickle` and stored as BLOBs.
+    When the ``WRITE_MEMORY`` environment variable is not set to ``"1"``,
+    the backend transparently falls back to a plain in-memory dictionary
+    so that read-only or ephemeral sessions incur no disk I/O.
+
+    Attributes:
+        write_enabled: ``True`` when the ``WRITE_MEMORY`` environment
+            variable is ``"1"``, enabling actual SQLite persistence.
+        db_path: :class:`~pathlib.Path` to the SQLite database file.
+        _memory_storage: In-memory fallback dictionary used when
+            ``write_enabled`` is ``False``.
+
+    Example:
+        >>> import os
+        >>> os.environ["WRITE_MEMORY"] = "1"
+        >>> from calute.memory.storage import SQLiteStorage
+        >>> store = SQLiteStorage("/tmp/mem.db")
+        >>> store.save("k", {"v": 1})
+        True
     """
 
-    def __init__(self, db_path: str = ".calute_memory/memory.db"):
-        """
-        Initialize SQLite storage.
+    def __init__(self, db_path: str = ".calute_memory/memory.db") -> None:
+        """Initialize SQLite storage with optional write persistence.
+
+        When ``WRITE_MEMORY=1`` is set in the environment, the database
+        file and its parent directory are created if they do not exist,
+        and the schema is initialised. Otherwise, an in-memory dictionary
+        is used as a transparent fallback.
 
         Args:
-            db_path: Path to the SQLite database file
+            db_path: File path for the SQLite database. Parent directories
+                are created automatically when write is enabled.
         """
         import os
 
@@ -380,8 +421,14 @@ class SQLiteStorage(MemoryStorage):
         else:
             self._memory_storage = {}
 
-    def _init_db(self):
-        """Initialize database schema with memory table and indexes."""
+    def _init_db(self) -> None:
+        """Initialize the database schema with the ``memory`` table and indexes.
+
+        Creates the ``memory`` table (if it does not already exist) with
+        columns for ``key`` (primary key), ``data`` (BLOB), ``created_at``,
+        and ``updated_at``. Also creates an index on ``created_at`` for
+        efficient ordering.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS memory (
@@ -531,14 +578,31 @@ class SQLiteStorage(MemoryStorage):
 
 
 class RAGStorage(MemoryStorage):
-    """
-    RAG storage with vector similarity search capabilities.
+    """RAG-enhanced storage with vector similarity search capabilities.
 
-    Wraps another storage backend and adds vector embedding support
-    for semantic similarity search. Supports multiple embedding backends:
-    - TF-IDF (default, no external dependencies)
-    - sentence-transformers (if installed)
-    - OpenAI embeddings (if openai is installed and api_key provided)
+    Wraps another :class:`MemoryStorage` backend and augments it with
+    dense vector embeddings for semantic similarity search via
+    :meth:`search_similar`. Supports multiple embedding backends:
+
+    - **TF-IDF** (default) -- no external dependencies, hash-based
+      256-dimensional vectors.
+    - **sentence-transformers** -- dense embeddings from a local model
+      (requires the ``sentence-transformers`` package).
+    - **OpenAI** -- remote embeddings via the OpenAI API (requires the
+      ``openai`` package and a valid API key).
+
+    Attributes:
+        backend: The underlying :class:`MemoryStorage` that handles
+            actual data persistence.
+        embeddings: Dictionary mapping storage keys to their computed
+            embedding vectors.
+
+    Example:
+        >>> from calute.memory.storage import RAGStorage, SimpleStorage
+        >>> rag = RAGStorage(SimpleStorage(), embedding_model="tfidf")
+        >>> rag.save("doc1", "The cat sat on the mat")
+        True
+        >>> results = rag.search_similar("feline sitting", limit=5)
     """
 
     def __init__(
@@ -546,18 +610,25 @@ class RAGStorage(MemoryStorage):
         backend: MemoryStorage | None = None,
         embedding_model: str | None = None,
         embedding_api_key: str | None = None,
-    ):
-        """
-        Initialize RAG storage.
+    ) -> None:
+        """Initialize RAG storage with an embedding backend.
 
         Args:
-            backend: Underlying storage backend (defaults to SimpleStorage)
-            embedding_model: Embedding model to use. Options:
-                - None: auto-detect best available (sentence-transformers > tfidf)
-                - "tfidf": TF-IDF based embeddings (no extra deps)
-                - A sentence-transformers model name (e.g. "all-MiniLM-L6-v2")
-                - An OpenAI model name (e.g. "text-embedding-3-small")
-            embedding_api_key: API key for OpenAI embeddings (if using OpenAI model)
+            backend: Underlying :class:`MemoryStorage` for data persistence.
+                Defaults to a new :class:`SimpleStorage` instance.
+            embedding_model: Embedding backend selector. Accepted values:
+
+                - ``None`` -- auto-detect best available (prefers
+                  sentence-transformers, falls back to TF-IDF).
+                - ``"tfidf"`` -- hash-based TF-IDF embeddings (no extra
+                  dependencies).
+                - A ``sentence-transformers`` model name (e.g.
+                  ``"all-MiniLM-L6-v2"``).
+                - An OpenAI model name starting with ``"text-embedding"``
+                  (e.g. ``"text-embedding-3-small"``).
+            embedding_api_key: API key for OpenAI embeddings. Falls back
+                to the ``OPENAI_API_KEY`` environment variable when not
+                provided.
         """
         self.backend = backend or SimpleStorage()
         self.embeddings: dict[str, list[float]] = {}
@@ -570,7 +641,20 @@ class RAGStorage(MemoryStorage):
         self._embedding_type = self._resolve_embedding_type(embedding_model)
 
     def _resolve_embedding_type(self, model: str | None) -> str:
-        """Resolve which embedding backend to use."""
+        """Resolve which embedding backend to use.
+
+        Selects the appropriate embedding backend based on the requested model name.
+        When model is None, auto-detects the best available backend (prefers
+        sentence-transformers, falls back to tfidf if not installed).
+
+        Args:
+            model: Model name hint. ``"tfidf"`` forces TF-IDF; names starting with
+                ``"text-embedding"`` select OpenAI; any other string attempts to
+                load a sentence-transformers model; None triggers auto-detection.
+
+        Returns:
+            One of ``"tfidf"``, ``"openai"``, or ``"sentence_transformers"``.
+        """
         if model == "tfidf":
             return "tfidf"
 
@@ -586,7 +670,6 @@ class RAGStorage(MemoryStorage):
             except ImportError:
                 pass
 
-        # Auto-detect: prefer sentence-transformers, fall back to tfidf
         if model is None:
             try:
                 from sentence_transformers import SentenceTransformer
@@ -618,8 +701,16 @@ class RAGStorage(MemoryStorage):
     def _compute_tfidf_embedding(self, text: str) -> list[float]:
         """Compute TF-IDF based embedding using word frequencies.
 
-        Builds a vocabulary from all stored texts and computes
-        term-frequency vectors for semantic comparison.
+        Builds a fixed-size 256-dimensional vector by hashing each word to a
+        position, accumulating term-frequency weights, and L2-normalising the
+        result. Requires no external dependencies.
+
+        Args:
+            text: Input text to encode.
+
+        Returns:
+            Normalised 256-dimensional float vector, or a 128-dimensional zero
+            vector for empty input.
         """
         words = text.lower().split()
         if not words:
@@ -630,23 +721,31 @@ class RAGStorage(MemoryStorage):
             word_freq[w] = word_freq.get(w, 0) + 1
 
         total = len(words)
-        # Use consistent hashing to map words to vector positions
         dim = 256
         vec = [0.0] * dim
         for word, count in word_freq.items():
             tf = count / total
-            # Hash word to a position in the vector
             idx = hash(word) % dim
             vec[idx] += tf
 
-        # Normalize
         norm = sum(v * v for v in vec) ** 0.5
         if norm > 0:
             vec = [v / norm for v in vec]
         return vec
 
     def _compute_sentence_transformer_embedding(self, text: str) -> list[float]:
-        """Compute embedding using sentence-transformers model."""
+        """Compute a dense embedding using a sentence-transformers model.
+
+        Lazily loads the model on first call if it has not already been
+        initialised. Falls back to ``"all-MiniLM-L6-v2"`` when no explicit
+        model name is configured.
+
+        Args:
+            text: Input text to encode.
+
+        Returns:
+            Dense float embedding vector from the sentence-transformers model.
+        """
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
 
@@ -657,13 +756,23 @@ class RAGStorage(MemoryStorage):
         return embedding.tolist()
 
     def _compute_openai_embedding(self, text: str) -> list[float]:
-        """Compute embedding using OpenAI API."""
+        """Compute an embedding using the OpenAI embeddings API.
+
+        Falls back to TF-IDF if the ``openai`` package is not installed or no
+        API key is available (via ``embedding_api_key`` or the
+        ``OPENAI_API_KEY`` environment variable).
+
+        Args:
+            text: Input text to encode.
+
+        Returns:
+            Dense float embedding vector, or a TF-IDF fallback vector.
+        """
         import os
 
         try:
             from openai import OpenAI
         except ImportError:
-            # Fall back to tfidf if openai not installed
             return self._compute_tfidf_embedding(text)
 
         api_key = self._embedding_api_key or os.getenv("OPENAI_API_KEY")

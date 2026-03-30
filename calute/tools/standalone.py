@@ -66,24 +66,35 @@ class ReadFile(AgentBaseFn):
         **context_variables,
     ) -> str:
         """
-        Read a text file and return its contents.
+        Read a text file from disk and return decoded text content.
+
+        Use this tool when you need to inspect a local file before deciding
+        what to do next, for example reading a README, source file, config, or
+        report that already exists in the workspace. The tool reads the file as
+        text only; it does not parse structured formats for you and it is not
+        suitable for binary files.
 
         Args:
             file_path (str):
-                Absolute or relative path to the file that should be read.
+                Absolute or relative path to the file that should be read. The
+                path is expanded and resolved before opening the file, so
+                ``~/notes.txt`` and ``./src/app.py`` are both valid forms.
             max_chars (int | None, optional):
-                Maximum number of characters to return.
-                If ``None`` the file is returned in full.
-                Defaults to ``4_096``.
+                Maximum number of characters to return. If the file is longer,
+                the returned text is truncated and a visible marker is appended
+                so the caller can tell the result is incomplete. Set this to
+                ``None`` to return the full file.
             encoding (str, optional):
-                Character encoding used to decode the file.
-                Defaults to ``"utf-8"``.
+                Character encoding used to decode the file, such as
+                ``"utf-8"`` or ``"latin-1"``.
             errors (str, optional):
                 Error-handling strategy passed to :pymeth:`Path.read_text`.
-                Defaults to ``"ignore"``.
+                ``"ignore"`` drops undecodable bytes, while ``"replace"`` keeps
+                the read going and inserts replacement characters.
         Returns:
-            str: File content (possibly truncated and suffixed with the marker
-            ``"\n\n…[truncated]…"``).
+            str: The decoded file content. If truncation happens, the text is
+            suffixed with ``"\n\n…[truncated]…"`` so the model can request a
+            more targeted follow-up read if needed.
 
         Raises:
             FileNotFoundError: If the supplied path does not exist or is not a
@@ -122,16 +133,28 @@ class WriteFile(AgentBaseFn):
         """
         Write text to a file, creating parent directories if necessary.
 
+        Use this tool when you need to create a new text file or replace an
+        existing one with generated content such as a report, config, patch
+        notes, or source code. This tool writes the entire file in one shot; if
+        you want to add to an existing file without replacing it, use the append
+        tool instead.
+
         Args:
-            file_path (str): Destination file path.
-            content (str): Text to be written to the file.
+            file_path (str):
+                Destination file path. Parent directories are created
+                automatically if they do not already exist.
+            content (str):
+                Full text content to write. Whatever you pass becomes the entire
+                file contents after the write completes.
             overwrite (bool, optional):
                 If ``False`` (default) the call fails when the file already
-                exists.  Set to ``True`` to overwrite.
-            encoding (str, optional): Text encoding used for writing.
+                exists. Set to ``True`` to replace an existing file.
+            encoding (str, optional):
+                Text encoding used for writing.
 
         Returns:
-            str: Human-readable status message (✅ emoji included).
+            str: Human-readable status message that includes the final resolved
+            path and the number of characters written.
 
         Raises:
             FileExistsError: When the file exists and ``overwrite`` is ``False``.
@@ -166,16 +189,23 @@ class ListDir(AgentBaseFn):
         """
         List files in a directory, optionally filtering by extension.
 
+        Use this tool to discover what files are available before reading or
+        editing them. The result is intentionally shallow: it lists only the
+        immediate files in the target directory, not nested files in
+        subdirectories, and it excludes directories from the returned list.
+
         Args:
             directory_path (str, optional):
                 Directory to inspect. Defaults to current working directory
                 (``"."``).
             extension_filter (str | None, optional):
                 If provided, only return files whose name ends with the given
-                extension (case-insensitive). E.g. ``".py"``.
+                extension (case-insensitive), for example ``".py"`` or
+                ``".md"``.
 
         Returns:
-            list[str]: Sorted list of file names (no directory paths included).
+            list[str]: Sorted list of file names only. The returned values are
+            base names such as ``"README.md"`` rather than absolute paths.
 
         Raises:
             FileNotFoundError: If the provided path does not exist or is not a
@@ -223,8 +253,16 @@ class ExecutePythonCode(AgentBaseFn):
             Use only in trusted environments or inside a sandbox (Docker,
             `firejail`, etc.).
 
+        This is best for quick one-shot computations, data transformations,
+        environment inspection, or script-like tasks where you want a fresh
+        Python interpreter. State does not persist between calls. If you need an
+        interactive session that survives across multiple writes, use the PTY
+        operator tools instead.
+
         Args:
-            code (str): Python source code to be executed.
+            code (str):
+                Python source code to execute. The code is dedented and passed
+                to ``python -c``.
             timeout (float | None, optional):
                 Maximum wall-clock time in seconds before the subprocess is
                 terminated. ``None`` disables the limit. Defaults to ``10.0``.
@@ -232,7 +270,9 @@ class ExecutePythonCode(AgentBaseFn):
         Returns:
             dict[str, str]:
                 A mapping containing the captured standard streams:
-                ``{"stdout": "<captured>", "stderr": "<captured>"}``.
+                ``{"stdout": "<captured>", "stderr": "<captured>"}``. Normal
+                prints go to ``stdout``; tracebacks and interpreter errors show
+                up in ``stderr``.
 
         Raises:
             subprocess.TimeoutExpired: If execution exceeds ``timeout``.
@@ -275,18 +315,32 @@ class ExecuteShell(AgentBaseFn):
         **context_variables,
     ) -> dict[str, str]:
         """
-        Execute a shell command.
+        Execute a one-shot shell command and capture its output.
+
+        Use this tool for short, non-interactive commands such as ``ls``,
+        ``pwd``, ``git status``, or a single build/test command. The command is
+        run through the system shell with ``shell=True`` and does not preserve
+        interactive state between calls. If you need to start a long-running
+        terminal session and send more input later, use ``exec_command`` and
+        ``write_stdin`` instead.
 
         Args:
-            command (str): The exact command string passed to the system shell.
+            command (str):
+                The exact command string passed to the system shell. Shell
+                features such as pipes, redirects, ``&&``, and variable
+                expansion are available because the command is executed by the
+                shell.
             timeout (float | None, optional):
-                Maximum execution time in seconds. Defaults to ``10.0``.
+                Maximum execution time in seconds. If the command runs longer,
+                the subprocess is terminated and ``TimeoutExpired`` is raised.
             cwd (str | None, optional):
                 Working directory for the command. ``None`` (default) means
-                current directory.
+                the current directory.
 
         Returns:
-            dict[str, str]: ``{"stdout": ..., "stderr": ...}``
+            dict[str, str]: ``{"stdout": ..., "stderr": ...}``. A non-zero exit
+            code does not raise automatically; you should inspect ``stderr`` and
+            the command output to decide what happened.
 
         Raises:
             subprocess.TimeoutExpired: If the command times out.
@@ -326,17 +380,28 @@ class AppendFile(AgentBaseFn):
         """
         Append one or more lines to a text file.
 
-        The file is created if it does not yet exist.
+        Use this tool for logs, incremental reports, notes, or any workflow
+        where you want to keep existing content and add new text at the end. The
+        file is created if it does not yet exist.
 
         Args:
-            file_path (str): Destination file.
-            lines (str): Text to append (no line breaks are added automatically).
-            encoding (str, optional): Encoding used when opening the file.
+            file_path (str):
+                Destination file path. Parent directories are created if
+                required.
+            lines (str):
+                Text to append. The tool does not try to inspect existing file
+                structure; it simply writes the supplied text followed by the
+                configured newline string.
+            encoding (str, optional):
+                Encoding used when opening the file.
             newline (str, optional):
-                Character(s) to append after ``lines``. Defaults to ``"\\n"``.
+                Character(s) appended after ``lines``. Defaults to ``"\\n"``,
+                but can be set to ``""`` if you do not want an automatic line
+                ending.
 
         Returns:
-            str: Status message specifying how many characters were appended.
+            str: Status message specifying how many characters were appended and
+            where they were written.
 
         """
         p = Path(file_path).expanduser().resolve()

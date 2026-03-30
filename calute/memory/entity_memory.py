@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Entity memory for tracking information about specific entities"""
+"""Entity memory for tracking information about specific entities."""
 
 import re
 from collections import defaultdict
@@ -23,24 +23,47 @@ from .base import Memory, MemoryItem
 
 
 class EntityMemory(Memory):
-    """
-    Memory system for tracking entities (people, organizations, concepts).
-    Maintains a knowledge graph of entities and their relationships.
+    """Memory system for tracking entities (people, organisations, concepts).
+
+    Maintains a lightweight knowledge graph of entities and their
+    relationships. Entities are automatically extracted from stored text
+    using pattern-matching heuristics (capitalised phrases and quoted
+    strings), and relationships are detected from common verb patterns
+    (e.g. "works at", "knows", "created").
+
+    Attributes:
+        entities: Dictionary mapping entity names to tracking metadata
+            including ``first_seen``, ``last_seen``, ``frequency``, and
+            ``contexts`` (snippet list).
+        relationships: Dictionary mapping relation types (e.g. ``"knows"``)
+            to lists of ``(entity1, entity2)`` tuples.
+        entity_mentions: Dictionary mapping entity names to lists of
+            memory IDs in which that entity was mentioned.
+
+    Example:
+        >>> from calute.memory import EntityMemory
+        >>> em = EntityMemory()
+        >>> item = em.save("Alice works at Acme Corp")
+        >>> em.get_entity_info("Alice")
+        {'first_seen': ..., 'frequency': 1, ...}
     """
 
     def __init__(
         self,
-        storage=None,
+        storage: Any | None = None,
         max_items: int = 5000,
         enable_embeddings: bool = False,
-    ):
-        """
-        Initialize entity memory.
+    ) -> None:
+        """Initialize entity memory with optional persistence.
 
         Args:
-            storage: Storage backend for persistence
-            max_items: Maximum number of memory items to store
-            enable_embeddings: Whether to compute embeddings for semantic search
+            storage: Optional :class:`MemoryStorage` backend for persisting
+                entity data and memory items. When ``None``, data is held
+                in-memory only.
+            max_items: Maximum number of memory items to store before the
+                oldest items may be evicted.
+            enable_embeddings: Whether to compute dense vector embeddings
+                for semantic search over stored content.
         """
         super().__init__(storage=storage, max_items=max_items, enable_embeddings=enable_embeddings)
         self.entities: dict[str, dict[str, Any]] = {}
@@ -50,17 +73,23 @@ class EntityMemory(Memory):
     def save(
         self, content: str, metadata: dict[str, Any] | None = None, entities: list[str] | None = None, **kwargs
     ) -> MemoryItem:
-        """
-        Save memory with entity extraction.
+        """Save a memory item and extract entities from its content.
+
+        Entities are either provided explicitly or extracted automatically
+        via :meth:`_extract_entities`. Relationships between co-occurring
+        entities are also detected and recorded.
 
         Args:
-            content: Content containing entities
-            metadata: Additional metadata
-            entities: Pre-identified entities (optional)
-            **kwargs: Additional fields
+            content: Text content to store. Entity extraction heuristics
+                are applied to this text when ``entities`` is not provided.
+            metadata: Optional key-value metadata to attach. An ``"entities"``
+                key is added automatically with the resolved entity list.
+            entities: Pre-identified entity names. When ``None``, entities
+                are extracted from ``content`` using pattern matching.
+            **kwargs: Additional keyword arguments (currently unused).
 
         Returns:
-            Created memory item
+            The newly created :class:`MemoryItem` with entity metadata.
         """
         metadata = metadata or {}
 
@@ -99,17 +128,27 @@ class EntityMemory(Memory):
         entity_filter: list[str] | None = None,
         **kwargs,
     ) -> list[MemoryItem]:
-        """
-        Search memories related to entities.
+        """Search for memories related to specific entities.
+
+        Entities are first extracted from the query (or taken from
+        ``entity_filter``), and then all stored items are scored by the
+        fraction of target entities they mention. Items with no overlapping
+        entities are excluded unless no target entities were identified, in
+        which case a simple substring match is used instead.
 
         Args:
-            query: Search query (can be entity name)
-            limit: Maximum results
-            filters: Additional filters
-            entity_filter: Filter by specific entities
+            query: Natural-language query. Entity names are extracted from
+                this text when ``entity_filter`` is not provided.
+            limit: Maximum number of results to return.
+            filters: Optional key-value criteria matched against item
+                attributes (e.g. ``{"agent_id": "agent-1"}``).
+            entity_filter: Explicit list of entity names to search for.
+                Overrides automatic extraction from ``query``.
+            **kwargs: Additional keyword arguments (currently unused).
 
         Returns:
-            List of relevant memories
+            List of :class:`MemoryItem` instances sorted by relevance
+            (entity overlap ratio), with at most ``limit`` entries.
         """
 
         query_entities = self._extract_entities(query)
@@ -150,17 +189,22 @@ class EntityMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """
-        Retrieve memories by ID or filters.
+        """Retrieve memory items by ID or filter criteria.
+
+        When ``memory_id`` is provided, performs an O(1) index lookup.
+        Otherwise iterates through items and applies attribute-based filters.
 
         Args:
-            memory_id: Specific memory ID to retrieve
-            filters: Filter criteria for memory attributes
-            limit: Maximum number of results to return
+            memory_id: UUID of a specific memory item to retrieve.
+            filters: Optional key-value criteria matched against item
+                attributes (e.g. ``{"agent_id": "agent-1"}``). Items where
+                any specified attribute does not match are excluded.
+            limit: Maximum number of items to return when using filter-based
+                retrieval.
 
         Returns:
-            Single MemoryItem if memory_id provided, list of items otherwise,
-            or None if memory_id not found
+            A single :class:`MemoryItem` when ``memory_id`` is provided
+            (or ``None`` if not found), or a list of matching items.
         """
         if memory_id:
             return self._index.get(memory_id)
@@ -183,15 +227,21 @@ class EntityMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """
-        Update a memory item and re-extract entities if content changes.
+        """Update a memory item and re-extract entities if content changes.
+
+        When the ``"content"`` field is included in ``updates``, the old
+        entity mentions are removed and new entities are extracted from the
+        updated content. Changes are persisted to storage if configured.
 
         Args:
-            memory_id: ID of the memory to update
-            updates: Dictionary of fields to update
+            memory_id: UUID of the memory item to update.
+            updates: Dictionary mapping attribute names to their new values.
+                When ``"content"`` is present, entity mention tracking is
+                refreshed automatically.
 
         Returns:
-            True if update was successful, False if memory_id not found
+            ``True`` if the item was found and updated, ``False`` if
+            ``memory_id`` was not found in the index.
         """
         if memory_id not in self._index:
             return False
@@ -221,15 +271,22 @@ class EntityMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """
-        Delete memories and update entity mention tracking.
+        """Delete a memory item and update entity mention tracking.
+
+        Removes the item from the in-memory index and list, cleans up
+        entity mention references, and deletes from the storage backend
+        if configured.
+
+        Note:
+            Filter-based bulk deletion is accepted by the signature for
+            interface compatibility but is not currently implemented.
 
         Args:
-            memory_id: Specific memory ID to delete
-            filters: Filter criteria for bulk deletion (not implemented)
+            memory_id: UUID of the specific memory item to delete.
+            filters: Reserved for future filter-based bulk deletion.
 
         Returns:
-            Number of memories deleted
+            Number of items deleted (0 or 1).
         """
         count = 0
 
@@ -261,14 +318,22 @@ class EntityMemory(Memory):
                 self.storage.delete(key)
 
     def get_entity_info(self, entity: str) -> dict[str, Any]:
-        """
-        Get all information about an entity including relationships.
+        """Get comprehensive information about an entity.
+
+        Collects the entity's tracking metadata, all memory IDs that
+        mention it, and its direct relationships (both outgoing and
+        inverse incoming).
 
         Args:
-            entity: Name of the entity to look up
+            entity: The entity name to look up (case-sensitive).
 
         Returns:
-            Dictionary containing entity data, mentions, and relationships
+            Dictionary containing:
+                - All stored tracking fields (``first_seen``, ``last_seen``,
+                  ``frequency``, ``contexts``) if the entity exists.
+                - ``"mentions"``: list of memory IDs referencing this entity.
+                - ``"relationships"``: list of dicts with ``"relation"`` and
+                  ``"target"`` keys describing outgoing and inverse relations.
         """
         info = self.entities.get(entity, {})
         info["mentions"] = self.entity_mentions.get(entity, [])
@@ -384,13 +449,16 @@ class EntityMemory(Memory):
 
         return relationships
 
-    def _update_entity(self, entity: str, memory_item: MemoryItem):
-        """
-        Update entity tracking data with new memory mention.
+    def _update_entity(self, entity: str, memory_item: MemoryItem) -> None:
+        """Update entity tracking data with a new memory mention.
+
+        Creates the entity entry if it does not already exist, increments
+        the frequency counter, records the latest timestamp, appends a
+        content snippet, and logs the memory ID in :attr:`entity_mentions`.
 
         Args:
-            entity: Entity name to update
-            memory_item: Memory item containing the entity mention
+            entity: Entity name to update or create.
+            memory_item: The :class:`MemoryItem` that mentions this entity.
         """
         if entity not in self.entities:
             self.entities[entity] = {"first_seen": memory_item.timestamp, "frequency": 0, "contexts": []}
@@ -400,8 +468,8 @@ class EntityMemory(Memory):
         self.entities[entity]["contexts"].append(memory_item.content[:100])
         self.entity_mentions[entity].append(memory_item.memory_id)
 
-    def _save_entity_data(self):
-        """Save entity data to storage"""
+    def _save_entity_data(self) -> None:
+        """Persist entity tables (entities, relationships, mentions) to storage."""
         if self.storage:
             self.storage.save("_entity_entities", self.entities)
             self.storage.save("_entity_relationships", dict(self.relationships))

@@ -39,22 +39,27 @@ from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import ConfigDict, Field
 
-from ..multimodal import SerializableImage
-from ..utils import CaluteBase
+from ..core.multimodal import SerializableImage
+from ..core.utils import CaluteBase
 from .tool_calls import ToolCall
 
 
 class ChunkTypes(StrEnum):
-    r"""Enum for the types of chunks that can be sent to the model.
+    """Enumeration of content chunk types supported in messages.
+
+    Defines the different types of content chunks that can be included
+    in multimodal messages sent to LLM models.
 
     Attributes:
-       text: A text chunk.
-       image: An image chunk.
-       image_url: An image url chunk.
+        text: A plain text content chunk.
+        image: A binary image content chunk (PIL Image or base64-encoded).
+        image_url: An image referenced by URL or base64 data URI.
 
-    Examples:
-        >>> from mistral_common.protocol.instruct.messages import ChunkTypes
+    Example:
+        >>> from calute.types.messages import ChunkTypes
         >>> chunk_type = ChunkTypes.text
+        >>> chunk_type.value
+        'text'
     """
 
     text = "text"
@@ -63,39 +68,69 @@ class ChunkTypes(StrEnum):
 
 
 class BaseContentChunk(CaluteBase):
-    r"""Base class for all content chunks.
+    """Abstract base class for all content chunks in multimodal messages.
 
-    Content chunks are used to send different types of content to the model.
+    Content chunks represent individual pieces of content within a message,
+    such as text passages, images, or image URLs. Subclasses must implement
+    the ``to_openai`` and ``from_openai`` methods for format conversion.
 
     Attributes:
-       type: The type of the chunk.
+        type: The discriminator type of the chunk, one of 'text', 'image',
+            or 'image_url'.
     """
 
     type: Literal[ChunkTypes.text, ChunkTypes.image, ChunkTypes.image_url]
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        r"""Converts the chunk to the OpenAI format.
+        """Convert this content chunk to the OpenAI API format.
 
-        Should be implemented by subclasses.
+        Must be implemented by subclasses to provide the appropriate
+        dictionary representation for the OpenAI messages API.
+
+        Returns:
+            A dictionary in OpenAI content chunk format with a 'type' key
+            and type-specific content keys.
+
+        Raises:
+            NotImplementedError: Always raised in the base class; subclasses
+                must override this method.
         """
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "BaseContentChunk":  # type:ignore
-        r"""Converts the OpenAI chunk to the Calute format.
+        """Create a content chunk from an OpenAI-format dictionary.
 
-        Should be implemented by subclasses.
+        Must be implemented by subclasses to parse the OpenAI content chunk
+        format into the appropriate Calute chunk type.
+
+        Args:
+            openai_chunk: A dictionary in OpenAI content chunk format containing
+                at minimum a 'type' key.
+
+        Returns:
+            An instance of the appropriate BaseContentChunk subclass.
+
+        Raises:
+            NotImplementedError: Always raised in the base class; subclasses
+                must override this method.
         """
         raise NotImplementedError(f"from_openai method not implemented for {cls.__name__}")
 
 
 class ImageChunk(BaseContentChunk):
-    r"""Image chunk.
+    """Content chunk containing a binary image.
+
+    Wraps a PIL Image or base64-encoded image data for inclusion in
+    multimodal messages. When converted to OpenAI format, the image is
+    serialized as a base64 data URI within an ``image_url`` structure.
 
     Attributes:
-       image: The image to be sent to the model.
+        type: Chunk type discriminator, always ``ChunkTypes.image``.
+        image: The image data, either a PIL Image object or a base64 string,
+            wrapped in a SerializableImage for Pydantic compatibility.
 
-    Examples:
+    Example:
         >>> from PIL import Image
         >>> image_chunk = ImageChunk(image=Image.new('RGB', (200, 200), color='blue'))
     """
@@ -105,13 +140,37 @@ class ImageChunk(BaseContentChunk):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        r"""Converts the chunk to the OpenAI format."""
+        """Convert the image chunk to OpenAI API format.
+
+        Serializes the image to a base64 data URI and wraps it in the
+        OpenAI ``image_url`` content chunk format.
+
+        Returns:
+            A dictionary with ``type`` set to ``"image_url"`` and an
+            ``image_url`` sub-dictionary containing the base64 data URI.
+        """
         base64_image = self.model_dump(include={"image"}, context={"add_format_prefix": True})["image"]
         return {"type": "image_url", "image_url": {"url": base64_image}}
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "ImageChunk":
-        r"""Converts the OpenAI chunk to the Calute format."""
+        """Create an ImageChunk from an OpenAI-format image_url dictionary.
+
+        Parses the base64 data URI from the OpenAI format, stripping the
+        ``data:image/...;base64,`` prefix if present, and creates an
+        ImageChunk with the raw base64 image data.
+
+        Args:
+            openai_chunk: A dictionary with ``type`` set to ``"image_url"``
+                and an ``image_url`` sub-dictionary containing a ``url`` key.
+
+        Returns:
+            A new ImageChunk instance with the parsed image data.
+
+        Raises:
+            AssertionError: If the chunk type is not ``"image_url"`` or the
+                ``image_url`` dictionary is malformed.
+        """
         assert openai_chunk.get("type") == "image_url", openai_chunk
 
         image_url_dict = openai_chunk["image_url"]
@@ -124,14 +183,19 @@ class ImageChunk(BaseContentChunk):
 
 
 class ImageURL(CaluteBase):
-    r"""Image URL or a base64 encoded image.
+    """Represents an image reference by URL or base64-encoded data URI.
+
+    Used within ``ImageURLChunk`` to specify the image source and optional
+    detail level for vision-capable models.
 
     Attributes:
-       url: The URL of the image.
-       detail: The detail of the image.
+        url: The URL of the image or a base64-encoded data URI string
+            (e.g., ``"data:image/png;base64,..."`` or ``"https://..."``).
+        detail: Optional detail level hint for the model (e.g., ``"low"``,
+            ``"high"``, ``"auto"``). Controls image processing resolution.
 
-    Examples:
-       >>> image_url = ImageURL(url="https://example.com/image.png")
+    Example:
+        >>> image_url = ImageURL(url="https://example.com/image.png", detail="high")
     """
 
     url: str
@@ -139,13 +203,21 @@ class ImageURL(CaluteBase):
 
 
 class ImageURLChunk(BaseContentChunk):
-    r"""Image URL chunk.
+    """Content chunk containing an image referenced by URL or data URI.
+
+    Supports both plain URL strings and structured ``ImageURL`` objects
+    with optional detail level hints for vision-capable models.
 
     Attributes:
-       image_url: The URL of the image or a base64 encoded image to be sent to the model.
+        type: Chunk type discriminator, always ``ChunkTypes.image_url``.
+        image_url: The image reference, either an ``ImageURL`` object with
+            ``url`` and optional ``detail`` fields, or a plain URL string.
 
-    Examples:
-        >>> image_url_chunk = ImageURLChunk(image_url="data:image/png;base64,iVBORw0")
+    Example:
+        >>> chunk = ImageURLChunk(image_url="https://example.com/photo.jpg")
+        >>> chunk_with_detail = ImageURLChunk(
+        ...     image_url=ImageURL(url="https://example.com/photo.jpg", detail="high")
+        ... )
     """
 
     type: Literal[ChunkTypes.image_url] = ChunkTypes.image_url
@@ -156,17 +228,28 @@ class ImageURLChunk(BaseContentChunk):
     def get_url(self) -> str:
         """Extract the URL string from the image_url attribute.
 
-        Handles both ImageURL objects and plain string URLs.
+        Handles both ``ImageURL`` objects and plain string URLs, providing
+        a uniform way to access the underlying URL.
 
         Returns:
-            The URL string for the image.
+            The URL string for the image, regardless of whether ``image_url``
+            is an ``ImageURL`` instance or a plain string.
         """
         if isinstance(self.image_url, ImageURL):
             return self.image_url.url
         return self.image_url
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        r"""Converts the chunk to the OpenAI format."""
+        """Convert the image URL chunk to OpenAI API format.
+
+        Creates an OpenAI-compatible content chunk dictionary with the image
+        URL and optional detail level.
+
+        Returns:
+            A dictionary with ``type`` set to ``"image_url"`` and an
+            ``image_url`` sub-dictionary containing the URL and optionally
+            a ``detail`` key.
+        """
         image_url_dict = {"url": self.get_url()}
         if isinstance(self.image_url, ImageURL) and self.image_url.detail is not None:
             image_url_dict["detail"] = self.image_url.detail
@@ -179,34 +262,61 @@ class ImageURLChunk(BaseContentChunk):
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "ImageURLChunk":
-        r"""Converts the OpenAI chunk to the Calute format."""
+        """Create an ImageURLChunk from an OpenAI-format content chunk dictionary.
+
+        Args:
+            openai_chunk: A dictionary with an ``image_url`` key containing
+                either a URL string or a dictionary with ``url`` and optional
+                ``detail`` keys.
+
+        Returns:
+            A new ImageURLChunk instance parsed from the OpenAI format.
+        """
         return cls.model_validate({"image_url": openai_chunk["image_url"]})
 
 
 class TextChunk(BaseContentChunk):
-    r"""Text chunk.
+    """Content chunk containing plain text.
+
+    The most common content chunk type, representing a segment of text
+    within a multimodal message.
 
     Attributes:
-      text: The text to be sent to the model.
+        type: Chunk type discriminator, always ``ChunkTypes.text``.
+        text: The text content string.
 
-    Examples:
+    Example:
         >>> text_chunk = TextChunk(text="Hello, how can I help you?")
+        >>> text_chunk.to_openai()
+        {'type': 'text', 'text': 'Hello, how can I help you?'}
     """
 
     type: Literal[ChunkTypes.text] = ChunkTypes.text
     text: str
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        r"""Converts the chunk to the OpenAI format."""
+        """Convert the text chunk to OpenAI API format.
+
+        Returns:
+            A dictionary with ``type`` set to ``"text"`` and a ``text`` key
+            containing the text content.
+        """
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, messages: dict[str, str | dict[str, str]]) -> "TextChunk":
-        r"""Converts the OpenAI chunk to the Calute format."""
+        """Create a TextChunk from an OpenAI-format content chunk dictionary.
+
+        Args:
+            messages: A dictionary with ``type`` set to ``"text"`` and a
+                ``text`` key containing the text content.
+
+        Returns:
+            A new TextChunk instance with the parsed text.
+        """
         return cls.model_validate(messages)
 
 
-#: Discriminated union of all content chunk types for multimodal message content.
 ContentChunk = Annotated[TextChunk | ImageChunk | ImageURLChunk, Field(discriminator="type")]
 
 
@@ -246,16 +356,21 @@ def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[s
 
 
 class Roles(StrEnum):
-    r"""Enum for the roles of the messages.
+    """Enumeration of message roles in a chat conversation.
+
+    Defines the four standard roles used in chat completion APIs to
+    distinguish between different participants in a conversation.
 
     Attributes:
-       system: The system role.
-       user: The user role.
-       assistant: The assistant role.
-       tool: The tool role.
+        system: The system role, used for initial instructions and context.
+        user: The user role, representing the human participant.
+        assistant: The assistant role, representing the AI model's responses.
+        tool: The tool role, used for function/tool execution results.
 
-    Examples:
+    Example:
         >>> role = Roles.user
+        >>> role.value
+        'user'
     """
 
     system = "system"
@@ -265,45 +380,85 @@ class Roles(StrEnum):
 
 
 class BaseMessage(CaluteBase):
-    r"""Base class for all messages.
+    """Abstract base class for all chat message types.
+
+    Provides the common interface for message serialization to and from
+    OpenAI format. Subclasses implement role-specific content handling
+    and serialization logic.
 
     Attributes:
-       role: The role of the message.
+        role: The role of the message sender, one of ``system``, ``user``,
+            ``assistant``, or ``tool``.
     """
 
     role: Literal[Roles.system, Roles.user, Roles.assistant, Roles.tool]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        r"""Converts the message to the OpenAI format.
+        """Convert this message to the OpenAI API format.
 
-        Should be implemented by subclasses.
+        Must be implemented by subclasses to produce a dictionary compatible
+        with the OpenAI chat completion messages format.
+
+        Returns:
+            A dictionary with at minimum ``role`` and ``content`` keys,
+            formatted for the OpenAI API.
+
+        Raises:
+            NotImplementedError: Always raised in the base class; subclasses
+                must override this method.
         """
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "BaseMessage":  # type:ignore
-        r"""Converts the OpenAI message to the Calute format.
+        """Create a message instance from an OpenAI-format dictionary.
 
-        Should be implemented by subclasses.
+        Must be implemented by subclasses to parse OpenAI-format message
+        dictionaries into the appropriate Calute message type.
+
+        Args:
+            openai_message: A dictionary in OpenAI message format containing
+                at minimum a ``role`` key.
+
+        Returns:
+            An instance of the appropriate BaseMessage subclass.
+
+        Raises:
+            NotImplementedError: Always raised in the base class; subclasses
+                must override this method.
         """
         raise NotImplementedError(f"from_openai method not implemented for {cls.__name__}.")
 
 
 class UserMessage(BaseMessage):
-    r"""User message.
+    """Message from the user in a chat conversation.
+
+    Supports both plain text content and multimodal content consisting of
+    a list of content chunks (text, images, image URLs).
 
     Attributes:
-        content: The content of the message.
+        role: The message role, always ``Roles.user``.
+        content: The message content, either a plain text string or a list of
+            ``ContentChunk`` objects for multimodal messages.
 
-    Examples:
+    Example:
         >>> message = UserMessage(content="Can you help me to write a poem?")
+        >>> message.role
+        <Roles.user: 'user'>
     """
 
     role: Literal[Roles.user] = Roles.user
     content: str | list[ContentChunk]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        r"""Converts the message to the OpenAI format."""
+        """Convert the user message to OpenAI API format.
+
+        Handles both plain text content (returned as a string) and multimodal
+        content (returned as a list of content chunk dictionaries).
+
+        Returns:
+            A dictionary with ``role`` and ``content`` keys in OpenAI format.
+        """
         if isinstance(self.content, str):
             return {"role": self.role, "content": self.content}
         return {
@@ -313,7 +468,19 @@ class UserMessage(BaseMessage):
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "UserMessage":
-        r"""Converts the OpenAI message to the Calute format."""
+        """Create a UserMessage from an OpenAI-format message dictionary.
+
+        Handles both plain text content strings and lists of content chunk
+        dictionaries for multimodal messages.
+
+        Args:
+            openai_message: A dictionary with ``role`` set to ``"user"`` and
+                a ``content`` key containing either a string or a list of
+                content chunk dictionaries.
+
+        Returns:
+            A new UserMessage instance with properly typed content.
+        """
         if isinstance(openai_message["content"], str):
             return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
@@ -325,27 +492,48 @@ class UserMessage(BaseMessage):
 
 
 class SystemMessage(BaseMessage):
-    r"""System message.
+    """System-level instruction message for configuring model behavior.
+
+    System messages set the context, personality, and constraints for
+    the AI assistant. They are typically placed at the beginning of a
+    conversation and support both plain text and multimodal content.
 
     Attributes:
-        content: The content of the message.
+        role: The message role, always ``Roles.system``.
+        content: The system instruction content, either a plain text string
+            or a list of ``ContentChunk`` objects.
 
-    Examples:
+    Example:
         >>> message = SystemMessage(content="You are a helpful assistant.")
+        >>> message.to_openai()
+        {'role': 'system', 'content': 'You are a helpful assistant.'}
     """
 
     role: Literal[Roles.system] = Roles.system
     content: str | list[ContentChunk]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        r"""Converts the message to the OpenAI format."""
+        """Convert the system message to OpenAI API format.
+
+        Returns:
+            A dictionary with ``role`` and ``content`` keys in OpenAI format.
+        """
         if isinstance(self.content, str):
             return {"role": self.role, "content": self.content}
         return {"role": self.role, "content": [chunk.to_openai() for chunk in self.content]}
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "SystemMessage":
-        r"""Converts the OpenAI message to the Calute format."""
+        """Create a SystemMessage from an OpenAI-format message dictionary.
+
+        Args:
+            openai_message: A dictionary with ``role`` set to ``"system"`` and
+                a ``content`` key containing either a string or a list of
+                content chunk dictionaries.
+
+        Returns:
+            A new SystemMessage instance with properly typed content.
+        """
         if isinstance(openai_message["content"], str):
             return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
@@ -357,16 +545,26 @@ class SystemMessage(BaseMessage):
 
 
 class AssistantMessage(BaseMessage):
-    r"""Assistant message.
+    """Message generated by the AI assistant.
+
+    Represents the model's response in a conversation. May contain text
+    content, tool/function calls, or both. The ``prefix`` flag indicates
+    whether this message should be treated as a prefix-fill for the next
+    generation (used by some model APIs).
 
     Attributes:
-        role: The role of the message.
-        content: The content of the message.
-        tool_calls: The tool calls of the message.
-        prefix: Whether the message is a prefix.
+        role: The message role, always ``Roles.assistant``.
+        content: The text content of the assistant's response, or None if
+            the response consists only of tool calls.
+        tool_calls: Optional list of ``ToolCall`` objects representing
+            function/tool invocations requested by the model.
+        prefix: Whether this message serves as a prefix for continued
+            generation (default: False).
 
-    Examples:
+    Example:
         >>> message = AssistantMessage(content="Hello, how can I help you?")
+        >>> message.to_openai()
+        {'role': 'assistant', 'content': 'Hello, how can I help you?'}
     """
 
     role: Literal[Roles.assistant] = Roles.assistant
@@ -375,7 +573,15 @@ class AssistantMessage(BaseMessage):
     prefix: bool = False
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        r"""Converts the message to the OpenAI format."""
+        """Convert the assistant message to OpenAI API format.
+
+        Includes ``content`` and ``tool_calls`` keys only when they are not
+        None, matching the OpenAI API's expected structure.
+
+        Returns:
+            A dictionary with ``role`` and optionally ``content`` and
+            ``tool_calls`` keys in OpenAI format.
+        """
         out_dict: dict[str, str | list[dict[str, str | dict[str, Any]]]] = {
             "role": self.role,
         }
@@ -388,7 +594,18 @@ class AssistantMessage(BaseMessage):
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "AssistantMessage":
-        r"""Converts the OpenAI message to the Calute format."""
+        """Create an AssistantMessage from an OpenAI-format message dictionary.
+
+        Parses both the text content and any tool calls from the OpenAI
+        message format.
+
+        Args:
+            openai_message: A dictionary with ``role`` set to ``"assistant"``,
+                optional ``content`` string, and optional ``tool_calls`` list.
+
+        Returns:
+            A new AssistantMessage instance with parsed content and tool calls.
+        """
         openai_tool_calls = openai_message.get("tool_calls", None)
         tools_calls = (
             [ToolCall.from_openai(openai_tool_call) for openai_tool_call in openai_tool_calls]
@@ -405,14 +622,23 @@ class AssistantMessage(BaseMessage):
 
 
 class ToolMessage(BaseMessage):
-    r"""Tool message.
+    """Message containing the result of a tool/function call execution.
+
+    Tool messages are sent after a function has been executed to provide
+    the result back to the model. Each tool message must reference the
+    specific tool call it responds to via ``tool_call_id``.
 
     Attributes:
-        content: The content of the message.
-        tool_call_id: The tool call id of the message.
+        content: The string result of the tool execution.
+        role: The message role, always ``Roles.tool``.
+        tool_call_id: The unique identifier of the tool call this message
+            responds to. Must not be None when converting to OpenAI format.
 
-    Examples:
-       >>> message = ToolMessage(content="Hello, how can I help you?", tool_call_id="123")
+    Example:
+        >>> message = ToolMessage(
+        ...     content='{"temperature": 72, "unit": "fahrenheit"}',
+        ...     tool_call_id="call_abc123"
+        ... )
     """
 
     content: str
@@ -420,13 +646,33 @@ class ToolMessage(BaseMessage):
     tool_call_id: str | None = None
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        r"""Converts the message to the OpenAI format."""
+        """Convert the tool message to OpenAI API format.
+
+        Returns:
+            A dictionary with ``role``, ``content``, and ``tool_call_id`` keys.
+
+        Raises:
+            AssertionError: If ``tool_call_id`` is None, as OpenAI requires
+                tool messages to reference a specific tool call.
+        """
         assert self.tool_call_id is not None, "tool_call_id must be provided for tool messages."
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, messages: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "ToolMessage":
-        r"""Converts the OpenAI message to the Calute format."""
+        """Create a ToolMessage from an OpenAI-format message dictionary.
+
+        Args:
+            messages: A dictionary with ``role`` set to ``"tool"``, a
+                ``content`` string, and a ``tool_call_id`` string.
+
+        Returns:
+            A new ToolMessage instance with the parsed content and tool call ID.
+
+        Raises:
+            AssertionError: If ``tool_call_id`` is not present in the input,
+                as it is required for tool messages.
+        """
         tool_message = cls.model_validate(
             dict(
                 content=messages["content"],
@@ -438,7 +684,6 @@ class ToolMessage(BaseMessage):
         return tool_message
 
 
-# Internal mapping from message class types to their corresponding roles.
 _map_type_to_role = {
     ToolMessage: Roles.tool,
     UserMessage: Roles.user,
@@ -446,7 +691,6 @@ _map_type_to_role = {
     SystemMessage: Roles.system,
 }
 
-# Internal reverse mapping from roles to their corresponding message class types.
 _map_role_to_type = {v: k for k, v in _map_type_to_role.items()}
 
 
@@ -478,7 +722,15 @@ class MessagesHistory(CaluteBase):
     ]
 
     def to_openai(self) -> list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]:
-        r"""Converts the message to the OpenAI format."""
+        """Convert all messages to OpenAI API format.
+
+        Iterates through all messages, converts each to OpenAI format,
+        and filters out system messages with empty content.
+
+        Returns:
+            A dictionary with a ``messages`` key containing a list of
+            OpenAI-format message dictionaries.
+        """
         message = []
         for msg in self.messages:
             msg = msg.to_openai()
@@ -550,7 +802,15 @@ class MessagesHistory(CaluteBase):
 
         other_msgs = [m for m in self.messages if not isinstance(m, SystemMessage)]
 
-        def _capitalize_role(role):
+        def _capitalize_role(role: str | Roles) -> str:
+            """Capitalize a role name for display purposes.
+
+            Args:
+                role: A Roles enum member or plain string.
+
+            Returns:
+                Capitalized string representation of the role.
+            """
             if hasattr(role, "value"):
                 return role.value.capitalize()
             return role.capitalize()
@@ -602,23 +862,16 @@ class MessagesHistory(CaluteBase):
         return "\n\n".join(prompt_parts)
 
 
-#: Discriminated union of all chat message types, keyed by role.
 ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
 
-#: Generic type variable for any chat message type.
 ChatMessageType = TypeVar("ChatMessageType", bound=ChatMessage)
 
-#: Generic type variable bound to UserMessage.
 UserMessageType = TypeVar("UserMessageType", bound=UserMessage)
 
-#: Generic type variable bound to AssistantMessage.
 AssistantMessageType = TypeVar("AssistantMessageType", bound=AssistantMessage)
 
-#: Generic type variable bound to ToolMessage.
 ToolMessageType = TypeVar("ToolMessageType", bound=ToolMessage)
 
-#: Generic type variable bound to SystemMessage.
 SystemMessageType = TypeVar("SystemMessageType", bound=SystemMessage)
 
-#: Type alias for a list of chat messages representing a conversation.
 ConversionType: TypeAlias = list[ChatMessage]

@@ -60,7 +60,7 @@ class AutoCompactAgent:
 
     Note:
         This is a stub implementation. Full compaction logic is handled
-        by the context_management module and compaction strategies.
+        by the context module and compaction strategies.
 
     Example:
         >>> agent = AutoCompactAgent(llm_client=calute_instance)
@@ -91,7 +91,7 @@ class AutoCompactAgent:
 
         Note:
             This stub implementation only stores the llm_client. Full
-            configuration handling is implemented in the context_management
+            configuration handling is implemented in the context
             module and CortexAgent.
 
         Example:

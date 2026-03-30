@@ -193,9 +193,9 @@ Categories include:
 
 
 TOOL_REQUIREMENTS: dict[str, str] = {
-    "WebScraper": "calute[search]",
+    "WebScraper": "beautifulsoup4 (included in core)",
     "APIClient": "httpx (included in core)",
-    "RSSReader": "feedparser",
+    "RSSReader": "feedparser (included in core)",
     "SystemInfo": "psutil",
     "ProcessManager": "psutil",
     "FileSystemTools": "core",

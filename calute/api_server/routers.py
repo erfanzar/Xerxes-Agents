@@ -58,9 +58,14 @@ class ChatRouter:
     def __init__(self, agents: dict[str, Agent], completion_service: CompletionService):
         """Initialize the chat router.
 
+        Creates a new ``APIRouter`` and registers the chat completion
+        endpoint for handling standard agent requests.
+
         Args:
-            agents: Dictionary of registered agents
-            completion_service: Service for handling completions
+            agents: Dictionary mapping agent IDs (strings) to their
+                corresponding ``Agent`` objects.
+            completion_service: The ``CompletionService`` instance used
+                to process chat completion requests.
         """
         self.agents = agents
         self.completion_service = completion_service
@@ -68,11 +73,37 @@ class ChatRouter:
         self._setup_routes()
 
     def _setup_routes(self):
-        """Set up the chat completion routes."""
+        """Register the ``/v1/chat/completions`` POST endpoint on the router.
+
+        The registered endpoint looks up the requested model in the agents
+        dictionary, converts messages from OpenAI format to Calute format,
+        applies any sampling parameter overrides, and delegates to the
+        completion service for either streaming or non-streaming responses.
+
+        Raises:
+            HTTPException: 404 if the requested model is not found among
+                registered agents; 500 for any unexpected processing error.
+        """
 
         @self.router.post("/v1/chat/completions")
         async def chat_completions(request: ChatCompletionRequest):
-            """Handle chat completion requests (OpenAI compatible)."""
+            """Handle a chat completion request (OpenAI-compatible).
+
+            Resolves the agent by model name, converts messages, and
+            returns either a streaming ``StreamingResponse`` or a
+            complete ``ChatCompletionResponse``.
+
+            Args:
+                request: The incoming ``ChatCompletionRequest`` with
+                    model name, messages, and optional parameters.
+
+            Returns:
+                A ``ChatCompletionResponse`` for non-streaming requests,
+                or a ``StreamingResponse`` with SSE for streaming requests.
+
+            Raises:
+                HTTPException: 404 if model not found; 500 on internal error.
+            """
             try:
                 agent = self.agents.get(request.model)
                 if not agent:
@@ -112,19 +143,35 @@ class ModelsRouter:
     def __init__(self, agents: dict[str, Agent]):
         """Initialize the models router.
 
+        Creates a new ``APIRouter`` and registers the models listing
+        endpoint for enumerating available agents.
+
         Args:
-            agents: Dictionary of registered agents
+            agents: Dictionary mapping agent IDs (strings) to their
+                corresponding ``Agent`` objects or model configurations.
         """
         self.agents = agents
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self):
-        """Set up the models routes."""
+        """Register the ``/v1/models`` GET endpoint on the router.
+
+        The registered endpoint iterates over all registered agents and
+        returns their metadata in OpenAI-compatible ``ModelsResponse`` format.
+        """
 
         @self.router.get("/v1/models")
         async def list_models() -> ModelsResponse:
-            """List available models (agents) (OpenAI compatible)."""
+            """List all available models and agents (OpenAI-compatible).
+
+            Builds a list of ``ModelInfo`` objects from the registered agents,
+            each stamped with the current Unix timestamp as the creation time.
+
+            Returns:
+                A ``ModelsResponse`` containing a list of ``ModelInfo`` objects
+                for every registered agent.
+            """
             models = []
             for agent_id, _ in self.agents.items():
                 models.append(ModelInfo(id=agent_id, created=int(time.time())))
@@ -134,30 +181,47 @@ class ModelsRouter:
 class HealthRouter:
     """Router for health check endpoints.
 
-    Provides the /health endpoint for server health monitoring,
-    returning the server status and number of registered agents.
+    Provides the ``/health`` endpoint for server health monitoring,
+    returning the server status and the number of registered agents.
+    This is typically used by load balancers, container orchestrators,
+    or monitoring systems to verify the server is operational.
 
     Attributes:
-        agents: Dictionary mapping agent IDs to Agent objects.
-        router: FastAPI APIRouter instance with configured routes.
+        agents: Dictionary mapping agent IDs to ``Agent`` objects.
+            The length of this dictionary is reported in health responses.
+        router: FastAPI ``APIRouter`` instance with configured routes.
     """
 
     def __init__(self, agents: dict[str, Agent]):
         """Initialize the health router.
 
+        Creates a new ``APIRouter`` and registers the health check
+        endpoint.
+
         Args:
-            agents: Dictionary of registered agents
+            agents: Dictionary mapping agent IDs (strings) to their
+                corresponding ``Agent`` objects. Used to report the
+                number of available agents in the health response.
         """
         self.agents = agents
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self):
-        """Set up the health check routes."""
+        """Register the ``/health`` GET endpoint on the router.
+
+        The registered endpoint returns a ``HealthResponse`` with
+        the current server status and agent count.
+        """
 
         @self.router.get("/health")
         async def health_check() -> HealthResponse:
-            """Health check endpoint."""
+            """Return the current health status of the API server.
+
+            Returns:
+                A ``HealthResponse`` with status ``"healthy"`` and
+                the count of currently registered agents.
+            """
             return HealthResponse(status="healthy", agents=len(self.agents))
 
 
@@ -176,15 +240,28 @@ class CortexChatRouter:
     def __init__(self, cortex_completion_service: CortexCompletionService):
         """Initialize the Cortex chat router.
 
+        Creates a new ``APIRouter`` and registers the Cortex chat
+        completion endpoint for multi-agent orchestration requests.
+
         Args:
-            cortex_completion_service: Service for handling Cortex completions
+            cortex_completion_service: The ``CortexCompletionService``
+                instance used to process multi-agent orchestration requests.
         """
         self.cortex_completion_service = cortex_completion_service
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self):
-        """Set up the Cortex chat completion routes."""
+        """Register the ``/v1/chat/completions`` POST endpoint for Cortex on the router.
+
+        The registered endpoint converts messages from OpenAI format to Calute
+        format and delegates to the Cortex completion service. The model name
+        in the request determines the execution mode (task vs. instruction) and
+        process type (sequential, parallel, hierarchical).
+
+        Raises:
+            HTTPException: 500 for any unexpected processing error.
+        """
 
         @self.router.post("/v1/chat/completions")
         async def cortex_chat_completions(request: ChatCompletionRequest):
@@ -249,10 +326,20 @@ class UnifiedChatRouter:
     ):
         """Initialize the unified chat router.
 
+        Creates a single router that can dispatch to either standard Calute
+        agents or Cortex multi-agent orchestration based on the model name
+        in each incoming request.
+
         Args:
-            agents: Dictionary of registered standard agents
-            completion_service: Service for standard completions
-            cortex_completion_service: Service for Cortex completions
+            agents: Optional dictionary mapping agent IDs (strings) to their
+                corresponding ``Agent`` objects for standard completions.
+                Defaults to an empty dictionary if ``None``.
+            completion_service: Optional ``CompletionService`` instance for
+                handling standard agent completions. If ``None``, standard
+                agent requests will return a 404 error.
+            cortex_completion_service: Optional ``CortexCompletionService``
+                instance for handling Cortex multi-agent completions. If
+                ``None``, Cortex requests will return a 404 error.
         """
         self.agents = agents or {}
         self.completion_service = completion_service
@@ -263,16 +350,27 @@ class UnifiedChatRouter:
     def _is_cortex_model(self, model_name: str) -> bool:
         """Check if the model name indicates a Cortex request.
 
-        Supports various prefix patterns:
-        - Direct: "cortex", "cortex-task"
-        - With custom prefix: "calute-cortex", "myapp-cortex-task"
-        - Any model containing "cortex" is considered a Cortex model
+        Performs a case-insensitive check for the substring ``"cortex"``
+        anywhere in the model name. This supports various naming patterns:
+
+        - Direct: ``"cortex"``, ``"cortex-task"``
+        - With custom prefix: ``"calute-cortex"``, ``"myapp-cortex-task"``
+        - Any model containing ``"cortex"`` is considered a Cortex model
 
         Args:
-            model_name: The model name from the request
+            model_name: The model name string from the incoming request.
 
         Returns:
-            True if this should be handled by Cortex
+            ``True`` if the model name contains ``"cortex"`` (case-insensitive)
+            and should be routed to the Cortex completion service;
+            ``False`` otherwise or if the model name is empty/falsy.
+
+        Example:
+            >>> router = UnifiedChatRouter()
+            >>> router._is_cortex_model("cortex-task-parallel")
+            True
+            >>> router._is_cortex_model("gpt-4")
+            False
         """
         if not model_name:
             return False
@@ -280,19 +378,32 @@ class UnifiedChatRouter:
         return "cortex" in model_name.lower()
 
     def _normalize_cortex_model(self, model_name: str) -> str:
-        """Normalize Cortex model name for compatibility.
+        """Normalize a Cortex model name into a canonical hyphen-separated format.
 
-        Extracts and normalizes the Cortex-specific part from various formats:
-        - "cortex:task" -> "cortex-task"
-        - "calute-cortex-task" -> "cortex-task"
-        - "myapp-cortex:task:parallel" -> "cortex-task-parallel"
-        - "custom.cortex.task" -> "cortex-task"
+        Extracts the Cortex-specific portion of the model name and replaces
+        all non-hyphen separators (``:`` ``.`` ``_``) with hyphens. Any
+        prefix before ``"cortex"`` is stripped, and trailing hyphens are removed.
 
         Args:
-            model_name: The original model name
+            model_name: The original model name string, potentially with
+                custom prefixes and mixed separators.
 
         Returns:
-            Normalized model name containing only the cortex-relevant parts
+            A normalized model name string containing only the cortex-relevant
+            parts, using hyphens as separators. If ``"cortex"`` is not found
+            in the name, the entire lowercased and separator-normalized string
+            is returned.
+
+        Example:
+            >>> router = UnifiedChatRouter()
+            >>> router._normalize_cortex_model("cortex:task")
+            'cortex-task'
+            >>> router._normalize_cortex_model("calute-cortex-task")
+            'cortex-task'
+            >>> router._normalize_cortex_model("myapp-cortex:task:parallel")
+            'cortex-task-parallel'
+            >>> router._normalize_cortex_model("custom.cortex.task")
+            'cortex-task'
         """
 
         normalized = model_name.lower()
@@ -309,25 +420,47 @@ class UnifiedChatRouter:
         return normalized
 
     def _setup_routes(self):
-        """Set up the unified chat completion routes."""
+        """Register the unified ``/v1/chat/completions`` POST endpoint on the router.
+
+        The registered endpoint inspects the model name in each request to
+        determine whether it should be handled by the Cortex completion service
+        or the standard completion service. Cortex model names are normalized
+        before being passed to the service layer.
+
+        Raises:
+            HTTPException: 404 if the requested service or model is not
+                available; 500 for any unexpected processing error.
+        """
 
         @self.router.post("/v1/chat/completions")
         async def unified_chat_completions(request: ChatCompletionRequest):
             """Handle both standard and Cortex chat completions.
 
             This endpoint is fully OpenAI-compatible and automatically routes
-            requests based on the model name:
+            requests based on the model name. If the model name contains
+            ``"cortex"``, the request is forwarded to the Cortex completion
+            service; otherwise, it is handled by the standard completion service.
 
             Standard agents:
-            - Use the agent's registered name/ID
+                Use the agent's registered name/ID as the model.
 
             Cortex modes:
-            - "cortex" or "cortex-instruct": Instruction mode
-            - "cortex-task": Task mode with dynamic task creation
-            - "cortex-task-parallel": Task mode with parallel execution
-            - "cortex-task-hierarchical": Task mode with hierarchical execution
+                - ``"cortex"`` or ``"cortex-instruct"``: Instruction mode
+                - ``"cortex-task"``: Task mode with dynamic task creation
+                - ``"cortex-task-parallel"``: Task mode with parallel execution
+                - ``"cortex-task-hierarchical"``: Hierarchical execution
 
-            The endpoint maintains full compatibility with OpenAI client libraries.
+            Args:
+                request: The incoming ``ChatCompletionRequest`` with model
+                    name, messages, and optional streaming/sampling parameters.
+
+            Returns:
+                A ``ChatCompletionResponse`` for non-streaming requests,
+                or a ``StreamingResponse`` with SSE for streaming requests.
+
+            Raises:
+                HTTPException: 404 if the requested model or service is not
+                    available; 500 for any unexpected processing error.
             """
             try:
                 original_model = request.model

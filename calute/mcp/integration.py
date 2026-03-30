@@ -33,8 +33,8 @@ LLM function calling.
 from collections.abc import Callable
 from typing import Any
 
-from ..loggings import get_logger
-from ..utils import run_sync
+from ..core.utils import run_sync
+from ..logging.console import get_logger
 from .manager import MCPManager
 from .types import MCPTool
 
@@ -120,7 +120,7 @@ def mcp_tool_to_calute_function(tool: MCPTool, manager: MCPManager) -> Callable:
             return run_sync(manager.call_tool(tool.name, kwargs))
         except Exception as e:
             logger.error(f"Error executing MCP tool {tool.name}: {e}")
-            raise  # Re-raise instead of returning error dict
+            raise
 
     func_name = tool.name.replace("-", "_").replace(".", "_")
     sync_wrapper.__name__ = func_name

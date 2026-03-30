@@ -1,6 +1,6 @@
 [project]
 name = "calute"
-version = "0.1.5"
+version = "0.2.0"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }
@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
-# Core dependencies - minimal set required for basic functionality
+# Core runtime dependencies
 dependencies = [
     "pydantic>=2.9.2,<3.0.0",
     "openai>=1.72.0",
@@ -32,13 +32,22 @@ dependencies = [
     "jinja2>=3.1.6",
     "requests>=2.31.0",
     "ddgs>=9.5.4",
+    "beautifulsoup4>=4.12.0",
+    "feedparser>=6.0.0",
+    "python-dateutil>=2.8.0",
+    "pyyaml>=6.0",
     "lxml>=5.0.0",
+    "textual>=0.89,<1.0",
+    "playwright>=1.54.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/erfanzar/Calute"
 Repository = "https://github.com/erfanzar/Calute"
 Documentation = "https://erfanzar.github.io/Calute"
+
+[project.scripts]
+calute = "calute.tui.cli:main"
 
 [project.optional-dependencies]
 # Development tools
@@ -56,14 +65,10 @@ dev = [
 ]
 
 ui = ["chainlit~=2.9.2", "markdown>=3.5.0"]
+tui = []
 
 # Search and web tools
-search = [
-    "beautifulsoup4>=4.12.0",
-    "feedparser>=6.0.0",
-    "python-dateutil>=2.8.0",
-    "pyyaml>=6.0",
-]
+search = []
 
 # Database backends (currently unused - placeholder for future)
 # database = [
@@ -109,7 +114,7 @@ mcp = [
 # ]
 
 # Full installation with all features
-full = ["calute[search,monitoring,vectors,ui,mcp]"]
+full = ["calute[search,monitoring,vectors,ui,tui,mcp]"]
 
 # Common presets for different use cases
 research = ["calute[search,vectors,ui]"]

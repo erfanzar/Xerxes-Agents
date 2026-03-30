@@ -66,12 +66,76 @@ Typical usage example:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
 from urllib.parse import urlparse
 
 from .base import BaseLLM, LLMConfig
+
+
+class _AsyncIteratorFromSyncStream:
+    """Adapter that wraps a synchronous streaming iterator as an async iterator.
+
+    This class bridges the gap between OpenAI's synchronous streaming client
+    and Calute's async-first interface. It uses ``asyncio.to_thread`` to
+    offload blocking ``next()`` calls to a thread pool, preventing the event
+    loop from being blocked during streaming.
+
+    This is used internally when the synchronous OpenAI client returns a
+    synchronous stream but the caller expects an async iterator (e.g., when
+    ``generate_completion`` is awaited with ``stream=True``).
+
+    Attributes:
+        _iterator: The underlying synchronous iterator being adapted.
+        _sentinel: A unique sentinel object used to detect iterator exhaustion
+            without catching ``StopIteration`` across threads.
+
+    Example:
+        sync_stream = client.chat.completions.create(stream=True, ...)
+        async_stream = _AsyncIteratorFromSyncStream(sync_stream)
+        async for chunk in async_stream:
+            print(chunk)
+    """
+
+    def __init__(self, iterator: Any):
+        """Initialize the async adapter with a synchronous iterator.
+
+        Args:
+            iterator: Any synchronous iterable or iterator to be wrapped.
+                Will be converted to an iterator via ``iter()`` if not
+                already one.
+        """
+        self._iterator = iter(iterator)
+        self._sentinel = object()
+
+    def __aiter__(self) -> _AsyncIteratorFromSyncStream:
+        """Return self as the async iterator.
+
+        Returns:
+            This adapter instance, implementing the async iterator protocol.
+        """
+        return self
+
+    async def __anext__(self) -> Any:
+        """Retrieve the next item from the underlying synchronous iterator.
+
+        Offloads the blocking ``next()`` call to a thread pool worker via
+        ``asyncio.to_thread``, so the event loop remains responsive during
+        synchronous I/O waits.
+
+        Returns:
+            The next item from the underlying iterator.
+
+        Raises:
+            StopAsyncIteration: When the underlying synchronous iterator
+                is exhausted (detected via the sentinel pattern).
+        """
+        value = await asyncio.to_thread(next, self._iterator, self._sentinel)
+        if value is self._sentinel:
+            raise StopAsyncIteration
+        return value
 
 
 class OpenAILLM(BaseLLM):
@@ -123,7 +187,13 @@ class OpenAILLM(BaseLLM):
         llm = OpenAILLM(client=custom_client)
     """
 
-    def __init__(self, config: LLMConfig | None = None, client: Any | None = None, **kwargs):
+    def __init__(
+        self,
+        config: LLMConfig | None = None,
+        client: Any | None = None,
+        async_client: Any | None = None,
+        **kwargs,
+    ):
         """Initialize the OpenAI LLM provider.
 
         Creates a new OpenAI LLM provider instance with the specified configuration.
@@ -133,9 +203,14 @@ class OpenAILLM(BaseLLM):
         Args:
             config: LLM configuration object. If None, a default config is created
                 using the provided kwargs with model defaulting to "gpt-4o-mini".
-            client: Optional pre-configured OpenAI client instance. When provided,
-                the client is used directly without creating a new one. Useful for
-                custom authentication or connection pooling scenarios.
+            client: Optional pre-configured synchronous OpenAI client instance.
+                When provided, the client is used directly without creating a new
+                one. Useful for custom authentication or connection pooling scenarios.
+            async_client: Optional pre-configured AsyncOpenAI client instance.
+                When provided, this async client is used for ``generate_completion``
+                calls instead of wrapping the synchronous client with
+                ``asyncio.to_thread``. If not provided but ``client`` is also not
+                provided, both clients are created automatically.
             **kwargs: Configuration parameters when config is None. Common kwargs:
                 - model: Model identifier (default: "gpt-4o-mini")
                 - api_key: OpenAI API key (falls back to OPENAI_API_KEY env var)
@@ -175,6 +250,7 @@ class OpenAILLM(BaseLLM):
             )
 
         self.client = client
+        self.async_client = async_client
         super().__init__(config)
 
     def _initialize_client(self) -> None:
@@ -205,7 +281,7 @@ class OpenAILLM(BaseLLM):
         """
         if self.client is None:
             try:
-                from openai import OpenAI
+                from openai import AsyncOpenAI, OpenAI
             except ImportError as e:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai") from e
 
@@ -218,11 +294,33 @@ class OpenAILLM(BaseLLM):
                 base_url=self.config.base_url,
                 timeout=self.config.timeout,
             )
+            if self.async_client is None:
+                self.async_client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=self.config.base_url,
+                    timeout=self.config.timeout,
+                )
 
         self._auto_fetch_model_info()
 
     def _supports_openai_compatible_sampling_params(self) -> bool:
-        """Return True when targeting a non-OpenAI compatible endpoint."""
+        """Check if the configured endpoint supports extra sampling parameters.
+
+        Determines whether the configured ``base_url`` points to a non-official
+        OpenAI-compatible endpoint (such as vLLM, LM Studio, or a custom proxy)
+        that typically accepts additional sampling parameters like ``top_k``,
+        ``min_p``, and ``repetition_penalty`` via ``extra_body``.
+
+        Official OpenAI and Azure OpenAI endpoints do not support these extra
+        parameters and will return errors if they are included.
+
+        Returns:
+            ``True`` if ``base_url`` is set and does not point to
+            ``api.openai.com`` or ``*.openai.azure.com``, indicating a
+            third-party endpoint that likely supports extended sampling params.
+            ``False`` if no ``base_url`` is configured or the host is an
+            official OpenAI endpoint.
+        """
         if not self.config.base_url:
             return False
 
@@ -312,7 +410,6 @@ class OpenAILLM(BaseLLM):
             }]
             response = await llm.generate_completion(prompt, tools=tools)
         """
-
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
         else:
@@ -378,15 +475,36 @@ class OpenAILLM(BaseLLM):
         if merged_extra_body:
             params["extra_body"] = merged_extra_body
 
-        if params["stream"]:
-            return self.client.chat.completions.create(**params)
-        else:
-            response = self.client.chat.completions.create(**params)
-            return response
+        if self.async_client is not None:
+            return await self.async_client.chat.completions.create(**params)
+
+        response = await asyncio.to_thread(self.client.chat.completions.create, **params)
+        if params["stream"] and not hasattr(response, "__aiter__"):
+            return _AsyncIteratorFromSyncStream(response)
+        return response
 
     @staticmethod
     def _get_openai_field(obj: Any, field: str) -> Any:
-        """Read a field from dicts, typed SDK models, or model extras."""
+        """Read a field from dicts, typed SDK models, or model extras.
+
+        Provides a unified way to access a named field regardless of whether
+        the object is a plain dictionary, a Pydantic model (as used by the
+        OpenAI SDK), or an object with ``model_extra`` for additional fields
+        not declared in the schema.
+
+        The lookup order is:
+        1. ``dict.get(field)`` if ``obj`` is a dict
+        2. ``getattr(obj, field)`` for regular attributes
+        3. ``obj.model_extra.get(field)`` for Pydantic model extras
+
+        Args:
+            obj: The object to read from. Can be ``None``, a dict, a Pydantic
+                model, or any object with attributes.
+            field: The name of the field to retrieve.
+
+        Returns:
+            The field value if found, or ``None`` if the object is ``None``
+            or the field does not exist in any of the checked locations."""
         if obj is None:
             return None
         if isinstance(obj, dict):
@@ -403,12 +521,34 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _stringify_reasoning(cls, value: Any) -> str:
-        """Convert provider-specific reasoning payloads into plain text."""
+        """Convert provider-specific reasoning payloads into plain text.
+
+        Recursively processes reasoning content from various formats returned
+        by different OpenAI-compatible providers. Reasoning models (o1, o3,
+        DeepSeek-R1, etc.) may embed chain-of-thought tokens in different
+        structures: strings, lists, dicts, or Pydantic SDK objects.
+
+        The method attempts to extract text by:
+        1. Returning strings directly
+        2. Recursively joining list/tuple elements
+        3. Searching dicts for known text keys (``text``, ``content``,
+           ``summary_text``, ``reasoning_content``, etc.)
+        4. Falling back to attribute access via :meth:`_get_openai_field`
+           for SDK model objects
+
+        Args:
+            value: The reasoning payload to convert. Can be ``None``, a string,
+                a list/tuple of items, a dict with known text keys, or an
+                SDK model object with reasoning attributes.
+
+        Returns:
+            The extracted plain text reasoning content. Returns an empty
+            string if ``value`` is ``None`` or no text can be extracted."""
         if value is None:
             return ""
         if isinstance(value, str):
             return value
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, list | tuple):
             return "".join(part for item in value if (part := cls._stringify_reasoning(item)))
         if isinstance(value, dict):
             for key in (
@@ -451,14 +591,33 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _extract_reasoning_from_message(cls, message: Any) -> str:
-        """Extract reasoning from chat-completions style message payloads."""
+        """Extract reasoning content from a chat-completions style message.
+
+        Searches the message object for reasoning tokens that reasoning models
+        (o1, o3, DeepSeek-R1, etc.) include alongside the main content. The
+        method checks multiple possible field names used by different providers.
+
+        The extraction strategy is:
+        1. Check top-level fields: ``reasoning_content``, ``reasoning``,
+           ``delta_reasoning`` on the message object
+        2. If the message ``content`` is a list, scan items for those whose
+           ``type`` contains ``'reasoning'`` and extract their text
+
+        Args:
+            message: A chat completion message object (from
+                ``response.choices[0].message``). Can be a Pydantic model or
+                dict with reasoning-related fields.
+
+        Returns:
+            The extracted reasoning text as a single string. Returns an empty
+            string if no reasoning content is found in the message."""
         for field in ("reasoning_content", "reasoning", "delta_reasoning"):
             text = cls._stringify_reasoning(cls._get_openai_field(message, field))
             if text:
                 return text
 
         content = cls._get_openai_field(message, "content")
-        if isinstance(content, (list, tuple)):
+        if isinstance(content, list | tuple):
             parts: list[str] = []
             for item in content:
                 item_type = str(cls._get_openai_field(item, "type") or "").lower()
@@ -472,7 +631,27 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _extract_reasoning_from_chunk(cls, chunk: Any) -> str:
-        """Extract reasoning deltas from chat chunks and Responses API events."""
+        """Extract reasoning deltas from streaming chat chunks and Responses API events.
+
+        Processes a single streaming chunk to extract any incremental reasoning
+        content. Supports multiple event formats used by the OpenAI Chat
+        Completions API and the Responses API for reasoning models.
+
+        The extraction checks (in order):
+        1. Responses API event types: ``response.reasoning.delta``,
+           ``response.reasoning_text.delta``, etc.
+        2. Chat completions delta fields: ``reasoning_content``, ``reasoning``,
+           ``delta_reasoning`` on ``choices[0].delta``
+        3. Top-level ``delta_reasoning`` field on the chunk itself
+
+        Args:
+            chunk: A streaming chunk object from either the Chat Completions
+                or Responses API. Can be a Pydantic model, dict, or any
+                object with the expected attributes.
+
+        Returns:
+            The reasoning text delta from this chunk. Returns an empty string
+            if the chunk contains no reasoning content."""
         event_type = str(cls._get_openai_field(chunk, "type") or "")
         if event_type in {
             "response.reasoning.delta",
@@ -1002,5 +1181,14 @@ class OpenAILLM(BaseLLM):
             async with OpenAILLM(model="gpt-4") as llm:
                 response = await llm.generate_completion("Hello")
         """
+        if hasattr(self.async_client, "aclose"):
+            await self.async_client.aclose()
+        elif hasattr(self.async_client, "close"):
+            maybe_result = self.async_client.close()
+            if hasattr(maybe_result, "__await__"):
+                await maybe_result
+
         if hasattr(self.client, "close"):
-            self.client.close()
+            maybe_result = self.client.close()
+            if hasattr(maybe_result, "__await__"):
+                await maybe_result

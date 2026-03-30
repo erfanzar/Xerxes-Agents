@@ -34,10 +34,9 @@ import subprocess
 from contextlib import AsyncExitStack
 from typing import Any
 
-from ..loggings import get_logger
+from ..logging.console import get_logger
 from .types import MCPPrompt, MCPResource, MCPServerConfig, MCPTool, MCPTransportType
 
-# Lazy imports for optional MCP SDK
 _MCP_SDK_AVAILABLE: bool | None = None
 
 
@@ -81,13 +80,23 @@ class MCPClient:
         prompts: Available prompts from the server
     """
 
-    _request_id_counter: int = 0  # Class-level counter for unique JSON-RPC IDs
+    _request_id_counter: int = 0
 
     def __init__(self, config: MCPServerConfig):
         """Initialize MCP client with server configuration.
 
+        Sets up the client in a disconnected state with empty capability lists.
+        Call ``connect()`` to establish a connection to the MCP server and
+        discover its capabilities.
+
         Args:
-            config: Configuration for the MCP server
+            config: Configuration for the MCP server, specifying the transport
+                type, command/URL, and optional environment variables or headers.
+
+        Example:
+            >>> config = MCPServerConfig(name="fs", command="npx", args=["-y", "@mcp/server-fs"])
+            >>> client = MCPClient(config)
+            >>> connected = await client.connect()
         """
         self.config = config
         self.process: subprocess.Popen | None = None
@@ -99,7 +108,6 @@ class MCPClient:
         self.resources: list[MCPResource] = []
         self.prompts: list[MCPPrompt] = []
 
-        # For SDK-based transports (SSE, Streamable HTTP)
         self._session: Any = None
         self._exit_stack: AsyncExitStack | None = None
 
@@ -130,7 +138,9 @@ class MCPClient:
         """
         try:
             transport = self.config.transport
-            # Handle deprecated aliases
+            if self.config.url and self.config.url.startswith(("ws://", "wss://")):
+                self.logger.error(f"WebSocket MCP transport is not implemented for {self.config.name}")
+                return False
             if transport == MCPTransportType.HTTP:
                 transport = MCPTransportType.SSE
             elif transport == MCPTransportType.WEBSOCKET:
@@ -192,12 +202,11 @@ class MCPClient:
             await asyncio.sleep(0.5)
 
             if self.process.poll() is not None:
-                # Use asyncio.to_thread to avoid blocking the event loop
                 stderr_output = ""
                 if self.process.stderr:
                     stderr_output = await asyncio.to_thread(self.process.stderr.read)
                 self.logger.error(f"MCP server process failed to start. Exit code: {self.process.returncode}")
-                self.logger.error(f"stderr: {stderr_output}")
+                self.logger.error(f"stderr output: {stderr_output}")
                 return False
 
             init_request = {
@@ -269,7 +278,6 @@ class MCPClient:
             self._exit_stack = AsyncExitStack()
             await self._exit_stack.__aenter__()
 
-            # Create SSE client connection
             sse_transport = await self._exit_stack.enter_async_context(
                 sse_client(
                     url=self.config.url,
@@ -279,10 +287,8 @@ class MCPClient:
                 )
             )
 
-            # Unpack the transport tuple (read_stream, write_stream)
             read_stream, write_stream = sse_transport
 
-            # Create and initialize the MCP session
             self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             await self._session.initialize()
 
@@ -290,7 +296,6 @@ class MCPClient:
             self.connected = True
             self.logger.debug(f"Connected to MCP server {self.config.name} via SSE")
 
-            # Discover capabilities using SDK session
             await self._discover_capabilities_sdk()
             return True
 
@@ -330,7 +335,6 @@ class MCPClient:
             self._exit_stack = AsyncExitStack()
             await self._exit_stack.__aenter__()
 
-            # Create Streamable HTTP client connection
             http_transport = await self._exit_stack.enter_async_context(
                 streamablehttp_client(
                     url=self.config.url,
@@ -339,20 +343,16 @@ class MCPClient:
                 )
             )
 
-            # Unpack the transport tuple (read_stream, write_stream, get_session_id)
             read_stream, write_stream, get_session_id = http_transport
 
-            # Create and initialize the MCP session
             self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             await self._session.initialize()
 
-            # Get session ID from transport if available
             session_id = get_session_id()
             self.session_id = session_id if session_id else str(id(self))
             self.connected = True
             self.logger.debug(f"Connected to MCP server {self.config.name} via Streamable HTTP")
 
-            # Discover capabilities using SDK session
             await self._discover_capabilities_sdk()
             return True
 
@@ -377,7 +377,6 @@ class MCPClient:
             return
 
         try:
-            # List tools
             tools_result = await self._session.list_tools()
             self.tools = [
                 MCPTool(
@@ -393,7 +392,6 @@ class MCPClient:
             self.logger.debug(f"Failed to list tools: {e}")
 
         try:
-            # List resources
             resources_result = await self._session.list_resources()
             self.resources = [
                 MCPResource(
@@ -410,7 +408,6 @@ class MCPClient:
             self.logger.debug(f"Failed to list resources: {e}")
 
         try:
-            # List prompts
             prompts_result = await self._session.list_prompts()
             self.prompts = [
                 MCPPrompt(
@@ -473,7 +470,6 @@ class MCPClient:
             )
 
             if self.process.poll() is not None:
-                # Use asyncio.to_thread to avoid blocking the event loop
                 stderr_output = ""
                 if self.process.stderr:
                     stderr_output = await asyncio.to_thread(self.process.stderr.read)
@@ -563,12 +559,10 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
-        # Use SDK session for SSE/Streamable HTTP transports
         if self._session:
             result = await self._session.call_tool(tool_name, arguments)
             return result.content
 
-        # Use stdio for STDIO transport
         request = {
             "jsonrpc": "2.0",
             "method": "tools/call",
@@ -604,12 +598,10 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
-        # Use SDK session for SSE/Streamable HTTP transports
         if self._session:
             result = await self._session.read_resource(uri)
             return result.contents
 
-        # Use stdio for STDIO transport
         request = {"jsonrpc": "2.0", "method": "resources/read", "params": {"uri": uri}, "id": self._next_request_id()}
 
         self._write_message(request)
@@ -642,7 +634,6 @@ class MCPClient:
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
-        # Use SDK session for SSE/Streamable HTTP transports
         if self._session:
             result = await self._session.get_prompt(name, arguments or {})
             messages = result.messages
@@ -653,7 +644,6 @@ class MCPClient:
                 return str(content)
             return ""
 
-        # Use stdio for STDIO transport
         request = {
             "jsonrpc": "2.0",
             "method": "prompts/get",
@@ -683,7 +673,6 @@ class MCPClient:
 
         This method is safe to call multiple times.
         """
-        # Clean up SDK session and exit stack (for SSE/Streamable HTTP)
         if self._exit_stack:
             try:
                 await self._exit_stack.__aexit__(None, None, None)
@@ -692,7 +681,6 @@ class MCPClient:
             self._exit_stack = None
             self._session = None
 
-        # Clean up subprocess (for STDIO)
         if self.process:
             try:
                 self.process.terminate()

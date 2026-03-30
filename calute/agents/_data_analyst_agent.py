@@ -76,15 +76,41 @@ def analyze_dataset(
     data: list[dict] | str,
     analysis_type: str = "descriptive",
 ) -> str:
-    """
-    Perform comprehensive data analysis.
+    """Perform comprehensive data analysis on a structured dataset.
+
+    Analyzes the provided dataset according to the specified analysis type,
+    generating statistical summaries, data structure information, and
+    actionable insights. The function supports multiple input formats and
+    automatically detects column data types for appropriate analysis.
+
+    The analysis result is stored in the global ``analysis_state`` dictionary
+    under the ``analyses`` key, indexed by a unique analysis ID.
 
     Args:
-        data: Dataset to analyze (list of dicts or JSON string)
-        analysis_type: Type of analysis (descriptive, diagnostic, predictive)
+        data: Dataset to analyze. Accepts either a list of dictionaries where
+            each dictionary represents a record, or a JSON/CSV string that
+            will be automatically parsed. CSV strings should have a header
+            row followed by data rows separated by newlines.
+        analysis_type: Type of analysis to perform. Valid values are:
+            - ``'descriptive'``: Computes summary statistics (mean, min, max)
+              for numeric columns and reports dataset dimensions.
+            - ``'diagnostic'``: Identifies data quality issues such as missing
+              values and duplicate records (inspects first 100 rows).
+            - ``'predictive'``: Provides guidance on predictive modeling
+              approaches including ML models and time series analysis.
 
     Returns:
-        Analysis results with insights
+        A formatted string report containing the analysis ID, analysis type,
+        record and feature counts, data structure breakdown by column type,
+        and numbered key insights. The report uses a structured text format
+        with section headers.
+
+    Example:
+        >>> report = analyze_dataset(
+        ...     data=[{"sales": 100, "region": "East"}, {"sales": 150, "region": "West"}],
+        ...     analysis_type="descriptive",
+        ... )
+        >>> print(report)  # Shows stats for 'sales' column and dataset shape
     """
     analysis_id = f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -204,15 +230,41 @@ DATA STRUCTURE:
 
 
 def clean_data(data: list[dict] | str, operations: list[str] | None = None) -> str:
-    """
-    Clean and preprocess data.
+    """Clean and preprocess a dataset by applying configurable cleaning operations.
+
+    Applies a sequence of data cleaning operations to the input dataset and
+    produces a detailed cleaning report. The cleaned dataset metadata is stored
+    in the global ``analysis_state`` dictionary under the ``datasets`` key.
 
     Args:
-        data: Data to clean
-        operations: List of cleaning operations to perform
+        data: Data to clean. Accepts either a list of dictionaries where each
+            dictionary represents a record, or a JSON string that will be
+            parsed automatically. Each record should be a dictionary with
+            consistent keys.
+        operations: List of cleaning operation names to perform, applied in
+            order. If ``None``, defaults to all available operations:
+            ``['remove_duplicates', 'handle_missing', 'standardize', 'validate']``.
+            Supported operations are:
+            - ``'remove_duplicates'``: Removes exact duplicate records based
+              on string representation of sorted dictionary items.
+            - ``'handle_missing'``: Fills ``None`` and empty string values
+              with ``'N/A'`` for strings or ``0`` for other types.
+            - ``'standardize'``: Strips whitespace and applies title case
+              to all string values in the dataset.
+            - ``'validate'``: Removes records that are not non-empty
+              dictionaries.
 
     Returns:
-        Cleaned data summary
+        A formatted string report containing the cleaning ID, original and
+        final record counts, list of operations performed, a detailed
+        cleaning log with per-operation results, and a data quality score
+        expressed as a percentage of retained records.
+
+    Example:
+        >>> report = clean_data(
+        ...     data=[{"name": " john "}, {"name": " john "}, {"name": None}],
+        ...     operations=["remove_duplicates", "handle_missing", "standardize"],
+        ... )
     """
     cleaning_id = f"clean_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -313,15 +365,39 @@ OPERATIONS PERFORMED:
 
 
 def detect_patterns(data: list[Any], pattern_type: str = "trends") -> str:
-    """
-    Detect patterns and anomalies in data.
+    """Detect patterns, trends, cycles, and anomalies in a data sequence.
+
+    Analyzes the input data for the specified pattern type using statistical
+    methods. Numeric values are extracted from the data for analysis; for
+    dictionary items, the string length is used as a proxy value. Results
+    are stored in the global ``analysis_state`` dictionary.
 
     Args:
-        data: Data to analyze
-        pattern_type: Type of pattern to detect (trends, cycles, anomalies)
+        data: Data sequence to analyze. Can be a list of numeric values,
+            strings (attempted float conversion), or dictionaries (string
+            length is used as proxy). Must contain at least 2 items for
+            trend detection and at least 1 item for anomaly detection.
+        pattern_type: Type of pattern detection to perform. Valid values are:
+            - ``'trends'``: Compares the average of the first and second
+              halves of the data to detect increasing, decreasing, or
+              stable trends (uses a 10% threshold).
+            - ``'cycles'``: Checks for seasonal and periodic patterns.
+              Reports a potential cycle length estimate when data has
+              more than 10 points (estimated as ``len(data) // 4``).
+            - ``'anomalies'``: Identifies statistical outliers using a
+              2-standard-deviation threshold from the mean. Reports up
+              to 3 anomalous data points with their index and value.
 
     Returns:
-        Pattern detection results
+        A formatted string report containing the pattern ID, detection type,
+        number of data points analyzed, a numbered list of detected patterns,
+        and a confidence level (High if >2 patterns, Medium if any, Low
+        if none).
+
+    Example:
+        >>> result = detect_patterns([10, 20, 30, 40, 50], pattern_type="trends")
+        >>> "Increasing trend detected" in result
+        True
     """
     pattern_id = f"pattern_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -409,15 +485,38 @@ def generate_insights(
     analysis_results: dict[str, Any],
     business_context: str = "",
 ) -> str:
-    """
-    Generate business insights from analysis.
+    """Generate actionable business insights from data analysis results.
+
+    Examines analysis results and business context to produce domain-specific
+    insights and strategic recommendations. The function performs keyword-based
+    matching on both the analysis results and the business context string to
+    generate relevant insights. Results are appended to the global
+    ``analysis_state['reports']`` list.
 
     Args:
-        analysis_results: Results from data analysis
-        business_context: Business context for insights
+        analysis_results: Dictionary containing results from prior data
+            analysis operations. The function inspects the string
+            representation for keywords such as ``'trends'``,
+            ``'anomal'``, and ``'pattern'`` to generate corresponding
+            insights.
+        business_context: Optional free-text description of the business
+            domain or scenario. The function checks for domain keywords
+            including ``'sales'``, ``'customer'``, ``'cost'``,
+            ``'expense'``, and ``'performance'`` to generate
+            context-specific insights and recommendations. Defaults to
+            an empty string.
 
     Returns:
-        Actionable business insights
+        A formatted string report containing the insights ID, business
+        context label, numbered key insights derived from the analysis,
+        strategic insights (always included), numbered actionable
+        recommendations, and fixed impact/confidence indicators.
+
+    Example:
+        >>> result = generate_insights(
+        ...     analysis_results={"type": "trends", "patterns": ["growth"]},
+        ...     business_context="sales performance quarterly review",
+        ... )
     """
     insights_id = f"insights_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -500,15 +599,37 @@ def create_dashboard_spec(
     metrics: list[str],
     layout: str = "grid",
 ) -> str:
-    """
-    Create dashboard specification for data visualization.
+    """Create a dashboard specification for data visualization.
+
+    Generates a structured dashboard configuration containing visualization
+    components for each specified metric. Components cycle through chart
+    types (chart, gauge, table, card, heatmap) and are positioned according
+    to the selected layout. An executive summary card is always appended.
+    The dashboard spec is stored in ``analysis_state['visualizations']``.
 
     Args:
-        metrics: List of metrics to display
-        layout: Dashboard layout type (grid, flow, tabs)
+        metrics: List of metric name strings to include as dashboard
+            components. Each metric generates one visualization component.
+            Metric names are converted to title-cased display titles with
+            underscores replaced by spaces.
+        layout: Dashboard layout strategy. Valid values are:
+            - ``'grid'``: Components are arranged in a 3-column grid with
+              row/col positioning.
+            - ``'flow'``: Components are ordered sequentially.
+            - ``'tabs'``: Components are ordered sequentially (same as flow
+              in the current implementation).
 
     Returns:
-        Dashboard specification
+        A formatted string report containing the dashboard ID, layout type,
+        component count, refresh rate (5 minutes), a detailed listing of
+        each component with its type and metric, and feature flags for
+        interactivity, real-time updates, and mobile responsiveness.
+
+    Example:
+        >>> spec = create_dashboard_spec(
+        ...     metrics=["revenue", "user_count", "conversion_rate"],
+        ...     layout="grid",
+        ... )
     """
     dashboard_id = f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -584,16 +705,47 @@ def forecast_values(
     periods: int = 5,
     method: str = "linear",
 ) -> str:
-    """
-    Forecast future values based on historical data.
+    """Forecast future values based on historical time series data.
+
+    Applies the specified forecasting method to historical data to generate
+    predicted values for future periods. Includes confidence intervals based
+    on the standard deviation of the historical data and provides a trend
+    summary comparing average forecast values to historical averages.
 
     Args:
-        historical_data: Historical values
-        periods: Number of periods to forecast
-        method: Forecasting method (linear, exponential, moving_average)
+        historical_data: List of numeric historical values ordered
+            chronologically. Must contain at least 2 data points for
+            any forecasting method to operate.
+        periods: Number of future periods to forecast. Each period
+            generates one predicted value with confidence interval.
+            Defaults to 5.
+        method: Forecasting algorithm to use. Valid values are:
+            - ``'linear'``: Fits a least-squares linear regression to the
+              historical data and extrapolates. Best for data with a
+              consistent linear trend.
+            - ``'exponential'``: Uses exponential smoothing with
+              ``alpha=0.3``. The first forecast blends the last observed
+              value with the historical mean; subsequent forecasts apply
+              smoothing to prior forecasts.
+            - ``'moving_average'``: Uses the average of the last 3 (or
+              fewer) historical values as the base forecast, with minor
+              oscillating variation applied to each period.
 
     Returns:
-        Forecast results
+        A formatted string report containing the forecast ID, method used,
+        historical and forecast period counts, a historical summary
+        (last value, average, trend arrow), per-period forecast values
+        with 95% confidence intervals (1.96 * std_dev), and an overall
+        forecast summary indicating expected growth, decline, or stability.
+        Returns a warning string if fewer than 2 historical data points
+        are provided.
+
+    Example:
+        >>> result = forecast_values(
+        ...     historical_data=[100, 110, 120, 130, 140],
+        ...     periods=3,
+        ...     method="linear",
+        ... )
     """
     forecast_id = f"forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 

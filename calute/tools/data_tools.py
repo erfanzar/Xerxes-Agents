@@ -69,18 +69,46 @@ class JSONProcessor(AgentBaseFn):
         pretty: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Process JSON data with various operations.
+        """Process JSON data with various operations.
+
+        Performs load, save, validate, query, or transform operations on
+        JSON data. Supports both file-based and in-memory JSON manipulation.
 
         Args:
-            operation: Operation to perform (load, save, query, validate, transform)
-            data: JSON data to process
-            file_path: Path to JSON file
-            query: JSONPath or simple query for data extraction
-            pretty: Whether to format output prettily
+            operation: The operation to perform. Options:
+                - "load": Load JSON from a file. Requires ``file_path``.
+                - "save": Save data to a JSON file. Requires ``file_path``
+                  and ``data``.
+                - "validate": Check if ``data`` is valid JSON (accepts
+                  both string and object inputs).
+                - "query": Extract a value from ``data`` using dot-notation
+                  paths (e.g., "user.name", "items[0].id"). Requires
+                  ``query`` and ``data``.
+                - "transform": Get metadata about ``data`` including type,
+                  keys, length, and optionally pretty-printed output.
+            data: The JSON data to process. Can be a Python dict/list or
+                a JSON string (for validate). Required for save, validate,
+                query, and transform operations.
+            file_path: Path to the JSON file for load/save operations.
+            query: Dot-notation query path for data extraction. Supports
+                bracket notation for array indexing (e.g., "items[0]").
+            pretty: Whether to use indented formatting when saving or
+                transforming JSON. Defaults to True.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Processed JSON data or operation result
+            A dictionary containing operation-specific results:
+                For "load": data, success.
+                For "save": success, file_path.
+                For "validate": valid (bool), error (if invalid).
+                For "query": result (extracted value).
+                For "transform": keys, type, length, formatted (if pretty).
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = JSONProcessor.static_call("validate", data='{"key": 1}')
+            >>> print(result["valid"])
+            True
         """
         result = {}
 
@@ -171,20 +199,48 @@ class CSVProcessor(AgentBaseFn):
         max_rows: int | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Process CSV data with various operations.
+        """Process CSV data with various operations.
+
+        Performs read, write, analyze, or convert operations on CSV files.
+        Supports custom delimiters, header configuration, and row limits.
 
         Args:
-            operation: Operation to perform (read, write, analyze, convert)
-            file_path: Path to CSV file
-            data: Data to write (list of dictionaries)
-            delimiter: CSV delimiter
-            headers: Column headers for writing (also used as fieldnames when has_header=False)
-            has_header: Whether the CSV file has a header row (default True)
-            max_rows: Maximum rows to read
+            operation: The operation to perform. Options:
+                - "read": Read a CSV file into a list of dictionaries.
+                  Requires ``file_path``.
+                - "write": Write a list of dictionaries to a CSV file.
+                  Requires ``file_path`` and ``data``.
+                - "analyze": Get structural statistics about a CSV file
+                  including row/column counts, headers, sample data, and
+                  empty cell count. Requires ``file_path``.
+                - "convert": Convert a CSV file to a list of JSON-like
+                  dictionaries. Requires ``file_path``.
+            file_path: Path to the CSV file for read/write/analyze/convert.
+            data: List of dictionaries to write. Each dict represents a row
+                with column names as keys. Required for the "write" operation.
+            delimiter: Column delimiter character. Defaults to ",".
+            headers: Explicit column headers. For "write", used as fieldnames;
+                if not provided, inferred from the first data dict. For "read"
+                with ``has_header=False``, used as the column names.
+            has_header: Whether the CSV file's first row is a header row.
+                If False and no ``headers`` are provided, columns are
+                auto-named as "col_0", "col_1", etc. Defaults to True.
+            max_rows: Maximum number of rows to read. None reads all rows.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Processed CSV data or operation result
+            A dictionary containing operation-specific results:
+                For "read": data (list[dict]), count (int), columns (list[str]).
+                For "write": success (bool), rows_written (int), file_path (str).
+                For "analyze": total_rows, total_columns, headers, sample_data,
+                    empty_cells.
+                For "convert": json (list[dict]), count (int).
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = CSVProcessor.static_call("read", file_path="data.csv", max_rows=5)
+            >>> print(result["count"])
+            5
         """
         result = {}
 
@@ -194,17 +250,15 @@ class CSVProcessor(AgentBaseFn):
             try:
                 rows = []
                 with open(file_path, "r", newline="", encoding="utf-8") as f:
-                    # If no header row, use provided headers or generate column names
                     fieldnames = None
                     if not has_header:
                         if headers:
                             fieldnames = headers
                         else:
-                            # Peek at first row to determine column count
                             first_line = f.readline()
                             col_count = len(first_line.split(delimiter))
                             fieldnames = [f"col_{i}" for i in range(col_count)]
-                            f.seek(0)  # Reset to beginning
+                            f.seek(0)
                     reader = csv.DictReader(f, fieldnames=fieldnames, delimiter=delimiter)
                     for i, row in enumerate(reader):
                         if max_rows and i >= max_rows:
@@ -298,18 +352,51 @@ class TextProcessor(AgentBaseFn):
         case_sensitive: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Process text with various operations.
+        """Process text with various operations.
+
+        Applies the specified text processing operation, ranging from
+        statistical analysis to pattern-based extraction and formatting.
 
         Args:
-            text: Input text to process
-            operation: Operation to perform (stats, clean, extract, replace, split, format)
-            pattern: Regex pattern for operations
-            replacement: Replacement text for replace operation
-            case_sensitive: Whether operations are case-sensitive
+            text: The input text to process.
+            operation: The operation to perform. Options:
+                - "stats": Compute text statistics including length, word
+                  count, line count, character frequency, and word frequency.
+                - "clean": Remove extra whitespace and optionally remove
+                  content matching ``pattern``.
+                - "extract": Extract patterns from text. ``pattern`` can be
+                  a named shortcut ("emails", "urls", "phones", "numbers")
+                  or a custom regular expression.
+                - "replace": Replace occurrences of ``pattern`` in text with
+                  ``replacement``. Uses regex matching.
+                - "split": Split text by ``pattern`` (regex) or by
+                  whitespace if no pattern is given.
+                - "format": Apply text formatting. ``pattern`` specifies the
+                  format: "title", "upper", "lower", "sentence", or
+                  "no_punctuation".
+            pattern: Regex pattern or named shortcut for extract/replace/split/
+                format operations. Required for "extract" and "replace".
+            replacement: Replacement string for the "replace" operation.
+                Defaults to empty string if None.
+            case_sensitive: Whether pattern matching is case-sensitive.
+                Defaults to True.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Processed text or analysis results
+            A dictionary containing operation-specific results:
+                For "stats": length, words, lines, characters_no_spaces,
+                    most_common_chars, most_common_words.
+                For "clean": cleaned_text, original_length, cleaned_length.
+                For "extract": matches (list[str]), count (int).
+                For "replace": replaced_text, replacements_made (int).
+                For "split": parts (list[str]), count (int).
+                For "format": formatted_text (str).
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = TextProcessor.static_call("Hello World!", "stats")
+            >>> print(result["words"])
+            2
         """
         result = {}
 
@@ -430,17 +517,44 @@ class DataConverter(AgentBaseFn):
         encoding: str = "utf-8",
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Convert data between formats.
+        """Convert data between different formats.
+
+        First parses the input data from the source format into an
+        intermediate Python object, then serializes it to the target format.
 
         Args:
-            data: Input data to convert
-            from_format: Source format (json, csv, yaml, xml, base64, hex)
-            to_format: Target format
-            encoding: Character encoding
+            data: Input data to convert. Can be a string (for json, yaml,
+                base64, hex source formats) or a Python object (dict, list).
+            from_format: Source format of the data. Options:
+                - "json": JSON string or Python dict/list.
+                - "yaml": YAML string or Python object. Requires PyYAML.
+                - "base64": Base64-encoded string.
+                - "hex": Hexadecimal-encoded string.
+            to_format: Target format to convert to. Options:
+                - "json": Pretty-printed JSON string.
+                - "yaml": YAML string. Requires PyYAML.
+                - "base64": Base64-encoded string.
+                - "hex": Hexadecimal string.
+                - "hash": Dictionary of cryptographic hashes (MD5, SHA1,
+                  SHA256, SHA512). Output only.
+            encoding: Character encoding for encoding/decoding operations.
+                Defaults to "utf-8".
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Converted data
+            A dictionary containing:
+                - output: The converted data in the target format. For
+                  "hash" target, this is a dict with md5, sha1, sha256,
+                  and sha512 hex digest strings.
+                - success (bool): True if conversion succeeded.
+                - error (str): Error message if the conversion failed.
+
+        Example:
+            >>> result = DataConverter.static_call(
+            ...     '{"key": "value"}', from_format="json", to_format="base64"
+            ... )
+            >>> print(result["success"])
+            True
         """
         result = {}
 
@@ -549,20 +663,54 @@ class DateTimeProcessor(AgentBaseFn):
         delta_minutes: int = 0,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Process dates and times.
+        """Process dates and times with various operations.
+
+        Provides operations for getting the current time, parsing date
+        strings, computing time deltas, and formatting dates in various
+        output styles.
 
         Args:
-            operation: Operation to perform (parse, format, now, delta, compare)
-            date_string: Date string to parse
-            format: Date format string
-            timezone: Timezone name
-            delta_days: Days to add/subtract
-            delta_hours: Hours to add/subtract
-            delta_minutes: Minutes to add/subtract
+            operation: The operation to perform. Options:
+                - "now": Get current date and time in multiple formats.
+                - "parse": Parse a date string into components. Tries
+                  common formats automatically; use ``format`` for a
+                  specific strptime format. Falls back to dateutil if
+                  available.
+                - "delta": Add or subtract time from a date. Uses
+                  ``date_string`` as the base (defaults to now).
+                - "format": Format a date in various output styles. Uses
+                  ``date_string`` as input (defaults to now). If ``format``
+                  is provided, uses it as a strftime pattern; otherwise
+                  returns all common formats.
+            date_string: Date string to parse, use as base for delta, or
+                format. Expected to be in ISO format for delta/format
+                operations. For parse, accepts many common formats.
+            format: Explicit strftime/strptime format pattern. For "parse",
+                used as the preferred parsing format. For "format", used as
+                the output format pattern.
+            timezone: Timezone name. Currently reserved for future use.
+            delta_days: Number of days to add (positive) or subtract
+                (negative) from the base date. Defaults to 0.
+            delta_hours: Number of hours to add or subtract. Defaults to 0.
+            delta_minutes: Number of minutes to add or subtract. Defaults to 0.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Processed date/time information
+            A dictionary containing operation-specific results:
+                For "now": datetime (ISO), timestamp, formatted (dict with
+                    date, time, datetime, iso, human keys).
+                For "parse": parsed (ISO), timestamp, components (dict with
+                    year, month, day, hour, minute, second, weekday).
+                For "delta": original (ISO), new (ISO), delta (dict with
+                    days, hours, minutes, total_seconds).
+                For "format": formats (dict of format name to value) or
+                    formatted (str) when a specific format is provided.
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = DateTimeProcessor.static_call("parse", date_string="2024-01-15")
+            >>> print(result["components"]["weekday"])
+            'Monday'
         """
         result = {}
 

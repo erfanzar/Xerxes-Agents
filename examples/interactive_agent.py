@@ -15,9 +15,9 @@ from openai import OpenAI
 from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
 
 # Import all improvements
-from calute.config import CaluteConfig, get_config, set_config
-from calute.errors import CaluteTimeoutError
-from calute.logging_config import get_logger
+from calute.core.config import CaluteConfig, get_config, set_config
+from calute.core.errors import CaluteTimeoutError
+from calute.logging.structured import get_logger
 from calute.memory import MemoryStore, MemoryType
 
 # ================== Custom Functions for Testing ==================

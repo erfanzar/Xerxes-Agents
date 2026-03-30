@@ -56,36 +56,61 @@ class CompletionService:
     the Calute agent execution system and formats responses according to the
     OpenAI-compatible API specification.
 
+    The service is used internally by the ``ChatRouter`` and
+    ``UnifiedChatRouter`` to delegate completion logic away from the
+    HTTP routing layer.
+
     Attributes:
-        calute: The Calute instance used for running agent completions.
+        calute: The ``Calute`` instance used for running agent completions.
         can_overide_samplings: Flag indicating whether request parameters
-            can override agent sampling settings.
+            can override agent sampling settings. When ``True``, parameters
+            like ``temperature``, ``top_p``, ``max_tokens``, ``stop``,
+            ``presence_penalty``, ``frequency_penalty``, ``repetition_penalty``,
+            ``top_k``, and ``min_p`` from the request will be applied to the
+            agent before execution.
+
+    Example:
+        >>> from calute.api_server.completion_service import CompletionService
+        >>> service = CompletionService(calute_instance, can_overide_samplings=True)
     """
 
     def __init__(self, calute: Calute, can_overide_samplings: bool = False):
         """Initialize the completion service.
 
         Args:
-            calute: The Calute instance to use for completions.
+            calute: The ``Calute`` instance to use for running agent
+                completions. Must be fully initialized with a client.
             can_overide_samplings: Whether to allow request parameters to
                 override agent sampling settings (temperature, top_p, etc.).
+                Defaults to ``False``.
         """
         self.calute = calute
         self.can_overide_samplings = can_overide_samplings
 
     def apply_request_parameters(self, agent: Agent, request: ChatCompletionRequest) -> None:
-        """Apply request parameters to the agent.
+        """Apply sampling parameters from the request to the agent.
 
-        Conditionally applies sampling parameters from the request to the
-        agent if `can_overide_samplings` is enabled. Parameters include
-        max_tokens, temperature, top_p, stop sequences, and penalty values.
+        Conditionally transfers sampling parameters from the incoming request
+        to the agent configuration. This only takes effect when
+        ``can_overide_samplings`` is ``True``. Each parameter is applied only
+        if it is explicitly set (not ``None``) in the request.
+
+        The following parameters are supported:
+            - ``max_tokens``: Maximum number of tokens to generate.
+            - ``temperature``: Sampling temperature.
+            - ``top_p``: Nucleus sampling threshold.
+            - ``top_k``: Top-k sampling parameter.
+            - ``min_p``: Minimum probability threshold.
+            - ``stop``: Stop sequences for generation.
+            - ``presence_penalty``: Presence penalty value.
+            - ``frequency_penalty``: Frequency penalty value.
+            - ``repetition_penalty``: Repetition penalty value.
 
         Args:
-            agent: The agent to modify with request parameters.
-            request: The request containing parameters to apply.
-
-        Returns:
-            None
+            agent: The ``Agent`` instance whose sampling settings will be
+                modified in-place.
+            request: The ``ChatCompletionRequest`` containing the sampling
+                parameters to apply.
         """
         if self.can_overide_samplings:
             if request.max_tokens:
@@ -116,17 +141,27 @@ class CompletionService:
         """Create a non-streaming chat completion.
 
         Executes the Calute agent with the provided messages and returns
-        a complete response. The execution is run in a thread executor
-        to avoid blocking the event loop.
+        a complete response. The synchronous ``calute.run()`` call is
+        offloaded to a thread executor via ``loop.run_in_executor`` to
+        avoid blocking the async event loop.
+
+        The response includes the full generated text, usage statistics
+        (prompt tokens, completion tokens, processing time, etc.), and
+        a finish reason of ``"stop"``.
 
         Args:
-            agent: The agent to use for completion.
-            messages: Chat messages history to process.
-            request: The original chat completion request for model info.
+            agent: The ``Agent`` instance to use for generating the
+                completion.
+            messages: The ``MessagesHistory`` containing the conversation
+                context to process.
+            request: The original ``ChatCompletionRequest``, used to
+                extract the model name for the response object.
 
         Returns:
-            ChatCompletionResponse containing the agent's full response,
-            usage information, and finish reason.
+            A ``ChatCompletionResponse`` containing a single choice with
+            the assistant's full response message, usage information
+            (token counts, processing time, tokens per second), and
+            finish reason ``"stop"``.
         """
 
         loop = asyncio.get_event_loop()
@@ -167,22 +202,34 @@ class CompletionService:
         messages: MessagesHistory,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[str]:
-        """Create a streaming chat completion.
+        """Create a streaming chat completion using server-sent events.
 
-        Executes the Calute agent in streaming mode, yielding response
-        chunks as server-sent events (SSE). Each chunk is formatted as
-        a ChatCompletionStreamResponse and encoded for SSE transmission.
+        Executes the Calute agent in streaming mode and yields response
+        chunks as SSE-formatted strings. Each chunk is serialized as a
+        ``ChatCompletionStreamResponse`` JSON object prefixed with
+        ``"data: "`` and followed by double newlines, conforming to the
+        SSE protocol.
+
+        The method yields an ``asyncio.sleep(0)`` after each chunk to
+        allow the event loop to process other tasks, enabling cooperative
+        multitasking during long-running generations.
+
+        After all content chunks have been yielded, a final chunk with
+        an empty delta and ``finish_reason="stop"`` is emitted, followed
+        by a ``"data: [DONE]"`` sentinel to signal stream completion.
 
         Args:
-            agent: The agent to use for completion.
-            messages: Chat messages history to process.
-            request: The original chat completion request for model info.
+            agent: The ``Agent`` instance to use for generating the
+                streaming completion.
+            messages: The ``MessagesHistory`` containing the conversation
+                context to process.
+            request: The original ``ChatCompletionRequest``, used to
+                extract the model name for each streamed response chunk.
 
         Yields:
-            Server-sent events containing streaming response chunks in SSE
-            format. Each event contains delta content and usage information.
-            The stream ends with a final chunk indicating completion and a
-            "[DONE]" message.
+            Byte-encoded and plain string SSE events. Each content event
+            is a ``bytes`` object containing ``"data: {json}\\n\\n"``.
+            The final ``"[DONE]"`` event is a plain string.
         """
 
         usage_info = None

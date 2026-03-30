@@ -60,23 +60,31 @@ Typical usage example:
 
 import asyncio
 import json
+import logging
+import os
 import pprint
 import queue
 import re
 import textwrap
 import threading
 import typing as tp
+import uuid
 from collections.abc import AsyncIterator, Generator
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from calute.types.function_execution_types import ReinvokeSignal
 from calute.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
 
+from .core.prompt_template import SEP, PromptSection, PromptTemplate
+from .core.streamer_buffer import StreamerBuffer
+from .core.utils import debug_print, function_to_json, get_callable_public_name
 from .executors import AgentOrchestrator, FunctionExecutor
 from .llms import BaseLLM
 from .memory import MemoryStore, MemoryType
-from .streamer_buffer import StreamerBuffer
+from .operators import OperatorRuntimeConfig
+from .runtime.features import RuntimeFeaturesConfig, RuntimeFeaturesState
+from .runtime.loop_detection import LoopDetector
 from .types import (
     Agent,
     AgentFunction,
@@ -102,96 +110,21 @@ from .types import (
 )
 from .types.oai_protocols import ToolDefinition
 from .types.tool_calls import FunctionCall
-from .utils import debug_print, function_to_json
 
-SEP = "  "
+logger = logging.getLogger(__name__)
+
 add_depth = lambda x, add_prefix=False: SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")  # noqa
 
 
-class PromptSection(Enum):
-    """Enumeration of different sections in a structured prompt.
-
-    This enum defines the standard sections that can be included in a
-    structured prompt template, allowing for consistent prompt organization
-    across different agents and use cases.
-
-    Attributes:
-        SYSTEM: System-level instructions and configuration.
-        PERSONA: Agent personality and role definition.
-        RULES: Behavioral rules and constraints for the agent.
-        FUNCTIONS: Available function/tool definitions.
-        TOOLS: Tool usage instructions and format specifications.
-        EXAMPLES: Example interactions for few-shot learning.
-        CONTEXT: Contextual information and variables.
-        HISTORY: Conversation history from previous turns.
-        PROMPT: The actual user prompt/query.
-
-    Example:
-        >>> template = PromptTemplate(
-        ...     sections={PromptSection.SYSTEM: "INSTRUCTIONS:"},
-        ...     section_order=[PromptSection.SYSTEM, PromptSection.PROMPT]
-        ... )
-    """
-
-    SYSTEM = "system"
-    PERSONA = "persona"
-    RULES = "rules"
-    FUNCTIONS = "functions"
-    TOOLS = "tools"
-    EXAMPLES = "examples"
-    CONTEXT = "context"
-    HISTORY = "history"
-    PROMPT = "prompt"
-
-
 @dataclass
-class PromptTemplate:
-    """Configurable template for structuring agent prompts.
+class _RuntimeTurnState:
+    """Tracks one user-visible turn across tool reinvocation cycles."""
 
-    This class provides a flexible way to structure prompts with different
-    sections that can be customized or reordered based on requirements.
-
-    Attributes:
-        sections: Dictionary mapping PromptSection enums to their header strings.
-        section_order: List defining the order in which sections appear in the prompt.
-
-    Example:
-        >>> template = PromptTemplate(
-        ...     sections={PromptSection.SYSTEM: "INSTRUCTIONS:"},
-        ...     section_order=[PromptSection.SYSTEM, PromptSection.PROMPT]
-        ... )
-    """
-
-    sections: dict[PromptSection, str] | None = None
-    section_order: list[PromptSection] | None = None
-
-    def __post_init__(self):
-        """Initialize default sections and ordering if not provided.
-
-        Sets up standard prompt sections with appropriate headers and
-        establishes a default ordering that works well for most use cases.
-        """
-        self.sections = self.sections or {
-            PromptSection.SYSTEM: "SYSTEM:",
-            PromptSection.RULES: "RULES:",
-            PromptSection.FUNCTIONS: "FUNCTIONS:",
-            PromptSection.TOOLS: f"TOOLS:\n{SEP}When using tools, follow this format:",
-            PromptSection.EXAMPLES: f"EXAMPLES:\n{SEP}",
-            PromptSection.CONTEXT: "CONTEXT:\n",
-            PromptSection.HISTORY: f"HISTORY:\n{SEP}Conversation so far:\n",
-            PromptSection.PROMPT: "PROMPT:\n",
-        }
-
-        self.section_order = self.section_order or [
-            PromptSection.SYSTEM,
-            PromptSection.RULES,
-            PromptSection.FUNCTIONS,
-            PromptSection.TOOLS,
-            PromptSection.EXAMPLES,
-            PromptSection.CONTEXT,
-            PromptSection.HISTORY,
-            PromptSection.PROMPT,
-        ]
+    turn_id: str
+    prompt: str = ""
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    tool_calls: list[tp.Any] = field(default_factory=list)
+    finalized: bool = False
 
 
 class Calute:
@@ -245,6 +178,11 @@ class Calute:
     """
 
     SEP: tp.ClassVar[str] = SEP
+    REINVOKE_FOLLOWUP_INSTRUCTION: tp.ClassVar[str] = (
+        "Use the function results above to continue the task. If the results already answer the user's"
+        " request, respond to the user directly. Only call another function if the returned data is"
+        " missing something necessary or the user explicitly asked for a fresh lookup."
+    )
 
     def __init__(
         self,
@@ -253,6 +191,7 @@ class Calute:
         enable_memory: bool = False,
         memory_config: dict[str, tp.Any] | None = None,
         auto_add_memory_tools: bool = True,
+        runtime_features: RuntimeFeaturesConfig | None = None,
     ):
         """Initialize Calute with an LLM.
 
@@ -287,6 +226,24 @@ class Calute:
         self.executor = FunctionExecutor(self.orchestrator)
         self.enable_memory = enable_memory
         self.auto_add_memory_tools = auto_add_memory_tools
+        self._launch_workspace_root = os.path.abspath(os.getcwd())
+        self.runtime_features = self._normalize_runtime_features(runtime_features, self._launch_workspace_root)
+        self._runtime_features_state: RuntimeFeaturesState | None = (
+            RuntimeFeaturesState(self.runtime_features)
+            if (
+                self.runtime_features.enabled
+                or (self.runtime_features.operator is not None and self.runtime_features.operator.enabled)
+            )
+            else None
+        )
+        if self._runtime_features_state is not None and self._runtime_features_state.operator_state is not None:
+            self._runtime_features_state.operator_state.attach_runtime(self, self._runtime_features_state)
+        self._session_id: str | None = None
+        if self._runtime_features_state is not None and self._runtime_features_state.session_manager is not None:
+            session = self._runtime_features_state.session_manager.start_session()
+            self._session_id = session.session_id
+            if self._runtime_features_state.audit_emitter is not None:
+                self._runtime_features_state.audit_emitter._session_id = self._session_id
         if enable_memory:
             memory_config = memory_config or {}
             self.memory_store = MemoryStore(
@@ -300,6 +257,40 @@ class Calute:
                 cache_size=memory_config.get("cache_size", 100),
             )
         self._setup_default_triggers()
+
+    @staticmethod
+    def _normalize_runtime_features(
+        runtime_features: RuntimeFeaturesConfig | None,
+        workspace_root: str,
+    ) -> RuntimeFeaturesConfig:
+        """Ensure Calute has operator runtime available by default.
+
+        When no runtime config is supplied, Calute starts with runtime features
+        enabled and operator tooling available. When runtime features are explicitly
+        enabled but no operator config is provided, operator tooling is attached with
+        its default allow-by-default policy.
+        """
+        if runtime_features is None:
+            return RuntimeFeaturesConfig(
+                enabled=True,
+                workspace_root=workspace_root,
+                operator=OperatorRuntimeConfig(
+                    enabled=True,
+                    power_tools_enabled=True,
+                    shell_default_workdir=workspace_root,
+                ),
+            )
+
+        if runtime_features.workspace_root is None:
+            runtime_features.workspace_root = workspace_root
+
+        if runtime_features.enabled and runtime_features.operator is None:
+            runtime_features.operator = OperatorRuntimeConfig(enabled=True, power_tools_enabled=True)
+
+        if runtime_features.operator is not None and runtime_features.operator.shell_default_workdir is None:
+            runtime_features.operator.shell_default_workdir = workspace_root
+
+        return runtime_features
 
     def _setup_default_triggers(self) -> None:
         """Setup default agent switching triggers.
@@ -325,7 +316,7 @@ class Calute:
         """
 
         def capability_based_switch(context, agents, current_agent_id):  # type:ignore
-            """Switch agent based on required capabilities"""
+            """Switch to the highest-scoring agent that has the required capability."""
             required_capability = context.get("required_capability")
             if not required_capability:
                 return None
@@ -343,7 +334,7 @@ class Calute:
             return best_agent
 
         def error_recovery_switch(context, agents, current_agent_id):
-            """Switch agent on function execution errors"""
+            """Switch to the current agent's fallback when an execution error is present."""
             if context.get("execution_error") and current_agent_id:
                 current_agent = agents[current_agent_id]
                 if current_agent.fallback_agent_id:
@@ -352,6 +343,182 @@ class Calute:
 
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.CAPABILITY_BASED, capability_based_switch)
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.ERROR_RECOVERY, error_recovery_switch)
+
+    def _notify_turn_start(self, agent_id: str | None, messages: MessagesHistory | None = None) -> None:
+        """Fire the ``on_turn_start`` hook if any listeners are registered."""
+        runtime_state = self._runtime_features_state
+        if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_turn_start"):
+            return
+        runtime_state.hook_runner.run("on_turn_start", agent_id=agent_id, messages=messages)
+
+    def _notify_turn_end(self, agent_id: str | None, response: str | None = None) -> None:
+        """Fire the ``on_turn_end`` hook if any listeners are registered."""
+        runtime_state = self._runtime_features_state
+        if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_turn_end"):
+            return
+        runtime_state.hook_runner.run("on_turn_end", agent_id=agent_id, response=response)
+
+    def _notify_runtime_error(self, agent_id: str | None, error: Exception) -> None:
+        """Fire the ``on_error`` hook if any listeners are registered."""
+        runtime_state = self._runtime_features_state
+        if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_error"):
+            return
+        runtime_state.hook_runner.run("on_error", agent_id=agent_id, error=error)
+
+    @staticmethod
+    def _new_runtime_turn_id() -> str:
+        """Generate a compact random identifier for a new runtime turn."""
+        return uuid.uuid4().hex[:12]
+
+    def _append_turn_tool_results(
+        self,
+        turn_state: _RuntimeTurnState | None,
+        results: list[RequestFunctionCall],
+    ) -> None:
+        """Append tool-call execution records to the current turn state."""
+        if turn_state is None:
+            return
+
+        from .session import ToolCallRecord
+
+        operator_state = (
+            self._runtime_features_state.operator_state if self._runtime_features_state is not None else None
+        )
+
+        for result in results:
+            arguments = result.arguments if isinstance(result.arguments, dict) else {}
+            persisted_result: tp.Any = result.result
+            metadata: dict[str, tp.Any] = {}
+            if operator_state is not None:
+                persisted_result, metadata = operator_state.summarize_result(result.result)
+            turn_state.tool_calls.append(
+                ToolCallRecord(
+                    call_id=result.id,
+                    tool_name=result.name,
+                    arguments=arguments,
+                    result=str(persisted_result)[:500] if persisted_result is not None else None,
+                    status=result.status.value,
+                    error=result.error,
+                    metadata=metadata,
+                )
+            )
+
+    def _finalize_runtime_turn(
+        self,
+        agent_id: str | None,
+        response_content: str,
+        turn_state: _RuntimeTurnState | None = None,
+    ) -> None:
+        """Close out a turn: fire hooks, emit audit event, and persist the session record."""
+        self._notify_turn_end(agent_id, response_content)
+
+        runtime_state = self._runtime_features_state
+        if runtime_state is None:
+            return
+
+        function_calls_count = len(turn_state.tool_calls) if turn_state is not None else 0
+        if runtime_state.audit_emitter is not None:
+            runtime_state.audit_emitter.emit_turn_end(
+                agent_id=agent_id,
+                turn_id=turn_state.turn_id if turn_state is not None else None,
+                content=response_content,
+                fc_count=function_calls_count,
+            )
+
+        if turn_state is None or turn_state.finalized:
+            return
+
+        if runtime_state.session_manager is not None and self._session_id is not None:
+            from .session import TurnRecord
+
+            turn = TurnRecord(
+                turn_id=turn_state.turn_id,
+                agent_id=agent_id,
+                prompt=turn_state.prompt,
+                response_content=response_content[:1000] if response_content else None,
+                tool_calls=list(turn_state.tool_calls),
+                started_at=turn_state.started_at,
+                ended_at=datetime.now(UTC).isoformat(),
+                status="success",
+            )
+            runtime_state.session_manager.record_turn(self._session_id, turn)
+
+        turn_state.finalized = True
+
+    def _record_runtime_error(
+        self,
+        agent_id: str | None,
+        error: Exception,
+        context: str,
+        turn_state: _RuntimeTurnState | None = None,
+    ) -> None:
+        """Fire error hooks, emit an audit error event, and persist a failed turn record."""
+        self._notify_runtime_error(agent_id, error)
+
+        runtime_state = self._runtime_features_state
+        if runtime_state is None:
+            return
+
+        if runtime_state.audit_emitter is not None:
+            runtime_state.audit_emitter.emit_error(
+                error_type=type(error).__name__,
+                error_msg=str(error),
+                context=context,
+                agent_id=agent_id,
+                turn_id=turn_state.turn_id if turn_state is not None else None,
+            )
+
+        if turn_state is None or turn_state.finalized:
+            return
+
+        if runtime_state.session_manager is not None and self._session_id is not None:
+            from .session import TurnRecord
+
+            turn = TurnRecord(
+                turn_id=turn_state.turn_id,
+                agent_id=agent_id,
+                prompt=turn_state.prompt,
+                response_content=None,
+                tool_calls=list(turn_state.tool_calls),
+                started_at=turn_state.started_at,
+                ended_at=datetime.now(UTC).isoformat(),
+                status="error",
+                error=str(error),
+            )
+            runtime_state.session_manager.record_turn(self._session_id, turn)
+
+        turn_state.finalized = True
+
+    @classmethod
+    def _is_reinvoke_followup_message(cls, message: ChatMessage) -> bool:
+        """Return True if the message is the standard reinvoke follow-up instruction."""
+        return isinstance(message, UserMessage) and (message.content or "").strip() == cls.REINVOKE_FOLLOWUP_INSTRUCTION
+
+    @staticmethod
+    def _is_operator_reinvoke_attachment(message: ChatMessage) -> bool:
+        """Return True for synthetic user messages injected from operator tool results."""
+        if not isinstance(message, UserMessage) or isinstance(message.content, str):
+            return False
+        if not message.content:
+            return False
+        first_chunk = message.content[0]
+        return hasattr(first_chunk, "text") and str(first_chunk.text).startswith("[TOOL IMAGE RESULT]")
+
+    @classmethod
+    def _compact_reinvoke_history(cls, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Strip trailing reinvoke cycles (follow-up instruction + tool messages + assistant call) from history."""
+        compacted = messages.copy()
+
+        while compacted and cls._is_reinvoke_followup_message(compacted[-1]):
+            compacted.pop()
+            while compacted and cls._is_operator_reinvoke_attachment(compacted[-1]):
+                compacted.pop()
+            while compacted and isinstance(compacted[-1], ToolMessage):
+                compacted.pop()
+            if compacted and isinstance(compacted[-1], AssistantMessage) and compacted[-1].tool_calls:
+                compacted.pop()
+
+        return compacted
 
     def register_agent(self, agent: Agent) -> None:
         """Register an agent with the orchestrator.
@@ -377,6 +544,9 @@ class Calute:
         """
         if self.enable_memory and self.auto_add_memory_tools:
             self._add_memory_tools_to_agent(agent)
+        if self._runtime_features_state is not None:
+            self._runtime_features_state.merge_plugin_tools(agent)
+            self._runtime_features_state.merge_operator_tools(agent)
         self.orchestrator.register_agent(agent)
 
     def _add_memory_tools_to_agent(self, agent: Agent) -> None:
@@ -405,10 +575,10 @@ class Calute:
         if agent.functions is None:
             agent.functions = []
 
-        current_func_names = {func.__name__ for func in agent.functions}
+        current_func_names = {get_callable_public_name(func) for func in agent.functions}
 
         for tool in MEMORY_TOOLS:
-            if tool.__name__ not in current_func_names:
+            if get_callable_public_name(tool) not in current_func_names:
                 agent.functions.append(tool)
 
     def _update_memory_from_response(
@@ -530,8 +700,11 @@ class Calute:
         if not content_str:
             return None
 
+        if not header:
+            return content_str
+
         indented = textwrap.indent(content_str, SEP)
-        return f"{header}\n{indented}" if header else indented
+        return f"{header}\n{indented}"
 
     def _extract_from_markdown(self, content: str, field: str) -> list[str]:
         """Extract content from markdown code blocks with a specific field identifier.
@@ -601,6 +774,13 @@ class Calute:
         assert self.template.sections is not None
         persona_header = self.template.sections.get(PromptSection.SYSTEM, "SYSTEM:") if use_instructed_prompt else ""
         instructions = str((agent.instructions() if callable(agent.instructions) else agent.instructions) or "")
+        if self._runtime_features_state is not None:
+            prompt_prefix = self._runtime_features_state.build_prompt_prefix(
+                agent_id=agent.id,
+                tool_names=[self._build_tool_prompt_label(func) for func in agent.functions],
+            )
+            if prompt_prefix:
+                instructions = f"{prompt_prefix}\n\n{instructions}".strip()
         if use_chain_of_thought:
             instructions += (
                 "\n\nApproach every task systematically:\n"
@@ -621,6 +801,15 @@ class Calute:
             rules.append(
                 "If a function can satisfy the user request, you MUST respond only with a valid tool call in the"
                 " specified format. Do not add any conversational text before or after the tool call."
+            )
+        elif agent.functions:
+            rules.extend(
+                [
+                    "Use available functions when they are needed to gather information or take actions.",
+                    "After a function returns a result, use that result to continue the task and answer the user.",
+                    "Do not repeat the same function call with the same arguments if the available result already"
+                    " answers the request unless the user asks for refreshed data or the result is incomplete.",
+                ]
             )
         if self.enable_memory and include_memory:
             rules.extend(
@@ -698,6 +887,7 @@ class Calute:
         assistant_content: str,
         function_calls: list[RequestFunctionCall],
         results: list[RequestFunctionCall],
+        agent_id: str | None = None,
     ) -> MessagesHistory:
         """Build message history for reinvocation including function results.
 
@@ -713,7 +903,7 @@ class Calute:
         Returns:
             Updated MessagesHistory with function calls and results included.
         """
-        messages = original_messages.messages.copy()
+        messages = self._compact_reinvoke_history(original_messages.messages)
 
         tool_calls = []
         for fc in function_calls:
@@ -733,14 +923,31 @@ class Calute:
         )
         messages.append(assistant_msg)
 
+        runtime_state = self._runtime_features_state
         for fc, result in zip(function_calls, results, strict=False):
             if result.status == ExecutionStatus.SUCCESS:
-                tool_content = json.dumps(result.result) if not isinstance(result.result, str) else result.result
+                tool_result: tp.Any = result.result
             else:
-                tool_content = f"Error: {result.error}"
+                tool_result = f"Error: {result.error}"
+
+            if runtime_state is not None and runtime_state.hook_runner.has_hooks("tool_result_persist"):
+                tool_result = runtime_state.hook_runner.run(
+                    "tool_result_persist",
+                    tool_name=fc.name,
+                    result=tool_result,
+                    agent_id=agent_id,
+                )
+
+            tool_content = json.dumps(tool_result) if not isinstance(tool_result, str) else tool_result
 
             tool_msg = ToolMessage(content=tool_content, tool_call_id=fc.id)
             messages.append(tool_msg)
+            if runtime_state is not None and runtime_state.operator_state is not None:
+                operator_message = runtime_state.operator_state.create_reinvoke_message(result.result)
+                if operator_message is not None:
+                    messages.append(operator_message)
+
+        messages.append(UserMessage(content=self.REINVOKE_FOLLOWUP_INSTRUCTION))
 
         return MessagesHistory(messages=messages)
 
@@ -808,11 +1015,15 @@ class Calute:
             List of RequestFunctionCall objects extracted from XML.
         """
         function_calls = []
+        valid_function_names = set(agent.get_available_functions())
         pattern = r"<(\w+)>\s*<arguments>(.*?)</arguments>\s*</\w+>"
         matches = re.findall(pattern, content, re.DOTALL)
 
         for i, match in enumerate(matches):
             name = match[0]
+            if name not in valid_function_names:
+                logger.debug("Ignoring XML function call for unknown tool '%s'", name)
+                continue
             arguments_str = match[1].strip()
             try:
                 arguments = json.loads(arguments_str)
@@ -844,8 +1055,13 @@ class Calute:
             List of RequestFunctionCall objects.
         """
         function_calls = []
+        valid_function_names = set(agent.get_available_functions())
         for call_data in function_calls_data:
             try:
+                name = call_data.get("name")
+                if name not in valid_function_names:
+                    logger.debug("Ignoring provider function call for unknown tool '%s'", name)
+                    continue
                 arguments = call_data.get("arguments", {})
                 if isinstance(arguments, str):
                     try:
@@ -855,7 +1071,7 @@ class Calute:
 
                 function_calls.append(
                     RequestFunctionCall(
-                        name=call_data.get("name"),
+                        name=name,
                         arguments=arguments,
                         id=call_data.get("id", f"call_{len(function_calls)}"),
                         timeout=agent.function_timeout,
@@ -863,7 +1079,7 @@ class Calute:
                     )
                 )
             except (KeyError, TypeError, ValueError) as e:
-                self._logger.debug(f"Skipping malformed function call data: {e}")
+                logger.debug("Skipping malformed function call data: %s", e)
                 continue
         return function_calls
 
@@ -889,8 +1105,13 @@ class Calute:
 
         if tool_calls is not None:
             function_calls = []
+            valid_function_names = set(agent.get_available_functions())
             for call_ in tool_calls:
                 try:
+                    name = call_.function.name
+                    if name not in valid_function_names:
+                        logger.debug("Ignoring provider tool call for unknown tool '%s'", name)
+                        continue
                     arguments = call_.function.arguments
                     if isinstance(arguments, str):
                         try:
@@ -903,7 +1124,7 @@ class Calute:
 
                     function_calls.append(
                         RequestFunctionCall(
-                            name=call_.function.name,
+                            name=name,
                             arguments=arguments,
                             id=call_.id,
                             timeout=agent.function_timeout,
@@ -919,13 +1140,18 @@ class Calute:
             return function_calls
 
         function_calls = []
+        valid_function_names = set(agent.get_available_functions())
         matches = self._extract_from_markdown(content=content, field="tool_call")
 
         for i, match in enumerate(matches):
             try:
                 call_data = json.loads(match)
+                name = call_data.get("name")
+                if name not in valid_function_names:
+                    logger.debug("Ignoring markdown function call for unknown tool '%s'", name)
+                    continue
                 function_call = RequestFunctionCall(
-                    name=call_data.get("name"),
+                    name=name,
                     arguments=call_data.get("content", {}),
                     id=f"call_{i}_{hash(match)}",
                     timeout=agent.function_timeout,
@@ -992,7 +1218,7 @@ class Calute:
         """
         if not agent.functions:
             return False
-        function_names = [func.__name__ for func in agent.functions]
+        function_names = [get_callable_public_name(func) for func in agent.functions]
         for func_name in function_names:
             if f"<{func_name}>" in content or f"<{func_name} " in content:
                 if "<arguments>" in content:
@@ -1017,7 +1243,7 @@ class Calute:
         """
         if not agent.functions:
             return False
-        function_names = [func.__name__ for func in agent.functions]
+        function_names = [get_callable_public_name(func) for func in agent.functions]
         for func_name in function_names:
             pattern = rf"<{func_name}(?:\s[^>]*)?>.*?<arguments>"
             if re.search(pattern, content, re.DOTALL):
@@ -1135,7 +1361,7 @@ class Calute:
                     doc = self._format_function_doc(schema)
                     function_docs.append(doc)
                 except Exception as e:
-                    func_name = getattr(func, "__name__", str(func))
+                    func_name = get_callable_public_name(func)
                     function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
         if uncategorized:
             if categorized_functions:
@@ -1146,7 +1372,7 @@ class Calute:
                     doc = self._format_function_doc(schema)
                     function_docs.append(doc)
                 except Exception as e:
-                    func_name = getattr(func, "__name__", str(func))
+                    func_name = get_callable_public_name(func)
                     function_docs.append(f"Warning: Unable to parse function {func_name}: {e!s}")
 
         return "\n\n".join(function_docs)
@@ -1219,6 +1445,32 @@ class Calute:
 
         return "\n".join(doc_lines)
 
+    def _build_tool_prompt_label(self, func: AgentFunction) -> str:
+        """Build a short tool label for visible system-prompt tool summaries.
+
+        Native tool schemas are still passed to provider APIs. This helper only
+        improves the human-readable prompt prefix so models that are weak at
+        native tool use still see what a tool is for.
+        """
+        name = get_callable_public_name(func)
+        try:
+            schema = function_to_json(func)["function"]
+        except Exception:
+            return name
+
+        description = str(schema.get("description") or "").strip()
+        if not description:
+            return name
+
+        first_paragraph = description.split("\n\n", 1)[0].strip()
+        first_line = first_paragraph.splitlines()[0].strip()
+        summary = re.sub(r"\s+", " ", first_line).strip()
+        if not summary:
+            return name
+        if len(summary) > 140:
+            summary = summary[:137].rstrip() + "..."
+        return f"{name}: {summary}"
+
     def format_context_variables(self, variables: dict[str, tp.Any]) -> str:
         """Format context variables with type information.
 
@@ -1280,6 +1532,8 @@ class Calute:
         reinvoke_after_function: bool = True,
         reinvoked_runtime: bool = False,
         streamer_buffer: StreamerBuffer | None = None,
+        _runtime_loop_detector: LoopDetector | None = None,
+        _runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> ResponseResult | AsyncIterator[StreamingResponseType]:
         """Create response with enhanced function calling and agent switching.
 
@@ -1319,68 +1573,102 @@ class Calute:
             agent = self.orchestrator.get_current_agent()
 
         context_variables = context_variables or {}
-        prompt_messages: MessagesHistory = self.manage_messages(
-            agent=agent,
-            prompt=prompt,
-            context_variables=context_variables,
-            use_instructed_prompt=use_instructed_prompt,
-            messages=messages,
-        )
-
-        if use_instructed_prompt:
-            prompt_str = prompt_messages.make_instruction_prompt(
-                conversation_name_holder=conversation_name_holder,
-                mention_last_turn=mention_last_turn,
+        runtime_state = self._runtime_features_state
+        if runtime_state is not None and not reinvoked_runtime and _runtime_turn_state is None:
+            _runtime_turn_state = _RuntimeTurnState(
+                turn_id=self._new_runtime_turn_id(),
+                prompt=prompt or "",
             )
-        else:
-            prompt_str = prompt_messages.to_openai()["messages"]
+            self._notify_turn_start(agent.id or "default", messages)
+            if runtime_state.audit_emitter is not None:
+                runtime_state.audit_emitter.emit_turn_start(
+                    agent_id=agent.id or "default",
+                    turn_id=_runtime_turn_state.turn_id,
+                    prompt=_runtime_turn_state.prompt,
+                )
 
-        if print_formatted_prompt:
+        if runtime_state is not None and _runtime_loop_detector is None:
+            _runtime_loop_detector = runtime_state.create_loop_detector(agent.id or "default")
+
+        try:
+            prompt_messages: MessagesHistory = self.manage_messages(
+                agent=agent,
+                prompt=prompt,
+                context_variables=context_variables,
+                use_instructed_prompt=use_instructed_prompt,
+                messages=messages,
+            )
+
             if use_instructed_prompt:
-                print(prompt_str)
+                prompt_str = prompt_messages.make_instruction_prompt(
+                    conversation_name_holder=conversation_name_holder,
+                    mention_last_turn=mention_last_turn,
+                )
             else:
-                pprint.pprint(prompt_messages.to_openai())
+                prompt_str = prompt_messages.to_openai()["messages"]
 
-        response = await self.llm_client.generate_completion(
-            prompt=prompt_str,
-            model=agent.model,
-            temperature=agent.temperature,
-            max_tokens=agent.max_tokens,
-            top_p=agent.top_p,
-            stop=agent.stop if isinstance(agent.stop, list) else ([agent.stop] if agent.stop else None),
-            top_k=agent.top_k,
-            min_p=agent.min_p,
-            tools=None if use_instructed_prompt else [ToolDefinition(**function_to_json(fn)) for fn in agent.functions],
-            presence_penalty=agent.presence_penalty,
-            frequency_penalty=agent.frequency_penalty,
-            repetition_penalty=agent.repetition_penalty,
-            extra_body=agent.extra_body,
-            stream=True,
-        )
+            if print_formatted_prompt:
+                if use_instructed_prompt:
+                    print(prompt_str)
+                else:
+                    pprint.pprint(prompt_messages.to_openai())
+
+            response = await self.llm_client.generate_completion(
+                prompt=prompt_str,
+                model=agent.model,
+                temperature=agent.temperature,
+                max_tokens=agent.max_tokens,
+                top_p=agent.top_p,
+                stop=agent.stop if isinstance(agent.stop, list) else ([agent.stop] if agent.stop else None),
+                top_k=agent.top_k,
+                min_p=agent.min_p,
+                tools=None
+                if use_instructed_prompt
+                else [ToolDefinition(**function_to_json(fn)) for fn in agent.functions],
+                presence_penalty=agent.presence_penalty,
+                frequency_penalty=agent.frequency_penalty,
+                repetition_penalty=agent.repetition_penalty,
+                extra_body=agent.extra_body,
+                stream=True,
+            )
+        except Exception as e:
+            self._record_runtime_error(
+                agent.id or "default", e, context="create_response_setup", turn_state=_runtime_turn_state
+            )
+            raise
 
         if not apply_functions:
             if stream:
-                return self._handle_streaming(response, reinvoked_runtime, agent)
+                return self._handle_streaming(response, reinvoked_runtime, agent, streamer_buffer, _runtime_turn_state)
             else:
-                collected = []
+                collected_content = []
+                collected_reasoning = ""
+                completion = None
                 async for chunk in self._handle_streaming(
                     response,
                     reinvoked_runtime,
                     agent,
                     streamer_buffer,
+                    _runtime_turn_state,
                 ):
-                    collected.append(chunk)
-                return (
-                    collected[-1]
-                    if collected
-                    else ResponseResult(
-                        content="",
-                        response=None,
-                        function_calls=[],
-                        agent_id=agent.id,
-                        execution_history=[],
-                        reinvoked=reinvoked_runtime,
-                    )
+                    if hasattr(chunk, "content") and chunk.content:
+                        collected_content.append(chunk.content)
+                    if hasattr(chunk, "buffered_reasoning_content") and chunk.buffered_reasoning_content:
+                        collected_reasoning = chunk.buffered_reasoning_content
+                    if hasattr(chunk, "reasoning_content") and chunk.reasoning_content and not collected_reasoning:
+                        collected_reasoning = chunk.reasoning_content
+                    if isinstance(chunk, Completion):
+                        completion = chunk
+
+                return ResponseResult(
+                    content="".join(collected_content),
+                    reasoning_content=collected_reasoning,
+                    response=response,
+                    completion=completion,
+                    function_calls=[],
+                    agent_id=agent.id,
+                    execution_history=[],
+                    reinvoked=reinvoked_runtime,
                 )
 
         if stream:
@@ -1393,12 +1681,15 @@ class Calute:
                 reinvoked_runtime,
                 use_instructed_prompt,
                 streamer_buffer,
+                _runtime_loop_detector,
+                _runtime_turn_state,
             )
         else:
             collected_content = []
             collected_reasoning = ""
             function_calls = []
             execution_history = []
+            completion = None
             async for chunk in self._handle_streaming_with_functions(
                 response,
                 agent,
@@ -1408,6 +1699,8 @@ class Calute:
                 reinvoked_runtime,
                 use_instructed_prompt,
                 streamer_buffer,
+                _runtime_loop_detector,
+                _runtime_turn_state,
             ):
                 if hasattr(chunk, "content") and chunk.content:
                     collected_content.append(chunk.content)
@@ -1419,12 +1712,15 @@ class Calute:
                     function_calls = chunk.function_calls
                 if hasattr(chunk, "result"):
                     execution_history.append(chunk)
+                if isinstance(chunk, Completion):
+                    completion = chunk
 
             final_content = "".join(collected_content)
             return ResponseResult(
                 content=final_content,
                 reasoning_content=collected_reasoning,
                 response=response,
+                completion=completion,
                 function_calls=function_calls,
                 agent_id=agent.id or "default",
                 execution_history=execution_history,
@@ -1441,6 +1737,8 @@ class Calute:
         reinvoked_runtime: bool,
         use_instructed_prompt: bool,
         streamer_buffer: StreamerBuffer | None,
+        runtime_loop_detector: LoopDetector | None = None,
+        runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> AsyncIterator[StreamingResponseType]:
         """Handle streaming response with function calls and optional reinvocation.
 
@@ -1464,253 +1762,292 @@ class Calute:
         buffered_reasoning_content = ""
         function_calls_detected = False
         function_calls = []
-        # Track tool IDs across streaming chunks to ensure consistency
         tool_id_by_index: dict[int, str] = {}
 
-        if hasattr(response, "__aiter__"):
-            stream_generator = self.llm_client.astream_completion(response, agent)
-            async for chunk_data in stream_generator:
-                content = chunk_data.get("content")
-                buffered_content = chunk_data.get("buffered_content", buffered_content)
-                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
+        try:
+            if hasattr(response, "__aiter__"):
+                stream_generator = self.llm_client.astream_completion(response, agent)
+                async for chunk_data in stream_generator:
+                    content = chunk_data.get("content")
+                    buffered_content = chunk_data.get("buffered_content", buffered_content)
+                    buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
-                streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
-                tool_call_chunks = []
+                    streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
+                    tool_call_chunks = []
 
-                if streaming_tool_calls_data:
-                    for tool_idx, tool_delta in streaming_tool_calls_data.items():
-                        if tool_delta:
-                            # Use tracked ID if available, update if new ID arrives
-                            if tool_delta.get("id"):
-                                tool_id_by_index[tool_idx] = tool_delta["id"]
-                            tool_id = tool_id_by_index.get(tool_idx, f"tool_{tool_idx}")
+                    if streaming_tool_calls_data:
+                        for tool_idx, tool_delta in streaming_tool_calls_data.items():
+                            if tool_delta:
+                                if tool_delta.get("id"):
+                                    tool_id_by_index[tool_idx] = tool_delta["id"]
+                                tool_id = tool_id_by_index.get(tool_idx, f"tool_{tool_idx}")
 
-                            tool_call_chunks.append(
-                                ToolCallStreamChunk(
-                                    id=tool_id,
-                                    type="function",
-                                    function_name=tool_delta.get("name"),
-                                    arguments=tool_delta.get("arguments"),
-                                    index=tool_idx,
-                                    is_complete=False,
+                                tool_call_chunks.append(
+                                    ToolCallStreamChunk(
+                                        id=tool_id,
+                                        type="function",
+                                        function_name=tool_delta.get("name"),
+                                        arguments=tool_delta.get("arguments"),
+                                        index=tool_idx,
+                                        is_complete=False,
+                                    )
                                 )
-                            )
-                            function_calls_detected = True
+                                function_calls_detected = True
 
-                if content and not function_calls_detected:
-                    function_calls_detected = self._detect_function_calls(buffered_content, agent)
+                    if content and not function_calls_detected:
+                        function_calls_detected = self._detect_function_calls(buffered_content, agent)
 
-                out = StreamChunk(
-                    chunk=chunk_data.get("raw_chunk"),
-                    agent_id=agent.id or "default",
-                    content=content,
-                    buffered_content=buffered_content,
-                    reasoning_content=chunk_data.get("reasoning_content"),
-                    buffered_reasoning_content=buffered_reasoning_content or None,
-                    function_calls_detected=function_calls_detected,
-                    reinvoked=reinvoked_runtime,
-                    tool_calls=None,
-                    streaming_tool_calls=tool_call_chunks if tool_call_chunks else None,
-                )
+                    out = StreamChunk(
+                        chunk=chunk_data.get("raw_chunk"),
+                        agent_id=agent.id or "default",
+                        content=content,
+                        buffered_content=buffered_content,
+                        reasoning_content=chunk_data.get("reasoning_content"),
+                        buffered_reasoning_content=buffered_reasoning_content or None,
+                        function_calls_detected=function_calls_detected,
+                        reinvoked=reinvoked_runtime,
+                        tool_calls=None,
+                        streaming_tool_calls=tool_call_chunks if tool_call_chunks else None,
+                    )
+
+                    if streamer_buffer is not None:
+                        streamer_buffer.put(out)
+                    yield out
+
+                    if chunk_data.get("is_final") and chunk_data.get("function_calls"):
+                        function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
+                        function_calls_detected = bool(function_calls) or self._detect_function_calls(
+                            buffered_content, agent
+                        )
+            else:
+                stream_generator = self.llm_client.stream_completion(response, agent)
+                for chunk_data in stream_generator:
+                    content = chunk_data.get("content")
+                    buffered_content = chunk_data.get("buffered_content", buffered_content)
+                    buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
+
+                    streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
+                    tool_call_chunks = []
+
+                    if streaming_tool_calls_data:
+                        for tool_idx, tool_delta in (
+                            streaming_tool_calls_data.items()
+                            if isinstance(streaming_tool_calls_data, dict)
+                            else enumerate(streaming_tool_calls_data or [])
+                        ):
+                            if tool_delta:
+                                idx = tool_idx if isinstance(tool_idx, int) else 0
+                                if tool_delta.get("id"):
+                                    tool_id_by_index[idx] = tool_delta["id"]
+                                tool_id = tool_id_by_index.get(idx, f"tool_{idx}")
+
+                                tool_call_chunks.append(
+                                    ToolCallStreamChunk(
+                                        id=tool_id,
+                                        type="function",
+                                        function_name=tool_delta.get("name"),
+                                        arguments=tool_delta.get("arguments"),
+                                        index=idx,
+                                        is_complete=False,
+                                    )
+                                )
+                                function_calls_detected = True
+
+                    if content and not function_calls_detected:
+                        function_calls_detected = self._detect_function_calls(buffered_content, agent)
+
+                    out = StreamChunk(
+                        chunk=chunk_data.get("raw_chunk"),
+                        agent_id=agent.id or "default",
+                        content=content,
+                        buffered_content=buffered_content,
+                        reasoning_content=chunk_data.get("reasoning_content"),
+                        buffered_reasoning_content=buffered_reasoning_content or None,
+                        function_calls_detected=function_calls_detected,
+                        reinvoked=reinvoked_runtime,
+                        tool_calls=None,
+                        streaming_tool_calls=tool_call_chunks if tool_call_chunks else None,
+                    )
+
+                    if streamer_buffer is not None:
+                        streamer_buffer.put(out)
+                    yield out
+
+                    if chunk_data.get("is_final") and chunk_data.get("function_calls"):
+                        function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
+                        function_calls_detected = bool(function_calls) or self._detect_function_calls(
+                            buffered_content, agent
+                        )
+
+            if function_calls_detected:
+                out = FunctionDetection(message="Processing function calls...", agent_id=agent.id or "default")
 
                 if streamer_buffer is not None:
                     streamer_buffer.put(out)
                 yield out
 
-                if chunk_data.get("is_final") and chunk_data.get("function_calls"):
-                    function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
-                    function_calls_detected = True
-        else:
-            stream_generator = self.llm_client.stream_completion(response, agent)
-            for chunk_data in stream_generator:
-                content = chunk_data.get("content")
-                buffered_content = chunk_data.get("buffered_content", buffered_content)
-                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
+                if not function_calls:
+                    function_calls = self._extract_function_calls(buffered_content, agent, None)
 
-                streaming_tool_calls_data = chunk_data.get("streaming_tool_calls")
-                tool_call_chunks = []
+                if function_calls:
+                    out = FunctionCallsExtracted(
+                        function_calls=[FunctionCallInfo(name=fc.name, id=fc.id) for fc in function_calls],
+                        agent_id=agent.id or "default",
+                    )
 
-                if streaming_tool_calls_data:
-                    for tool_idx, tool_delta in (
-                        streaming_tool_calls_data.items()
-                        if isinstance(streaming_tool_calls_data, dict)
-                        else enumerate(streaming_tool_calls_data or [])
-                    ):
-                        if tool_delta:
-                            idx = tool_idx if isinstance(tool_idx, int) else 0
-                            # Use tracked ID if available, update if new ID arrives
-                            if tool_delta.get("id"):
-                                tool_id_by_index[idx] = tool_delta["id"]
-                            tool_id = tool_id_by_index.get(idx, f"tool_{idx}")
+                    if streamer_buffer is not None:
+                        streamer_buffer.put(out)
+                    yield out
 
-                            tool_call_chunks.append(
-                                ToolCallStreamChunk(
-                                    id=tool_id,
-                                    type="function",
-                                    function_name=tool_delta.get("name"),
-                                    arguments=tool_delta.get("arguments"),
-                                    index=idx,
-                                    is_complete=False,
-                                )
+                    results = []
+                    for i, call in enumerate(function_calls):
+                        out = FunctionExecutionStart(
+                            function_name=call.name,
+                            function_id=call.id,
+                            progress=f"{i + 1}/{len(function_calls)}",
+                            agent_id=agent.id or "default",
+                        )
+
+                        if streamer_buffer is not None:
+                            streamer_buffer.put(out)
+                        yield out
+
+                        enhanced_context = context.copy()
+                        if self.enable_memory:
+                            enhanced_context["memory_store"] = self.memory_store
+                        enhanced_context["agent_id"] = agent.id or "default"
+
+                        result = await self.executor._execute_single_call(
+                            call,
+                            enhanced_context,
+                            agent,
+                            runtime_features_state=self._runtime_features_state,
+                            loop_detector=runtime_loop_detector,
+                            audit_turn_id=runtime_turn_state.turn_id if runtime_turn_state is not None else None,
+                        )
+                        results.append(result)
+
+                        out = FunctionExecutionComplete(
+                            function_name=call.name,
+                            function_id=call.id,
+                            status=result.status.value,
+                            result=result.result if result.status == ExecutionStatus.SUCCESS else None,
+                            error=result.error,
+                            agent_id=agent.id or "default",
+                        )
+
+                        if streamer_buffer is not None:
+                            streamer_buffer.put(out)
+                        yield out
+
+                    exec_results = [
+                        ExecutionResult(
+                            status=r.status,
+                            result=r.result if hasattr(r, "result") else None,
+                            error=r.error if hasattr(r, "error") else None,
+                        )
+                        for r in results
+                    ]
+                    switch_context = SwitchContext(
+                        function_results=exec_results,
+                        execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
+                        buffered_content=buffered_content,
+                    )
+                    self._append_turn_tool_results(runtime_turn_state, results)
+
+                    target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
+                    if target_agent:
+                        old_agent = agent.id
+                        self.orchestrator.switch_agent(target_agent, "Post-execution switch")
+
+                        out = AgentSwitch(
+                            from_agent=old_agent or "default",
+                            to_agent=target_agent,
+                            reason="Post-execution switch",
+                        )
+                        if (
+                            self._runtime_features_state is not None
+                            and self._runtime_features_state.session_manager is not None
+                            and self._session_id is not None
+                        ):
+                            from datetime import datetime
+
+                            from .session import AgentTransitionRecord
+
+                            self._runtime_features_state.session_manager.record_agent_transition(
+                                self._session_id,
+                                AgentTransitionRecord(
+                                    from_agent=old_agent or "default",
+                                    to_agent=target_agent,
+                                    reason="Post-execution switch",
+                                    turn_id=runtime_turn_state.turn_id if runtime_turn_state is not None else "",
+                                    timestamp=datetime.now(UTC).isoformat(),
+                                ),
                             )
-                            function_calls_detected = True
 
-                if content and not function_calls_detected:
-                    function_calls_detected = self._detect_function_calls(buffered_content, agent)
+                        if streamer_buffer is not None:
+                            streamer_buffer.put(out)
+                        yield out
 
-                out = StreamChunk(
-                    chunk=chunk_data.get("raw_chunk"),
-                    agent_id=agent.id or "default",
-                    content=content,
-                    buffered_content=buffered_content,
-                    reasoning_content=chunk_data.get("reasoning_content"),
-                    buffered_reasoning_content=buffered_reasoning_content or None,
-                    function_calls_detected=function_calls_detected,
-                    reinvoked=reinvoked_runtime,
-                    tool_calls=None,
-                    streaming_tool_calls=tool_call_chunks if tool_call_chunks else None,
-                )
+                    if reinvoke_after_function and function_calls:
+                        updated_messages = self._build_reinvoke_messages(
+                            prompt_messages,
+                            buffered_content,
+                            function_calls,
+                            results,
+                            agent_id=agent.id or "default",
+                        )
+                        out = ReinvokeSignal(
+                            message="Reinvoking agent with function results...",
+                            agent_id=agent.id or "default",
+                        )
 
-                if streamer_buffer is not None:
-                    streamer_buffer.put(out)
-                yield out
+                        if streamer_buffer is not None:
+                            streamer_buffer.put(out)
+                        yield out
 
-                if chunk_data.get("is_final") and chunk_data.get("function_calls"):
-                    function_calls = self._convert_function_calls(chunk_data["function_calls"], agent)
-                    function_calls_detected = True
+                        reinvoke_response = await self.create_response(
+                            prompt=None,
+                            context_variables=context,
+                            messages=updated_messages,
+                            agent_id=agent,
+                            stream=True,
+                            apply_functions=True,
+                            print_formatted_prompt=False,
+                            use_instructed_prompt=use_instructed_prompt,
+                            reinvoke_after_function=True,
+                            reinvoked_runtime=True,
+                            _runtime_loop_detector=runtime_loop_detector,
+                            _runtime_turn_state=runtime_turn_state,
+                        )
 
-        if function_calls_detected:
-            out = FunctionDetection(message="Processing function calls...", agent_id=agent.id or "default")
+                        if not isinstance(reinvoke_response, ResponseResult):
+                            async for chunk in reinvoke_response:
+                                if streamer_buffer is not None and chunk is not None:
+                                    streamer_buffer.put(chunk)
+                                yield chunk
+                        return
+
+            self._finalize_runtime_turn(agent.id or "default", buffered_content, runtime_turn_state)
+            out = Completion(
+                final_content=buffered_content,
+                reasoning_content=buffered_reasoning_content,
+                function_calls_executed=len(function_calls),
+                agent_id=agent.id or "default",
+                execution_history=self.orchestrator.execution_history[-3:],
+            )
 
             if streamer_buffer is not None:
                 streamer_buffer.put(out)
             yield out
-
-            if not function_calls:
-                function_calls = self._extract_function_calls(buffered_content, agent, None)
-
-            if function_calls:
-                out = FunctionCallsExtracted(
-                    function_calls=[FunctionCallInfo(name=fc.name, id=fc.id) for fc in function_calls],
-                    agent_id=agent.id or "default",
-                )
-
-                if streamer_buffer is not None:
-                    streamer_buffer.put(out)
-                yield out
-
-                results = []
-                for i, call in enumerate(function_calls):
-                    out = FunctionExecutionStart(
-                        function_name=call.name,
-                        function_id=call.id,
-                        progress=f"{i + 1}/{len(function_calls)}",
-                        agent_id=agent.id or "default",
-                    )
-
-                    if streamer_buffer is not None:
-                        streamer_buffer.put(out)
-                    yield out
-
-                    enhanced_context = context.copy()
-                    if self.enable_memory:
-                        enhanced_context["memory_store"] = self.memory_store
-                    enhanced_context["agent_id"] = agent.id or "default"
-
-                    result = await self.executor._execute_single_call(call, enhanced_context, agent)
-                    results.append(result)
-
-                    out = FunctionExecutionComplete(
-                        function_name=call.name,
-                        function_id=call.id,
-                        status=result.status.value,
-                        result=result.result if result.status == ExecutionStatus.SUCCESS else None,
-                        error=result.error,
-                        agent_id=agent.id or "default",
-                    )
-
-                    if streamer_buffer is not None:
-                        streamer_buffer.put(out)
-                    yield out
-
-                exec_results = [
-                    ExecutionResult(
-                        status=r.status,
-                        result=r.result if hasattr(r, "result") else None,
-                        error=r.error if hasattr(r, "error") else None,
-                    )
-                    for r in results
-                ]
-                switch_context = SwitchContext(
-                    function_results=exec_results,
-                    execution_error=any(r.status == ExecutionStatus.FAILURE for r in results),
-                    buffered_content=buffered_content,
-                )
-
-                target_agent = self.orchestrator.should_switch_agent(switch_context.__dict__)
-                if target_agent:
-                    old_agent = agent.id
-                    self.orchestrator.switch_agent(target_agent, "Post-execution switch")
-
-                    out = AgentSwitch(
-                        from_agent=old_agent or "default",
-                        to_agent=target_agent,
-                        reason="Post-execution switch",
-                    )
-
-                    if streamer_buffer is not None:
-                        streamer_buffer.put(out)
-                    yield out
-
-                if reinvoke_after_function and function_calls:
-                    updated_messages = self._build_reinvoke_messages(
-                        prompt_messages,
-                        buffered_content,
-                        function_calls,
-                        results,
-                    )
-                    out = ReinvokeSignal(
-                        message="Reinvoking agent with function results...",
-                        agent_id=agent.id or "default",
-                    )
-
-                    if streamer_buffer is not None:
-                        streamer_buffer.put(out)
-                    yield out
-
-                    reinvoke_response = await self.create_response(
-                        prompt=None,
-                        context_variables=context,
-                        messages=updated_messages,
-                        agent_id=agent,
-                        stream=True,
-                        apply_functions=True,
-                        print_formatted_prompt=False,
-                        use_instructed_prompt=use_instructed_prompt,
-                        reinvoke_after_function=True,
-                        reinvoked_runtime=True,
-                    )
-
-                    if isinstance(reinvoke_response, ResponseResult):
-                        pass
-                    else:
-                        async for chunk in reinvoke_response:
-                            if streamer_buffer is not None and chunk is not None:
-                                streamer_buffer.put(chunk)
-                            yield chunk
-                    return
-
-        out = Completion(
-            final_content=buffered_content,
-            reasoning_content=buffered_reasoning_content,
-            function_calls_executed=len(function_calls),
-            agent_id=agent.id or "default",
-            execution_history=self.orchestrator.execution_history[-3:],
-        )
-
-        if streamer_buffer is not None:
-            streamer_buffer.put(out)
-        yield out
+        except Exception as e:
+            self._record_runtime_error(
+                agent.id or "default",
+                e,
+                context="handle_streaming_with_functions",
+                turn_state=runtime_turn_state,
+            )
+            raise
 
     async def _handle_streaming(
         self,
@@ -1718,6 +2055,7 @@ class Calute:
         reinvoked_runtime,
         agent: Agent,
         streamer_buffer: StreamerBuffer | None = None,
+        runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> AsyncIterator[StreamingResponseType]:
         """Handle streaming response without function calls.
 
@@ -1735,58 +2073,69 @@ class Calute:
         buffered_content = ""
         buffered_reasoning_content = ""
 
-        if hasattr(response, "__aiter__"):
-            stream_generator = self.llm_client.astream_completion(response, agent)
-            async for chunk_data in stream_generator:
-                content = chunk_data.get("content")
-                buffered_content = chunk_data.get("buffered_content", buffered_content)
-                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
+        try:
+            if hasattr(response, "__aiter__"):
+                stream_generator = self.llm_client.astream_completion(response, agent)
+                async for chunk_data in stream_generator:
+                    content = chunk_data.get("content")
+                    buffered_content = chunk_data.get("buffered_content", buffered_content)
+                    buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
-                out = StreamChunk(
-                    chunk=chunk_data.get("raw_chunk"),
-                    agent_id=agent.id or "default",
-                    content=content,
-                    buffered_content=buffered_content,
-                    reasoning_content=chunk_data.get("reasoning_content"),
-                    buffered_reasoning_content=buffered_reasoning_content or None,
-                    function_calls_detected=False,
-                    reinvoked=reinvoked_runtime,
-                )
-                if streamer_buffer is not None:
-                    streamer_buffer.put(out)
-                yield out
-        else:
-            stream_generator = self.llm_client.stream_completion(response, agent)
-            for chunk_data in stream_generator:
-                content = chunk_data.get("content")
-                buffered_content = chunk_data.get("buffered_content", buffered_content)
-                buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
+                    out = StreamChunk(
+                        chunk=chunk_data.get("raw_chunk"),
+                        agent_id=agent.id or "default",
+                        content=content,
+                        buffered_content=buffered_content,
+                        reasoning_content=chunk_data.get("reasoning_content"),
+                        buffered_reasoning_content=buffered_reasoning_content or None,
+                        function_calls_detected=False,
+                        reinvoked=reinvoked_runtime,
+                    )
+                    if streamer_buffer is not None:
+                        streamer_buffer.put(out)
+                    yield out
+            else:
+                stream_generator = self.llm_client.stream_completion(response, agent)
+                for chunk_data in stream_generator:
+                    content = chunk_data.get("content")
+                    buffered_content = chunk_data.get("buffered_content", buffered_content)
+                    buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
 
-                out = StreamChunk(
-                    chunk=chunk_data.get("raw_chunk"),
-                    agent_id=agent.id or "default",
-                    content=content,
-                    buffered_content=buffered_content,
-                    reasoning_content=chunk_data.get("reasoning_content"),
-                    buffered_reasoning_content=buffered_reasoning_content or None,
-                    function_calls_detected=False,
-                    reinvoked=reinvoked_runtime,
-                )
-                if streamer_buffer is not None:
-                    streamer_buffer.put(out)
-                yield out
-        out = Completion(
-            final_content=buffered_content,
-            reasoning_content=buffered_reasoning_content,
-            function_calls_executed=0,
-            agent_id=agent.id or "default",
-            execution_history=self.orchestrator.execution_history[-3:],
-        )
+                    out = StreamChunk(
+                        chunk=chunk_data.get("raw_chunk"),
+                        agent_id=agent.id or "default",
+                        content=content,
+                        buffered_content=buffered_content,
+                        reasoning_content=chunk_data.get("reasoning_content"),
+                        buffered_reasoning_content=buffered_reasoning_content or None,
+                        function_calls_detected=False,
+                        reinvoked=reinvoked_runtime,
+                    )
+                    if streamer_buffer is not None:
+                        streamer_buffer.put(out)
+                    yield out
 
-        if streamer_buffer is not None:
-            streamer_buffer.put(out)
+            self._finalize_runtime_turn(agent.id or "default", buffered_content, runtime_turn_state)
+            out = Completion(
+                final_content=buffered_content,
+                reasoning_content=buffered_reasoning_content,
+                function_calls_executed=0,
+                agent_id=agent.id or "default",
+                execution_history=self.orchestrator.execution_history[-3:],
+            )
 
-        yield out
+            if streamer_buffer is not None:
+                streamer_buffer.put(out)
+
+            yield out
+        except Exception as e:
+            self._record_runtime_error(
+                agent.id or "default",
+                e,
+                context="handle_streaming",
+                turn_state=runtime_turn_state,
+            )
+            raise
 
     def run(
         self,
@@ -1935,12 +2284,14 @@ class Calute:
         output_queue = queue.Queue()
         exception_holder = [None]
 
-        def run_async():
+        def run_async() -> None:
+            """Run the async response pipeline on a dedicated event loop in a background thread."""
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-                async def async_runner():
+                async def async_runner() -> None:
+                    """Await create_response and forward each chunk to the output queue."""
                     try:
                         response = await self.create_response(
                             prompt=prompt,
@@ -2048,7 +2399,8 @@ class Calute:
         result_holder = [None]
         exception_holder = [None]
 
-        def run_in_thread():
+        def run_in_thread() -> None:
+            """Execute the synchronous run loop and store the result or exception."""
             try:
                 result = self.run(
                     prompt=prompt,
@@ -2131,7 +2483,8 @@ class Calute:
         result_holder = [None]
         exception_holder = [None]
 
-        async def run_async():
+        async def run_async() -> None:
+            """Stream the response into the buffer and build the final ResponseResult."""
             try:
                 stream = await self.create_response(
                     prompt=prompt,
@@ -2159,6 +2512,7 @@ class Calute:
                 result = ResponseResult(
                     content="".join(collected_content),
                     response=final_response,
+                    completion=final_response if isinstance(final_response, Completion) else None,
                     function_calls=getattr(final_response, "function_calls", []),
                     agent_id=getattr(final_response, "agent_id", "default"),
                     execution_history=getattr(final_response, "execution_history", []),
@@ -2214,6 +2568,23 @@ class Calute:
         from .ui import launch_application
 
         return launch_application(executor=self, agent=target_agent)
+
+    def create_tui(self, target_agent: Agent | str | None = None):
+        """Create and launch a terminal UI for interactive agent chat.
+
+        Launches the Textual-based terminal interface for interacting with
+        the Calute agent system. The TUI consumes the same streaming runtime
+        events used by the web UI, but renders them in a terminal layout.
+
+        Args:
+            target_agent: Optional specific agent or agent ID to focus.
+
+        Returns:
+            Deferred launcher object with a ``launch()`` method.
+        """
+        from .tui import launch_tui
+
+        return launch_tui(executor=self, agent=target_agent)
 
 
 __all__ = ("Calute", "PromptSection", "PromptTemplate")

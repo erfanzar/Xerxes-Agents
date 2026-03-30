@@ -39,24 +39,60 @@ from calute.types.oai_protocols import ChatMessage
 class MessageConverter:
     """Converts between OpenAI and Calute message formats.
 
-    Utility class providing static methods for bidirectional
-    conversion between OpenAI-format ChatMessage objects and
-    Calute's internal MessagesHistory format. Handles role
-    mapping and content extraction for all supported message types.
+    Utility class providing static methods for bidirectional conversion
+    between OpenAI-format ``ChatMessage`` objects and Calute's internal
+    ``MessagesHistory`` format. Handles role mapping and content extraction
+    for all supported message types (system, user, assistant).
+
+    This converter is used internally by the API server routers to
+    translate incoming OpenAI-compatible requests into the format
+    expected by Calute's agent execution pipeline.
+
+    Example:
+        >>> from calute.api_server.converters import MessageConverter
+        >>> from calute.types.oai_protocols import ChatMessage
+        >>> msgs = [
+        ...     ChatMessage(role="system", content="You are helpful."),
+        ...     ChatMessage(role="user", content="Hello!"),
+        ... ]
+        >>> history = MessageConverter.convert_openai_to_calute(msgs)
+        >>> len(history.messages)
+        2
     """
 
     @staticmethod
     def convert_openai_to_calute(messages: list[ChatMessage]) -> MessagesHistory:
-        """Convert OpenAI messages to Calute format.
+        """Convert a list of OpenAI-format messages to Calute's internal format.
+
+        Iterates through each ``ChatMessage`` and maps it to the corresponding
+        Calute message type based on the role field:
+
+        - ``"system"`` -> ``SystemMessage``
+        - ``"user"`` -> ``UserMessage``
+        - ``"assistant"`` -> ``AssistantMessage``
+
+        Any ``None`` content is converted to an empty string.
 
         Args:
-            messages: List of OpenAI ChatMessage objects
+            messages: List of OpenAI ``ChatMessage`` objects to convert. Each
+                message must have a ``role`` field set to one of ``"system"``,
+                ``"user"``, or ``"assistant"``.
 
         Returns:
-            MessagesHistory with converted messages
+            A ``MessagesHistory`` instance containing the converted messages
+            in the same order as the input list.
 
         Raises:
-            ValueError: If an unknown message role is encountered
+            ValueError: If a message has an unrecognized role (i.e., not
+                ``"system"``, ``"user"``, or ``"assistant"``).
+
+        Example:
+            >>> from calute.api_server.converters import MessageConverter
+            >>> from calute.types.oai_protocols import ChatMessage
+            >>> messages = [ChatMessage(role="user", content="Hi")]
+            >>> history = MessageConverter.convert_openai_to_calute(messages)
+            >>> history.messages[0].content
+            'Hi'
         """
         calute_messages = []
 

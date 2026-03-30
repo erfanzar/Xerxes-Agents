@@ -707,38 +707,31 @@ def apply_diff(original: str, diff: str, context_variables: dict | None = None) 
         diff_lines = diff.splitlines()
 
         result = []
-        current_line = 0  # 0-indexed position in original
+        current_line = 0
 
         for diff_line in diff_lines:
             if diff_line.startswith("+++") or diff_line.startswith("---"):
                 continue
             elif diff_line.startswith("@@"):
-                # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
                 match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_line)
                 if match:
-                    old_start = int(match.group(1)) - 1  # Convert to 0-indexed
-                    # Copy unchanged lines before this hunk
+                    old_start = int(match.group(1)) - 1
                     while current_line < old_start and current_line < len(lines):
                         result.append(lines[current_line])
                         current_line += 1
             elif diff_line.startswith("+") and not diff_line.startswith("+++"):
-                # Addition - add the new line
                 result.append(diff_line[1:] + "\n")
             elif diff_line.startswith("-") and not diff_line.startswith("---"):
-                # Deletion - skip the original line
                 current_line += 1
             elif diff_line.startswith(" "):
-                # Context line - copy from original
                 if current_line < len(lines):
                     result.append(lines[current_line])
                     current_line += 1
 
-        # Copy any remaining lines after the last hunk
         while current_line < len(lines):
             result.append(lines[current_line])
             current_line += 1
 
-        # Join and handle trailing newline
         output = "".join(result)
         if output.endswith("\n") and not original.endswith("\n"):
             output = output[:-1]

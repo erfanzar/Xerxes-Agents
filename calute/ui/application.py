@@ -43,7 +43,6 @@ import sys
 import typing
 from pathlib import Path
 
-# Handle both package import and direct run by chainlit
 try:
     from .themes import APP_TITLE, setup_chainlit_theme
 except ImportError:
@@ -52,12 +51,10 @@ except ImportError:
 if typing.TYPE_CHECKING:
     from calute.calute import Calute
     from calute.cortex import Cortex, CortexAgent, CortexTask
-    from calute.cortex.dynamic import DynamicCortex
-    from calute.cortex.task_creator import TaskCreator
+    from calute.cortex.orchestration.dynamic import DynamicCortex
+    from calute.cortex.orchestration.task_creator import TaskCreator
     from calute.types.agent_types import Agent
 
-# Use builtins to store executor config - this survives module reimport
-# when Chainlit's load_module() reimports this file
 _EXECUTOR_CONFIG_KEY = "_calute_executor_config"
 
 
@@ -137,24 +134,17 @@ class ChainlitLauncher:
             starting Chainlit. The executor config is stored in builtins to
             survive module reimport by Chainlit.
         """
-        # Set executor config in builtins BEFORE chainlit loads this module
-        # This survives module reimport by chainlit's load_module
         _set_executor_config(self.executor, self.agent)
 
-        # Setup theme configuration files BEFORE chainlit is imported
         setup_chainlit_theme()
 
-        # Set environment variables for chainlit
         os.environ["CHAINLIT_HOST"] = server_name
         os.environ["CHAINLIT_PORT"] = str(server_port)
 
-        # Import chainlit CLI and run
         from chainlit.cli import run_chainlit
 
-        # Get the path to this module for Chainlit to run
         module_path = str(Path(__file__).resolve())
 
-        # Run chainlit in same process
         run_chainlit(module_path)
 
 
@@ -191,7 +181,6 @@ def launch_application(
     return ChainlitLauncher(executor=executor, agent=agent)
 
 
-# Chainlit handlers - only registered when chainlit loads this module
 if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
     import chainlit as cl
     from chainlit.input_widget import Slider, Switch
@@ -203,7 +192,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
     except ImportError:
         from calute.ui.helpers import process_message_chainlit
 
-    # Default settings values
     DEFAULT_SETTINGS = {
         "temperature": 0.7,
         "max_tokens": 8192,
@@ -230,13 +218,10 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         Returns:
             Dictionary mapping agent IDs to agent objects.
         """
-        # Check for Calute's orchestrator.agents pattern
         if hasattr(executor, "orchestrator") and hasattr(executor.orchestrator, "agents"):
             return executor.orchestrator.agents
-        # Check for direct _agents attribute
         if hasattr(executor, "_agents"):
             return executor._agents
-        # Check for agents list (Cortex pattern)
         if hasattr(executor, "agents"):
             agents = executor.agents
             if isinstance(agents, dict):
@@ -258,14 +243,12 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         agents = _get_agents_from_executor(executor)
         agent = agents.get(agent_id) if agent_id else None
 
-        # Try to get default agent if no specific agent
         if agent is None and hasattr(executor, "default_agent"):
             agent = executor.default_agent
 
         if agent is None:
             return
 
-        # Apply settings to agent
         if hasattr(agent, "temperature"):
             agent.temperature = settings.get("temperature", DEFAULT_SETTINGS["temperature"])
         if hasattr(agent, "max_tokens"):
@@ -284,7 +267,24 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             agent.repetition_penalty = settings.get("repetition_penalty", DEFAULT_SETTINGS["repetition_penalty"])
 
     def _build_initial_settings(executor, agent_id) -> dict:
-        """Build UI settings from defaults overridden by the active agent."""
+        """Build UI settings from defaults overridden by the active agent.
+
+        Constructs the initial settings dictionary by starting with DEFAULT_SETTINGS
+        and then overriding values with attributes from the active agent (if found).
+        This ensures the UI sliders reflect the agent's current configuration when
+        a chat session starts.
+
+        Args:
+            executor: The executor instance containing registered agents.
+            agent_id: ID of the currently selected agent, or None to use the
+                default agent.
+
+        Returns:
+            Dictionary of settings values suitable for initializing ChatSettings
+            widgets. Keys include 'temperature', 'max_tokens', 'top_p', 'top_k',
+            'min_p', 'presence_penalty', 'frequency_penalty', 'repetition_penalty',
+            and 'streaming'.
+        """
         settings = dict(DEFAULT_SETTINGS)
         agents = _get_agents_from_executor(executor)
         agent = agents.get(agent_id) if agent_id else None
@@ -362,19 +362,15 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         - ChatSettings widgets for runtime configuration
         - Welcome message with profile info
         """
-        # Get executor config from builtins (set before chainlit loaded this module)
         config = _get_executor_config()
         executor = config["executor"]
 
-        # Initialize message history
         cl.user_session.set("calute_msgs", MessagesHistory(messages=[]))
 
-        # Store executor in session
         cl.user_session.set("executor", executor)
 
-        # Handle chat profile selection
         profile = cl.user_session.get("chat_profile")
-        selected_agent = config["agent"]  # Default from config
+        selected_agent = config["agent"]
 
         if profile and profile != "Default" and executor:
             agents = _get_agents_from_executor(executor)
@@ -388,7 +384,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
         initial_settings = _build_initial_settings(executor, selected_agent)
 
-        # Setup ChatSettings
         settings = await cl.ChatSettings(
             [
                 Slider(
@@ -474,10 +469,8 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
 
         cl.user_session.set("settings", settings)
 
-        # Apply initial settings
         _apply_settings_to_agent(executor, selected_agent, settings)
 
-        # Send welcome message with profile info
         profile_msg = f" (Profile: **{profile}**)" if profile and profile != "Default" else ""
         await cl.Message(
             content=f"Welcome to **{APP_TITLE}**{profile_msg}! How can I help you today?",
@@ -518,14 +511,12 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             await cl.Message(content="Nothing to regenerate.").send()
             return
 
-        # Remove last assistant message
         calute_msgs.messages.pop()
         last_user_msg = calute_msgs.messages[-1].content
 
         executor = cl.user_session.get("executor")
         agent = cl.user_session.get("agent")
 
-        # Re-process the last user message
         updated_msgs = await process_message_chainlit(
             message=last_user_msg,
             calute_msgs=calute_msgs,
@@ -571,10 +562,8 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             await cl.Message(content="Error: No executor configured. Please restart the application.").send()
             return
 
-        # Apply current settings before processing
         _apply_settings_to_agent(executor, agent, settings)
 
-        # Process the message with streaming
         updated_msgs = await process_message_chainlit(
             message=message.content,
             calute_msgs=calute_msgs,
@@ -582,7 +571,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             executor=executor,
         )
 
-        # Update session state
         cl.user_session.set("calute_msgs", updated_msgs)
 
     @cl.on_stop
@@ -594,13 +582,11 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         """
         executor = cl.user_session.get("executor")
 
-        # Stop active streamer buffers
         if executor and hasattr(executor, "streamer_buffer"):
             buf = executor.streamer_buffer
             if buf and hasattr(buf, "kill"):
                 buf.kill()
 
-        # Also check for any streamer stored in session
         streamer = cl.user_session.get("active_streamer")
         if streamer and hasattr(streamer, "kill"):
             streamer.kill()
@@ -619,7 +605,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
         cl.user_session.set("settings", None)
         cl.user_session.set("mcp_tools", None)
 
-    # MCP (Model Context Protocol) handlers
     @cl.on_mcp_connect
     async def on_mcp_connect(connection, session):
         """Handle MCP server connection.
@@ -633,7 +618,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             session: The MCP ClientSession for interacting with the server
         """
         try:
-            # Discover tools from the connected MCP server
             result = await session.list_tools()
             tools = [
                 {
@@ -647,12 +631,10 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
                 for t in result.tools
             ]
 
-            # Store tools in session, keyed by connection name
             mcp_tools = cl.user_session.get("mcp_tools") or {}
             mcp_tools[connection.name] = {"tools": tools, "session": session}
             cl.user_session.set("mcp_tools", mcp_tools)
 
-            # Notify user of connected tools
             tool_names = [t["function"]["name"] for t in tools]
             await cl.Message(
                 content=f"Connected to MCP server **{connection.name}** with {len(tools)} tools: {', '.join(tool_names[:5])}{'...' if len(tool_names) > 5 else ''}",
@@ -673,7 +655,6 @@ if "chainlit" in sys.modules or os.environ.get("CHAINLIT_ROOT_PATH"):
             name: The name of the disconnected MCP server
             session: The MCP ClientSession being disconnected
         """
-        # Remove tools from session
         mcp_tools = cl.user_session.get("mcp_tools") or {}
         if name in mcp_tools:
             del mcp_tools[name]

@@ -42,15 +42,13 @@ Example:
 """
 
 from .base import Memory, MemoryItem
-from .compat import MemoryStore, MemoryType
+from .compat import MemoryEntry, MemoryStore, MemoryType
 from .contextual_memory import ContextualMemory
 from .entity_memory import EntityMemory
 from .long_term_memory import LongTermMemory
 from .short_term_memory import ShortTermMemory
 from .storage import MemoryStorage, RAGStorage, SimpleStorage, SQLiteStorage
 from .user_memory import UserMemory
-
-MemoryEntry = MemoryItem
 
 __all__ = [
     "ContextualMemory",

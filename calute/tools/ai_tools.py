@@ -64,17 +64,43 @@ class TextEmbedder(AgentBaseFn):
         max_length: int = 512,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Generate text embeddings.
+        """Generate text embeddings using the specified method.
+
+        Converts one or more text strings into numerical vector representations.
+        Supports TF-IDF (with sklearn fallback to word frequency), sentence-transformers
+        for dense semantic embeddings, and OpenAI embedding API.
 
         Args:
-            text: Text or list of texts to embed
-            method: Embedding method (tfidf, sentence-transformers, openai)
-            model_name: Model name for embedding
-            max_length: Maximum text length
+            text: A single text string or a list of text strings to embed.
+            method: Embedding method to use. Options:
+                - "tfidf": TF-IDF vectorization via sklearn (falls back to word
+                  frequency vectors if sklearn is not installed).
+                - "sentence-transformers": Dense semantic embeddings using the
+                  sentence-transformers library.
+                - "openai": Embeddings via the OpenAI API (requires an OpenAI
+                  client in context_variables).
+            model_name: Model identifier for the embedding backend. Used by
+                sentence-transformers (default: "all-MiniLM-L6-v2") and OpenAI
+                (default: "text-embedding-ada-002"). Ignored for TF-IDF.
+            max_length: Maximum number of characters per text. Texts longer
+                than this are truncated before embedding.
+            **context_variables: Runtime context from the agent. For the "openai"
+                method, must contain an "openai_client" key with an initialized
+                OpenAI client instance.
 
         Returns:
-            Embeddings and metadata
+            A dictionary containing:
+                - embeddings: List of embedding vectors (list of lists of floats).
+                - shape: Tuple of (num_texts, embedding_dimension).
+                - features: Top feature names (for TF-IDF method).
+                - model: Model name used (for sentence-transformers and OpenAI).
+                - usage: Token usage information (for OpenAI method).
+                - error: Error message if the operation failed.
+
+        Example:
+            >>> result = TextEmbedder.static_call("Hello world", method="tfidf")
+            >>> print(result["shape"])
+            (1, 2)
         """
         result = {}
 
@@ -174,16 +200,43 @@ class TextSimilarity(AgentBaseFn):
         method: str = "cosine",
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Calculate similarity between two texts.
+        """Calculate the similarity between two text strings.
+
+        Computes a similarity score using the chosen metric. All methods
+        produce a normalized score in the range [0, 1] (or [-1, 1] for
+        semantic), along with a human-readable interpretation of the result.
 
         Args:
-            text1: First text
-            text2: Second text
-            method: Similarity method (cosine, jaccard, levenshtein, semantic)
+            text1: The first text to compare.
+            text2: The second text to compare.
+            method: Similarity metric to use. Options:
+                - "cosine": Cosine similarity on word frequency vectors.
+                  Scale: 0 to 1 (1 = identical).
+                - "jaccard": Jaccard index on word sets (intersection / union).
+                  Scale: 0 to 1. Also returns common words.
+                - "levenshtein": Normalized Levenshtein edit distance.
+                  Scale: 0 to 1 (1 = identical). Also returns raw distance.
+                - "semantic": Cosine similarity on sentence-transformer
+                  embeddings. Scale: -1 to 1. Requires the
+                  sentence-transformers package.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Similarity scores and analysis
+            A dictionary containing:
+                - similarity (float): The computed similarity score.
+                - method (str): The method used for comparison.
+                - scale (str): Description of the score range.
+                - interpretation (str): Human-readable strength label
+                  ("Very high", "High", "Moderate", "Low", "Very low").
+                - common_words (list[str]): Shared words (Jaccard only).
+                - distance (int): Raw edit distance (Levenshtein only).
+                - model (str): Embedding model used (semantic only).
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = TextSimilarity.static_call("hello world", "hello there")
+            >>> print(result["similarity"])
+            0.5
         """
         result = {}
 
@@ -308,16 +361,57 @@ class TextClassifier(AgentBaseFn):
         method: str = "keyword",
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Classify text into categories.
+        """Classify text into categories using heuristic methods.
+
+        Applies the selected classification method to determine the category,
+        sentiment, language, or topic of the input text. All methods are
+        lightweight and do not require external ML models.
 
         Args:
-            text: Text to classify
-            categories: List of possible categories
-            method: Classification method (keyword, sentiment, language, topic)
+            text: The text to classify.
+            categories: List of candidate category labels. Required when
+                method is "keyword"; ignored for other methods.
+            method: Classification method to use. Options:
+                - "keyword": Match category labels against text content.
+                  Requires the ``categories`` argument.
+                - "sentiment": Simple lexicon-based sentiment analysis
+                  returning positive, negative, or neutral.
+                - "language": Detect the language of the text using common
+                  word indicators (supports English, Spanish, French,
+                  German, Italian).
+                - "topic": Classify into predefined topics (technology,
+                  business, science, health, education) using keyword
+                  matching.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Classification results
+            A dictionary containing method-specific results:
+                For "keyword":
+                    - category (str): Best matching category.
+                    - confidence (float): Confidence score (0 to 1).
+                    - scores (dict): Per-category match counts.
+                For "sentiment":
+                    - sentiment (str): "positive", "negative", or "neutral".
+                    - confidence (float): Confidence score (0 to 1).
+                    - positive_score (int): Count of positive word matches.
+                    - negative_score (int): Count of negative word matches.
+                For "language":
+                    - language (str): Detected language name.
+                    - confidence (float): Confidence score.
+                    - scores (dict): Per-language match counts.
+                For "topic":
+                    - topic (str): Detected topic label.
+                    - confidence (float): Confidence score (0 to 1).
+                    - scores (dict): Per-topic match counts.
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = TextClassifier.static_call(
+            ...     "The algorithm processes data efficiently",
+            ...     method="topic"
+            ... )
+            >>> print(result["topic"])
+            'technology'
         """
         result = {}
 
@@ -526,17 +620,55 @@ class TextSummarizer(AgentBaseFn):
         max_length: int | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Summarize text.
+        """Generate a summary of the input text.
+
+        Supports extractive summarization (selecting important sentences),
+        keyword extraction (identifying key terms and phrases), and
+        statistical analysis (computing text metrics).
 
         Args:
-            text: Text to summarize
-            method: Summarization method (extractive, keywords, statistics)
-            max_sentences: Maximum sentences in summary
-            max_length: Maximum character length
+            text: The text to summarize.
+            method: Summarization method to use. Options:
+                - "extractive": Select the most important sentences based
+                  on word frequency scoring. Returns a condensed version
+                  of the original text.
+                - "keywords": Extract the most frequent meaningful words
+                  and bigram phrases from the text.
+                - "statistics": Compute text statistics including word
+                  count, sentence count, vocabulary richness, and
+                  sentence length metrics.
+            max_sentences: Maximum number of sentences to include in an
+                extractive summary. Defaults to 3.
+            max_length: Maximum character length for the summary output.
+                If the summary exceeds this, it is truncated with "...".
+                Only applies to the "extractive" method. None means no limit.
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Summary and metadata
+            A dictionary containing method-specific results:
+                For "extractive":
+                    - summary (str): The extracted summary text.
+                    - original_length (int): Character count of original text.
+                    - summary_length (int): Character count of summary.
+                    - compression_ratio (float): Summary length / original length.
+                For "keywords":
+                    - keywords (list[str]): Top 10 most frequent words.
+                    - key_phrases (list[str]): Top 5 bigram phrases.
+                    - summary (str): Brief description of key topics.
+                For "statistics":
+                    - summary (dict): Dictionary with total_characters,
+                      total_words, unique_words, vocabulary_richness,
+                      total_sentences, avg_sentence_length,
+                      longest_sentence, shortest_sentence.
+                - error (str): Error message if the operation failed.
+
+        Example:
+            >>> result = TextSummarizer.static_call(
+            ...     "Long article text here...",
+            ...     method="extractive",
+            ...     max_sentences=2
+            ... )
+            >>> print(result["summary"])
         """
         result = {}
 
@@ -686,15 +818,42 @@ class EntityExtractor(AgentBaseFn):
         entity_types: list[str] | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """
-        Extract entities from text.
+        """Extract named entities from text using regex pattern matching.
+
+        Scans the input text for various entity types using predefined
+        regular expression patterns. Returns deduplicated matches for
+        each requested entity type.
 
         Args:
-            text: Text to process
-            entity_types: Types of entities to extract
+            text: The text to extract entities from.
+            entity_types: List of entity types to extract. If None, extracts
+                all supported types. Supported types:
+                - "emails": Email addresses.
+                - "urls": HTTP/HTTPS URLs.
+                - "phone_numbers": Phone numbers in various formats.
+                - "dates": Dates in common formats (YYYY-MM-DD, MM/DD/YYYY, etc.).
+                - "times": Time expressions (HH:MM, HH:MM:SS, with optional AM/PM).
+                - "numbers": Integer and decimal numbers.
+                - "hashtags": Hashtag expressions (#word).
+                - "mentions": At-mention expressions (@user).
+                - "currency": Currency values ($, EUR, GBP, JPY prefixed).
+                - "names": Proper names (capitalized multi-word sequences).
+            **context_variables: Runtime context from the agent (unused).
 
         Returns:
-            Extracted entities
+            A dictionary containing:
+                - entities (dict[str, list[str]]): Mapping of entity type
+                  to a list of unique extracted values (max 20 per type).
+                - total_entities (int): Total number of extracted entities
+                  across all types.
+
+        Example:
+            >>> result = EntityExtractor.static_call(
+            ...     "Contact john@example.com or visit https://example.com",
+            ...     entity_types=["emails", "urls"]
+            ... )
+            >>> print(result["entities"]["emails"])
+            ['john@example.com']
         """
         result = {"entities": {}}
 

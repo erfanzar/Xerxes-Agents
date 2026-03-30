@@ -82,9 +82,11 @@ class AgentSwitchTrigger(Enum):
 
     EXPLICIT = "explicit"
     CAPABILITY_BASED = "capability"
+    CAPABILITY_REQUIRED = "capability"
     LOAD_BALANCING = "load"
     CONTEXT_BASED = "context"
     ERROR_RECOVERY = "error"
+    CUSTOM = "custom"
 
 
 class ExecutionStatus(Enum):
@@ -103,6 +105,7 @@ class ExecutionStatus(Enum):
 
     SUCCESS = "success"
     FAILURE = "failure"
+    FAILED = "failure"
     PARTIAL = "partial"
     PENDING = "pending"
     CANCELLED = "cancelled"
@@ -139,7 +142,9 @@ class RequestFunctionCall:
     Attributes:
         name: Name of the function to call.
         arguments: Dictionary of arguments to pass to the function.
-        id: Unique identifier for this function call.
+        id: Unique identifier for this function call, auto-generated if not provided.
+        call_id: Optional explicit call ID that, when provided, overrides ``id``.
+            After initialization, ``id`` and ``call_id`` are kept in sync.
         agent_id: ID of the agent making the call, if applicable.
         dependencies: List of function call IDs this call depends on.
         timeout: Optional timeout in seconds for execution.
@@ -153,6 +158,7 @@ class RequestFunctionCall:
     name: str
     arguments: dict
     id: str = field(default_factory=lambda: f"call_{hash(id(object()))}")
+    call_id: str | None = None
     agent_id: str | None = None
     dependencies: list[str] = field(default_factory=list)
     timeout: float | None = None
@@ -161,6 +167,18 @@ class RequestFunctionCall:
     status: ExecutionStatus = ExecutionStatus.PENDING
     result: tp.Any = None
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        """Synchronize the ``id`` and ``call_id`` fields after initialization.
+
+        Ensures both identifiers are consistent: if ``call_id`` was explicitly
+        provided, it takes precedence and overwrites ``id``; otherwise ``call_id``
+        is set to the auto-generated ``id`` value.
+        """
+        if self.call_id:
+            self.id = self.call_id
+        else:
+            self.call_id = self.id
 
 
 @dataclass
@@ -183,6 +201,12 @@ class AgentCapability:
     function_names: list[str] = field(default_factory=list)
     context_requirements: dict[str, tp.Any] = field(default_factory=dict)
     performance_score: float = 1.0
+
+
+AgentCapability.FUNCTION_CALLING = AgentCapability(  # type: ignore[attr-defined]
+    name="function_calling",
+    description="Can use tools and function calls",
+)
 
 
 @dataclass
@@ -258,6 +282,8 @@ class StreamChunk:
         agent_id: ID of the agent that produced this chunk.
         content: Text content extracted from the chunk.
         buffered_content: Accumulated content from all chunks so far.
+        reasoning_content: Reasoning/thinking content from the current chunk.
+        buffered_reasoning_content: Accumulated reasoning content from all chunks so far.
         function_calls_detected: Whether function calls were detected.
         reinvoked: Whether the agent was reinvoked after function execution.
         tool_calls: Completed tool calls extracted from the response.
@@ -277,7 +303,13 @@ class StreamChunk:
     streaming_tool_calls: list[ToolCallStreamChunk] | None = None
 
     def __post_init__(self):
-        """Initialize the chunk, ensuring content fields are properly set."""
+        """Normalize the chunk after initialization.
+
+        Ensures that ``delta.content`` on each choice in an OpenAI-style chunk
+        is set to an empty string rather than ``None``. This prevents downstream
+        consumers from needing to handle ``None`` content during string
+        concatenation of streamed responses.
+        """
         if self.chunk is not None:
             if hasattr(self.chunk, "choices"):
                 for idx, chose in enumerate(self.chunk.choices):
@@ -471,6 +503,7 @@ class ResponseResult:
         content: The text content of the response.
         response: Raw ChatCompletion response from the LLM.
         completion: Completion event with summary information.
+        reasoning_content: Reasoning/thinking content produced by the model, if any.
         function_calls: List of function calls that were executed.
         agent_id: ID of the agent that produced the response.
         execution_history: List of all execution events.
@@ -505,9 +538,6 @@ class ReinvokeSignal:
     type: str = "reinvoke_signal"
 
 
-#: Type alias for all possible streaming response event types.
-#: Used to type-hint generators and async generators that yield
-#: streaming events during agent execution.
 StreamingResponseType: tp.TypeAlias = (
     StreamChunk
     | FunctionDetection

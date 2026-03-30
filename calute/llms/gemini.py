@@ -493,7 +493,6 @@ class GeminiLLM(BaseLLM):
 
             yield chunk_data
 
-        # After the loop ends, yield a final chunk to signal completion
         yield {
             "content": None,
             "buffered_content": buffered_content,
@@ -568,7 +567,6 @@ class GeminiLLM(BaseLLM):
 
             yield chunk_data
 
-        # Signal stream completion
         yield {
             "content": None,
             "buffered_content": buffered_content,
@@ -620,7 +618,6 @@ class GeminiLLM(BaseLLM):
                             args = getattr(fc, "args", None)
                             if args is not None:
                                 try:
-                                    # Convert MapComposite/proto objects to dict then JSON
                                     args_str = _json.dumps(dict(args))
                                 except (TypeError, ValueError):
                                     args_str = str(args)

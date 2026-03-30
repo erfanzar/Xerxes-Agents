@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Base memory classes for Calute memory system"""
+"""Base memory classes for Calute memory system."""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -24,7 +24,23 @@ from uuid import uuid4
 
 @dataclass
 class MemoryItem:
-    """Individual memory item with comprehensive metadata"""
+    """Individual memory item with comprehensive metadata.
+
+    Attributes:
+        content: The text content stored in this memory item.
+        memory_type: Category label for the memory (e.g., "general", "short_term").
+        timestamp: When the memory was created.
+        metadata: Arbitrary key-value data attached to this item.
+        agent_id: Identifier of the agent that created this memory.
+        task_id: Identifier of the task associated with this memory.
+        conversation_id: Identifier of the conversation this memory belongs to.
+        user_id: Identifier of the user associated with this memory.
+        relevance_score: Search relevance score (0.0-1.0).
+        access_count: Number of times this item has been retrieved.
+        last_accessed: Timestamp of the most recent access.
+        embedding: Optional dense vector embedding for semantic search.
+        memory_id: Unique UUID string for this memory item.
+    """
 
     content: str
     memory_type: str = "general"
@@ -41,7 +57,12 @@ class MemoryItem:
     memory_id: str = field(default_factory=lambda: str(uuid4()))
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert memory item to dictionary"""
+        """Convert this memory item to a JSON-serialisable dictionary.
+
+        Returns:
+            Dictionary representation with all fields, converting datetimes
+            to ISO 8601 strings.
+        """
         return {
             "memory_id": self.memory_id,
             "content": self.content,
@@ -59,7 +80,14 @@ class MemoryItem:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
-        """Create memory item from dictionary"""
+        """Create a MemoryItem from a dictionary, converting ISO strings to datetimes.
+
+        Args:
+            data: Dictionary as produced by :meth:`to_dict`.
+
+        Returns:
+            A new MemoryItem populated from the supplied data.
+        """
         data = data.copy()
         if "timestamp" in data and isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.fromisoformat(data["timestamp"])
@@ -69,21 +97,27 @@ class MemoryItem:
 
 
 class Memory(ABC):
-    """Abstract base class for memory implementations"""
+    """Abstract base class for all Calute memory implementations.
+
+    Subclasses must implement :meth:`save`, :meth:`search`, :meth:`retrieve`,
+    :meth:`update`, :meth:`delete`, and :meth:`clear`. The base class provides
+    shared infrastructure: an ordered ``_items`` list, an ``_index`` mapping
+    memory IDs to items, and the :meth:`get_context` / :meth:`get_statistics`
+    convenience methods.
+    """
 
     def __init__(
         self,
         storage: Any | None = None,
         max_items: int | None = None,
         enable_embeddings: bool = False,
-    ):
-        """
-        Initialize memory.
+    ) -> None:
+        """Initialize memory.
 
         Args:
-            storage: Storage backend for persistence
-            max_items: Maximum number of items to store
-            enable_embeddings: Whether to compute embeddings for semantic search
+            storage: Storage backend for persistence.
+            max_items: Maximum number of items to store before eviction.
+            enable_embeddings: Whether to compute embeddings for semantic search.
         """
         self.storage = storage
         self.max_items = max_items
@@ -93,12 +127,31 @@ class Memory(ABC):
 
     @abstractmethod
     def save(self, content: str, metadata: dict[str, Any] | None = None, **kwargs) -> MemoryItem:
-        """Save a memory item"""
+        """Save a memory item.
+
+        Args:
+            content: Text content to store.
+            metadata: Optional key-value metadata to attach.
+            **kwargs: Additional implementation-specific fields.
+
+        Returns:
+            The newly created MemoryItem.
+        """
         pass
 
     @abstractmethod
     def search(self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, **kwargs) -> list[MemoryItem]:
-        """Search for relevant memories"""
+        """Search for relevant memories matching a query.
+
+        Args:
+            query: Natural-language or keyword query string.
+            limit: Maximum number of results to return.
+            filters: Optional key-value criteria to narrow results.
+            **kwargs: Additional implementation-specific parameters.
+
+        Returns:
+            List of matching MemoryItem instances, ordered by relevance.
+        """
         pass
 
     @abstractmethod
@@ -108,22 +161,48 @@ class Memory(ABC):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve specific memory items"""
+        """Retrieve specific memory items by ID or filter criteria.
+
+        Args:
+            memory_id: Specific memory UUID to retrieve.
+            filters: Optional key-value criteria for bulk retrieval.
+            limit: Maximum number of items to return when using filters.
+
+        Returns:
+            Single MemoryItem if memory_id is provided and found,
+            list of MemoryItem when using filters, or None if not found.
+        """
         pass
 
     @abstractmethod
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update a memory item"""
+        """Update an existing memory item with new field values.
+
+        Args:
+            memory_id: UUID of the memory item to update.
+            updates: Dictionary of attribute names and new values.
+
+        Returns:
+            True if the update succeeded, False if the item was not found.
+        """
         pass
 
     @abstractmethod
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete memory items"""
+        """Delete memory items by ID or filter criteria.
+
+        Args:
+            memory_id: Specific memory UUID to delete.
+            filters: Optional key-value criteria for bulk deletion.
+
+        Returns:
+            Number of items deleted.
+        """
         pass
 
     @abstractmethod
     def clear(self) -> None:
-        """Clear all memories"""
+        """Remove all memory items from this store."""
         pass
 
     def get_context(self, limit: int = 10, format_type: str = "text") -> str:
@@ -160,7 +239,12 @@ class Memory(ABC):
             return "\n".join(lines)
 
     def get_statistics(self) -> dict[str, Any]:
-        """Get memory statistics"""
+        """Return aggregate statistics about stored memory items.
+
+        Returns:
+            Dictionary with keys: total_items, max_items, memory_types (counts
+            per type), unique_agents, unique_users, and unique_conversations.
+        """
         stats = {
             "total_items": len(self._items),
             "max_items": self.max_items,
@@ -188,9 +272,9 @@ class Memory(ABC):
         return stats
 
     def __len__(self) -> int:
-        """Get number of memory items"""
+        """Return the number of memory items currently stored."""
         return len(self._items)
 
     def __repr__(self) -> str:
-        """String representation"""
+        """Return a concise string representation of this memory store."""
         return f"{self.__class__.__name__}(items={len(self._items)}, max={self.max_items})"

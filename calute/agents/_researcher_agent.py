@@ -80,16 +80,44 @@ def conduct_research(
     depth: str = "comprehensive",
     max_sources: int = 10,
 ) -> str:
-    """
-    Conduct comprehensive research on a topic.
+    """Conduct comprehensive research on a topic at the specified depth.
+
+    Executes a structured research workflow by generating multiple search
+    queries tailored to different facets of the topic (overview, latest
+    research, concepts, applications, challenges, and future trends). The
+    number of queries and results per query scales with the chosen depth
+    level. Research sessions are stored in the global ``research_state``
+    dictionary under the ``topics`` key.
 
     Args:
-        topic: Research topic
-        depth: Research depth (quick, standard, comprehensive)
-        max_sources: Maximum number of sources to analyze
+        topic: The research topic or subject to investigate. Used to
+            generate multiple search query variations covering different
+            angles of the topic.
+        depth: Research depth level controlling the breadth and thoroughness
+            of the investigation. Valid values are:
+            - ``'quick'``: 2 queries with 3 results each for rapid overview.
+            - ``'standard'``: 4 queries with 5 results each for balanced
+              coverage.
+            - ``'comprehensive'``: 6 queries with 8 results each for
+              thorough investigation (default).
+        max_sources: Maximum number of sources to analyze across all
+            queries. Defaults to 10. Note: in the current implementation
+            the actual source count is determined by the depth config
+            rather than this parameter directly.
 
     Returns:
-        Research summary with key findings
+        A formatted string report containing the research ID, topic,
+        depth level, total sources analyzed, numbered key findings
+        organized by query facet, research metrics (queries executed,
+        results analyzed, information density, confidence level), and
+        a completion status.
+
+    Example:
+        >>> report = conduct_research(
+        ...     topic="machine learning",
+        ...     depth="comprehensive",
+        ...     max_sources=15,
+        ... )
     """
     research_id = f"research_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -176,15 +204,40 @@ def analyze_sources(
     urls: list[str],
     analysis_type: str = "credibility",
 ) -> str:
-    """
-    Analyze and evaluate information sources.
+    """Analyze and evaluate the credibility of information sources by URL.
+
+    Evaluates each provided URL based on its domain characteristics to
+    assign credibility scores and source type classifications. Domain
+    suffixes (e.g., ``.edu``, ``.gov``, ``.org``) and known domain names
+    are used as heuristics for scoring. Results are appended to the
+    global ``research_state['sources']`` list.
 
     Args:
-        urls: List of URLs to analyze
-        analysis_type: Type of analysis (credibility, bias, relevance)
+        urls: List of URL strings to analyze. Each URL is parsed to
+            extract its domain for credibility assessment. URLs should
+            include the protocol (e.g., ``https://``).
+        analysis_type: Type of source analysis to perform. Valid values
+            are:
+            - ``'credibility'``: Evaluates source trustworthiness based
+              on domain type (default).
+            - ``'bias'``: Assesses potential bias in sources.
+            - ``'relevance'``: Evaluates source relevance to the topic.
+            Note: The current implementation applies domain-based
+            credibility scoring regardless of the analysis type selected.
 
     Returns:
-        Source analysis report
+        A formatted string report containing the analysis ID, number of
+        sources analyzed, analysis type, average credibility score with
+        a qualitative rating (Excellent/Good/Fair/Low), source type
+        distribution with percentages, individual source assessments
+        with color-coded credibility indicators, and an overall
+        recommendation.
+
+    Example:
+        >>> report = analyze_sources(
+        ...     urls=["https://example.edu/paper", "https://news.com/article"],
+        ...     analysis_type="credibility",
+        ... )
     """
     analysis_id = f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -275,16 +328,42 @@ def synthesize_information(
     synthesis_type: str = "summary",
     max_length: int = 500,
 ) -> str:
-    """
-    Synthesize multiple information sources into cohesive insights.
+    """Synthesize multiple research findings into cohesive, structured insights.
+
+    Combines and organizes a list of textual findings into a unified
+    synthesis using the specified approach. Findings are categorized by
+    theme (for summaries), analyzed for common terms (for comparisons),
+    or evaluated for consensus, controversy, and knowledge gaps (for
+    analytical synthesis). Results are appended to ``research_state['findings']``.
 
     Args:
-        findings: List of findings to synthesize
-        synthesis_type: Type of synthesis (summary, comparison, analysis)
-        max_length: Maximum length of synthesis
+        findings: List of finding strings to synthesize. Each string
+            represents a discrete piece of information or insight from
+            a research source. Returns a warning if the list is empty.
+        synthesis_type: Approach for combining the findings. Valid values:
+            - ``'summary'``: Categorizes findings into thematic groups
+              (fundamentals, applications, challenges, trends) based on
+              keyword matching and presents up to 2 items per theme.
+            - ``'comparison'``: Performs term frequency analysis across
+              all findings, identifying the top 5 recurring terms (>4
+              characters) and computing a diversity score.
+            - ``'analysis'``: Classifies findings into consensus areas,
+              disputed areas, and knowledge gaps based on discourse
+              markers (e.g., "however", "similarly", "unknown").
+        max_length: Maximum character length for the synthesis output.
+            If the generated synthesis exceeds this limit, it is
+            truncated with an ellipsis. Defaults to 500.
 
     Returns:
-        Synthesized information
+        A formatted string report containing the synthesis ID, type,
+        source count, character length, the synthesis content itself,
+        and a completion status.
+
+    Example:
+        >>> result = synthesize_information(
+        ...     findings=["AI is transforming healthcare", "Challenges include data privacy"],
+        ...     synthesis_type="summary",
+        ... )
     """
     synthesis_id = f"synthesis_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -410,15 +489,35 @@ def generate_citations(
     sources: list[dict[str, str]],
     style: str = "APA",
 ) -> str:
-    """
-    Generate properly formatted citations.
+    """Generate properly formatted academic citations from source metadata.
+
+    Formats a list of source metadata dictionaries into citations following
+    the specified academic citation style. Generated citations are appended
+    to the global ``research_state['citations']`` list.
 
     Args:
-        sources: List of source dictionaries with title, author, date, url
-        style: Citation style (APA, MLA, Chicago)
+        sources: List of source dictionaries. Each dictionary should contain:
+            - ``'title'`` (str): Title of the source. Defaults to ``'Untitled'``.
+            - ``'author'`` (str): Author name(s). Defaults to ``'Unknown Author'``.
+            - ``'date'`` (str | int): Publication date or year. Defaults to
+              the current year.
+            - ``'url'`` (str): URL where the source can be accessed.
+              Defaults to an empty string.
+        style: Citation formatting style. Valid values are:
+            - ``'APA'``: Author (Date). Title. Retrieved from URL (default).
+            - ``'MLA'``: Author. "Title." Web. Date. <URL>.
+            - ``'Chicago'``: Author. "Title." Accessed Date. URL.
+            Any other value produces a simple comma-separated format.
 
     Returns:
-        Formatted citations
+        A formatted string containing the citation style header, total
+        count, and numbered citations in the specified format.
+
+    Example:
+        >>> citations = generate_citations(
+        ...     sources=[{"title": "AI Safety", "author": "Smith", "date": "2024", "url": "https://example.com"}],
+        ...     style="APA",
+        ... )
     """
     citations = []
 
@@ -454,15 +553,38 @@ Generated {len(citations)} citations:
 
 
 def fact_check(claim: str, sources: list[str] | None = None) -> str:
-    """
-    Fact-check claims against reliable sources.
+    """Fact-check a claim against reliable sources using heuristic analysis.
+
+    Evaluates the veracity of a textual claim by analyzing its linguistic
+    properties (absolute statements, numerical claims, temporal claims) and
+    optionally cross-referencing against provided sources. The function uses
+    keyword-based heuristics to assign a verification status and confidence
+    score.
 
     Args:
-        claim: Claim to verify
-        sources: Optional list of sources to check against
+        claim: The textual claim or assertion to verify. The function
+            inspects the claim for absolute language (``'always'``,
+            ``'never'``), numerical content, and temporal markers
+            (``'first'``, ``'recently'``) to guide the analysis.
+        sources: Optional list of source reference strings to check the
+            claim against. When provided, sources are heuristically split
+            into supporting and contradicting groups to determine the
+            claim's status (``'likely true'``, ``'likely false'``, or
+            ``'disputed'``). Defaults to ``None``, in which case the
+            claim status remains ``'unverified'``.
 
     Returns:
-        Fact-checking results
+        A formatted string report containing the fact-check ID, the claim
+        text, verification status with a color-coded indicator, confidence
+        percentage, analysis notes, counts of supporting and contradicting
+        sources, and a recommendation (accept, verify further, or treat
+        with skepticism).
+
+    Example:
+        >>> result = fact_check(
+        ...     claim="Python is the most popular programming language",
+        ...     sources=["survey_2024.pdf", "tiobe_index.html"],
+        ... )
     """
     fact_check_id = f"factcheck_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -534,16 +656,42 @@ def create_literature_review(
     scope: str = "comprehensive",
     max_sources: int = 20,
 ) -> str:
-    """
-    Create a structured literature review.
+    """Create a structured literature review document on a given topic.
+
+    Generates a literature review with sections determined by the scope
+    level. Each section is populated with template content relevant to the
+    topic. The review is stored in the global
+    ``research_state['knowledge_base']['reviews']`` list.
 
     Args:
-        topic: Review topic
-        scope: Review scope (focused, comprehensive, systematic)
-        max_sources: Maximum sources to include
+        topic: The subject or research area for the literature review.
+            Used to contextualize section content throughout the document.
+        scope: Review scope controlling the number and depth of sections.
+            Valid values are:
+            - ``'focused'``: Minimal review with 3 sections (Introduction,
+              Key Studies, Conclusion) and targeted depth.
+            - ``'comprehensive'``: Standard review with 6 sections
+              (Introduction, Background, Methodology, Key Findings,
+              Discussion, Conclusion) and thorough depth (default).
+            - ``'systematic'``: Full systematic review with 9 sections
+              (Abstract, Introduction, Methods, Search Strategy, Results,
+              Analysis, Discussion, Limitations, Conclusion) and
+              exhaustive depth.
+        max_sources: Maximum number of sources to reference in the review.
+            Used in the introduction and bibliography placeholder.
+            Defaults to 20.
 
     Returns:
-        Literature review document
+        A formatted string document containing the review title, ID,
+        scope, date, and all sections with template content. Ends with
+        a references placeholder indicating the expected source count.
+
+    Example:
+        >>> review = create_literature_review(
+        ...     topic="deep learning in healthcare",
+        ...     scope="comprehensive",
+        ...     max_sources=25,
+        ... )
     """
     review_id = f"review_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
@@ -638,15 +786,37 @@ def extract_key_concepts(
     text: str,
     max_concepts: int = 10,
 ) -> str:
-    """
-    Extract and define key concepts from text.
+    """Extract and define key concepts from a text document using pattern matching.
+
+    Uses regular expression patterns to identify potential key concepts in
+    the input text. Two extraction strategies are combined: capitalized
+    multi-word phrases (proper nouns and named entities) and technical terms
+    identified by common suffixes (e.g., ``-tion``, ``-ment``, ``-ity``,
+    ``-ology``). Definitions are auto-generated based on suffix heuristics.
 
     Args:
-        text: Text to analyze
-        max_concepts: Maximum concepts to extract
+        text: The input text to analyze for key concepts. Should contain
+            substantive content for meaningful extraction. Both capitalized
+            phrases and technical terminology are detected.
+        max_concepts: Maximum number of concepts to extract and return.
+            Results are deduplicated before limiting. Defaults to 10.
 
     Returns:
-        Key concepts with definitions
+        A formatted string report containing the total count of extracted
+        concepts and a numbered list where each concept is paired with
+        an auto-generated definition based on its morphological structure.
+
+    Note:
+        Definitions are heuristically generated from word suffixes (e.g.,
+        words ending in ``-tion`` get definitions like "The process or
+        result of ..."). Concepts without recognized suffixes receive a
+        generic definition.
+
+    Example:
+        >>> result = extract_key_concepts(
+        ...     text="Machine Learning and Neural Network optimization improves classification accuracy.",
+        ...     max_concepts=5,
+        ... )
     """
 
     import re

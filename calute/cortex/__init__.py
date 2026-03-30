@@ -69,16 +69,16 @@ Example:
     >>> print(result.raw_output)
 """
 
-from .agent import CortexAgent
-from .cortex import Cortex, CortexOutput, MemoryConfig
-from .dynamic import DynamicCortex, DynamicTaskBuilder, create_dynamic_cortex
-from .enums import ChainType, ProcessType
-from .memory_integration import CortexMemory
-from .planner import CortexPlanner, ExecutionPlan, PlanStep
-from .task import ChainLink, CortexTask, CortexTaskOutput
-from .task_creator import TaskCreationPlan, TaskCreator, TaskDefinition
-from .tool import CortexTool
-from .universal_agent import UniversalAgent, UniversalTaskCreator
+from .agents.agent import CortexAgent
+from .agents.memory_integration import CortexMemory
+from .agents.universal_agent import UniversalAgent, UniversalTaskCreator
+from .core.enums import ChainType, ProcessType
+from .core.tool import CortexTool
+from .orchestration.cortex import Cortex, CortexOutput, MemoryConfig
+from .orchestration.dynamic import DynamicCortex, DynamicTaskBuilder, create_dynamic_cortex
+from .orchestration.planner import CortexPlanner, ExecutionPlan, PlanStep
+from .orchestration.task import ChainLink, CortexTask, CortexTaskOutput
+from .orchestration.task_creator import TaskCreationPlan, TaskCreator, TaskDefinition
 
 __all__ = [
     "ChainLink",

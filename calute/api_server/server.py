@@ -87,12 +87,28 @@ class CaluteAPIServer:
     ):
         """Initialize the API server.
 
+        Sets up the FastAPI application, completion services, and optionally
+        the Cortex multi-agent orchestration layer. If Cortex is enabled and
+        an LLM is provided, the Cortex completion service and routers are
+        initialized immediately. Otherwise, routers are deferred until the
+        first agent is registered.
+
         Args:
-            calute_instance: The Calute instance to use for agent management
-            llm: LLM instance for Cortex agents
-            can_overide_samplings: Whether to allow overriding sampling parameters
-            enable_cortex: Whether to enable Cortex endpoints
-            use_universal_agent: Whether to include UniversalAgent in Cortex
+            calute_instance: Optional ``Calute`` instance to use for standard
+                agent management and execution. Required for registering
+                standard agents via ``register_agent``.
+            llm: Optional ``BaseLLM`` instance for powering Cortex agents.
+                Required when ``enable_cortex`` is ``True``.
+            can_overide_samplings: Whether to allow incoming request parameters
+                (temperature, top_p, max_tokens, etc.) to override the agent's
+                default sampling settings. Defaults to ``False``.
+            enable_cortex: Whether to enable Cortex multi-agent orchestration
+                endpoints. When ``True``, the server supports model names
+                containing ``"cortex"`` for multi-agent workflows.
+                Defaults to ``False``.
+            use_universal_agent: Whether to include a ``UniversalAgent`` as a
+                fallback agent in the Cortex agent pool. Only relevant when
+                ``enable_cortex`` is ``True``. Defaults to ``True``.
         """
         self.calute = calute_instance
         self.llm = llm
@@ -132,17 +148,28 @@ class CaluteAPIServer:
             self._routers_initialized = True
 
     def register_agent(self, agent: Agent) -> None:
-        """Register an agent to be available via API.
+        """Register a standard agent to be available via the API.
+
+        Adds the agent to both the Calute instance and the server's internal
+        agent registry. The agent becomes accessible through the chat
+        completions endpoint using its ID, name, or model as the ``model``
+        parameter in requests. If routers have not yet been initialized,
+        this method triggers router setup.
 
         Args:
-            agent: The Agent instance to register.
+            agent: The ``Agent`` instance to register. Must have at least
+                one of ``id``, ``name``, or ``model`` set to serve as the
+                lookup key in the agent registry.
 
         Raises:
-            ValueError: If no Calute instance is available.
+            ValueError: If no ``Calute`` instance was provided during server
+                initialization, since standard agents require Calute for
+                execution.
 
-        Note:
-            The agent will be available via its ID, name, or model as the model parameter
-            in chat completion requests.
+        Example:
+            >>> server = CaluteAPIServer(calute_instance=calute)
+            >>> agent = Agent(id="assistant", model="gpt-4", instructions="Help users")
+            >>> server.register_agent(agent)
         """
         if not self.calute:
             raise ValueError("Calute instance required for registering regular agents")
@@ -156,16 +183,26 @@ class CaluteAPIServer:
             self._routers_initialized = True
 
     def register_cortex_agent(self, agent: CortexAgent) -> None:
-        """Register a CortexAgent for orchestration.
+        """Register a ``CortexAgent`` for multi-agent orchestration.
+
+        Adds the agent to the Cortex agent pool. If the Cortex completion
+        service has already been initialized, its agent list is updated
+        immediately. If routers have not yet been initialized, this method
+        triggers router setup.
 
         Args:
-            agent: The CortexAgent instance to register.
+            agent: The ``CortexAgent`` instance to register. This agent
+                will be available for task assignment and orchestration
+                through the Cortex completion service.
 
         Raises:
-            ValueError: If Cortex is not enabled.
+            ValueError: If Cortex was not enabled during server initialization
+                (i.e., ``enable_cortex=False``).
 
-        Note:
-            CortexAgents are used for multi-agent orchestration via Cortex endpoints.
+        Example:
+            >>> server = CaluteAPIServer(llm=my_llm, enable_cortex=True)
+            >>> cortex_agent = CortexAgent(name="researcher", llm=my_llm)
+            >>> server.register_cortex_agent(cortex_agent)
         """
         if not self.enable_cortex:
             raise ValueError("Cortex must be enabled to register CortexAgents")
@@ -180,12 +217,21 @@ class CaluteAPIServer:
             self._routers_initialized = True
 
     def _setup_routers(self) -> None:
-        """Set up FastAPI routers for the API endpoints.
+        """Set up and include FastAPI routers for the API endpoints.
 
-        Configures the appropriate routers based on enabled features:
-        - UnifiedChatRouter for Cortex-enabled servers
-        - ChatRouter for standard agent servers
-        - ModelsRouter and HealthRouter for all servers
+        Configures the appropriate routers based on which services are
+        available and includes them in the FastAPI application:
+
+        - ``UnifiedChatRouter``: Used when Cortex is enabled. Handles both
+          standard and Cortex requests through a single endpoint.
+        - ``ChatRouter``: Used when only standard agents are available.
+        - ``ModelsRouter``: Lists all available models/agents. Included
+          whenever at least one completion service is active.
+        - ``HealthRouter``: Provides the health check endpoint. Included
+          whenever at least one completion service is active.
+
+        This method is called automatically when the first agent is
+        registered or during ``__init__`` if Cortex is pre-configured.
         """
         from .routers import UnifiedChatRouter
 
@@ -208,10 +254,19 @@ class CaluteAPIServer:
             self.app.include_router(health_router.router, tags=["health"])
 
     def _get_all_models(self) -> dict[str, Any]:
-        """Get all available models including Cortex models.
+        """Get all available models including Cortex virtual models.
+
+        Builds a combined dictionary of all registered standard agents and,
+        if Cortex is enabled, adds virtual model entries for each supported
+        Cortex mode and process type. Virtual Cortex models are generated
+        with multiple common prefixes (empty, ``"calute-"``, ``"api-"``,
+        ``"v1-"``) to support flexible model naming in client requests.
 
         Returns:
-            Dictionary mapping model names to their configurations
+            Dictionary mapping model name strings to either ``Agent`` objects
+            (for standard agents) or configuration dictionaries (for Cortex
+            virtual models) containing ``type``, ``mode``, and optionally
+            ``process`` keys.
         """
         models = dict(self.agents)
 
@@ -233,17 +288,30 @@ class CaluteAPIServer:
         return models
 
     def run(self, host: str = "0.0.0.0", port: int = 11881, **kwargs) -> None:
-        """Run the API server.
+        """Run the API server using uvicorn.
 
-        Starts the uvicorn server with the configured FastAPI application.
+        Starts the uvicorn ASGI server with the configured FastAPI application.
+        If routers have not been initialized yet, this method attempts to set
+        them up. Raises an error if no agents have been registered and Cortex
+        is not enabled.
 
         Args:
-            host: Host to bind the server to (default: "0.0.0.0").
-            port: Port to bind the server to (default: 11881).
-            **kwargs: Additional arguments passed to uvicorn.run().
+            host: The hostname or IP address to bind the server to.
+                Defaults to ``"0.0.0.0"`` (all interfaces).
+            port: The TCP port number to bind the server to.
+                Defaults to ``11881``.
+            **kwargs: Additional keyword arguments passed directly to
+                ``uvicorn.run()``, such as ``log_level``, ``workers``,
+                ``ssl_keyfile``, etc.
 
         Raises:
-            RuntimeError: If no agents are registered and Cortex is not enabled.
+            RuntimeError: If no agents are registered and Cortex is not
+                enabled, since the server would have no endpoints to serve.
+
+        Example:
+            >>> server = CaluteAPIServer(calute_instance=calute)
+            >>> server.register_agent(agent)
+            >>> server.run(host="127.0.0.1", port=8000, log_level="info")
         """
         if not self._routers_initialized:
             if self.enable_cortex and self.cortex_completion_service:
@@ -266,26 +334,37 @@ class CaluteAPIServer:
     ) -> CaluteAPIServer:
         """Create a Calute API server with the given client and agents.
 
-        This is a convenience factory function that creates a Calute instance and
-        API server, then registers the provided agents.
+        This is a convenience factory method that handles the full setup
+        sequence: creating a ``Calute`` instance, wrapping it in a
+        ``CaluteAPIServer``, and registering all provided agents. The
+        returned server is ready to be started with ``run()``.
 
         Args:
-            client: OpenAI-compatible client instance.
-            agents: List of agents to register, or a single Agent instance.
-            can_overide_samplings: Whether to allow overriding sampling parameters.
-            **calute_kwargs: Additional arguments passed to Calute constructor.
+            client: An OpenAI-compatible client instance (e.g.,
+                ``openai.OpenAI(...)``). Passed to the ``Calute`` constructor.
+            agents: A single ``Agent`` instance or a list of ``Agent``
+                instances to register with the server. If ``None``, no agents
+                are registered and they must be added later via
+                ``register_agent()``.
+            can_overide_samplings: Whether to allow incoming request parameters
+                (temperature, top_p, max_tokens, etc.) to override the agent's
+                default sampling settings. Defaults to ``False``.
+            **calute_kwargs: Additional keyword arguments passed directly to
+                the ``Calute`` constructor (e.g., ``max_history_length``,
+                ``system_prompt``).
 
         Returns:
-            CaluteAPIServer instance ready to run.
+            A fully configured ``CaluteAPIServer`` instance with all provided
+            agents registered and ready to serve requests.
 
         Example:
             >>> import openai
             >>> from calute.types import Agent
-            >>> from calute.api_server import create_server
+            >>> from calute.api_server import CaluteAPIServer
             >>>
             >>> client = openai.OpenAI(api_key="key", base_url="url")
             >>> agent = Agent(id="assistant", model="gpt-4", instructions="Help users")
-            >>> server = create_server(client, agents=[agent])
+            >>> server = CaluteAPIServer.create_server(client, agents=[agent])
             >>> server.run(port=8000)
         """
         calute = Calute(client=client, **calute_kwargs)

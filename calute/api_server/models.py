@@ -38,13 +38,23 @@ class ModelInfo(BaseModel):
 
     Represents metadata for a single model or agent registered
     with the Calute API server. Follows the OpenAI model object
-    specification for compatibility.
+    specification for compatibility with the ``/v1/models`` endpoint.
 
     Attributes:
-        id: Unique identifier for the model/agent.
-        object: Object type, always "model" for OpenAI compatibility.
-        created: Unix timestamp when model was created.
-        owned_by: Owner of the model (always "calute").
+        id: Unique identifier for the model/agent. This is the value
+            clients use in the ``model`` field of chat completion requests.
+        object: Object type, always ``"model"`` for OpenAI compatibility.
+        created: Unix timestamp (seconds since epoch) indicating when the
+            model entry was created.
+        owned_by: Owner identifier for the model. Defaults to ``"calute"``.
+
+    Example:
+        >>> from calute.api_server.models import ModelInfo
+        >>> info = ModelInfo(id="my-agent", created=1700000000)
+        >>> info.object
+        'model'
+        >>> info.owned_by
+        'calute'
     """
 
     id: str
@@ -54,15 +64,25 @@ class ModelInfo(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """Response containing list of available models/agents.
+    """Response containing a list of available models/agents.
 
-    Standard response format for the /v1/models endpoint,
+    Standard response format for the ``/v1/models`` endpoint,
     providing a list of all registered agents. Follows the
     OpenAI list response specification.
 
     Attributes:
-        object: Object type, always "list" for OpenAI compatibility.
-        data: List of ModelInfo objects representing available agents.
+        object: Object type, always ``"list"`` for OpenAI compatibility.
+        data: List of ``ModelInfo`` objects representing all available
+            agents and models registered with the server.
+
+    Example:
+        >>> from calute.api_server.models import ModelInfo, ModelsResponse
+        >>> model = ModelInfo(id="assistant", created=1700000000)
+        >>> response = ModelsResponse(data=[model])
+        >>> response.object
+        'list'
+        >>> len(response.data)
+        1
     """
 
     object: str = "list"
@@ -72,13 +92,21 @@ class ModelsResponse(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response model.
 
-    Response format for the /health endpoint, providing basic
+    Response format for the ``/health`` endpoint, providing basic
     health status information about the API server and its
-    registered agents.
+    registered agents. Used by load balancers and monitoring systems
+    to verify server availability.
 
     Attributes:
-        status: Health status string (e.g., "healthy", "degraded").
-        agents: Number of registered agents currently available.
+        status: Health status string (e.g., ``"healthy"``, ``"degraded"``).
+        agents: Number of registered agents currently available for
+            serving chat completion requests.
+
+    Example:
+        >>> from calute.api_server.models import HealthResponse
+        >>> health = HealthResponse(status="healthy", agents=3)
+        >>> health.status
+        'healthy'
     """
 
     status: str

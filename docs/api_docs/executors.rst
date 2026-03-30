@@ -2,6 +2,6 @@ calute.executors
 ================
 
 .. automodule:: calute.executors
-    :members:
-    :undoc-members:
-    :show-inheritance:
+   :members:
+   :undoc-members:
+   :show-inheritance:

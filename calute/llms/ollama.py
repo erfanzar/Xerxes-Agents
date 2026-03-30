@@ -302,7 +302,7 @@ class OllamaLLM(BaseLLM):
 
         try:
             if use_stream:
-                return await self._stream_completion(endpoint, payload)
+                return self._stream_completion(endpoint, payload)
             else:
                 response = await self.client.post(endpoint, json=payload)
                 response.raise_for_status()
@@ -609,7 +609,6 @@ class OllamaLLM(BaseLLM):
                     data = resp.json()
                     model_info = data.get("model_info", {})
                     details = data.get("details", {})
-                    # Ollama stores context length in model_info with various key names
                     context_len = (
                         model_info.get("context_length")
                         or model_info.get("llama.context_length")

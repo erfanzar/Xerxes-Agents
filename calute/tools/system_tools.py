@@ -325,12 +325,12 @@ class ProcessManager(AgentBaseFn):
             try:
                 proc = psutil.Process(pid)
                 proc_name = proc.name()
-                proc.terminate()  # Graceful termination first
+                proc.terminate()
                 try:
-                    proc.wait(timeout=5)  # Wait up to 5 seconds
+                    proc.wait(timeout=5)
                     result["status"] = "terminated"
                 except psutil.TimeoutExpired:
-                    proc.kill()  # Force kill if still running
+                    proc.kill()
                     result["status"] = "killed"
                 result["pid"] = pid
                 result["name"] = proc_name

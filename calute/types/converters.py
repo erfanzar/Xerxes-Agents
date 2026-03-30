@@ -39,13 +39,34 @@ from .tool_calls import Tool
 
 
 def convert_openai_messages(messages: list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]) -> list[ChatMessage]:
-    r"""Convert OpenAI messages to Calute messages.
+    """Convert a list of OpenAI-format message dictionaries to Calute ChatMessage objects.
+
+    Iterates through each message dictionary and dispatches to the appropriate
+    Calute message class (UserMessage, AssistantMessage, ToolMessage, or
+    SystemMessage) based on the 'role' field.
 
     Args:
-        messages: The OpenAI messages to convert.
+        messages: A list of message dictionaries in OpenAI chat completion format.
+            Each dictionary must contain a 'role' key with one of the values:
+            'user', 'assistant', 'tool', or 'system'. Additional keys depend
+            on the role (e.g., 'content', 'tool_calls', 'tool_call_id').
 
     Returns:
-        The Calute messages.
+        A list of typed Calute ChatMessage objects corresponding to the input
+        messages, preserving order.
+
+    Raises:
+        ValueError: If a message has an unrecognized role value.
+
+    Example:
+        >>> openai_msgs = [
+        ...     {"role": "system", "content": "You are a helpful assistant."},
+        ...     {"role": "user", "content": "Hello!"},
+        ...     {"role": "assistant", "content": "Hi there!"},
+        ... ]
+        >>> calute_msgs = convert_openai_messages(openai_msgs)
+        >>> len(calute_msgs)
+        3
     """
     converted_messages: list[ChatMessage] = []
     for openai_message in messages:
@@ -66,32 +87,63 @@ def convert_openai_messages(messages: list[dict[str, str | list[dict[str, str | 
 
 
 def convert_openai_tools(tools: list[dict[str, Any]]) -> list[Tool]:
-    r"""Convert OpenAI tools to Calute tools.
+    """Convert a list of OpenAI-format tool dictionaries to Calute Tool objects.
+
+    Each tool dictionary is expected to follow the OpenAI tool definition format
+    with a 'type' field (typically "function") and a 'function' field containing
+    the function name, description, and JSON Schema parameters.
 
     Args:
-        tools: The OpenAI tools to convert.
+        tools: A list of tool definition dictionaries in OpenAI format. Each
+            dictionary should contain 'type' and 'function' keys matching
+            the OpenAI tool specification.
 
     Returns:
-        The Calute tools.
+        A list of Calute Tool instances, one per input dictionary.
+
+    Example:
+        >>> openai_tools = [{
+        ...     "type": "function",
+        ...     "function": {
+        ...         "name": "get_weather",
+        ...         "description": "Get weather info",
+        ...         "parameters": {"type": "object", "properties": {}}
+        ...     }
+        ... }]
+        >>> calute_tools = convert_openai_tools(openai_tools)
+        >>> calute_tools[0].function.name
+        'get_weather'
     """
     converted_tools = [Tool.from_openai(openai_tool) for openai_tool in tools]
     return converted_tools
 
 
 def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> None:
-    r"""Check if the names are valid field names.
+    """Validate that parameter names are recognized field names.
 
-    Names are valid if they are inside the `valid_fields_names` set or chat completion OpenAI fields. If the names are
-    not valid field names, raise a ValueError.
+    Checks each name against two sets: the caller-provided ``valid_fields_names``
+    and the internal ``_OPENAI_COMPLETION_FIELDS`` set of standard OpenAI chat
+    completion parameters. Names that appear in neither set are flagged as invalid.
 
-    The error message will contain the invalid field names sorted by if they are openAI valid field names or not.
+    The error message distinguishes between names that are valid OpenAI parameters
+    (but not in the caller's valid set) and names that are entirely unrecognized,
+    making it easier to diagnose configuration issues.
 
     Args:
-        valid_fields_names: The valid field names.
-        names: The names to check.
+        valid_fields_names: A set of field names that the caller considers valid
+            for its specific context (e.g., fields on a custom request model).
+        names: The set of field names to validate against both the caller's
+            valid set and the OpenAI completion fields.
 
     Raises:
-        ValueError: If the names are not valid field names.
+        ValueError: If any name is not found in ``valid_fields_names``. The error
+            message separates OpenAI-valid-but-unsupported parameters from
+            completely unrecognized parameters.
+
+    Example:
+        >>> valid = {"model", "messages", "temperature"}
+        >>> check_openai_fields_names(valid, {"model", "temperature"})  # OK
+        >>> check_openai_fields_names(valid, {"invalid_param"})  # raises ValueError
     """
 
     openai_valid_params = set()
@@ -114,13 +166,25 @@ def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> 
 
 
 def is_openai_field_name(name: str) -> bool:
-    """Check if a name is a valid OpenAI completion field name.
+    """Check whether a name is a recognized OpenAI chat completion field.
+
+    Looks up the given name in the internal ``_OPENAI_COMPLETION_FIELDS`` set,
+    which contains all standard parameter names accepted by the OpenAI chat
+    completion API (e.g., 'model', 'messages', 'temperature', 'tools').
 
     Args:
-        name: The field name to check.
+        name: The field name string to check against the known OpenAI
+            completion parameter names.
 
     Returns:
-        True if the name is a valid OpenAI completion field, False otherwise.
+        True if the name is a recognized OpenAI completion field name,
+        False otherwise.
+
+    Example:
+        >>> is_openai_field_name("temperature")
+        True
+        >>> is_openai_field_name("not_a_real_field")
+        False
     """
     return name in _OPENAI_COMPLETION_FIELDS
 

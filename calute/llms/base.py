@@ -123,7 +123,6 @@ class LLMConfig:
     timeout: float = 60.0
     retry_attempts: int = 3
     extra_params: dict[str, Any] = field(default_factory=dict)
-    # Model metadata (auto-fetched from provider)
     max_model_len: int | None = None
     model_metadata: dict[str, Any] = field(default_factory=dict)
 
