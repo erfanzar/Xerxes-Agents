@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import os
 import re
 import time
 import typing as tp
@@ -36,6 +37,7 @@ from urllib.parse import urlparse
 from rich.console import Group
 from rich.panel import Panel
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -410,7 +412,7 @@ class CaluteTUI(App[None]):
     """
 
     SPINNER_FRAMES: tp.ClassVar = ["|", "/", "-", "\\"]
-    DEFAULT_INPUT_PLACEHOLDER = "Paste/type multiple lines. Ctrl+S to send. Type / for palette."
+    DEFAULT_INPUT_PLACEHOLDER = "Paste/type multiple lines. Cmd+Enter to send. Type / for palette."
 
     CSS = """
     Screen {
@@ -483,7 +485,7 @@ class CaluteTUI(App[None]):
 
     BINDINGS: tp.ClassVar = [
         Binding("ctrl+l", "clear_chat", "Clear"),
-        Binding("ctrl+s,ctrl+enter,meta+enter", "submit_input", "Send"),
+        Binding("ctrl+enter,meta+enter", "submit_input", "Send"),
         Binding("ctrl+j", "focus_input", "Focus Input"),
         Binding("ctrl+n", "next_agent", "Next Agent"),
         Binding("ctrl+p", "cycle_profile", "Cycle Profile"),
@@ -535,6 +537,10 @@ class CaluteTUI(App[None]):
         self.tokens_per_second = 0.0
         self._stream_started_at: float | None = None
         self._last_pending_question_id: str | None = None
+        self._last_escape_shortcut_at: float | None = None
+        self._vscode_meta_enter_fallback = bool(
+            os.environ.get("TERM_PROGRAM", "").strip().lower() == "vscode" or os.environ.get("VSCODE_PID")
+        )
 
     def compose(self) -> ComposeResult:
         """Build and yield the Textual widget tree for the application layout."""
@@ -591,6 +597,53 @@ class CaluteTUI(App[None]):
                 self._set_status("No matching commands. Try /help.")
         elif not self.is_busy:
             self._set_status("")
+
+    def on_key(self, event: events.Key) -> None:
+        """Handle VS Code's ``Cmd+Enter`` terminal fallback as ``Esc`` + ``Enter``.
+
+        The integrated VS Code terminal can be configured to forward
+        ``Cmd+Enter`` to terminal apps by sending an escape prefix followed
+        by carriage return. Textual doesn't reliably collapse that into a
+        single ``meta+enter`` binding in every terminal, so Calute treats a
+        tight ``Esc`` -> ``Enter`` sequence in the focused composer as a
+        submit shortcut when running inside VS Code.
+        """
+        if not self._vscode_meta_enter_fallback:
+            return
+        try:
+            input_focused = self.focused is self._input_widget()
+        except NoMatches:
+            input_focused = False
+
+        if not input_focused:
+            self._last_escape_shortcut_at = None
+            return
+
+        if event.key == "escape":
+            self._last_escape_shortcut_at = time.perf_counter()
+            return
+
+        if event.key != "enter":
+            self._last_escape_shortcut_at = None
+            return
+
+        if self._last_escape_shortcut_at is None:
+            return
+
+        elapsed = time.perf_counter() - self._last_escape_shortcut_at
+        self._last_escape_shortcut_at = None
+        if elapsed > 0.35:
+            return
+
+        event.prevent_default()
+        event.stop()
+        self.run_worker(
+            self.action_submit_input(),
+            name="submit-input-shortcut",
+            group="input-shortcuts",
+            exclusive=True,
+            description="Submit input via VS Code Cmd+Enter fallback",
+        )
 
     def _input_widget(self) -> TextArea:
         """Return the multiline composer widget."""
@@ -1978,7 +2031,7 @@ class CaluteTUI(App[None]):
         self._last_pending_question_id = pending["request_id"]
         input_widget.disabled = False
         self._set_input_hint(
-            pending.get("placeholder") or "Answer the question above. Ctrl+S to send.",
+            pending.get("placeholder") or "Answer the question above. Cmd+Enter to send.",
             title="answer",
         )
         self._upsert_pending_question_entry(pending)

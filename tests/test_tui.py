@@ -92,6 +92,14 @@ def test_launch_tui_returns_launcher():
     assert calute.create_tui(agent) is not None
 
 
+def test_calute_tui_advertises_cmd_enter_submit():
+    submit_binding = next(binding for binding in CaluteTUI.BINDINGS if binding.action == "submit_input")
+    assert "meta+enter" in submit_binding.key
+    assert "ctrl+s" not in submit_binding.key
+    assert "Ctrl+S" not in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+    assert "Cmd+Enter" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+
+
 async def test_calute_tui_streaming_smoke():
     llm = _FakeLLM(
         responses=[
@@ -212,7 +220,6 @@ async def test_calute_tui_tracks_tool_activity_inline():
         assert "\u2713" in (tool_entry.title or "")
 
 
-
 async def test_calute_tui_shows_compact_streamed_tool_cards():
     def lookup(query: str) -> dict:
         return {
@@ -233,7 +240,7 @@ async def test_calute_tui_shows_compact_streamed_tool_cards():
                         0: {
                             "id": "call_lookup",
                             "name": "lookup",
-                            "arguments": "{\"query\":\"OpenAI\"}",
+                            "arguments": '{"query":"OpenAI"}',
                         }
                     }
                 ),
