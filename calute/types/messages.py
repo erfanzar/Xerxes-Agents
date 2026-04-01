@@ -575,18 +575,17 @@ class AssistantMessage(BaseMessage):
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
         """Convert the assistant message to OpenAI API format.
 
-        Includes ``content`` and ``tool_calls`` keys only when they are not
-        None, matching the OpenAI API's expected structure.
+        Always includes ``content`` so OpenAI-compatible servers that require
+        the field for tool-call turns still accept the payload.
 
         Returns:
-            A dictionary with ``role`` and optionally ``content`` and
+            A dictionary with ``role``, ``content``, and optionally
             ``tool_calls`` keys in OpenAI format.
         """
         out_dict: dict[str, str | list[dict[str, str | dict[str, Any]]]] = {
             "role": self.role,
+            "content": self.content if self.content is not None else "",
         }
-        if self.content is not None:
-            out_dict["content"] = self.content
         if self.tool_calls is not None:
             out_dict["tool_calls"] = [tool_call.to_openai() for tool_call in self.tool_calls]
 

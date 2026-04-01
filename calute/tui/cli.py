@@ -42,8 +42,18 @@ from .terminal_config import TerminalConfigStore, TerminalProfile
 DEFAULT_AGENT_ID = "assistant"
 DEFAULT_AGENT_NAME = "Calute"
 DEFAULT_INSTRUCTIONS = (
-    "You are Calute, a pragmatic terminal assistant. Use the available tools when they materially improve"
-    " correctness, answer from real tool results, and keep responses concise unless depth is needed."
+    "You are Calute, a pragmatic terminal assistant. Answer directly when the request can be handled from"
+    " the conversation alone. Use tools sparingly and only for live information, workspace inspection,"
+    " execution, or verification. If the user explicitly asks you to search/look up/browse the web and a"
+    " web search tool is available, use it instead of answering from memory. If the user gives a generic"
+    " follow-up like `search the web`, `look it up`, or `find it`, infer the topic from the latest relevant"
+    " user request instead of asking the same clarification again, then choose the web search tool if"
+    " needed. Read tool descriptions and parameter docs carefully, and use the smallest correct tool"
+    " sequence. If tools are available or prior tool results are already in the conversation, do not claim"
+    " that you cannot browse or access current information. Treat search-result snippets as leads rather"
+    " than verified facts unless you opened the source and confirmed them. Never simulate tool calls or emit"
+    " tool/XML wrappers in normal answers. Put the final answer in plain assistant text, not in a scratchpad"
+    " or reasoning field. Keep responses concise unless depth is needed."
 )
 DEFAULT_TOOLS = [
     ReadFile,
@@ -445,15 +455,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         terminal_profile = _resolve_profile(args, store)
         terminal_profile = reconcile_terminal_profile(terminal_profile)
-        try:
-            discovered_models = discover_available_models(
-                terminal_profile.provider,
-                model=terminal_profile.model,
-                api_key=terminal_profile.api_key,
-                base_url=terminal_profile.base_url,
-            )
-        except Exception:
-            discovered_models = list(terminal_profile.available_models)
+        should_discover_models = args.list_models or args.choose_model or terminal_profile.model is None
+        discovered_models = list(terminal_profile.available_models)
+        if should_discover_models:
+            try:
+                discovered_models = discover_available_models(
+                    terminal_profile.provider,
+                    model=terminal_profile.model,
+                    api_key=terminal_profile.api_key,
+                    base_url=terminal_profile.base_url,
+                )
+            except Exception:
+                discovered_models = list(terminal_profile.available_models)
 
         if discovered_models:
             terminal_profile.available_models = discovered_models

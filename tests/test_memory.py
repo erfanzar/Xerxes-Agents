@@ -147,9 +147,7 @@ class TestMemory:
 
     def test_retrieve_memories_by_tags(self, memory_store):
         """Test retrieving memories by tags."""
-        memory_store.add_memory(
-            "Tagged memory 1", MemoryType.SEMANTIC, "agent1", tags=["important", "urgent"]
-        )
+        memory_store.add_memory("Tagged memory 1", MemoryType.SEMANTIC, "agent1", tags=["important", "urgent"])
         memory_store.add_memory("Tagged memory 2", MemoryType.SEMANTIC, "agent1", tags=["important"])
         memory_store.add_memory("Tagged memory 3", MemoryType.SEMANTIC, "agent1", tags=["trivial"])
 

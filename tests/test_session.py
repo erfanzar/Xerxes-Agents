@@ -32,10 +32,6 @@ from calute.session.store import (
     SessionManager,
 )
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 
 def _make_tool_call(**overrides) -> ToolCallRecord:
     defaults = {
@@ -97,11 +93,6 @@ def _make_session(**overrides) -> SessionRecord:
     return SessionRecord(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# Serialization round-trips
-# ---------------------------------------------------------------------------
-
-
 class TestToolCallRecordSerialization:
     def test_round_trip(self):
         tc = _make_tool_call()
@@ -122,9 +113,7 @@ class TestToolCallRecordSerialization:
         json.dumps(tc.to_dict())
 
     def test_defaults(self):
-        tc = ToolCallRecord.from_dict(
-            {"call_id": "x", "tool_name": "y", "arguments": {}}
-        )
+        tc = ToolCallRecord.from_dict({"call_id": "x", "tool_name": "y", "arguments": {}})
         assert tc.status == "success"
         assert tc.error is None
 
@@ -205,11 +194,6 @@ class TestSessionRecordSerialization:
         assert restored.agent_transitions == []
 
 
-# ---------------------------------------------------------------------------
-# InMemorySessionStore
-# ---------------------------------------------------------------------------
-
-
 class TestInMemorySessionStore:
     def test_save_and_load(self):
         store = InMemorySessionStore()
@@ -255,11 +239,6 @@ class TestInMemorySessionStore:
         loaded = store.load_session("sess_1")
         assert loaded is not None
         assert loaded.metadata["v"] == 2
-
-
-# ---------------------------------------------------------------------------
-# FileSessionStore
-# ---------------------------------------------------------------------------
 
 
 class TestFileSessionStore:
@@ -322,11 +301,6 @@ class TestFileSessionStore:
         path = tmp_path / "sess_1.json"
         data = json.loads(path.read_text())
         assert data["session_id"] == "sess_1"
-
-
-# ---------------------------------------------------------------------------
-# SessionManager
-# ---------------------------------------------------------------------------
 
 
 class TestSessionManager:
@@ -405,9 +379,7 @@ class TestSessionManager:
         sid = session.session_id
 
         mgr.record_turn(sid, _make_turn(turn_id="t1"))
-        mgr.record_agent_transition(
-            sid, _make_transition(from_agent="a1", to_agent="a2")
-        )
+        mgr.record_agent_transition(sid, _make_transition(from_agent="a1", to_agent="a2"))
         mgr.record_turn(sid, _make_turn(turn_id="t2", agent_id="a2"))
         mgr.end_session(sid)
 

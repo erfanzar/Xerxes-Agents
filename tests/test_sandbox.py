@@ -20,10 +20,6 @@ from calute.security.sandbox import (
     SandboxRouter,
 )
 
-# ---------------------------------------------------------------------------
-# Original SandboxRouter tests (unchanged)
-# ---------------------------------------------------------------------------
-
 
 class TestSandboxRouter:
     def test_off_mode_always_host(self):
@@ -72,11 +68,6 @@ class TestSandboxRouter:
             router.execute_in_sandbox("execute_shell", lambda **kwargs: kwargs, {"x": 1})
 
 
-# ---------------------------------------------------------------------------
-# SandboxConfig new fields
-# ---------------------------------------------------------------------------
-
-
 class TestSandboxConfig:
     def test_backend_type_defaults_none(self):
         config = SandboxConfig()
@@ -99,11 +90,6 @@ class TestSandboxConfig:
         assert config.backend_config.mount_readonly is False
 
 
-# ---------------------------------------------------------------------------
-# SandboxBackendConfig
-# ---------------------------------------------------------------------------
-
-
 class TestSandboxBackendConfig:
     def test_defaults(self):
         bc = SandboxBackendConfig()
@@ -122,11 +108,6 @@ class TestSandboxBackendConfig:
         assert bc.image == "ubuntu:22.04"
         assert bc.mount_paths == {"/host/data": "/data"}
         assert bc.env_vars["FOO"] == "bar"
-
-
-# ---------------------------------------------------------------------------
-# Docker backend with mocked subprocess
-# ---------------------------------------------------------------------------
 
 
 class TestDockerSandboxBackendMocked:
@@ -183,9 +164,7 @@ class TestDockerSandboxBackendMocked:
         result_payload = pickle.dumps({"ok": True, "value": 42})
         encoded_result = base64.b64encode(result_payload).decode()
 
-        with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run"
-        ) as mock_run:
+        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0,
                 stdout=encoded_result,
@@ -196,9 +175,7 @@ class TestDockerSandboxBackendMocked:
 
     def test_execute_container_failure(self):
         backend = self._make_backend()
-        with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run"
-        ) as mock_run:
+        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=1,
                 stdout="",
@@ -232,11 +209,6 @@ class TestDockerSandboxBackendMocked:
         # Should have a volume mount for the working directory.
         assert "-v" in cmd
         assert any("/tmp/workdir:/workspace" in arg for arg in cmd)
-
-
-# ---------------------------------------------------------------------------
-# Subprocess backend (basic, uses real subprocess)
-# ---------------------------------------------------------------------------
 
 
 class TestSubprocessSandboxBackend:
@@ -273,11 +245,6 @@ class TestSubprocessSandboxBackend:
         backend = self._make_backend()
         with pytest.raises(RuntimeError, match="inside subprocess sandbox"):
             backend.execute("test_tool", _raise_value_error, {})
-
-
-# ---------------------------------------------------------------------------
-# SandboxRouter with a real backend
-# ---------------------------------------------------------------------------
 
 
 class TestSandboxRouterWithBackend:
@@ -324,11 +291,6 @@ class TestSandboxRouterWithBackend:
         assert decision.context == ExecutionContext.HOST
         assert "warn mode" in decision.reason.lower()
         assert any("would run in sandbox" in r.message for r in caplog.records)
-
-
-# ---------------------------------------------------------------------------
-# Backend registry / factory
-# ---------------------------------------------------------------------------
 
 
 class TestBackendRegistry:
@@ -381,11 +343,6 @@ class TestBackendRegistry:
         config = SandboxConfig()
         backend = get_backend("dummy_test", config)
         assert isinstance(backend, _DummyBackend)
-
-
-# ---------------------------------------------------------------------------
-# Module-level picklable helpers (must be at module scope for pickle)
-# ---------------------------------------------------------------------------
 
 
 def _add(a: int = 0, b: int = 0) -> int:

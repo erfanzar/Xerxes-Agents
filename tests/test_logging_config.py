@@ -115,6 +115,7 @@ class TestCaluteLogger:
 class TestGlobalLogger:
     def setup_method(self):
         import calute.logging.structured as mod
+
         mod._logger = None
 
     def test_get_logger_creates_default(self):

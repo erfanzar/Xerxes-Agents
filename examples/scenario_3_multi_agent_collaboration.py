@@ -36,7 +36,6 @@ task_queue = []
 completed_tasks = []
 
 
-# ============ Research Agent Functions ============
 
 
 def search_information(query: str) -> str:
@@ -96,7 +95,6 @@ def compile_report(topic: str) -> str:
     return report
 
 
-# ============ Planning Agent Functions ============
 
 
 def create_project_plan(project_name: str, requirements: str) -> str:
@@ -215,7 +213,6 @@ Overall Progress: {progress:.1f}%
     return result
 
 
-# ============ Implementation Agent Functions ============
 
 
 def implement_feature(feature_name: str, specifications: str = "") -> str:
@@ -288,7 +285,6 @@ def review_code(code_or_feature: str) -> str:
     return result
 
 
-# ============ Coordinator Function ============
 
 
 def coordinate_agents(task_description: str) -> str:

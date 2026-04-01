@@ -99,9 +99,7 @@ class TestGetProfileConfig:
     def test_string_profile_alias_is_accepted(self):
         builder = PromptContextBuilder()
         prefix = builder.assemble_system_prompt_prefix(profile="none")
-        assert prefix == (
-            "You are Calute, a runtime-managed AI agent operating inside a controlled tool environment."
-        )
+        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
 
 
 # ── PromptProfileConfig defaults ─────────────────────────────────────
@@ -161,23 +159,19 @@ class TestFullProfileBackwardCompat:
 
     def test_full_same_as_default(self):
         builder = _make_builder_with_everything()
-        default = builder.assemble_system_prompt_prefix(
-            agent_id="a1", tool_names=TOOL_NAMES
-        )
-        full = builder.assemble_system_prompt_prefix(
-            agent_id="a1", tool_names=TOOL_NAMES, profile=PromptProfile.FULL
-        )
+        default = builder.assemble_system_prompt_prefix(agent_id="a1", tool_names=TOOL_NAMES)
+        full = builder.assemble_system_prompt_prefix(agent_id="a1", tool_names=TOOL_NAMES, profile=PromptProfile.FULL)
         # Strip timestamp lines because they differ by microseconds
         import re
+
         def _strip_ts(s):
             return re.sub(r"(Local time: ).+\n", r"\1<TS>\n", s)
+
         assert _strip_ts(default) == _strip_ts(full)
 
     def test_full_profile_includes_all_sections(self):
         builder = _make_builder_with_everything()
-        prefix = builder.assemble_system_prompt_prefix(
-            agent_id="a1", tool_names=TOOL_NAMES, profile=PromptProfile.FULL
-        )
+        prefix = builder.assemble_system_prompt_prefix(agent_id="a1", tool_names=TOOL_NAMES, profile=PromptProfile.FULL)
         assert "[Identity]" in prefix
         assert "[Tooling]" in prefix
         assert "[Safety]" in prefix
@@ -258,9 +252,7 @@ class TestCompactProfile:
         """Tool list is capped at max_tools_listed with a '... and N more' trailer."""
         tools = [f"tool_{i}" for i in range(30)]
         builder = PromptContextBuilder()
-        prefix = builder.assemble_system_prompt_prefix(
-            tool_names=tools, profile=PromptProfile.COMPACT
-        )
+        prefix = builder.assemble_system_prompt_prefix(tool_names=tools, profile=PromptProfile.COMPACT)
         assert "tool_0" in prefix
         assert "tool_19" in prefix
         assert "tool_20" not in prefix
@@ -317,9 +309,7 @@ class TestMinimalProfile:
     def test_limits_tools_to_10(self):
         tools = [f"tool_{i}" for i in range(25)]
         builder = PromptContextBuilder()
-        prefix = builder.assemble_system_prompt_prefix(
-            tool_names=tools, profile=PromptProfile.MINIMAL
-        )
+        prefix = builder.assemble_system_prompt_prefix(tool_names=tools, profile=PromptProfile.MINIMAL)
         assert "tool_9" in prefix
         assert "tool_10" not in prefix
         assert "... and 15 more" in prefix
@@ -340,9 +330,7 @@ class TestNoneProfile:
             tool_names=TOOL_NAMES,
             profile=PromptProfile.NONE,
         )
-        assert prefix == (
-            "You are Calute, a runtime-managed AI agent operating inside a controlled tool environment."
-        )
+        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
         assert "[Identity]" not in prefix
         assert "[Tooling]" not in prefix
         assert "[Safety]" not in prefix
@@ -367,9 +355,7 @@ class TestTruncation:
         # Use a limit equal to the section length -- no truncation expected
         cfg = PromptProfileConfig(max_skill_instructions_length=len(section_text))
         builder = PromptContextBuilder(skill_registry=registry)
-        prefix = builder.assemble_system_prompt_prefix(
-            enabled_skills=[skill], tool_names=["t"], profile=cfg
-        )
+        prefix = builder.assemble_system_prompt_prefix(enabled_skills=[skill], tool_names=["t"], profile=cfg)
         assert "..." not in prefix
         assert "X" * 10 in prefix
 
@@ -381,9 +367,7 @@ class TestTruncation:
         )
         cfg = PromptProfileConfig(max_skill_instructions_length=50)
         builder = PromptContextBuilder()
-        prefix = builder.assemble_system_prompt_prefix(
-            enabled_skills=[skill], tool_names=["t"], profile=cfg
-        )
+        prefix = builder.assemble_system_prompt_prefix(enabled_skills=[skill], tool_names=["t"], profile=cfg)
         assert "..." in prefix
         assert "Y" * 600 not in prefix
 

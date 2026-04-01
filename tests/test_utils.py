@@ -1,6 +1,5 @@
 """Tests for calute.core.utils module."""
 
-
 from calute.core.utils import (
     CaluteBase,
     debug_print,

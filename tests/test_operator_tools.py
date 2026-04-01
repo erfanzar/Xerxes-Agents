@@ -11,6 +11,7 @@ from PIL import Image
 
 from calute import Agent, Calute, OperatorRuntimeConfig, RuntimeFeaturesConfig
 from calute.core.utils import function_to_json
+from calute.tools.duckduckgo_engine import DuckDuckGoSearch
 from calute.types import ExecutionStatus, ImageChunk, RequestFunctionCall, TextChunk, UserMessage
 
 
@@ -55,6 +56,40 @@ def test_operator_tool_schema_descriptions_are_detailed():
     assert "DuckDuckGo" in search_schema["function"]["description"]
     assert "up-to-date information" in search_schema["function"]["description"]
     assert "domain allowlist" in search_props["domains"]["description"]
+
+
+def test_duckduckgo_news_search_falls_back_to_text(monkeypatch):
+    class _FakeDDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def news(self, *args, **kwargs):
+            raise RuntimeError("No results found for query")
+
+        def text(self, *args, **kwargs):
+            return [
+                {
+                    "title": "OpenAI shipping news",
+                    "href": "https://example.com/openai-news",
+                    "body": "Fallback text result.",
+                }
+            ]
+
+    monkeypatch.setattr("calute.tools.duckduckgo_engine._get_ddgs", lambda: _FakeDDGS)
+
+    payload = DuckDuckGoSearch.static_call(
+        "latest OpenAI news",
+        search_type="news",
+        n_results=3,
+        return_metadata=True,
+    )
+
+    assert payload["results"][0]["title"] == "OpenAI shipping news"
+    assert payload["metadata"]["effective_search_type"] == "text"
+    assert payload["metadata"]["fallback_applied"] == "news_to_text"
 
 
 @pytest.mark.asyncio

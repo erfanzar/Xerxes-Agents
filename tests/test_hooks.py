@@ -22,8 +22,13 @@ class TestHookRunner:
 
     def test_all_hook_points_exist(self):
         expected = {
-            "before_tool_call", "after_tool_call", "tool_result_persist",
-            "bootstrap_files", "on_turn_start", "on_turn_end", "on_error",
+            "before_tool_call",
+            "after_tool_call",
+            "tool_result_persist",
+            "bootstrap_files",
+            "on_turn_start",
+            "on_turn_end",
+            "on_error",
         }
         assert HOOK_POINTS == expected
 
@@ -93,8 +98,10 @@ class TestHookRunner:
 
     def test_unregister_hook(self):
         runner = HookRunner()
+
         def fn(**kw):
             return "x"
+
         runner.register("on_turn_start", fn)
         assert runner.has_hooks("on_turn_start")
         assert runner.unregister("on_turn_start", fn)

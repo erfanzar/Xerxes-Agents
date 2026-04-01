@@ -39,10 +39,6 @@ from calute.audit import (
     TurnStartEvent,
 )
 
-# =========================================================================
-# Event creation and serialization
-# =========================================================================
-
 
 class TestEventCreation:
     def test_base_event_defaults(self):
@@ -178,11 +174,6 @@ class TestEventSerialization:
         assert json.loads(text)["metadata"]["key"] == [1, 2, 3]
 
 
-# =========================================================================
-# InMemoryCollector
-# =========================================================================
-
-
 class TestInMemoryCollector:
     def test_emit_and_get(self):
         c = InMemoryCollector()
@@ -228,11 +219,6 @@ class TestInMemoryCollector:
             assert ev.metadata["i"] == i
 
 
-# =========================================================================
-# JSONLSinkCollector
-# =========================================================================
-
-
 class TestJSONLSinkCollector:
     def test_write_to_stringio(self):
         buf = StringIO()
@@ -268,11 +254,6 @@ class TestJSONLSinkCollector:
         c.emit(AuditEvent())
         c.flush()
         assert len(buf.getvalue()) > 0
-
-
-# =========================================================================
-# CompositeCollector
-# =========================================================================
 
 
 class TestCompositeCollector:
@@ -317,11 +298,6 @@ class TestCompositeCollector:
         assert len(mem) == 5
         lines = buf.getvalue().strip().split("\n")
         assert len(lines) == 5
-
-
-# =========================================================================
-# AuditEmitter
-# =========================================================================
 
 
 class TestAuditEmitter:
@@ -441,11 +417,6 @@ class TestAuditEmitter:
         em.emit_error(error_type="E", error_msg="m")
         em.flush()
         assert len(buf.getvalue()) > 0
-
-
-# =========================================================================
-# Thread safety
-# =========================================================================
 
 
 class TestThreadSafety:

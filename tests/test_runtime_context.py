@@ -105,6 +105,31 @@ class TestPromptContextBuilder:
         assert "Be safe" in prefix
         assert "Bootstrap content" in prefix
 
+    def test_full_prefix_discourages_fake_tool_markup_and_reasoning_leaks(self):
+        builder = PromptContextBuilder()
+        prefix = builder.assemble_system_prompt_prefix(tool_names=["search"], profile=PromptProfile.FULL)
+
+        assert "Do not use or simulate tools for greetings, simple arithmetic" in prefix
+        assert "Never emit fake tool syntax such as <tool_call>" in prefix
+        assert "keep internal reasoning private" in prefix
+        assert "without <response>, <tool_call>, or XML-style wrappers" in prefix
+        assert "not in a scratchpad or reasoning field" in prefix
+
+    def test_full_prefix_includes_tool_selection_guidance(self):
+        builder = PromptContextBuilder()
+        prefix = builder.assemble_system_prompt_prefix(
+            tool_names=["web.search_query", "web.open", "ReadFile"],
+            profile=PromptProfile.FULL,
+        )
+
+        assert "Tool selection guidance:" in prefix
+        assert "user explicitly asks to search/look up/browse the web" in prefix
+        assert "Generic web-search follow-ups" in prefix
+        assert "Use this after search when you need the contents of a specific result page" in prefix
+        assert "File-reading tools: Use them for project-specific facts" in prefix
+        assert "do not claim that you cannot browse or access current information" in prefix
+        assert "Search snippets and result titles are leads, not verification" in prefix
+
     def test_empty_sections_omitted(self):
         builder = PromptContextBuilder()
         ctx = builder.build()

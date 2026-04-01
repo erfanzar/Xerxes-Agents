@@ -15,10 +15,6 @@ import pytest
 
 from calute.security.sandbox import SandboxBackendConfig, SandboxConfig, SandboxMode
 
-# ---------------------------------------------------------------------------
-# Module-level picklable helpers
-# ---------------------------------------------------------------------------
-
 
 def _multiply(a: int = 1, b: int = 1) -> int:
     return a * b
@@ -30,11 +26,6 @@ def _identity(value=None):
 
 def _greet(name: str = "world") -> str:
     return f"hello {name}"
-
-
-# ---------------------------------------------------------------------------
-# Docker backend -- command construction
-# ---------------------------------------------------------------------------
 
 
 class TestDockerCommandConstruction:
@@ -111,11 +102,6 @@ class TestDockerCommandConstruction:
         assert "LANG=C" in env_args
 
 
-# ---------------------------------------------------------------------------
-# Docker backend -- execute edge cases (mocked)
-# ---------------------------------------------------------------------------
-
-
 class TestDockerExecuteEdgeCases:
     def _make_backend(self):
         from calute.security.sandbox_backends.docker_backend import DockerSandboxBackend
@@ -132,40 +118,27 @@ class TestDockerExecuteEdgeCases:
         result_payload = pickle.dumps({"ok": True, "value": None})
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run"
-        ) as mock_run:
+        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             result = backend.execute("t", _identity, {})
         assert result is None
 
     def test_execute_bad_stdout(self):
         backend = self._make_backend()
-        with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run"
-        ) as mock_run:
+        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="not-valid-b64!!!", stderr="")
             with pytest.raises(RuntimeError, match="deserialise"):
                 backend.execute("t", _identity, {})
 
     def test_execute_tool_error_inside_container(self):
         backend = self._make_backend()
-        result_payload = pickle.dumps(
-            {"ok": False, "error": "division by zero", "type": "ZeroDivisionError"}
-        )
+        result_payload = pickle.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"})
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run"
-        ) as mock_run:
+        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             with pytest.raises(RuntimeError, match="ZeroDivisionError.*division by zero"):
                 backend.execute("t", _identity, {})
-
-
-# ---------------------------------------------------------------------------
-# Subprocess backend -- real execution
-# ---------------------------------------------------------------------------
 
 
 class TestSubprocessBackendExecution:

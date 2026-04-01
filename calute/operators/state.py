@@ -263,7 +263,6 @@ class OperatorState:
             return result.summary(), result.tool_metadata()
         return result, {}
 
-
     def _build_exec_command(self) -> tp.Callable:
         """Build the ``exec_command`` operator tool closure.
 
@@ -840,13 +839,24 @@ class OperatorState:
                 Search metadata plus a ``results`` list of compact
                 result dictionaries.
             """
-            results = DuckDuckGoSearch.static_call(
+            search_payload = DuckDuckGoSearch.static_call(
                 q,
                 n_results=n_results,
                 search_type=search_type,
                 allowed_domains=domains,
+                return_metadata=True,
             )
-            return {"query": q, "search_type": search_type, "results": results}
+            metadata = search_payload.get("metadata", {}) if isinstance(search_payload, dict) else {}
+            results = search_payload.get("results", []) if isinstance(search_payload, dict) else search_payload
+
+            response: dict[str, tp.Any] = {"query": q, "search_type": search_type, "results": results}
+            effective_search_type = metadata.get("effective_search_type")
+            if effective_search_type and effective_search_type != search_type:
+                response["effective_search_type"] = effective_search_type
+            fallback_applied = metadata.get("fallback_applied")
+            if fallback_applied:
+                response["fallback_applied"] = fallback_applied
+            return response
 
         return web_search_query
 

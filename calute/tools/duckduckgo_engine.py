@@ -34,6 +34,7 @@ Example:
     >>> news = DuckDuckGoSearch.static_call("AI news", search_type="news")
 """
 
+import typing as tp
 from datetime import datetime
 from typing import Literal
 
@@ -158,6 +159,32 @@ class DuckDuckGoSearch(AgentBaseFn):
         return filtered
 
     @staticmethod
+    def _append_text_results(
+        results: list[dict],
+        search_results: tp.Iterable[dict],
+        n_results: int | None,
+        title_length_limit: int | None,
+        snippet_length_limit: int | None,
+    ) -> None:
+        """Normalize DuckDuckGo text results into the shared result shape."""
+        for r in search_results:
+            results.append(
+                {
+                    "title": DuckDuckGoSearch._maybe_truncate(r.get("title", ""), title_length_limit),
+                    "url": r.get("href", ""),
+                    "snippet": DuckDuckGoSearch._maybe_truncate(r.get("body", ""), snippet_length_limit),
+                    "source": "DuckDuckGo",
+                }
+            )
+            if n_results and len(results) >= n_results:
+                break
+
+    @staticmethod
+    def _is_no_results_error(error: Exception) -> bool:
+        """Return True when the provider error means an empty result set."""
+        return "no results found" in str(error).lower()
+
+    @staticmethod
     def static_call(
         query: str,
         search_type: SearchType = "text",
@@ -274,17 +301,13 @@ class DuckDuckGoSearch(AgentBaseFn):
                     safesearch=safesearch.capitalize() if safesearch else "Moderate",
                     timelimit=timelimit,
                 )
-                for r in search_results:
-                    results.append(
-                        {
-                            "title": DuckDuckGoSearch._maybe_truncate(r.get("title", ""), title_length_limit),
-                            "url": r.get("href", ""),
-                            "snippet": DuckDuckGoSearch._maybe_truncate(r.get("body", ""), snippet_length_limit),
-                            "source": "DuckDuckGo",
-                        }
-                    )
-                    if n_results and len(results) >= n_results:
-                        break
+                DuckDuckGoSearch._append_text_results(
+                    results,
+                    search_results,
+                    n_results=n_results,
+                    title_length_limit=title_length_limit,
+                    snippet_length_limit=snippet_length_limit,
+                )
 
             elif search_type == "images":
                 search_results = ddgs.images(
@@ -337,25 +360,48 @@ class DuckDuckGoSearch(AgentBaseFn):
                 if news_safesearch == "strict" and timelimit:
                     news_safesearch = "moderate"
 
-                search_results = ddgs.news(
-                    query,
-                    region=region,
-                    safesearch=news_safesearch,
-                    timelimit=timelimit,
-                )
-                for r in search_results:
-                    results.append(
-                        {
-                            "title": DuckDuckGoSearch._maybe_truncate(r.get("title", ""), title_length_limit),
-                            "url": r.get("url", ""),
-                            "snippet": DuckDuckGoSearch._maybe_truncate(r.get("body", ""), snippet_length_limit),
-                            "source": r.get("source", ""),
-                            "date": r.get("date", ""),
-                            "image": r.get("image", ""),
-                        }
+                news_failed_with_no_results = False
+                try:
+                    search_results = ddgs.news(
+                        query,
+                        region=region,
+                        safesearch=news_safesearch,
+                        timelimit=timelimit,
                     )
-                    if n_results and len(results) >= n_results:
-                        break
+                    for r in search_results:
+                        results.append(
+                            {
+                                "title": DuckDuckGoSearch._maybe_truncate(r.get("title", ""), title_length_limit),
+                                "url": r.get("url", ""),
+                                "snippet": DuckDuckGoSearch._maybe_truncate(r.get("body", ""), snippet_length_limit),
+                                "source": r.get("source", ""),
+                                "date": r.get("date", ""),
+                                "image": r.get("image", ""),
+                            }
+                        )
+                        if n_results and len(results) >= n_results:
+                            break
+                except Exception as exc:
+                    if not DuckDuckGoSearch._is_no_results_error(exc):
+                        raise
+                    news_failed_with_no_results = True
+
+                if news_failed_with_no_results or not results:
+                    search_metadata["fallback_applied"] = "news_to_text"
+                    search_metadata["effective_search_type"] = "text"
+                    search_results = ddgs.text(
+                        query,
+                        region=region,
+                        safesearch=safesearch.capitalize() if safesearch else "Moderate",
+                        timelimit=timelimit,
+                    )
+                    DuckDuckGoSearch._append_text_results(
+                        results,
+                        search_results,
+                        n_results=n_results,
+                        title_length_limit=title_length_limit,
+                        snippet_length_limit=snippet_length_limit,
+                    )
 
             elif search_type == "maps":
                 search_results = ddgs.maps(query, place=region.split("-")[0] if region else None)
@@ -383,6 +429,7 @@ class DuckDuckGoSearch(AgentBaseFn):
         if exclude_keywords:
             results = DuckDuckGoSearch._filter_by_keywords(results, exclude_keywords, exclude=True)
 
+        search_metadata.setdefault("effective_search_type", search_type)
         search_metadata["total_results"] = len(results)
         search_metadata["filters_applied"]["keyword_filters"] = {
             "must_include": must_include_keywords,

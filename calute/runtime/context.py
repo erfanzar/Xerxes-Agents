@@ -449,9 +449,9 @@ class PromptContextBuilder:
         """
         profile_name = pcfg.profile.value if pcfg is not None else PromptProfile.FULL.value
         return (
-            f"[Reasoning]\n"
+            f"[Response Guidance]\n"
             f"  Profile: {profile_name}\n"
-            f"  Guidance: answer from actual tool and workspace results; avoid speculative claims.\n"
+            f"  Guidance: answer from actual tool and workspace results; avoid speculative claims; keep internal reasoning private; and put the final answer in the normal assistant response content, not in a scratchpad or reasoning field.\n"
         )
 
     def _build_sandbox(self, sandbox_config: SandboxConfig | None = None) -> str:
@@ -728,16 +728,61 @@ class PromptContextBuilder:
             A multi-line tooling block string.
         """
         tools_section = ctx.tools_section.rstrip() if ctx.tools_section else "[Available Tools]\n  - none"
+        tools_section_lower = tools_section.lower()
         lines = [
             "[Tooling]",
             "Available tools in this run:",
             tools_section,
             "Tool rules:",
-            "- Use tools when they materially improve correctness.",
+            "- Use tools only when you need live external state, workspace contents, shell execution, or another real action you cannot complete from the current conversation alone.",
+            "- Do not use or simulate tools for greetings, simple arithmetic, direct explanations, summaries, or code-writing requests that can be answered directly.",
             "- Do not repeat the same tool call with the same arguments if it did not make progress.",
             "- If a tool result already answers the task, use it directly.",
+            "- For a simple tool-backed request, prefer one necessary tool call followed by the final answer instead of extended planning or multiple retries.",
             "- If a tool fails, adjust strategy instead of blindly retrying.",
+            "- Never emit fake tool syntax such as <tool_call>, <response>, <function=name>, or <parameter=name>. Either call a real tool through the tool interface or answer normally.",
         ]
+        guidance_lines: list[str] = []
+        if "web.search_query" in tools_section_lower:
+            guidance_lines.append(
+                '- `web.search_query`: Use this when the user explicitly asks to search/look up/browse the web, or when the answer depends on live recent information, news, or source discovery. Pass a clean search phrase in `q`; prefer `search_type="news"` for latest/news queries and `"text"` for general research.'
+            )
+            guidance_lines.append(
+                "- Generic web-search follow-ups: If the user says something like `search the web`, `look it up`, or `find it` right after discussing a topic, infer the topic from the latest relevant user request instead of asking the same clarification again, then call `web.search_query` with that inferred query."
+            )
+        if "web.open" in tools_section_lower:
+            guidance_lines.append(
+                "- `web.open`: Use this after search when you need the contents of a specific result page, direct quotes, or details that are not in the search snippets. Do this before presenting a claim as confirmed, official, or verified."
+            )
+        if "web.find" in tools_section_lower:
+            guidance_lines.append(
+                "- `web.find`: Use this on an already opened page to jump to a specific term, section, or citation instead of guessing where the information is."
+            )
+        if "readfile" in tools_section_lower or "read_file" in tools_section_lower:
+            guidance_lines.append(
+                "- File-reading tools: Use them for project-specific facts, exact code behavior, config values, or anything the workspace can answer more reliably than memory."
+            )
+        if "listdir" in tools_section_lower or "list_dir" in tools_section_lower:
+            guidance_lines.append(
+                "- Directory-listing tools: Use them to discover repo structure or confirm what files exist before claiming paths from memory."
+            )
+        if (
+            "exec_command" in tools_section_lower
+            or "executeshell" in tools_section_lower
+            or "execute_shell" in tools_section_lower
+        ):
+            guidance_lines.append(
+                "- Shell tools: Use them for real command execution, environment inspection, tests, and filesystem queries that require current machine state."
+            )
+        if guidance_lines:
+            lines.extend(["Tool selection guidance:", *guidance_lines])
+        lines.extend(
+            [
+                "Search grounding rules:",
+                "- If a web/search tool is available or has already been used in the conversation, do not claim that you cannot browse or access current information.",
+                "- Search snippets and result titles are leads, not verification. Phrase them as 'search results indicate' or 'the top result says' unless you opened a source and confirmed it.",
+            ]
+        )
         return "\n".join(lines)
 
     def _build_safety_block(self, ctx: PromptContext) -> str:
@@ -900,16 +945,20 @@ class PromptContextBuilder:
                 "[Execution Policy]",
                 "1. Understand the request and use the workspace context first.",
                 "2. Choose the smallest correct action that moves the task forward.",
-                "3. Use tools only when needed for correctness, execution, or verification.",
-                "4. After tool use, answer from the actual result.",
-                "5. Surface blockers, assumptions, and risks clearly.",
-                "6. Do not loop.",
+                "3. Use tools only when you need missing live information, file contents, execution, or verification that cannot be done from the conversation alone.",
+                "4. Do not simulate tool calls or wrap normal answers in tool/XML markup.",
+                "5. If one successful tool result is enough, stop and give the final answer immediately.",
+                "6. After tool use, answer from the actual result.",
+                "7. Surface blockers, assumptions, and risks clearly.",
+                "8. Do not loop.",
             ]
         else:
             lines = [
                 "[Execution Policy]",
                 "- Stay within the assigned subtask.",
-                "- Use tools only when needed.",
+                "- Use tools only when needed for missing live information or real actions.",
+                "- Do not simulate tool calls or emit tool/XML wrappers in normal answers.",
+                "- If one tool result is enough, answer immediately instead of continuing to plan.",
                 "- Answer from actual tool and workspace results.",
                 "- Keep output compact and integration-friendly.",
             ]
@@ -937,6 +986,9 @@ class PromptContextBuilder:
                 "[Output Style]",
                 "- Be precise, technical, and pragmatic.",
                 "- Prefer concrete outcomes over general advice.",
+                "- Give the final answer directly, without <response>, <tool_call>, or XML-style wrappers.",
+                "- Keep internal reasoning out of the visible answer unless the user explicitly asks for it.",
+                "- Put the user-facing answer in the normal assistant response content, not in a scratchpad or reasoning field.",
                 "- If code or files were changed, mention the real result.",
                 "- If tests were run, report the actual scope and outcome.",
             ]

@@ -115,6 +115,11 @@ logger = logging.getLogger(__name__)
 
 add_depth = lambda x, add_prefix=False: SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")  # noqa
 
+_TOOL_PARAMETER_TAG_RE = re.compile(
+    r"<parameter=([A-Za-z0-9_.-]+)>\s*(.*?)\s*</parameter>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 @dataclass
 class _RuntimeTurnState:
@@ -181,7 +186,10 @@ class Calute:
     REINVOKE_FOLLOWUP_INSTRUCTION: tp.ClassVar[str] = (
         "Use the function results above to continue the task. If the results already answer the user's"
         " request, respond to the user directly. Only call another function if the returned data is"
-        " missing something necessary or the user explicitly asked for a fresh lookup."
+        " missing something necessary or the user explicitly asked for a fresh lookup. If a web/search tool"
+        " already ran, do not claim you cannot browse or access current information. Treat search-result"
+        " snippets as leads rather than verified facts; say that the search results indicate or suggest"
+        " something unless you opened a source page and confirmed it."
     )
 
     def __init__(
@@ -729,6 +737,58 @@ class Calute:
         pattern = rf"```{field}\s*\n(.*?)\n```"
         return re.findall(pattern, content, re.DOTALL)
 
+    @staticmethod
+    def _system_message_to_text(message: SystemMessage) -> str | None:
+        """Convert a system message into plain text for prompt deduplication."""
+        if isinstance(message.content, str):
+            content = message.content.strip()
+            return content or None
+
+        parts: list[str] = []
+        for chunk in message.content:
+            text = getattr(chunk, "text", None)
+            if text:
+                cleaned = str(text).strip()
+                if cleaned:
+                    parts.append(cleaned)
+
+        if not parts:
+            return None
+        return "\n".join(parts)
+
+    def _merge_system_history(
+        self,
+        final_system_content: str,
+        messages: MessagesHistory | None,
+    ) -> tuple[str, list[ChatMessage]]:
+        """Collapse any prior system messages into one prompt header."""
+        if not messages or not messages.messages:
+            return final_system_content, []
+
+        merged_parts: list[str] = []
+        if final_system_content.strip():
+            merged_parts.append(final_system_content.strip())
+
+        remaining_messages: list[ChatMessage] = []
+        for message in messages.messages:
+            if isinstance(message, SystemMessage):
+                system_text = self._system_message_to_text(message)
+                if system_text:
+                    merged_parts.append(system_text)
+                continue
+            remaining_messages.append(message)
+
+        deduped_parts: list[str] = []
+        seen_parts: set[str] = set()
+        for part in merged_parts:
+            normalized = part.strip()
+            if not normalized or normalized in seen_parts:
+                continue
+            seen_parts.add(normalized)
+            deduped_parts.append(normalized)
+
+        return "\n\n".join(deduped_parts), remaining_messages
+
     def manage_messages(
         self,
         agent: Agent | None,
@@ -799,13 +859,52 @@ class Calute:
         )
         if agent.functions and use_instructed_prompt:
             rules.append(
+                "Do not call a function for greetings, simple conversation, or requests you can answer directly"
+                " from the current conversation and instructions. Prefer a normal response unless a function is"
+                " required to get missing information or take an action."
+            )
+            rules.append(
+                "If the user explicitly asks to search, look up, browse, or find something on the web and"
+                " `web.search_query` is available, call it instead of answering from memory."
+            )
+            rules.append(
+                "If the user gives a generic follow-up like `search the web`, `look it up`, or `find it`,"
+                " infer the target topic from the latest relevant user request instead of asking the same"
+                " clarification again, then call `web.search_query` if it is needed."
+            )
+            rules.append(
+                "If web tools are available or prior tool results are present in the conversation, do not say"
+                " that you cannot browse, search the web, or access current information."
+            )
+            rules.append(
+                "Search-result snippets are not the same as verified facts. Say that search results indicate or"
+                " suggest something unless you have opened the source and confirmed it."
+            )
+            rules.append(
+                "Never simulate tool calls or wrap a normal answer in <tool_call>, <response>, XML, or"
+                " function-like markup. Either call a real tool through the tool interface or answer normally."
+            )
+            rules.append(
                 "If a function can satisfy the user request, you MUST respond only with a valid tool call in the"
                 " specified format. Do not add any conversational text before or after the tool call."
             )
         elif agent.functions:
             rules.extend(
                 [
-                    "Use available functions when they are needed to gather information or take actions.",
+                    "Do not use functions for greetings, simple conversation, or requests you can answer directly"
+                    " from the current conversation and instructions. Use them only when they are needed to gather"
+                    " missing information or take actions.",
+                    "If the user explicitly asks to search, look up, browse, or find something on the web and"
+                    " `web.search_query` is available, use it instead of answering from memory.",
+                    "If the user gives a generic follow-up like `search the web`, `look it up`, or `find it`,"
+                    " infer the topic from the latest relevant user request instead of asking the same"
+                    " clarification again, then use `web.search_query` if needed.",
+                    "If web tools are available or prior tool results are present in the conversation, do not say"
+                    " that you cannot browse, search the web, or access current information.",
+                    "Search-result snippets are not verified facts. Describe them as indications or leads unless"
+                    " you opened the source and confirmed the claim.",
+                    "Never simulate tool calls or wrap a normal answer in <tool_call>, <response>, XML, or"
+                    " function-like markup. Either call a real tool through the tool interface or answer normally.",
                     "After a function returns a result, use that result to continue the task and answer the user.",
                     "Do not repeat the same function call with the same arguments if the available result already"
                     " answers the request unless the user asks for refreshed data or the result is incomplete.",
@@ -864,10 +963,11 @@ class Calute:
         instructed_messages: list[ChatMessage] = []
 
         final_system_content = "\n\n".join(part for part in system_parts if part)
+        final_system_content, history_messages = self._merge_system_history(final_system_content, messages)
         instructed_messages.append(SystemMessage(content=final_system_content))
 
-        if messages and messages.messages:
-            instructed_messages.extend(messages.messages)
+        if history_messages:
+            instructed_messages.extend(history_messages)
 
         if prompt is not None:
             final_prompt_content = prompt
@@ -996,6 +1096,8 @@ class Calute:
         """
         pattern = r"<(\w+)>\s*<arguments>.*?</arguments>\s*</\w+>"
         cleaned = re.sub(pattern, "", content, flags=re.DOTALL)
+        pattern = r"<tool_call>\s*<function=[A-Za-z0-9_.:-]+>.*?</function>\s*</tool_call>"
+        cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL | re.IGNORECASE)
         pattern = r"```tool_call.*?```"
         cleaned = re.sub(pattern, "", cleaned, flags=re.DOTALL)
 
@@ -1037,6 +1139,56 @@ class Calute:
                 function_calls.append(function_call)
             except json.JSONDecodeError:
                 continue
+
+        return function_calls
+
+    def _extract_function_calls_from_tagged_markup(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
+        """Extract pseudo-XML tool calls such as ``<function=name>`` blocks."""
+        function_calls = []
+        functions_by_name = {get_callable_public_name(func): func for func in agent.functions}
+        valid_function_names = set(functions_by_name)
+        pattern = r"<function=([A-Za-z0-9_.:-]+)>\s*(.*?)\s*</function>"
+        matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+
+        for i, (name, body) in enumerate(matches):
+            if name not in valid_function_names:
+                logger.debug("Ignoring tagged function call for unknown tool '%s'", name)
+                continue
+
+            arguments: dict[str, tp.Any] = {}
+            for param_name, raw_value in _TOOL_PARAMETER_TAG_RE.findall(body):
+                value = raw_value.strip()
+                if not value:
+                    continue
+                if value.startswith(("'", '"', "{", "[", "-")) or value in {"true", "false", "null"} or value.isdigit():
+                    try:
+                        arguments[param_name] = json.loads(value)
+                        continue
+                    except json.JSONDecodeError:
+                        pass
+                arguments[param_name] = value
+
+            try:
+                required_fields = set(
+                    function_to_json(functions_by_name[name])["function"]["parameters"].get("required", [])
+                )
+            except Exception:
+                required_fields = set()
+            if required_fields and not required_fields.issubset(arguments):
+                logger.debug("Ignoring tagged function call for '%s' because required arguments are missing", name)
+                continue
+            if not arguments and required_fields:
+                continue
+
+            function_calls.append(
+                RequestFunctionCall(
+                    name=name,
+                    arguments=arguments,
+                    id=f"call_{i}_{hash((name, body))}",
+                    timeout=agent.function_timeout,
+                    max_retries=agent.max_function_retries,
+                )
+            )
 
         return function_calls
 
@@ -1138,6 +1290,9 @@ class Calute:
         function_calls = self._extract_function_calls_from_xml(content, agent)
         if function_calls:
             return function_calls
+        function_calls = self._extract_function_calls_from_tagged_markup(content, agent)
+        if function_calls:
+            return function_calls
 
         function_calls = []
         valid_function_names = set(agent.get_available_functions())
@@ -1223,6 +1378,8 @@ class Calute:
             if f"<{func_name}>" in content or f"<{func_name} " in content:
                 if "<arguments>" in content:
                     return True
+            if f"<function={func_name}>" in content and "<parameter=" in content:
+                return True
         if "```tool_call" in content:
             return True
 
@@ -1247,6 +1404,9 @@ class Calute:
         for func_name in function_names:
             pattern = rf"<{func_name}(?:\s[^>]*)?>.*?<arguments>"
             if re.search(pattern, content, re.DOTALL):
+                return True
+            tagged_pattern = rf"<function={re.escape(func_name)}>.*?<parameter="
+            if re.search(tagged_pattern, content):
                 return True
         return False
 

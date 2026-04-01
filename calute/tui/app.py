@@ -263,6 +263,68 @@ class SlashCommandSuggester(Suggester):
         return None
 
 
+class ComposerTextArea(TextArea):
+    """Chat composer with submit-on-enter semantics."""
+
+    def __init__(self, *args: tp.Any, **kwargs: tp.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._last_escape_shortcut_at: float | None = None
+        self._vscode_ctrl_enter_fallback = bool(
+            os.environ.get("TERM_PROGRAM", "").strip().lower() == "vscode" or os.environ.get("VSCODE_PID")
+        )
+
+    async def _on_key(self, event: events.Key) -> None:
+        """Submit on Enter and insert a newline on Ctrl+Enter.
+
+        VS Code's integrated terminal doesn't reliably forward a distinct
+        ``ctrl+enter`` key event to terminal applications, so the local
+        terminal keybinding sends ``escape`` followed by ``enter``. When
+        that short sequence is observed, treat it as an explicit newline.
+        """
+        self._restart_blink()
+        if self.read_only:
+            return
+
+        key = event.key
+
+        if self._vscode_ctrl_enter_fallback and key == "escape":
+            self._last_escape_shortcut_at = time.perf_counter()
+            event.stop()
+            event.prevent_default()
+            return
+
+        if key == "enter":
+            if self._last_escape_shortcut_at is not None:
+                elapsed = time.perf_counter() - self._last_escape_shortcut_at
+                self._last_escape_shortcut_at = None
+                if elapsed <= 0.35:
+                    event.stop()
+                    event.prevent_default()
+                    start, end = self.selection
+                    self._replace_via_keyboard("\n", start, end)
+                    return
+            event.stop()
+            event.prevent_default()
+            self.app.run_worker(
+                self.app.action_submit_input(),
+                name="submit-input-shortcut",
+                group="input-shortcuts",
+                exclusive=True,
+                description="Submit input via Enter",
+            )
+            return
+
+        self._last_escape_shortcut_at = None
+        if key in {"ctrl+enter", "shift+enter"}:
+            event.stop()
+            event.prevent_default()
+            start, end = self.selection
+            self._replace_via_keyboard("\n", start, end)
+            return
+
+        await super()._on_key(event)
+
+
 def preview_value(value: tp.Any, max_length: int = 240) -> str:
     """Render a compact preview string for tool results and errors.
 
@@ -412,7 +474,7 @@ class CaluteTUI(App[None]):
     """
 
     SPINNER_FRAMES: tp.ClassVar = ["|", "/", "-", "\\"]
-    DEFAULT_INPUT_PLACEHOLDER = "Paste/type multiple lines. Cmd+Enter to send. Type / for palette."
+    DEFAULT_INPUT_PLACEHOLDER = "Enter to send. Ctrl+Enter for newline. Type / for palette."
 
     CSS = """
     Screen {
@@ -485,7 +547,6 @@ class CaluteTUI(App[None]):
 
     BINDINGS: tp.ClassVar = [
         Binding("ctrl+l", "clear_chat", "Clear"),
-        Binding("ctrl+enter,meta+enter", "submit_input", "Send"),
         Binding("ctrl+j", "focus_input", "Focus Input"),
         Binding("ctrl+n", "next_agent", "Next Agent"),
         Binding("ctrl+p", "cycle_profile", "Cycle Profile"),
@@ -537,10 +598,6 @@ class CaluteTUI(App[None]):
         self.tokens_per_second = 0.0
         self._stream_started_at: float | None = None
         self._last_pending_question_id: str | None = None
-        self._last_escape_shortcut_at: float | None = None
-        self._vscode_meta_enter_fallback = bool(
-            os.environ.get("TERM_PROGRAM", "").strip().lower() == "vscode" or os.environ.get("VSCODE_PID")
-        )
 
     def compose(self) -> ComposeResult:
         """Build and yield the Textual widget tree for the application layout."""
@@ -550,7 +607,7 @@ class CaluteTUI(App[None]):
                 yield Static(id="transcript")
         yield Static(id="status-bar")
         yield Static(id="footer-bar")
-        yield TextArea(
+        yield ComposerTextArea(
             "",
             id="input",
             soft_wrap=True,
@@ -573,7 +630,11 @@ class CaluteTUI(App[None]):
         self._set_status("Ready")
         self.query_one("#input", TextArea).focus()
         self.set_interval(0.12, self._tick_operations)
-        if not self.available_models and self._provider_name() in {"openai", "ollama", "local"}:
+        if (
+            not self.available_models
+            and self._current_model_name() is None
+            and self._provider_name() in {"openai", "ollama", "local"}
+        ):
             self.run_worker(
                 self._refresh_available_models(),
                 name="model-discovery",
@@ -597,53 +658,6 @@ class CaluteTUI(App[None]):
                 self._set_status("No matching commands. Try /help.")
         elif not self.is_busy:
             self._set_status("")
-
-    def on_key(self, event: events.Key) -> None:
-        """Handle VS Code's ``Cmd+Enter`` terminal fallback as ``Esc`` + ``Enter``.
-
-        The integrated VS Code terminal can be configured to forward
-        ``Cmd+Enter`` to terminal apps by sending an escape prefix followed
-        by carriage return. Textual doesn't reliably collapse that into a
-        single ``meta+enter`` binding in every terminal, so Calute treats a
-        tight ``Esc`` -> ``Enter`` sequence in the focused composer as a
-        submit shortcut when running inside VS Code.
-        """
-        if not self._vscode_meta_enter_fallback:
-            return
-        try:
-            input_focused = self.focused is self._input_widget()
-        except NoMatches:
-            input_focused = False
-
-        if not input_focused:
-            self._last_escape_shortcut_at = None
-            return
-
-        if event.key == "escape":
-            self._last_escape_shortcut_at = time.perf_counter()
-            return
-
-        if event.key != "enter":
-            self._last_escape_shortcut_at = None
-            return
-
-        if self._last_escape_shortcut_at is None:
-            return
-
-        elapsed = time.perf_counter() - self._last_escape_shortcut_at
-        self._last_escape_shortcut_at = None
-        if elapsed > 0.35:
-            return
-
-        event.prevent_default()
-        event.stop()
-        self.run_worker(
-            self.action_submit_input(),
-            name="submit-input-shortcut",
-            group="input-shortcuts",
-            exclusive=True,
-            description="Submit input via VS Code Cmd+Enter fallback",
-        )
 
     def _input_widget(self) -> TextArea:
         """Return the multiline composer widget."""
@@ -1384,8 +1398,10 @@ class CaluteTUI(App[None]):
         footer = Text()
         footer.append(" ^L", style="bold #7B8CFF")
         footer.append(" clear ", style="#484f58")
-        footer.append(" ^S", style="bold #7B8CFF")
+        footer.append(" Enter", style="bold #7B8CFF")
         footer.append(" send ", style="#484f58")
+        footer.append(" ^Enter", style="bold #7B8CFF")
+        footer.append(" line ", style="#484f58")
         footer.append(" ^J", style="bold #7B8CFF")
         footer.append(" input ", style="#484f58")
         footer.append(" ^N", style="bold #7B8CFF")
@@ -1496,6 +1512,14 @@ class CaluteTUI(App[None]):
                 query = result.get("query")
                 if query:
                     parts.append(f"query={self._inline_value_preview(query, max_length=40)}")
+                requested_search_type = result.get("search_type")
+                effective_search_type = result.get("effective_search_type")
+                if (
+                    isinstance(requested_search_type, str)
+                    and isinstance(effective_search_type, str)
+                    and effective_search_type != requested_search_type
+                ):
+                    parts.append(f"fallback={requested_search_type}->{effective_search_type}")
                 parts.append(f"{len(results)} result(s)")
                 if results and isinstance(results[0], dict):
                     top_hit = results[0].get("title") or results[0].get("name") or results[0].get("url")
@@ -1621,9 +1645,9 @@ class CaluteTUI(App[None]):
     def _conversation_messages(self) -> MessagesHistory:
         """Convert visible transcript turns into model message history.
 
-        Keeps only user/assistant turns so follow-up prompts preserve the
-        conversational state without replaying TUI-only panels such as tool
-        cards, notes, or hidden reasoning.
+        Keeps user/assistant turns and compact completed tool summaries so
+        follow-up prompts preserve conversational state and prior tool results
+        without replaying TUI-only panels such as notes or hidden reasoning.
         """
         messages: list[UserMessage | AssistantMessage] = []
         for entry in self.chat_history:
@@ -1633,7 +1657,33 @@ class CaluteTUI(App[None]):
                 messages.append(UserMessage(content=entry.content))
             elif entry.role == "assistant":
                 messages.append(AssistantMessage(content=entry.content or None))
+            elif entry.role == "tool":
+                tool_message = self._tool_history_message(entry)
+                if tool_message is not None:
+                    messages.append(tool_message)
         return MessagesHistory(messages=messages)
+
+    @staticmethod
+    def _tool_history_message(entry: ChatEntry) -> AssistantMessage | None:
+        """Convert a completed tool card into compact assistant-visible history."""
+        if entry.role != "tool" or entry.streaming:
+            return None
+
+        raw_title = (entry.title or entry.key or "tool").strip()
+        status = "success"
+        if "✗" in raw_title:
+            status = "failure"
+        tool_name = re.sub(r"\s+[✓✗]\s*$", "", raw_title).strip()
+        if not tool_name:
+            tool_name = "tool"
+
+        lines = [f"[Prior tool {status}] {tool_name}"]
+        if entry.meta:
+            lines.append(f"input: {entry.meta}")
+        if entry.content:
+            label = "result" if status == "success" else "error"
+            lines.append(f"{label}: {entry.content}")
+        return AssistantMessage(content="\n".join(lines))
 
     def _start_run_stats(self, prompt: str, messages: MessagesHistory | None = None) -> None:
         """Reset and initialize token/TPS counters for a new streamed turn."""
@@ -1735,9 +1785,15 @@ class CaluteTUI(App[None]):
                 title_icon = "\u2717"
 
             def _tool_line(label: str, value: str, value_style: str = detail_style) -> Text:
+                label_prefix = f" {label:<6} "
+                value_lines = value.splitlines() or [value]
                 line = Text()
-                line.append(f" {label:<6}", style=detail_label_style)
-                line.append(value, style=value_style)
+                line.append(label_prefix, style=detail_label_style)
+                line.append(value_lines[0], style=value_style)
+                for extra_line in value_lines[1:]:
+                    line.append("\n")
+                    line.append(" " * len(label_prefix), style=detail_label_style)
+                    line.append(extra_line, style=value_style)
                 return line
 
             tool_parts: list[tp.Any] = []
@@ -2031,7 +2087,7 @@ class CaluteTUI(App[None]):
         self._last_pending_question_id = pending["request_id"]
         input_widget.disabled = False
         self._set_input_hint(
-            pending.get("placeholder") or "Answer the question above. Cmd+Enter to send.",
+            pending.get("placeholder") or "Answer the question above. Enter to send. Ctrl+Enter for newline.",
             title="answer",
         )
         self._upsert_pending_question_entry(pending)

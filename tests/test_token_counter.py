@@ -1,6 +1,5 @@
 """Tests for calute.context.token_counter module."""
 
-
 from calute.context.token_counter import (
     ProviderTokenCounter,
     SmartTokenCounter,

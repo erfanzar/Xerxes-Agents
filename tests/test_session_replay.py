@@ -25,10 +25,6 @@ from calute.session.models import (
 from calute.session.replay import ReplayView, SessionReplay
 from calute.session.store import FileSessionStore, SessionManager
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _tc(call_id: str, name: str = "tool", **kw) -> ToolCallRecord:
     defaults = {
@@ -88,11 +84,6 @@ def _session(**kw) -> SessionRecord:
     return SessionRecord(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# ReplayView construction
-# ---------------------------------------------------------------------------
-
-
 class TestReplayViewConstruction:
     def test_load_from_session(self):
         session = _session()
@@ -104,11 +95,6 @@ class TestReplayViewConstruction:
         session = _session()
         view = ReplayView(session=session, turns=[session.turns[0]])
         assert len(view.turns) == 1
-
-
-# ---------------------------------------------------------------------------
-# Turn lookup
-# ---------------------------------------------------------------------------
 
 
 class TestGetTurn:
@@ -133,11 +119,6 @@ class TestGetTurn:
         assert view.get_turn("nonexistent") is None
 
 
-# ---------------------------------------------------------------------------
-# Tool call aggregation
-# ---------------------------------------------------------------------------
-
-
 class TestGetToolCalls:
     def test_aggregates_across_turns(self):
         view = SessionReplay.load(_session())
@@ -152,11 +133,6 @@ class TestGetToolCalls:
         assert view.get_tool_calls() == []
 
 
-# ---------------------------------------------------------------------------
-# Agent transitions
-# ---------------------------------------------------------------------------
-
-
 class TestGetAgentTransitions:
     def test_returns_all(self):
         view = SessionReplay.load(_session())
@@ -164,11 +140,6 @@ class TestGetAgentTransitions:
         assert len(transitions) == 2
         assert transitions[0].to_agent == "a2"
         assert transitions[1].to_agent == "a1"
-
-
-# ---------------------------------------------------------------------------
-# Timeline
-# ---------------------------------------------------------------------------
 
 
 class TestGetTimeline:
@@ -200,11 +171,6 @@ class TestGetTimeline:
         assert len(transitions) == 2
 
 
-# ---------------------------------------------------------------------------
-# Filter by agent
-# ---------------------------------------------------------------------------
-
-
 class TestFilterByAgent:
     def test_returns_filtered_view(self):
         view = SessionReplay.load(_session())
@@ -231,11 +197,6 @@ class TestFilterByAgent:
         filtered = view.filter_by_agent("a1")
         # Filtered view should still reference the same session
         assert filtered.session is session
-
-
-# ---------------------------------------------------------------------------
-# Markdown rendering
-# ---------------------------------------------------------------------------
 
 
 class TestToMarkdown:
@@ -269,11 +230,6 @@ class TestToMarkdown:
         assert len(md) > 100
 
 
-# ---------------------------------------------------------------------------
-# Round-trip: create -> save -> load -> replay -> verify
-# ---------------------------------------------------------------------------
-
-
 class TestRoundTrip:
     def test_full_round_trip(self, tmp_path):
         store = FileSessionStore(tmp_path)
@@ -291,9 +247,7 @@ class TestRoundTrip:
         )
         mgr.record_turn(sid, t1)
 
-        mgr.record_agent_transition(
-            sid, _transition("a1", "a2", "2025-01-01T00:00:05+00:00")
-        )
+        mgr.record_agent_transition(sid, _transition("a1", "a2", "2025-01-01T00:00:05+00:00"))
 
         t2 = _turn("t2", "a2", tool_calls=[_tc("tc2", "calc")])
         mgr.record_turn(sid, t2)

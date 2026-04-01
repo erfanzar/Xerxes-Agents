@@ -10,6 +10,7 @@ import calute.tui.app as tui_app_module
 from calute import Agent, Calute, OperatorRuntimeConfig, PromptProfile, RuntimeFeaturesConfig
 from calute.llms.base import BaseLLM, LLMConfig
 from calute.tui import CaluteTUI, TextualLauncher, launch_tui, parse_command, preview_value
+from calute.tui.app import ChatEntry
 from calute.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
@@ -92,12 +93,11 @@ def test_launch_tui_returns_launcher():
     assert calute.create_tui(agent) is not None
 
 
-def test_calute_tui_advertises_cmd_enter_submit():
-    submit_binding = next(binding for binding in CaluteTUI.BINDINGS if binding.action == "submit_input")
-    assert "meta+enter" in submit_binding.key
-    assert "ctrl+s" not in submit_binding.key
-    assert "Ctrl+S" not in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
-    assert "Cmd+Enter" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+def test_calute_tui_advertises_enter_submit():
+    assert all(binding.action != "submit_input" for binding in CaluteTUI.BINDINGS)
+    assert "Enter to send" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+    assert "Ctrl+Enter for newline" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+    assert "Cmd+Enter" not in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
 
 
 async def test_calute_tui_streaming_smoke():
@@ -165,6 +165,51 @@ async def test_calute_tui_accepts_multiline_composer_input():
     assert app.chat_history[-1].content == "received"
 
 
+async def test_calute_tui_submits_on_enter_key():
+    llm = _FakeLLM(
+        responses=[
+            [
+                _chunk(content="received", buffered_content="received", is_final=True),
+            ]
+        ]
+    )
+    calute = Calute(
+        llm=llm,
+        runtime_features=RuntimeFeaturesConfig(enabled=True),
+    )
+    agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app._input_widget()
+        composer.text = "hello"
+        composer.cursor_location = (0, len("hello"))
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert app.chat_history[0].role == "user"
+    assert app.chat_history[0].content == "hello"
+    assert app.chat_history[-1].content == "received"
+
+
+async def test_calute_tui_ctrl_enter_inserts_newline():
+    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app._input_widget()
+        composer.text = "line 1"
+        composer.cursor_location = (0, len("line 1"))
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        assert composer.text == "line 1\n"
+
+
 async def test_calute_tui_passes_prior_turns_back_to_model():
     llm = _FakeLLM(
         responses=[
@@ -197,6 +242,36 @@ async def test_calute_tui_passes_prior_turns_back_to_model():
     assert second_prompt[3] == {"role": "user", "content": "follow up"}
 
 
+def test_calute_tui_conversation_messages_preserve_completed_tool_summary():
+    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    app.chat_history = [
+        ChatEntry(role="user", content="search web about prism ml"),
+        ChatEntry(
+            role="tool",
+            title="web.search_query ✓",
+            meta='query="prism ml"',
+            content='5 result(s); top="PrismML 1-Bit Bonsai LLM"',
+        ),
+        ChatEntry(role="assistant", content="The search results suggest there may be a PrismML page about it."),
+    ]
+
+    messages = app._conversation_messages().to_openai()["messages"]
+
+    assert messages[0] == {"role": "user", "content": "search web about prism ml"}
+    assert messages[1]["role"] == "assistant"
+    assert "[Prior tool success] web.search_query" in messages[1]["content"]
+    assert 'input: query="prism ml"' in messages[1]["content"]
+    assert 'result: 5 result(s); top="PrismML 1-Bit Bonsai LLM"' in messages[1]["content"]
+    assert messages[2] == {
+        "role": "assistant",
+        "content": "The search results suggest there may be a PrismML page about it.",
+    }
+
+
 async def test_calute_tui_tracks_tool_activity_inline():
     calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
@@ -218,6 +293,48 @@ async def test_calute_tui_tracks_tool_activity_inline():
         tool_entry = next(e for e in app.chat_history if e.role == "tool" and e.key == "call_1")
         assert not tool_entry.streaming
         assert "\u2713" in (tool_entry.title or "")
+
+
+def test_calute_tui_tool_cards_keep_label_and_value_separated():
+    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    panel = app._build_message_renderable(
+        ChatEntry(
+            role="tool",
+            title="web.search_query \u2713",
+            meta='query="bonsai 1bit llm news"',
+            content='5 result(s); top="Bonsai 1bit"',
+        )
+    )
+
+    tool_lines = [renderable.plain for renderable in panel.renderable.renderables]
+
+    assert tool_lines[0].startswith(" input ")
+    assert tool_lines[1].startswith(" result ")
+    assert "resultquery" not in tool_lines[1]
+    assert "statusrunning" not in tool_lines[1]
+
+
+def test_calute_tui_tool_result_summary_shows_search_fallback():
+    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    summary = app._summarize_tool_result(
+        {
+            "query": "latest OpenAI news",
+            "search_type": "news",
+            "effective_search_type": "text",
+            "results": [{"title": "Fallback result", "url": "https://example.com/fallback"}],
+        }
+    )
+
+    assert "fallback=news->text" in summary
+    assert "1 result(s)" in summary
 
 
 async def test_calute_tui_shows_compact_streamed_tool_cards():
@@ -446,6 +563,48 @@ async def test_calute_tui_hides_tool_markup_from_visible_reasoning_and_content()
         assert app.chat_history[-1].meta == "Inspect the request."
         assert "<tool_call>" not in app.chat_history[-1].content
         assert "<tool_call>" not in (app.chat_history[-1].meta or "")
+
+
+async def test_calute_tui_followup_prompt_includes_prior_tool_summary():
+    llm = _FakeLLM(
+        responses=[
+            [
+                _chunk(content="first answer", buffered_content="first answer", is_final=True),
+            ],
+            [
+                _chunk(content="second answer", buffered_content="second answer", is_final=True),
+            ],
+        ]
+    )
+    calute = Calute(
+        llm=llm,
+        runtime_features=RuntimeFeaturesConfig(enabled=True),
+    )
+    agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
+    calute.register_agent(agent)
+
+    app = CaluteTUI(executor=calute, agent=agent)
+    app.chat_history = [
+        ChatEntry(role="user", content="search web about prism ml"),
+        ChatEntry(
+            role="tool",
+            title="web.search_query ✓",
+            meta='query="prism ml"',
+            content='5 result(s); top="PrismML 1-Bit Bonsai LLM"',
+        ),
+        ChatEntry(role="assistant", content="The search results suggest there may be a PrismML page about it."),
+    ]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._stream_prompt("u did a web search ;/")
+
+    prompt = llm.prompts[0]
+    assert isinstance(prompt, list)
+    assert any(
+        message["role"] == "assistant" and "[Prior tool success] web.search_query" in message["content"]
+        for message in prompt
+    )
 
 
 async def test_calute_tui_model_change_persists(tmp_path):

@@ -52,8 +52,10 @@ class TestPluginRegistry:
 
     def test_register_hook(self):
         registry = PluginRegistry()
+
         def hook_fn(**kw):
             return None
+
         registry.register_hook("before_tool_call", hook_fn, plugin_name="test")
         hooks = registry.get_hooks("before_tool_call")
         assert len(hooks) == 1
@@ -61,10 +63,13 @@ class TestPluginRegistry:
 
     def test_multiple_hooks_same_point(self):
         registry = PluginRegistry()
+
         def h1(**kw):
             return "h1"
+
         def h2(**kw):
             return "h2"
+
         registry.register_hook("after_tool_call", h1, plugin_name="p1")
         registry.register_hook("after_tool_call", h2, plugin_name="p2")
         hooks = registry.get_hooks("after_tool_call")
@@ -113,7 +118,7 @@ class TestPluginRegistry:
 
     def test_discover_from_directory(self, tmp_path):
         # Create a plugin file
-        plugin_code = '''
+        plugin_code = """
 from calute.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="discovered_plugin", version="1.0", plugin_type=PluginType.TOOL)
@@ -123,7 +128,7 @@ def my_discovered_tool(x: str) -> str:
 
 def register(registry):
     registry.register_tool("discovered_tool", my_discovered_tool, meta=PLUGIN_META)
-'''
+"""
         (tmp_path / "my_plugin.py").write_text(plugin_code)
 
         registry = PluginRegistry()
@@ -196,32 +201,22 @@ class TestPluginDependencies:
     def test_validate_valid_dependency_graph(self):
         registry = PluginRegistry()
         registry.register_plugin(PluginMeta(name="base", version="1.0.0"))
-        registry.register_plugin(
-            PluginMeta(name="mid", version="1.0.0", dependencies=["base"])
-        )
-        registry.register_plugin(
-            PluginMeta(name="top", version="1.0.0", dependencies=["mid"])
-        )
+        registry.register_plugin(PluginMeta(name="mid", version="1.0.0", dependencies=["base"]))
+        registry.register_plugin(PluginMeta(name="top", version="1.0.0", dependencies=["mid"]))
         errors = registry.validate_dependencies()
         assert errors == []
 
     def test_validate_missing_deps(self):
         registry = PluginRegistry()
-        registry.register_plugin(
-            PluginMeta(name="lonely", version="1.0.0", dependencies=["ghost"])
-        )
+        registry.register_plugin(PluginMeta(name="lonely", version="1.0.0", dependencies=["ghost"]))
         errors = registry.validate_dependencies()
         assert any("ghost" in e for e in errors)
 
     def test_get_load_order_deterministic(self):
         registry = PluginRegistry()
         registry.register_plugin(PluginMeta(name="base", version="1.0.0"))
-        registry.register_plugin(
-            PluginMeta(name="mid", version="1.0.0", dependencies=["base"])
-        )
-        registry.register_plugin(
-            PluginMeta(name="top", version="1.0.0", dependencies=["mid"])
-        )
+        registry.register_plugin(PluginMeta(name="mid", version="1.0.0", dependencies=["base"]))
+        registry.register_plugin(PluginMeta(name="top", version="1.0.0", dependencies=["mid"]))
         order = registry.get_load_order()
         assert order.index("base") < order.index("mid")
         assert order.index("mid") < order.index("top")
@@ -232,9 +227,7 @@ class TestPluginDependencies:
         """Plugins with simple string dependencies (no version) still work."""
         registry = PluginRegistry()
         registry.register_plugin(PluginMeta(name="dep_a", version="1.0.0"))
-        registry.register_plugin(
-            PluginMeta(name="consumer", version="1.0.0", dependencies=["dep_a"])
-        )
+        registry.register_plugin(PluginMeta(name="consumer", version="1.0.0", dependencies=["dep_a"]))
         errors = registry.validate_dependencies()
         assert errors == []
 
@@ -287,11 +280,7 @@ class TestPluginDependencies:
         from calute.extensions.dependency import CircularDependencyError
 
         registry = PluginRegistry()
-        registry.register_plugin(
-            PluginMeta(name="a", version="1.0", dependencies=["b"])
-        )
-        registry.register_plugin(
-            PluginMeta(name="b", version="1.0", dependencies=["a"])
-        )
+        registry.register_plugin(PluginMeta(name="a", version="1.0", dependencies=["b"]))
+        registry.register_plugin(PluginMeta(name="b", version="1.0", dependencies=["a"]))
         with pytest.raises(CircularDependencyError):
             registry.get_load_order()

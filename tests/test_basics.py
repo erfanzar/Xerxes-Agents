@@ -71,9 +71,11 @@ class TestBasicRegistery:
 
     def test_invalid_register_type(self):
         try:
+
             @basic_registry("invalid", "test")
             class Bad:
                 pass
+
             raise AssertionError("Should have raised AssertionError")
         except AssertionError:
             pass

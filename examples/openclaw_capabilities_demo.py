@@ -21,7 +21,6 @@ Run with:
 import tempfile
 from pathlib import Path
 
-# === 1. Plugin Registration ===
 from calute.extensions.plugins import PluginMeta, PluginRegistry, PluginType
 
 print("=" * 60)
@@ -48,7 +47,6 @@ registry.register_tool("web_search", web_search, meta=meta)
 print(f"Registered plugins: {registry.plugin_names}")
 print(f"Available tools: {list(registry.get_all_tools().keys())}")
 
-# === 2. Skill Discovery ===
 from calute.extensions.skills import SkillRegistry
 
 print("\n" + "=" * 60)
@@ -85,7 +83,6 @@ When asked to research a topic:
     if skill:
         print(f"\nSkill prompt section:\n{skill.to_prompt_section()[:200]}...")
 
-# === 3. Tool Policy ===
 from calute.security.policy import PolicyAction, PolicyEngine, ToolPolicy, ToolPolicyViolation
 
 print("\n" + "=" * 60)
@@ -113,7 +110,6 @@ try:
 except ToolPolicyViolation as e:
     print(f"Policy violation: {e}")
 
-# === 4. Loop Detection ===
 from calute.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopSeverity
 
 print("\n" + "=" * 60)
@@ -131,7 +127,6 @@ for i in range(6):
 
 print(f"\nTotal calls tracked: {detector.call_count}")
 
-# === 5. Hook System ===
 from calute.extensions.hooks import HookRunner
 
 print("\n" + "=" * 60)
@@ -176,7 +171,6 @@ print(f"  Sanitized result: {result}")
 bootstrap = runner.run("bootstrap_files", agent_id="test_agent")
 print(f"  Bootstrap content: {bootstrap}")
 
-# === 6. Runtime Context & Enriched Prompt ===
 from calute.runtime.context import PromptContextBuilder
 from calute.security.sandbox import SandboxConfig, SandboxMode
 
@@ -196,7 +190,6 @@ prefix = builder.assemble_system_prompt_prefix(
 )
 print(prefix)
 
-# === 7. Sandbox Routing ===
 from calute.security.sandbox import SandboxRouter
 
 print("=" * 60)

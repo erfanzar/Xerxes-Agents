@@ -113,7 +113,5 @@ class TestDateTimeProcessor:
         assert result is not None
 
     def test_delta(self):
-        result = DateTimeProcessor.static_call(
-            operation="delta", date_string="2025-01-01", days=10
-        )
+        result = DateTimeProcessor.static_call(operation="delta", date_string="2025-01-01", days=10)
         assert result is not None

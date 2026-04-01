@@ -20,7 +20,6 @@ from calute.core.errors import CaluteTimeoutError
 from calute.logging.structured import get_logger
 from calute.memory import MemoryStore, MemoryType
 
-# ================== Custom Functions for Testing ==================
 
 
 def list_improvements() -> str:
@@ -342,7 +341,6 @@ def get_system_info() -> str:
     return result
 
 
-# ================== Interactive Agent Setup ==================
 
 # Global memory store for the agent
 agent_memory = MemoryStore(
@@ -613,7 +611,6 @@ Type 'help' for all commands."""
                 logger.logger.error(f"Error processing command: {e}")
 
 
-# ================== Main Execution ==================
 
 
 def main():

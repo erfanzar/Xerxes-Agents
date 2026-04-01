@@ -22,7 +22,9 @@ from calute.types import (
     AssistantMessage,
     ExecutionResult,
     ExecutionStatus,
+    MessagesHistory,
     RequestFunctionCall,
+    SystemMessage,
     ToolMessage,
     UserMessage,
 )
@@ -30,6 +32,30 @@ from calute.types import (
 
 def _tool_example(command: str) -> dict[str, str]:
     return {"command": command}
+
+
+def _web_search_query(q: str, search_type: str = "text", n_results: int = 5) -> dict[str, object]:
+    return {
+        "query": q,
+        "search_type": search_type,
+        "n_results": n_results,
+        "results": [{"title": "OpenAI latest", "url": "https://example.com/openai"}],
+    }
+
+
+_web_search_query.__calute_schema__ = {
+    "name": "web.search_query",
+    "description": "Search the public web through DuckDuckGo and return compact result dictionaries.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "q": {"type": "string", "description": "Search query text."},
+            "search_type": {"type": "string", "description": "Search vertical such as text or news."},
+            "n_results": {"type": "integer", "description": "Maximum number of results to return."},
+        },
+        "required": ["q"],
+    },
+}
 
 
 def _chunk(
@@ -92,6 +118,16 @@ def test_manage_messages_adds_post_tool_rules_for_native_tool_mode():
     messages = calute.manage_messages(agent=agent, prompt="List files in the current directory.")
     system_message = messages.messages[0]
 
+    assert "Do not use functions for greetings, simple conversation" in system_message.content
+    assert "If the user explicitly asks to search, look up, browse, or find something on the web" in (
+        system_message.content
+    )
+    assert "If the user gives a generic follow-up like `search the web`, `look it up`, or `find it`" in (
+        system_message.content
+    )
+    assert "do not say that you cannot browse, search the web, or access current information" in (system_message.content)
+    assert "Search-result snippets are not verified facts" in system_message.content
+    assert "Never simulate tool calls or wrap a normal answer" in system_message.content
     assert "After a function returns a result, use that result to continue the task and answer the user." in (
         system_message.content
     )
@@ -117,7 +153,132 @@ def test_build_reinvoke_messages_appends_followup_instruction_after_tool_results
     assert isinstance(updated_messages.messages[-2], ToolMessage)
     assert isinstance(updated_messages.messages[-1], UserMessage)
     assert "Use the function results above to continue the task." in updated_messages.messages[-1].content
+    assert "do not claim you cannot browse or access current information" in updated_messages.messages[-1].content
+    assert "Treat search-result snippets as leads rather than verified facts" in updated_messages.messages[-1].content
     assert updated_messages.messages[-2].tool_call_id == "call_1"
+
+
+def test_manage_messages_dedupes_system_prompt_when_reinvoking():
+    agent = Agent(model="gpt-4o-mini", functions=[_tool_example])
+    calute = Calute()
+    original_messages = calute.manage_messages(agent=agent, prompt="List files in the current directory.")
+
+    function_calls = [RequestFunctionCall(name="_tool_example", arguments={"command": "ls"}, id="call_1")]
+    results = [ExecutionResult(status=ExecutionStatus.SUCCESS, result={"stdout": "README.md\nsrc\n", "stderr": ""})]
+
+    updated_messages = calute._build_reinvoke_messages(
+        original_messages=original_messages,
+        assistant_content="",
+        function_calls=function_calls,
+        results=results,
+    )
+    reinvoked_messages = calute.manage_messages(agent=agent, messages=updated_messages)
+
+    system_messages = [message for message in reinvoked_messages.messages if isinstance(message, SystemMessage)]
+
+    assert len(system_messages) == 1
+    assert reinvoked_messages.messages[0] is system_messages[0]
+    assert [message.role for message in reinvoked_messages.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert system_messages[0].content.count("After a function returns a result") == 1
+
+
+def test_extract_function_calls_parses_tagged_function_markup():
+    agent = Agent(model="gpt-4o-mini", functions=[_web_search_query])
+    calute = Calute()
+
+    content = """
+<tool_call>
+<function=web.search_query>
+<parameter=q>
+latest OpenAI news
+</parameter>
+<parameter=search_type>
+news
+</parameter>
+</function>
+</tool_call>
+""".strip()
+
+    function_calls = calute._extract_function_calls(content, agent, None)
+
+    assert len(function_calls) == 1
+    assert function_calls[0].name == "web.search_query"
+    assert function_calls[0].arguments == {"q": "latest OpenAI news", "search_type": "news"}
+    assert calute._remove_function_calls_from_content(content) == ""
+
+
+@pytest.mark.asyncio
+async def test_explicit_web_search_request_is_left_to_model_tool_choice():
+    llm = _FakeLLM(
+        responses=[
+            [
+                _chunk(
+                    function_calls=[
+                        {
+                            "id": "call_search",
+                            "name": "web.search_query",
+                            "arguments": {"q": "latest OpenAI news", "search_type": "news"},
+                        }
+                    ],
+                    is_final=True,
+                )
+            ],
+            [[_chunk(content="Here are the current web search results.", is_final=True)]][0],
+        ]
+    )
+    calute = Calute(llm=llm)
+    agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[_web_search_query])
+    calute.register_agent(agent)
+
+    result = await calute.create_response(
+        prompt="Search the web for the latest OpenAI news.",
+        agent_id=agent,
+        stream=False,
+    )
+
+    assert len(llm.calls) == 2
+    assert result.content == "Here are the current web search results."
+    assert result.function_calls[0].name == "web.search_query"
+    first_prompt_messages = llm.calls[0]["prompt"]
+    assert not any(message["role"] == "tool" for message in first_prompt_messages)
+    tool_message = next(message for message in llm.calls[1]["prompt"] if message["role"] == "tool")
+    assert "latest OpenAI news" in str(tool_message["content"])
+
+
+@pytest.mark.asyncio
+async def test_generic_followup_web_search_relies_on_prompt_history_instead_of_forcing_tool():
+    llm = _FakeLLM(responses=[[_chunk(content="Tell me what to search for.", is_final=True)]])
+    calute = Calute(llm=llm)
+    agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[_web_search_query])
+    calute.register_agent(agent)
+
+    history = MessagesHistory(
+        messages=[
+            UserMessage(content="read about bonsai 1bit llm from prism-ml"),
+            AssistantMessage(content="I do not know enough about that yet."),
+        ]
+    )
+
+    await calute.create_response(
+        prompt="search the web",
+        messages=history,
+        agent_id=agent,
+        stream=False,
+    )
+
+    assert len(llm.calls) == 1
+    prompt_messages = llm.calls[0]["prompt"]
+    assert prompt_messages[1] == {"role": "user", "content": "read about bonsai 1bit llm from prism-ml"}
+    assert prompt_messages[2] == {"role": "assistant", "content": "I do not know enough about that yet."}
+    assert prompt_messages[3] == {"role": "user", "content": "search the web"}
+    assert not any(message["role"] == "tool" for message in prompt_messages)
+    assert "generic follow-up like `search the web`, `look it up`, or `find it`" in prompt_messages[0]["content"]
 
 
 @pytest.mark.asyncio

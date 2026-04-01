@@ -219,6 +219,7 @@ class TestCaluteConfig:
 class TestGlobalConfig:
     def setup_method(self):
         import calute.core.config as cfg_module
+
         cfg_module._config = None
 
     def test_get_config_creates_default(self):

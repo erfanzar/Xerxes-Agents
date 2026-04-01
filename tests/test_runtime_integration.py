@@ -93,12 +93,18 @@ def tool_result_persist(tool_name, result, agent_id):
     return str(result).upper()
 
 """
-        register_block += '    registry.register_hook("before_tool_call", before_tool_call, plugin_name=PLUGIN_META.name)\n'
-        register_block += '    registry.register_hook("after_tool_call", after_tool_call, plugin_name=PLUGIN_META.name)\n'
-        register_block += '    registry.register_hook("tool_result_persist", tool_result_persist, plugin_name=PLUGIN_META.name)\n'
+        register_block += (
+            '    registry.register_hook("before_tool_call", before_tool_call, plugin_name=PLUGIN_META.name)\n'
+        )
+        register_block += (
+            '    registry.register_hook("after_tool_call", after_tool_call, plugin_name=PLUGIN_META.name)\n'
+        )
+        register_block += (
+            '    registry.register_hook("tool_result_persist", tool_result_persist, plugin_name=PLUGIN_META.name)\n'
+        )
 
     path.write_text(
-        f'''from calute.extensions.plugins import PluginMeta, PluginType
+        f"""from calute.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="runtime_plugin", version="1.0.0", plugin_type=PluginType.TOOL)
 
@@ -111,7 +117,7 @@ def bootstrap_files(agent_id):
 {hook_block}
 def register(registry):
 {register_block}    registry.register_hook("bootstrap_files", bootstrap_files, plugin_name=PLUGIN_META.name)
-'''
+"""
     )
 
 
@@ -242,7 +248,11 @@ async def test_runtime_hooks_and_plugin_tool_apply_in_live_execution(tmp_path, m
 
     llm = _FakeLLM(
         responses=[
-            [_chunk(function_calls=[{"id": "call_1", "name": "plugin_echo", "arguments": {"text": "hi"}}], is_final=True)],
+            [
+                _chunk(
+                    function_calls=[{"id": "call_1", "name": "plugin_echo", "arguments": {"text": "hi"}}], is_final=True
+                )
+            ],
             [_chunk(content="final", is_final=True)],
         ]
     )
@@ -340,8 +350,18 @@ async def test_loop_detector_is_reused_across_reinvocation_cycles():
 
     llm = _FakeLLM(
         responses=[
-            [_chunk(function_calls=[{"id": "call_1", "name": "repeat_tool", "arguments": {"query": "same"}}], is_final=True)],
-            [_chunk(function_calls=[{"id": "call_2", "name": "repeat_tool", "arguments": {"query": "same"}}], is_final=True)],
+            [
+                _chunk(
+                    function_calls=[{"id": "call_1", "name": "repeat_tool", "arguments": {"query": "same"}}],
+                    is_final=True,
+                )
+            ],
+            [
+                _chunk(
+                    function_calls=[{"id": "call_2", "name": "repeat_tool", "arguments": {"query": "same"}}],
+                    is_final=True,
+                )
+            ],
             [_chunk(content="stopped", is_final=True)],
         ]
     )
@@ -382,9 +402,6 @@ def test_create_llm_resolves_provider_plugins():
     llm = create_llm("toy", plugin_registry=registry, model="toy-model")
 
     assert isinstance(llm, _ProviderLLM)
-
-
-# ---------- New integration tests for production-capability features ----------
 
 
 def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
@@ -528,9 +545,7 @@ def test_prompt_profile_compact_mode_produces_shorter_output(tmp_path, monkeypat
 
     monkeypatch.chdir(tmp_path)
 
-    calute_full = Calute(
-        runtime_features=RuntimeFeaturesConfig(enabled=True, guardrails=["Be safe"])
-    )
+    calute_full = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True, guardrails=["Be safe"]))
     agent_full = Agent(id="full", model="fake", instructions="Base", functions=[])
     calute_full.register_agent(agent_full)
     full_prompt = calute_full.manage_messages(agent=agent_full, prompt="hello").messages[0].content
@@ -614,7 +629,7 @@ def test_plugin_dependency_validation_runs_at_startup(tmp_path, monkeypatch):
     plugin_dir.mkdir()
     # Plugin with unmet dependency
     plugin_dir.joinpath("needy_plugin.py").write_text(
-        '''from calute.extensions.plugins import PluginMeta, PluginType
+        """from calute.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(
     name="needy",
@@ -628,7 +643,7 @@ def my_tool(x: str) -> str:
 
 def register(registry):
     registry.register_tool("my_tool", my_tool, meta=PLUGIN_META)
-'''
+"""
     )
 
     with pytest.raises(ValueError, match="nonexistent_dep"):

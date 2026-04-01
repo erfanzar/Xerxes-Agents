@@ -261,9 +261,7 @@ class TestFunctionExecutor:
 
         executor = FunctionExecutor(orchestrator)
 
-        call = RequestFunctionCall(
-            name="failing_func", arguments={}, call_id="call_1", status=ExecutionStatus.PENDING
-        )
+        call = RequestFunctionCall(name="failing_func", arguments={}, call_id="call_1", status=ExecutionStatus.PENDING)
 
         results = await executor.execute_function_calls(
             [call], context_variables={}, strategy=FunctionCallStrategy.SEQUENTIAL
@@ -322,9 +320,7 @@ class TestFunctionExecutor:
 
         executor = FunctionExecutor(orchestrator)
 
-        call = RequestFunctionCall(
-            name="non_existent", arguments={}, call_id="call_1", status=ExecutionStatus.PENDING
-        )
+        call = RequestFunctionCall(name="non_existent", arguments={}, call_id="call_1", status=ExecutionStatus.PENDING)
 
         results = await executor.execute_function_calls(
             [call], context_variables={}, strategy=FunctionCallStrategy.SEQUENTIAL

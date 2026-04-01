@@ -32,8 +32,7 @@ def _operator_tools(state: OperatorState) -> dict[str, callable]:
 def test_pty_session_manager_round_trip():
     manager = PTYSessionManager()
     script = (
-        "import sys; print('ready', flush=True); "
-        "line = sys.stdin.readline().strip(); print(f'echo:{line}', flush=True)"
+        "import sys; print('ready', flush=True); line = sys.stdin.readline().strip(); print(f'echo:{line}', flush=True)"
     )
     cmd = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
 
@@ -306,3 +305,25 @@ async def test_web_adapter_tools_use_search_and_http_mocks(monkeypatch):
     assert weather["location"] == "Istanbul"
     assert finance["price"] == 42
     assert sports["league"] == "nba"
+
+
+def test_web_search_query_surfaces_fallback_metadata(monkeypatch):
+    def fake_search(query: str, **kwargs):
+        assert kwargs["search_type"] == "news"
+        assert kwargs["return_metadata"] is True
+        return {
+            "results": [{"title": "Fallback result", "url": "https://example.com/fallback"}],
+            "metadata": {"effective_search_type": "text", "fallback_applied": "news_to_text"},
+        }
+
+    monkeypatch.setattr("calute.operators.state.DuckDuckGoSearch.static_call", fake_search)
+
+    state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
+    tools = _operator_tools(state)
+
+    search_result = tools["web.search_query"]("latest OpenAI news", search_type="news")
+
+    assert search_result["search_type"] == "news"
+    assert search_result["effective_search_type"] == "text"
+    assert search_result["fallback_applied"] == "news_to_text"
+    assert search_result["results"][0]["title"] == "Fallback result"

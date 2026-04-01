@@ -307,11 +307,31 @@ def function_to_json(func: callable) -> dict:
     except Exception:
         resolved_hints = {}
 
-    param_descriptions = {}
-    param_pattern = r"(\w+)(?:\s*\([^)]+\))?\s*:\s*(.+?)(?=\n\s*\w+(?:\s*\([^)]+\))?\s*:|$)"
-    matches = re.findall(param_pattern, docstring, re.DOTALL | re.MULTILINE)
-    for param_name, description in matches:
-        param_descriptions[param_name.strip()] = description.strip()
+    param_descriptions: dict[str, str] = {}
+    args_match = re.search(r"(?:^|\n)Args:\n(?P<body>.*?)(?:\n[A-Z][A-Za-z ]*:\n|\Z)", docstring, re.DOTALL)
+    if args_match:
+        current_name: str | None = None
+        current_lines: list[str] = []
+        for raw_line in args_match.group("body").splitlines():
+            if not raw_line.strip():
+                continue
+            param_match = re.match(r"\s{4}(\w+)(?:\s*\([^)]+\))?\s*:\s*(.*)", raw_line)
+            if param_match:
+                if current_name is not None:
+                    param_descriptions[current_name] = " ".join(part.strip() for part in current_lines if part.strip())
+                current_name = param_match.group(1).strip()
+                current_lines = [param_match.group(2).strip()]
+                continue
+            if current_name is not None and raw_line.startswith(" " * 8):
+                current_lines.append(raw_line.strip())
+        if current_name is not None:
+            param_descriptions[current_name] = " ".join(part.strip() for part in current_lines if part.strip())
+
+    if not param_descriptions:
+        param_pattern = r"(\w+)(?:\s*\([^)]+\))?\s*:\s*(.+?)(?=\n\s*\w+(?:\s*\([^)]+\))?\s*:|$)"
+        matches = re.findall(param_pattern, docstring, re.DOTALL | re.MULTILINE)
+        for param_name, description in matches:
+            param_descriptions[param_name.strip()] = description.strip()
 
     parameters = {}
     for param in signature.parameters.values():
