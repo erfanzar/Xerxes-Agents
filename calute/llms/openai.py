@@ -414,7 +414,6 @@ class OpenAILLM(BaseLLM):
             messages = [{"role": "user", "content": prompt}]
         else:
             messages = prompt
-
         compat_top_k = kwargs.pop("top_k", None)
         if compat_top_k is None:
             compat_top_k = self.config.top_k

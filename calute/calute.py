@@ -85,6 +85,7 @@ from .memory import MemoryStore, MemoryType
 from .operators import OperatorRuntimeConfig
 from .runtime.features import RuntimeFeaturesConfig, RuntimeFeaturesState
 from .runtime.loop_detection import LoopDetector
+from .runtime.session import RuntimeSession
 from .types import (
     Agent,
     AgentFunction,
@@ -351,6 +352,169 @@ class Calute:
 
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.CAPABILITY_BASED, capability_based_switch)
         self.orchestrator.register_switch_trigger(AgentSwitchTrigger.ERROR_RECOVERY, error_recovery_switch)
+
+    # ── New streaming/runtime infrastructure methods ───────────────────
+
+    def create_query_engine(
+        self,
+        model: str = "",
+        system_prompt: str = "",
+        **config_kwargs: tp.Any,
+    ):
+        """Create a fully-wired QueryEngine from this Calute instance.
+
+        The QueryEngine provides a multi-turn conversation interface with
+        budget control, auto-compaction, cost tracking, and history logging.
+
+        Args:
+            model: Model name override. If empty, uses the current agent's model.
+            system_prompt: System prompt override.
+            **config_kwargs: Additional QueryEngineConfig kwargs.
+
+        Returns:
+            A :class:`QueryEngine` instance.
+
+        Example:
+            >>> engine = calute.create_query_engine(model="gpt-4o")
+            >>> result = engine.submit("Hello!")
+            >>> print(result.output)
+        """
+        from .runtime.bridge import create_query_engine
+
+        agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
+        if not model and agent:
+            model = agent.model or ""
+        if not system_prompt and agent:
+            system_prompt = agent.instructions or ""
+
+        return create_query_engine(
+            calute_instance=self,
+            agent=agent,
+            model=model,
+            system_prompt=system_prompt,
+            **config_kwargs,
+        )
+
+    def create_runtime_session(self, prompt: str = "") -> RuntimeSession:
+        """Create a new RuntimeSession capturing current context.
+
+        Args:
+            prompt: Initial prompt or session description.
+
+        Returns:
+            A :class:`RuntimeSession` instance.
+        """
+        from .runtime.session import RuntimeSession
+
+        agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
+        model = (agent.model if agent else "") or ""
+        return RuntimeSession.create(model=model, prompt=prompt)
+
+    def bootstrap(self, extra_context: str = ""):
+        """Run the bootstrap sequence for this Calute instance.
+
+        Performs environment detection, git info loading, CLAUDE.md loading,
+        tool registration, and system prompt building.
+
+        Args:
+            extra_context: Additional context for the system prompt.
+
+        Returns:
+            A :class:`BootstrapResult`.
+        """
+        from .runtime.bridge import bootstrap_calute
+
+        agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
+        model = (agent.model if agent else "") or ""
+        return bootstrap_calute(
+            calute_instance=self,
+            agent=agent,
+            model=model,
+            extra_context=extra_context,
+        )
+
+    def get_execution_registry(self):
+        """Get a populated ExecutionRegistry with all Calute tools.
+
+        Returns:
+            An :class:`ExecutionRegistry` with all tools registered.
+        """
+        from .runtime.bridge import populate_registry
+
+        return populate_registry()
+
+    def get_tool_executor(self):
+        """Get a tool executor callable for the streaming agent loop.
+
+        Returns:
+            A callable ``(tool_name: str, tool_input: dict) -> str``.
+        """
+        from .runtime.bridge import build_tool_executor
+
+        agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
+        registry = self.get_execution_registry()
+        return build_tool_executor(calute_instance=self, agent=agent, registry=registry)
+
+    def create_subagent_manager(
+        self,
+        max_concurrent: int = 5,
+        max_depth: int = 5,
+    ):
+        """Create a SubAgentManager with the streaming agent loop wired up.
+
+        The manager uses a thread pool for concurrent sub-agent execution,
+        supports git worktree isolation, named agents, and inbox queues.
+
+        Args:
+            max_concurrent: Maximum number of concurrent sub-agents.
+            max_depth: Maximum nesting depth.
+
+        Returns:
+            A :class:`SubAgentManager` instance.
+
+        Example:
+            >>> mgr = calute.create_subagent_manager()
+            >>> from calute.agents import get_agent_definition
+            >>> task = mgr.spawn(
+            ...     prompt="Review this code",
+            ...     config={"model": "gpt-4o"},
+            ...     system_prompt="You are helpful.",
+            ...     agent_def=get_agent_definition("reviewer"),
+            ...     name="code-review",
+            ... )
+            >>> mgr.wait(task.id)
+            >>> print(task.result)
+        """
+        from .agents.subagent_manager import SubAgentManager
+        from .runtime.bridge import build_tool_executor, populate_registry
+
+        mgr = SubAgentManager(max_concurrent=max_concurrent, max_depth=max_depth)
+
+        registry = populate_registry()
+        tool_executor = build_tool_executor(calute_instance=self, registry=registry)
+
+        def runner(prompt, config, system_prompt, depth, cancel_check):
+            from .streaming.events import AgentState, TextChunk
+            from .streaming.loop import run
+
+            state = AgentState()
+            output_parts = []
+            for event in run(
+                user_message=prompt,
+                state=state,
+                config=config,
+                system_prompt=system_prompt,
+                tool_executor=tool_executor,
+                tool_schemas=registry.tool_schemas(),
+                depth=depth,
+                cancel_check=cancel_check,
+            ):
+                if isinstance(event, TextChunk):
+                    output_parts.append(event.text)
+            return "".join(output_parts)
+
+        mgr.set_runner(runner)
+        return mgr
 
     def _notify_turn_start(self, agent_id: str | None, messages: MessagesHistory | None = None) -> None:
         """Fire the ``on_turn_start`` hook if any listeners are registered."""

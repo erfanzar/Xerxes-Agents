@@ -41,13 +41,28 @@ from ._data_analyst_agent import data_analyst_agent
 from ._planner_agent import planner_agent
 from ._researcher_agent import research_agent
 from .compaction_agent import CompactionAgent, create_compaction_agent
+from .definitions import (
+    BUILTIN_AGENTS,
+    AgentDefinition,
+    get_agent_definition,
+    list_agent_definitions,
+    load_agent_definitions,
+)
+from .subagent_manager import SubAgentManager, SubAgentTask
 
 __all__ = (
+    "BUILTIN_AGENTS",
+    "AgentDefinition",
     "CompactionAgent",
+    "SubAgentManager",
+    "SubAgentTask",
     "code_agent",
     "compaction_agent",
     "create_compaction_agent",
     "data_analyst_agent",
+    "get_agent_definition",
+    "list_agent_definitions",
+    "load_agent_definitions",
     "planner_agent",
     "research_agent",
 )

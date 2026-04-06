@@ -39,9 +39,30 @@ from typing import Literal
 
 from .anthropic import AnthropicLLM
 from .base import BaseLLM, LLMConfig
+from .compat import (
+    CustomLLM,
+    DeepSeekLLM,
+    KimiLLM,
+    LMStudioLLM,
+    OpenAICompatLLM,
+    QwenLLM,
+    ZhipuLLM,
+)
 from .gemini import GeminiLLM
 from .ollama import LocalLLM, OllamaLLM
 from .openai import OpenAILLM
+from .registry import (
+    COSTS,
+    PROVIDERS,
+    ProviderConfig,
+    bare_model,
+    calc_cost,
+    detect_provider,
+    get_api_key,
+    get_context_limit,
+    get_provider_config,
+    list_all_models,
+)
 
 try:
     from ..extensions.plugins import PluginRegistry
@@ -108,7 +129,25 @@ def _instantiate_provider(provider_impl, config: LLMConfig | None, kwargs: dict)
 
 
 def create_llm(
-    provider: Literal["openai", "anthropic", "claude", "gemini", "google", "ollama", "local"] | str,
+    provider: Literal[
+        "openai",
+        "anthropic",
+        "claude",
+        "gemini",
+        "google",
+        "ollama",
+        "local",
+        "deepseek",
+        "kimi",
+        "moonshot",
+        "qwen",
+        "dashscope",
+        "zhipu",
+        "glm",
+        "lmstudio",
+        "custom",
+    ]
+    | str,
     config: LLMConfig | None = None,
     plugin_registry: PluginRegistry | None = None,
     **kwargs,
@@ -167,6 +206,15 @@ def create_llm(
         "google": GeminiLLM,
         "ollama": OllamaLLM,
         "local": LocalLLM,
+        "deepseek": DeepSeekLLM,
+        "kimi": KimiLLM,
+        "moonshot": KimiLLM,
+        "qwen": QwenLLM,
+        "dashscope": QwenLLM,
+        "zhipu": ZhipuLLM,
+        "glm": ZhipuLLM,
+        "lmstudio": LMStudioLLM,
+        "custom": CustomLLM,
     }
 
     if plugin_registry is not None:
@@ -182,12 +230,29 @@ def create_llm(
 
 
 __all__ = [
+    "COSTS",
+    "PROVIDERS",
     "AnthropicLLM",
     "BaseLLM",
+    "CustomLLM",
+    "DeepSeekLLM",
     "GeminiLLM",
+    "KimiLLM",
     "LLMConfig",
+    "LMStudioLLM",
     "LocalLLM",
     "OllamaLLM",
+    "OpenAICompatLLM",
     "OpenAILLM",
+    "ProviderConfig",
+    "QwenLLM",
+    "ZhipuLLM",
+    "bare_model",
+    "calc_cost",
     "create_llm",
+    "detect_provider",
+    "get_api_key",
+    "get_context_limit",
+    "get_provider_config",
+    "list_all_models",
 ]

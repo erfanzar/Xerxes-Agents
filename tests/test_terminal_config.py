@@ -16,7 +16,7 @@ def test_terminal_config_round_trip(tmp_path: Path):
         provider="openai",
         model="qwen3-coder",
         api_key="sk-test",
-        base_url="http://35.193.63.250:11556/v1/",
+        base_url="http://0.0.0.0:11556/v1/",
         power_tools_enabled=True,
         available_models=["qwen3-coder", "deepseek-v3"],
         sampling_params={"temperature": 0.3, "max_tokens": 4096},
@@ -28,7 +28,7 @@ def test_terminal_config_round_trip(tmp_path: Path):
     assert loaded is not None
     assert loaded.provider == "openai"
     assert loaded.model == "qwen3-coder"
-    assert loaded.base_url == "http://35.193.63.250:11556/v1/"
+    assert loaded.base_url == "http://0.0.0.0:11556/v1/"
     assert loaded.power_tools_enabled is True
     assert loaded.available_models == ["qwen3-coder", "deepseek-v3"]
     assert loaded.sampling_params == {"temperature": 0.3, "max_tokens": 4096}

@@ -621,7 +621,7 @@ async def test_calute_tui_model_change_persists(tmp_path):
         name="lab",
         provider="openai",
         model="old-model",
-        base_url="http://35.193.63.250:11556/v1/",
+        base_url="http://0.0.0.0:11556/v1/",
         api_key="sk-xxx",
         available_models=["old-model", "new-model"],
     )
@@ -756,7 +756,7 @@ async def test_calute_tui_endpoint_after_pending_provider_uses_new_provider(tmp_
         await pilot.pause()
         assert app._handle_command("/provider openai")
         await pilot.pause()
-        assert app._handle_command("/endpoint http://35.193.63.250:11556/v1/")
+        assert app._handle_command("/endpoint http://0.0.0.0:11556/v1/")
         await pilot.pause()
         await pilot.pause()
         assert calls[-1][0] == "openai"
@@ -766,7 +766,7 @@ async def test_calute_tui_endpoint_after_pending_provider_uses_new_provider(tmp_
     loaded = store.get_profile("lab")
     assert loaded is not None
     assert loaded.provider == "openai"
-    assert loaded.base_url == "http://35.193.63.250:11556/v1/"
+    assert loaded.base_url == "http://0.0.0.0:11556/v1/"
     assert loaded.model == "model-a"
     assert loaded.available_models == ["model-a", "model-b"]
 
@@ -785,7 +785,7 @@ async def test_calute_tui_provider_alias_oai_switches_to_openai(tmp_path, monkey
         name="lab",
         provider="ollama",
         model="llama3",
-        base_url="http://35.193.63.250:11556/v1/",
+        base_url="http://0.0.0.0:11556/v1/",
         api_key="sk-test",
     )
     store.upsert_profile(profile)
@@ -867,18 +867,18 @@ async def test_calute_tui_endpoint_and_api_key_commands_persist(tmp_path, monkey
     app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert app._handle_command("/endpoint http://35.193.63.250:11556/v1/")
+        assert app._handle_command("/endpoint http://0.0.0.0:11556/v1/")
         await pilot.pause()
         await pilot.pause()
         assert app._handle_command("/apikey sk-new-secret")
         await pilot.pause()
         await pilot.pause()
-        assert app._base_url() == "http://35.193.63.250:11556/v1/"
+        assert app._base_url() == "http://0.0.0.0:11556/v1/"
         assert app._api_key() == "sk-new-secret"
 
     loaded = store.get_profile("lab")
     assert loaded is not None
-    assert loaded.base_url == "http://35.193.63.250:11556/v1/"
+    assert loaded.base_url == "http://0.0.0.0:11556/v1/"
     assert loaded.api_key == "sk-new-secret"
     assert loaded.available_models == ["new-model"]
 

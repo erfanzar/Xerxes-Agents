@@ -40,7 +40,7 @@ def test_detect_model_prefers_generic_env():
 
 
 def test_looks_openai_compatible_endpoint_detects_v1():
-    assert looks_openai_compatible_endpoint("http://35.193.63.250:11556/v1/")
+    assert looks_openai_compatible_endpoint("http://0.0.0.0:11556/v1/")
     assert not looks_openai_compatible_endpoint("http://localhost:11434")
 
 
@@ -95,7 +95,7 @@ def test_main_launches_tui(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("calute.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json"))
 
-    exit_code = main(["--provider", "ollama", "--model", "llama3", "--no-tools"])
+    exit_code = main(["tui", "--provider", "ollama", "--model", "llama3", "--no-tools"])
     assert exit_code == 0
     assert captured["launched"] is True
 
@@ -108,7 +108,7 @@ def test_resolve_profile_heals_ollama_profile_pointing_at_v1_endpoint(tmp_path):
             provider="ollama",
             model="llama3",
             api_key="sk-xxx",
-            base_url="http://35.193.63.250:11556/v1/",
+            base_url="http://0.0.0.0:11556/v1/",
             available_models=["llama3", "qwen2.5"],
         )
     )
@@ -132,7 +132,7 @@ def test_resolve_profile_heals_ollama_profile_pointing_at_v1_endpoint(tmp_path):
     profile = _resolve_profile(args, store, {})
 
     assert profile.provider == "openai"
-    assert profile.base_url == "http://35.193.63.250:11556/v1/"
+    assert profile.base_url == "http://0.0.0.0:11556/v1/"
     assert profile.api_key == "sk-xxx"
     assert profile.available_models == []
 
@@ -156,10 +156,11 @@ def test_main_saves_profile(monkeypatch, tmp_path):
 
     exit_code = main(
         [
+            "tui",
             "--provider",
             "openai",
             "--base-url",
-            "http://35.193.63.250:11556/v1/",
+            "http://0.0.0.0:11556/v1/",
             "--api-key",
             "sk-xxx",
             "--profile-name",
@@ -173,7 +174,7 @@ def test_main_saves_profile(monkeypatch, tmp_path):
     saved = store.get_profile("lab")
     assert saved is not None
     assert saved.provider == "openai"
-    assert saved.base_url == "http://35.193.63.250:11556/v1/"
+    assert saved.base_url == "http://0.0.0.0:11556/v1/"
     assert saved.api_key == "sk-xxx"
     assert saved.model == "qwen3-coder"
     assert saved.available_models == ["qwen3-coder", "deepseek-r1"]
@@ -198,7 +199,7 @@ def test_main_loads_power_tools_enabled_from_profile(monkeypatch, tmp_path):
             provider="openai",
             model="qwen3-coder",
             api_key="sk-xxx",
-            base_url="http://35.193.63.250:11556/v1/",
+            base_url="http://0.0.0.0:11556/v1/",
             power_tools_enabled=True,
         )
     )
@@ -214,7 +215,7 @@ def test_main_loads_power_tools_enabled_from_profile(monkeypatch, tmp_path):
         lambda executor, agent, profile=None, config_store=None: _Launcher(executor),
     )
 
-    exit_code = main(["--profile-name", "lab"])
+    exit_code = main(["tui", "--profile-name", "lab"])
     assert exit_code == 0
     assert captured["power_tools_enabled"] is True
 
@@ -251,7 +252,7 @@ def test_main_skips_model_discovery_when_profile_already_has_model(monkeypatch, 
         "calute.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
 
-    exit_code = main(["--profile-name", "lab"])
+    exit_code = main(["tui", "--profile-name", "lab"])
     assert exit_code == 0
     assert captured["launched"] is True
 

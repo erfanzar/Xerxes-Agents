@@ -47,7 +47,11 @@ from textual.widgets import Static, TextArea
 
 from ..context.token_counter import ProviderTokenCounter
 from ..llms import create_llm
+from ..runtime.bridge import bootstrap_calute, populate_registry
+from ..runtime.cost_tracker import CostTracker
+from ..runtime.history import HistoryLog
 from ..runtime.profiles import PromptProfile
+from ..runtime.session import RuntimeSession
 from ..types import (
     Agent,
     AgentSwitch,
@@ -598,6 +602,15 @@ class CaluteTUI(App[None]):
         self.tokens_per_second = 0.0
         self._stream_started_at: float | None = None
         self._last_pending_question_id: str | None = None
+        # ── New runtime infrastructure ─────────────────────────────────
+        self.runtime_session = RuntimeSession.create(
+            model=getattr(profile, "model", "") or "",
+            prompt="(tui session)",
+        )
+        self.cost_tracker = CostTracker()
+        self.history_log = HistoryLog()
+        self._bootstrap_result = None
+        self._execution_registry = None
 
     def compose(self) -> ComposeResult:
         """Build and yield the Textual widget tree for the application layout."""
@@ -618,11 +631,30 @@ class CaluteTUI(App[None]):
         """Handle the Textual mount lifecycle event.
 
         Sets the application title, performs initial UI refreshes, focuses
-        the input widget, starts the operations-panel tick timer, and
-        optionally kicks off background model discovery.
+        the input widget, starts the operations-panel tick timer,
+        runs the bootstrap sequence, and optionally kicks off background
+        model discovery.
         """
         self.title = "Calute TUI"
         self.sub_title = "Streaming terminal runtime"
+
+        # ── Bootstrap: build execution registry, detect env, load context ──
+        try:
+            model_name = self._current_model_name() or ""
+            agent = (
+                self.executor.orchestrator.get_current_agent() if self.executor.orchestrator.current_agent_id else None
+            )
+            self._bootstrap_result = bootstrap_calute(
+                calute_instance=self.executor,
+                agent=agent,
+                model=model_name,
+            )
+            self._execution_registry = self._bootstrap_result.registry
+            self.history_log.add("bootstrap", "Bootstrap completed", f"{len(self._bootstrap_result.stages)} stages")
+        except Exception:
+            # Bootstrap is non-critical; proceed without it
+            self._execution_registry = populate_registry()
+
         self._refresh_header_bar()
         self._refresh_transcript()
         self._refresh_footer_bar()
@@ -837,6 +869,11 @@ class CaluteTUI(App[None]):
                         style="bold magenta",
                     )
                     self._set_status(f"Running {item.function_name}{progress}")
+                    self.history_log.add_tool_call(item.function_name)
+                    self.runtime_session.record_stream_event(
+                        "tool_start",
+                        tool=item.function_name,
+                    )
                 elif isinstance(item, FunctionExecutionComplete):
                     self._complete_tool_entry(
                         function_id=item.function_id,
@@ -890,6 +927,25 @@ class CaluteTUI(App[None]):
                         style="bold green",
                     )
                     self._set_status("Done.")
+                    # ── Track in new runtime infrastructure ─────────
+                    model = self._current_model_name() or ""
+                    self.cost_tracker.record_turn(
+                        model,
+                        in_tokens=self.prompt_tokens_used,
+                        out_tokens=self.output_tokens_used,
+                    )
+                    self.history_log.add_turn(
+                        model,
+                        in_tokens=self.prompt_tokens_used,
+                        out_tokens=self.output_tokens_used,
+                    )
+                    self.runtime_session.record_turn(
+                        model,
+                        in_tokens=self.prompt_tokens_used,
+                        out_tokens=self.output_tokens_used,
+                    )
+                    self.runtime_session.transcript.append("user", prompt)
+                    self.runtime_session.transcript.append("assistant", final_content)
         except Exception as exc:  # pragma: no cover - exercised through the app
             message = self._format_runtime_error(exc)
             self._update_run_stats(assistant_buffer, reasoning_buffer)
@@ -914,11 +970,46 @@ class CaluteTUI(App[None]):
         if command == "clear":
             self.action_clear_chat()
             return True
+        if command == "cost":
+            self._add_note(self.cost_tracker.summary())
+            self._set_status(f"Total cost: ${self.cost_tracker.total_cost_usd:.4f}")
+            return True
+        if command == "session":
+            self._add_note(self.runtime_session.as_markdown()[:2000])
+            self._set_status("Session summary displayed.")
+            return True
+        if command == "registry":
+            if self._execution_registry:
+                self._add_note(self._execution_registry.summary()[:2000])
+                self._set_status(
+                    f"Registry: {self._execution_registry.command_count} commands, {self._execution_registry.tool_count} tools"
+                )
+            else:
+                self._add_note("No execution registry available.")
+            return True
+        if command == "history":
+            self._add_note(self.history_log.as_markdown()[:2000])
+            self._set_status(f"History: {self.history_log.event_count} events")
+            return True
+        if command == "audit":
+            from ..runtime.parity_audit import run_parity_audit
+
+            audit = run_parity_audit()
+            self._add_note(audit.as_markdown()[:2000])
+            self._set_status(f"Audit: {audit.coverage_pct:.1f}% coverage")
+            return True
+        if command == "bootstrap":
+            if self._bootstrap_result:
+                self._add_note(self._bootstrap_result.as_markdown())
+            else:
+                self._add_note("No bootstrap result available.")
+            return True
         if command == "help":
             self._add_note(
                 "Commands: /providers, /provider <name>, /endpoint <url>, /apikey <key>, /clear, /agent <id>,"
                 " /profile <full|compact|minimal|none>, /models, /model <name>, /tools,"
                 " /power on|off, /sessions, /agents, /plans,"
+                " /cost, /session, /registry, /history, /audit, /bootstrap,"
                 " /sampling, /set <param> <value>, /reset-sampling, /help"
             )
             self._set_status("Help added to the transcript.")

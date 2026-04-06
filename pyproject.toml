@@ -48,6 +48,7 @@ Documentation = "https://erfanzar.github.io/Calute"
 
 [project.scripts]
 calute = "calute.tui.cli:main"
+calute-repl = "calute.tui.repl:main"
 
 [project.optional-dependencies]
 # Development tools

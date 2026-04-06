@@ -266,13 +266,15 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         A configured ``argparse.ArgumentParser`` instance.
     """
-    parser = argparse.ArgumentParser(prog="calute", description="Launch the Calute terminal UI.")
+    parser = argparse.ArgumentParser(
+        prog="calute", description="Calute AI agent — interactive REPL by default, 'tui' for full Textual UI."
+    )
     parser.add_argument(
         "command",
         nargs="?",
-        default="tui",
-        choices=["tui"],
-        help="Interface to launch. Currently only 'tui' is available.",
+        default="repl",
+        choices=["repl", "tui"],
+        help="Interface to launch: 'repl' (default) for interactive CLI, 'tui' for full Textual UI.",
     )
     parser.add_argument("--provider", help="LLM provider to use. Defaults to env auto-detection.")
     parser.add_argument("--model", help="Model name. Defaults to provider-specific env or provider default.")
@@ -430,12 +432,13 @@ def _resolve_profile(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Launch the Textual terminal UI from the command line.
+    """Main entry point for the ``calute`` console script.
 
-    This is the top-level entry point used by the ``calute`` console script.
-    It parses arguments, resolves profiles, discovers available models,
-    constructs the LLM client and default agent, and finally starts the
-    Textual application.
+    Routes to the REPL (default) or the full Textual TUI based on the
+    ``command`` argument:
+
+    - ``calute`` or ``calute repl`` → lightweight REPL
+    - ``calute tui`` → full Textual UI
 
     Args:
         argv: Argument list to parse.  Defaults to ``sys.argv[1:]`` when
@@ -455,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         terminal_profile = _resolve_profile(args, store)
         terminal_profile = reconcile_terminal_profile(terminal_profile)
+        # If the user explicitly passed --model, lock it in — never override
+        user_locked_model = args.model is not None
         should_discover_models = args.list_models or args.choose_model or terminal_profile.model is None
         discovered_models = list(terminal_profile.available_models)
         if should_discover_models:
@@ -470,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if discovered_models:
             terminal_profile.available_models = discovered_models
-            if terminal_profile.model not in discovered_models:
+            if not user_locked_model and terminal_profile.model not in discovered_models:
                 terminal_profile.model = None
 
         if args.list_models:
@@ -487,6 +492,26 @@ def main(argv: list[str] | None = None) -> int:
             elif terminal_profile.model is None:
                 terminal_profile.model = terminal_profile.available_models[0]
 
+        # ── REPL mode (default) ───────────────────────────────────────
+        if args.command == "repl":
+            from .repl import repl
+
+            repl_config: dict[str, tp.Any] = {
+                "model": terminal_profile.model or "gpt-4o",
+                "permission_mode": "auto",
+            }
+            if terminal_profile.api_key:
+                repl_config["api_key"] = terminal_profile.api_key
+            if terminal_profile.base_url:
+                repl_config["base_url"] = terminal_profile.base_url
+            if args.no_tools:
+                repl_config["no_tools"] = True
+
+            store.upsert_profile(terminal_profile, make_default=True)
+            repl(config=repl_config)
+            return 0
+
+        # ── TUI mode ──────────────────────────────────────────────────
         llm_kwargs: dict[str, tp.Any] = {}
         if terminal_profile.model:
             llm_kwargs["model"] = terminal_profile.model
