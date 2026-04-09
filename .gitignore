@@ -6,7 +6,9 @@ __pycache__/
 *.json
 .DS_Store
 # C extensions
+src/python/calute/_bin/calute-repl
 *.so
+src/python/calute/_bin/calute
 .chainlit
 chainlit.md
 public/

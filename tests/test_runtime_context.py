@@ -110,9 +110,9 @@ class TestPromptContextBuilder:
         prefix = builder.assemble_system_prompt_prefix(tool_names=["search"], profile=PromptProfile.FULL)
 
         assert "Do not use or simulate tools for greetings, simple arithmetic" in prefix
-        assert "Never emit fake tool syntax such as <tool_call>" in prefix
+        assert "Do not simulate tool calls or wrap normal answers in tool/XML markup." in prefix
         assert "keep internal reasoning private" in prefix
-        assert "without <response>, <tool_call>, or XML-style wrappers" in prefix
+        assert "Keep internal reasoning out of the visible answer" in prefix
         assert "not in a scratchpad or reasoning field" in prefix
 
     def test_full_prefix_includes_tool_selection_guidance(self):

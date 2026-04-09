@@ -127,7 +127,7 @@ def test_manage_messages_adds_post_tool_rules_for_native_tool_mode():
     )
     assert "do not say that you cannot browse, search the web, or access current information" in (system_message.content)
     assert "Search-result snippets are not verified facts" in system_message.content
-    assert "Never simulate tool calls or wrap a normal answer" in system_message.content
+    assert "Do not simulate tool calls or wrap normal answers in tool/XML markup." in system_message.content
     assert "After a function returns a result, use that result to continue the task and answer the user." in (
         system_message.content
     )
@@ -193,7 +193,6 @@ def test_extract_function_calls_parses_tagged_function_markup():
     calute = Calute()
 
     content = """
-<tool_call>
 <function=web.search_query>
 <parameter=q>
 latest OpenAI news
@@ -202,7 +201,6 @@ latest OpenAI news
 news
 </parameter>
 </function>
-</tool_call>
 """.strip()
 
     function_calls = calute._extract_function_calls(content, agent, None)

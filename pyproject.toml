@@ -37,7 +37,6 @@ dependencies = [
     "python-dateutil>=2.8.0",
     "pyyaml>=6.0",
     "lxml>=5.0.0",
-    "textual>=0.89,<1.0",
     "playwright>=1.54.0",
 ]
 
@@ -47,8 +46,7 @@ Repository = "https://github.com/erfanzar/Calute"
 Documentation = "https://erfanzar.github.io/Calute"
 
 [project.scripts]
-calute = "calute.tui.cli:main"
-calute-repl = "calute.tui.repl:main"
+calute = "calute._bin._launcher:launch"
 
 [project.optional-dependencies]
 # Development tools
@@ -66,7 +64,6 @@ dev = [
 ]
 
 ui = ["chainlit~=2.9.2", "markdown>=3.5.0"]
-tui = []
 
 # Search and web tools
 search = []
@@ -115,7 +112,7 @@ mcp = [
 # ]
 
 # Full installation with all features
-full = ["calute[search,monitoring,vectors,ui,tui,mcp]"]
+full = ["calute[search,monitoring,vectors,ui,mcp]"]
 
 # Common presets for different use cases
 research = ["calute[search,vectors,ui]"]
@@ -127,10 +124,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["calute"]
+packages = ["src/python/calute"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"calute/py.typed" = "calute/py.typed"
+"src/python/calute/py.typed" = "calute/py.typed"
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [tool.black]
 line-length = 121
@@ -151,7 +151,7 @@ ignore = ["F722", "B008", "UP015", "A005", "E501"]
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["calute/"]
+exclude = ["src/python/calute/"]
 
 [tool.basedpyright]
 # Disabled diagnostic rules to reduce type-checking noise
@@ -190,10 +190,10 @@ reportIncompatibleVariableOverride = "none"
 
 [tool.uv.build-backend]
 module-name = "calute"
-module-root = "."
+module-root = "src/python"
 
 [tool.setuptools]
-package-dir = { "" = "." }
+package-dir = { "" = "src/python" }
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src/python"]

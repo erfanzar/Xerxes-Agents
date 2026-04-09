@@ -529,19 +529,19 @@ async def test_calute_tui_hides_tool_markup_from_visible_reasoning_and_content()
                 _chunk(
                     reasoning_content=(
                         "Inspect the request.\n"
-                        "<tool_call><function=web.search_query><parameter=q>OpenAI</parameter></function></tool_call>"
+                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                     buffered_reasoning_content=(
                         "Inspect the request.\n"
-                        "<tool_call><function=web.search_query><parameter=q>OpenAI</parameter></function></tool_call>"
+                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                 ),
                 _chunk(
-                    content="Visible answer\n<tool_call><function=web.search_query></function></tool_call>",
-                    buffered_content="Visible answer\n<tool_call><function=web.search_query></function></tool_call>",
+                    content="Visible answer\n<function=web.search_query></function>",
+                    buffered_content="Visible answer\n<function=web.search_query></function>",
                     buffered_reasoning_content=(
                         "Inspect the request.\n"
-                        "<tool_call><function=web.search_query><parameter=q>OpenAI</parameter></function></tool_call>"
+                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                     is_final=True,
                 ),
@@ -561,8 +561,8 @@ async def test_calute_tui_hides_tool_markup_from_visible_reasoning_and_content()
         await app._stream_prompt("hello")
         assert app.chat_history[-1].content == "Visible answer"
         assert app.chat_history[-1].meta == "Inspect the request."
-        assert "<tool_call>" not in app.chat_history[-1].content
-        assert "<tool_call>" not in (app.chat_history[-1].meta or "")
+        assert "<function=" not in app.chat_history[-1].content
+        assert "<function=" not in (app.chat_history[-1].meta or "")
 
 
 async def test_calute_tui_followup_prompt_includes_prior_tool_summary():
