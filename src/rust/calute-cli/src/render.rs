@@ -1,3 +1,19 @@
+// Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Inline viewport rendering matching Codex CLI visual design.
+//!
 /// Cell rendering patterns:
 ///   User:       › text              (bold+dim prefix, blended background)
 ///   Agent:      • text              (dim bullet, plain text)
@@ -364,6 +380,110 @@ fn render_cell(cell: &Cell, lines: &mut Vec<Line<'static>>, width: usize) {
                     theme::dim(),
                 )));
             }
+        }
+
+        Cell::AgentActivity {
+            agent_name,
+            agent_type,
+            status,
+            tool_calls,
+            text_preview,
+        } => {
+            let (bullet_style, status_icon) = match status.as_str() {
+                "completed" => (theme::tool_success(), "✓"),
+                "failed" => (theme::tool_failure(), "✗"),
+                _ => (theme::dim(), "◦"),
+            };
+
+            let type_label = if agent_type.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", agent_type)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled("  ↳ ", theme::dim()),
+                Span::styled(status_icon, bullet_style),
+                Span::styled(format!(" {agent_name}"), theme::tool_verb()),
+                Span::styled(type_label, theme::dim()),
+            ]));
+
+            if !tool_calls.is_empty() {
+                let count = tool_calls.len();
+                let recent: String = tool_calls
+                    .iter()
+                    .rev()
+                    .take(3)
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(Line::from(vec![
+                    Span::styled("      ", theme::dim()),
+                    Span::styled(format!("{count} tool calls"), theme::dim()),
+                    Span::styled(format!(" ({recent})"), theme::tool_detail()),
+                ]));
+            }
+
+            if !text_preview.is_empty() {
+                let preview: String = text_preview.chars().take(60).collect();
+                lines.push(Line::from(vec![
+                    Span::styled("      ", theme::dim()),
+                    Span::styled(preview, theme::tool_result()),
+                ]));
+            }
+        }
+
+        Cell::Handoff { from, to, reason } => {
+            lines.push(Line::from(vec![]));
+            lines.push(Line::from(vec![
+                Span::styled("  → ", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled("Handoff ", Style::default().fg(theme::CYAN)),
+                Span::styled(format!("{from} → {to}"), theme::tool_verb()),
+            ]));
+            if !reason.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", theme::dim()),
+                    Span::styled(reason.clone(), theme::dim()),
+                ]));
+            }
+        }
+
+        Cell::PlanHeader { objective, steps } => {
+            lines.push(Line::from(vec![]));
+            lines.push(Line::from(vec![
+                Span::styled("  ◈ ", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled("Plan: ", Style::default().fg(theme::CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(objective.clone(), theme::text()),
+            ]));
+            for (id, agent, desc) in steps {
+                let short_desc: String = desc.chars().take(50).collect();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("    {id}. "), theme::dim()),
+                    Span::styled(format!("[{agent}] "), theme::tool_detail()),
+                    Span::styled(short_desc, theme::dim()),
+                ]));
+            }
+            lines.push(Line::from(vec![]));
+        }
+
+        Cell::PlanStep {
+            step_id,
+            agent,
+            description,
+            status,
+        } => {
+            let (icon, style) = match status.as_str() {
+                "completed" => ("✓", theme::tool_success()),
+                "failed" => ("✗", theme::tool_failure()),
+                _ => ("◦", theme::dim()),
+            };
+
+            let short_desc: String = description.chars().take(50).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!("    {icon} Step {step_id} "), style),
+                Span::styled(format!("[{agent}] "), theme::tool_detail()),
+                Span::styled(short_desc, theme::dim()),
+            ]));
         }
     }
 }

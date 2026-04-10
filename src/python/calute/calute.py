@@ -114,9 +114,10 @@ from .types.tool_calls import FunctionCall
 
 logger = logging.getLogger(__name__)
 
-add_depth = lambda x, add_prefix=False: (
-    SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")
-)
+
+def add_depth(x, add_prefix=False):
+    return SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")
+
 
 _TOOL_PARAMETER_TAG_RE = re.compile(
     r"<parameter=([A-Za-z0-9_.-]+)>\s*(.*?)\s*</parameter>",

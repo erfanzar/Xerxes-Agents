@@ -314,7 +314,20 @@ class SubAgentManager:
         runner = self._agent_runner
 
         def _run() -> None:
+            from calute.runtime.config_context import emit_event
+
             task.status = "running"
+            emit_event(
+                "agent_spawn",
+                {
+                    "task_id": task.id,
+                    "agent_name": task.name,
+                    "agent_type": task.agent_def_name,
+                    "prompt": task.prompt[:200],
+                    "depth": task.depth,
+                    "isolation": isolation,
+                },
+            )
             old_cwd = os.getcwd()
             try:
                 if worktree_path:
@@ -361,6 +374,16 @@ class SubAgentManager:
                 task.result = f"Error: {e}"
                 logger.error("Sub-agent %s failed: %s", task_id, e)
             finally:
+                emit_event(
+                    "agent_done",
+                    {
+                        "task_id": task.id,
+                        "agent_name": task.name,
+                        "agent_type": task.agent_def_name,
+                        "status": task.status,
+                        "result": (task.result or "")[:500],
+                    },
+                )
                 if worktree_path:
                     os.chdir(old_cwd)
                     if not _has_worktree_changes(worktree_path):
@@ -501,8 +524,9 @@ def _run_streaming_loop(
     depth: int,
     task: SubAgentTask,
 ) -> str:
-    """Fallback: run the streaming agent loop and collect the final text."""
-    from calute.streaming.events import AgentState, TextChunk
+    """Run the streaming agent loop, emitting events for parent visibility."""
+    from calute.runtime.config_context import emit_event
+    from calute.streaming.events import AgentState, TextChunk, ThinkingChunk, ToolEnd, ToolStart
     from calute.streaming.loop import run
 
     state = AgentState()
@@ -518,6 +542,46 @@ def _run_streaming_loop(
     ):
         if isinstance(event, TextChunk):
             output_parts.append(event.text)
+            emit_event(
+                "agent_text",
+                {
+                    "task_id": task.id,
+                    "agent_name": task.name,
+                    "agent_type": task.agent_def_name,
+                    "text": event.text,
+                },
+            )
+        elif isinstance(event, ThinkingChunk):
+            emit_event(
+                "agent_thinking",
+                {
+                    "task_id": task.id,
+                    "agent_name": task.name,
+                    "text": event.text,
+                },
+            )
+        elif isinstance(event, ToolStart):
+            emit_event(
+                "agent_tool_start",
+                {
+                    "task_id": task.id,
+                    "agent_name": task.name,
+                    "tool_name": event.name,
+                    "inputs": event.inputs,
+                },
+            )
+        elif isinstance(event, ToolEnd):
+            emit_event(
+                "agent_tool_end",
+                {
+                    "task_id": task.id,
+                    "agent_name": task.name,
+                    "tool_name": event.name,
+                    "result": event.result[:500] if len(event.result) > 500 else event.result,
+                    "permitted": event.permitted,
+                    "duration_ms": event.duration_ms,
+                },
+            )
 
     return "".join(output_parts)
 

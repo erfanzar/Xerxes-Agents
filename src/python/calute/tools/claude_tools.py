@@ -311,7 +311,6 @@ class AgentTool(AgentBaseFn):
             The agent's response text (if wait=True), or a task snapshot (if wait=False).
         """
         from ..agents.definitions import get_agent_definition
-
         from ..runtime.config_context import get_inheritable
 
         mgr = _get_agent_manager()
@@ -738,15 +737,20 @@ class SkillTool(AgentBaseFn):
             from ..extensions.skills import SkillRegistry
 
             registry = SkillRegistry()
-            registry.discover()
-            skill = registry.get_skill(skill_name)
+            skills_dir = Path.home() / ".calute" / "skills"
+            project_skills = Path.cwd() / "skills"
+            registry.discover(str(skills_dir), str(project_skills))
+
+            skill = registry.get(skill_name)
             if skill is None:
-                available = [s.name for s in registry.list_skills()]
-                return f"Skill '{skill_name}' not found. Available: {', '.join(available[:20])}"
-            prompt = skill.render(args=args) if hasattr(skill, "render") else str(skill)
+                available = [s.name for s in registry.get_all()]
+                if available:
+                    return f"Skill '{skill_name}' not found. Available: {', '.join(available[:20])}"
+                return f"Skill '{skill_name}' not found. No skills discovered."
+            prompt = skill.to_prompt_section()
+            if args:
+                prompt += f"\n\nUser request: {args}"
             return f"[Skill: {skill_name}]\n{prompt}"
-        except ImportError:
-            return "Error: extensions.skills module not available."
         except Exception as e:
             return f"Error invoking skill '{skill_name}': {e}"
 
@@ -956,6 +960,276 @@ class ScheduleCronTool(AgentBaseFn):
         )
 
 
+class HandoffTool(AgentBaseFn):
+    """Hand off the current task to a specialized agent.
+
+    Unlike AgentTool (which runs a sub-agent and returns the result),
+    HandoffTool transfers the conversation context to another agent type.
+    The receiving agent gets a summary of what's been done so far and
+    continues the work autonomously.
+    """
+
+    @staticmethod
+    def static_call(
+        target_agent: str,
+        reason: str,
+        context_summary: str = "",
+        prompt: str = "",
+        **context_variables,
+    ) -> str:
+        """
+        Hand off the current task to a specialized agent.
+
+        The receiving agent inherits the current provider config and gets
+        a summary of what has been done. This is an explicit delegation —
+        the parent agent yields control to the specialist.
+
+        Args:
+            target_agent: Agent type to hand off to (e.g. ``coder``, ``reviewer``).
+            reason: Why this handoff is happening.
+            context_summary: Summary of work done so far for the receiving agent.
+            prompt: Specific instructions for the receiving agent.
+
+        Returns:
+            The receiving agent's response.
+        """
+        from ..agents.definitions import get_agent_definition
+        from ..runtime.config_context import emit_event, get_inheritable
+
+        mgr = _get_agent_manager()
+        agent_def = get_agent_definition(target_agent)
+
+        config: dict[str, Any] = get_inheritable()
+        if agent_def and agent_def.model:
+            config["model"] = agent_def.model
+
+        handoff_prompt = f"""## Handoff from parent agent
+
+**Reason:** {reason}
+
+**Context:** {context_summary or "(no context provided)"}
+
+**Your task:** {prompt or "(continue from where the previous agent left off)"}
+
+You are receiving this task via handoff. The previous agent determined that
+your specialization ({target_agent}) is better suited for this work.
+"""
+
+        emit_event(
+            "agent_handoff",
+            {
+                "from": "parent",
+                "to": target_agent,
+                "reason": reason,
+            },
+        )
+
+        task = mgr.spawn(
+            prompt=handoff_prompt,
+            config=config,
+            system_prompt="You are a helpful AI assistant.",
+            agent_def=agent_def,
+            name=f"handoff-{target_agent}",
+        )
+
+        mgr.wait(task.id, timeout=300)
+
+        if task.status == "completed" and task.result:
+            return task.result
+        if task.status == "failed":
+            return f"Handoff to {target_agent} failed: {task.error}"
+        return json.dumps(task.snapshot(), indent=2)
+
+
+class PlanTool(AgentBaseFn):
+    """Create and execute a multi-step plan using specialized agents.
+
+    The planner breaks down a complex objective into steps, assigns each
+    step to the most appropriate agent type, and executes them respecting
+    dependency order. Parallel-safe steps run concurrently.
+    """
+
+    @staticmethod
+    def static_call(
+        objective: str,
+        execute: bool = True,
+        **context_variables,
+    ) -> str:
+        """
+        Create an execution plan for a complex objective.
+
+        Uses an LLM to decompose the objective into discrete steps,
+        each assigned to a specialized agent. Steps with no dependencies
+        on each other run in parallel.
+
+        Args:
+            objective: The high-level objective to plan and execute.
+            execute: If True, execute the plan immediately. If False,
+                only return the plan without executing.
+
+        Returns:
+            The plan (and execution results if execute=True).
+        """
+        from ..agents.definitions import get_agent_definition, list_agent_definitions
+        from ..runtime.config_context import emit_event, get_inheritable
+
+        config = get_inheritable()
+        mgr = _get_agent_manager()
+
+        agent_defs = list_agent_definitions()
+        agents_desc = "\n".join(f"- **{d.name}**: {d.description}" for d in agent_defs)
+
+        plan_prompt = f"""You are a task planner. Break down this objective into discrete steps.
+
+## Available agent types:
+{agents_desc}
+
+## Objective:
+{objective}
+
+## Output format (strict XML):
+<plan>
+  <step id="1" agent="general-purpose" depends="">
+    <description>First step description</description>
+  </step>
+  <step id="2" agent="coder" depends="">
+    <description>Second step (independent, can run in parallel with step 1)</description>
+  </step>
+  <step id="3" agent="reviewer" depends="1,2">
+    <description>Third step (depends on steps 1 and 2 completing first)</description>
+  </step>
+</plan>
+
+Rules:
+- Use the most appropriate agent type for each step.
+- Mark dependencies accurately — steps with no depends="" run in parallel.
+- Keep steps focused and actionable.
+- Output ONLY the <plan> XML, nothing else.
+"""
+
+        from ..streaming.events import AgentState, TextChunk
+        from ..streaming.loop import run
+
+        state = AgentState()
+        plan_text_parts: list[str] = []
+        for event in run(
+            user_message=plan_prompt,
+            state=state,
+            config=config,
+            system_prompt="You are a precise task planner.",
+        ):
+            if isinstance(event, TextChunk):
+                plan_text_parts.append(event.text)
+
+        plan_xml = "".join(plan_text_parts)
+
+        steps = _parse_plan_xml(plan_xml)
+        if not steps:
+            return f"Failed to parse plan. Raw output:\n{plan_xml}"
+
+        plan_summary = "# Execution Plan\n\n"
+        for s in steps:
+            deps = f" (depends on: {s['depends']})" if s["depends"] else ""
+            plan_summary += f"**Step {s['id']}** [{s['agent']}]{deps}: {s['description']}\n"
+
+        emit_event(
+            "plan_created",
+            {
+                "objective": objective,
+                "steps": steps,
+            },
+        )
+
+        if not execute:
+            return plan_summary
+
+        completed: dict[str, str] = {}
+        results: list[str] = [plan_summary, "\n# Execution Results\n"]
+
+        remaining = list(steps)
+        while remaining:
+            ready = [s for s in remaining if all(d.strip() in completed for d in s["depends"].split(",") if d.strip())]
+            if not ready:
+                results.append("\n**Deadlock:** remaining steps have unresolvable dependencies.")
+                break
+
+            tasks = []
+            for step in ready:
+                agent_def = get_agent_definition(step["agent"])
+
+                step_prompt = f"""## Task (Step {step["id"]} of plan)
+
+{step["description"]}
+
+"""
+                if step["depends"]:
+                    step_prompt += "## Results from previous steps:\n"
+                    for dep_id in step["depends"].split(","):
+                        dep_id = dep_id.strip()
+                        if dep_id in completed:
+                            step_prompt += f"\n### Step {dep_id}:\n{completed[dep_id][:1000]}\n"
+
+                emit_event(
+                    "plan_step_start",
+                    {
+                        "step_id": step["id"],
+                        "agent": step["agent"],
+                        "description": step["description"],
+                    },
+                )
+
+                task = mgr.spawn(
+                    prompt=step_prompt,
+                    config=config,
+                    system_prompt="You are a helpful AI assistant.",
+                    agent_def=agent_def,
+                    name=f"plan-step-{step['id']}",
+                )
+                tasks.append((step, task))
+
+            for step, task in tasks:
+                mgr.wait(task.id, timeout=300)
+                result = task.result or f"(failed: {task.error})"
+                completed[step["id"]] = result
+                results.append(f"\n## Step {step['id']} [{step['agent']}]: {step['description']}")
+                results.append(f"Status: {task.status}")
+                results.append(result[:2000])
+
+                emit_event(
+                    "plan_step_done",
+                    {
+                        "step_id": step["id"],
+                        "status": task.status,
+                    },
+                )
+
+            remaining = [s for s in remaining if s["id"] not in completed]
+
+        return "\n".join(results)
+
+
+def _parse_plan_xml(xml_text: str) -> list[dict[str, str]]:
+    """Parse the <plan> XML into a list of step dicts."""
+    import re
+
+    steps = []
+    step_pattern = re.compile(
+        r'<step\s+id="([^"]+)"\s+agent="([^"]+)"\s+depends="([^"]*)"[^>]*>'
+        r"\s*<description>(.*?)</description>\s*</step>",
+        re.DOTALL,
+    )
+    for match in step_pattern.finditer(xml_text):
+        steps.append(
+            {
+                "id": match.group(1),
+                "agent": match.group(2),
+                "depends": match.group(3),
+                "description": match.group(4).strip(),
+            }
+        )
+    return steps
+
+
 __all__ = [
     "AgentTool",
     "AskUserQuestionTool",
@@ -966,10 +1240,12 @@ __all__ = [
     "FileEditTool",
     "GlobTool",
     "GrepTool",
+    "HandoffTool",
     "LSPTool",
     "ListMcpResourcesTool",
     "MCPTool",
     "NotebookEditTool",
+    "PlanTool",
     "ReadMcpResourceTool",
     "RemoteTriggerTool",
     "ScheduleCronTool",

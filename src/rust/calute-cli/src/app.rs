@@ -1,3 +1,22 @@
+// Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Application state machine and cell model.
+//!
+//! Defines the conversation cell types ([`Cell`]), UI mode FSM ([`Mode`]),
+//! input editing, history navigation, and provider setup state.
+
 use std::collections::HashMap;
 
 use crate::spinner::Spinner;
@@ -53,6 +72,32 @@ pub enum Cell {
     },
     System {
         message: String,
+    },
+    /// A sub-agent was spawned and is working.
+    AgentActivity {
+        agent_name: String,
+        agent_type: String,
+        status: String,        // "running", "completed", "failed"
+        tool_calls: Vec<String>, // brief tool call descriptions
+        text_preview: String,  // first ~80 chars of output
+    },
+    /// Handoff between agents.
+    Handoff {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    /// An execution plan header.
+    PlanHeader {
+        objective: String,
+        steps: Vec<(String, String, String)>, // (id, agent, description)
+    },
+    /// A plan step status update.
+    PlanStep {
+        step_id: String,
+        agent: String,
+        description: String,
+        status: String,
     },
 }
 

@@ -1,3 +1,17 @@
+// Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /// Protocol event types mirroring Python's streaming events.
 ///
 /// These are deserialized from newline-delimited JSON coming from the Python bridge server.
@@ -150,6 +164,9 @@ pub enum Event {
         message_count: u64,
         cost_usd: f64,
     },
+    ModelChanged {
+        model: String,
+    },
     Error {
         message: String,
     },
@@ -164,6 +181,63 @@ pub enum Event {
         message: String,
         model: String,
         provider: String,
+    },
+    /// A sub-agent was spawned.
+    AgentSpawn {
+        task_id: String,
+        agent_name: String,
+        agent_type: String,
+        prompt: String,
+    },
+    /// Incremental text from a sub-agent.
+    AgentText {
+        task_id: String,
+        agent_name: String,
+        agent_type: String,
+        text: String,
+    },
+    /// A sub-agent started a tool call.
+    AgentToolStart {
+        task_id: String,
+        agent_name: String,
+        tool_name: String,
+    },
+    /// A sub-agent finished a tool call.
+    AgentToolEnd {
+        task_id: String,
+        agent_name: String,
+        tool_name: String,
+        permitted: bool,
+        duration_ms: f64,
+    },
+    /// A sub-agent completed.
+    AgentDone {
+        task_id: String,
+        agent_name: String,
+        agent_type: String,
+        status: String,
+    },
+    /// Explicit handoff between agents.
+    AgentHandoff {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    /// An execution plan was created.
+    PlanCreated {
+        objective: String,
+        steps: Vec<serde_json::Value>,
+    },
+    /// A plan step started executing.
+    PlanStepStart {
+        step_id: String,
+        agent: String,
+        description: String,
+    },
+    /// A plan step finished.
+    PlanStepDone {
+        step_id: String,
+        status: String,
     },
     Exit,
     Unknown(String),
@@ -233,6 +307,9 @@ impl Event {
                 message_count: d["message_count"].as_u64().unwrap_or(0),
                 cost_usd: d["cost_usd"].as_f64().unwrap_or(0.0),
             },
+            "model_changed" => Event::ModelChanged {
+                model: d["model"].as_str().unwrap_or("").to_string(),
+            },
             "error" => Event::Error {
                 message: d["message"].as_str().unwrap_or("").to_string(),
             },
@@ -261,6 +338,60 @@ impl Event {
                     provider: profile.get("provider").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 }
             }
+            "agent_spawn" => Event::AgentSpawn {
+                task_id: d["task_id"].as_str().unwrap_or("").to_string(),
+                agent_name: d["agent_name"].as_str().unwrap_or("").to_string(),
+                agent_type: d["agent_type"].as_str().unwrap_or("").to_string(),
+                prompt: d["prompt"].as_str().unwrap_or("").to_string(),
+            },
+            "agent_text" => Event::AgentText {
+                task_id: d["task_id"].as_str().unwrap_or("").to_string(),
+                agent_name: d["agent_name"].as_str().unwrap_or("").to_string(),
+                agent_type: d["agent_type"].as_str().unwrap_or("").to_string(),
+                text: d["text"].as_str().unwrap_or("").to_string(),
+            },
+            "agent_tool_start" => Event::AgentToolStart {
+                task_id: d["task_id"].as_str().unwrap_or("").to_string(),
+                agent_name: d["agent_name"].as_str().unwrap_or("").to_string(),
+                tool_name: d["tool_name"].as_str().unwrap_or("").to_string(),
+            },
+            "agent_tool_end" => Event::AgentToolEnd {
+                task_id: d["task_id"].as_str().unwrap_or("").to_string(),
+                agent_name: d["agent_name"].as_str().unwrap_or("").to_string(),
+                tool_name: d["tool_name"].as_str().unwrap_or("").to_string(),
+                permitted: d["permitted"].as_bool().unwrap_or(true),
+                duration_ms: d["duration_ms"].as_f64().unwrap_or(0.0),
+            },
+            "agent_done" => Event::AgentDone {
+                task_id: d["task_id"].as_str().unwrap_or("").to_string(),
+                agent_name: d["agent_name"].as_str().unwrap_or("").to_string(),
+                agent_type: d["agent_type"].as_str().unwrap_or("").to_string(),
+                status: d["status"].as_str().unwrap_or("").to_string(),
+            },
+            "agent_handoff" => Event::AgentHandoff {
+                from: d["from"].as_str().unwrap_or("").to_string(),
+                to: d["to"].as_str().unwrap_or("").to_string(),
+                reason: d["reason"].as_str().unwrap_or("").to_string(),
+            },
+            "plan_created" => {
+                let steps = d.get("steps")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.clone())
+                    .unwrap_or_default();
+                Event::PlanCreated {
+                    objective: d["objective"].as_str().unwrap_or("").to_string(),
+                    steps,
+                }
+            }
+            "plan_step_start" => Event::PlanStepStart {
+                step_id: d["step_id"].as_str().unwrap_or("").to_string(),
+                agent: d["agent"].as_str().unwrap_or("").to_string(),
+                description: d["description"].as_str().unwrap_or("").to_string(),
+            },
+            "plan_step_done" => Event::PlanStepDone {
+                step_id: d["step_id"].as_str().unwrap_or("").to_string(),
+                status: d["status"].as_str().unwrap_or("").to_string(),
+            },
             "exit" => Event::Exit,
             other => Event::Unknown(other.to_string()),
         }

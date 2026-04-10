@@ -12,13 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native Rust binaries for Calute.
-
-This package contains compiled Rust binaries that are copied here during
-``pip install`` by the custom hatch build hook. The :data:`BIN_DIR` path
-is used by the launcher to locate the ``calute`` binary.
-"""
-
-import pathlib
-
-BIN_DIR = pathlib.Path(__file__).parent
+"""Calute daemon — persistent background agent with WebSocket gateway."""

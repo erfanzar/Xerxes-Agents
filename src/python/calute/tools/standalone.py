@@ -171,9 +171,8 @@ class WriteFile(AgentBaseFn):
 class ListDir(AgentBaseFn):
     """Tool for listing directory contents.
 
-    Lists files in a directory with optional filtering by file
-    extension. Returns a sorted list of file names (directories
-    are excluded from results).
+    Lists files and directories with optional filtering by file
+    extension. Directories are shown with a trailing ``/``.
 
     Example:
         >>> files = ListDir.static_call("./src")
@@ -204,8 +203,9 @@ class ListDir(AgentBaseFn):
                 ``".md"``.
 
         Returns:
-            list[str]: Sorted list of file names only. The returned values are
-            base names such as ``"README.md"`` rather than absolute paths.
+            list[str]: Sorted list of file and directory names. Directories
+            have a trailing ``/`` (e.g. ``"src/"``). File entries are base
+            names such as ``"README.md"``.
 
         Raises:
             FileNotFoundError: If the provided path does not exist or is not a
@@ -219,7 +219,13 @@ class ListDir(AgentBaseFn):
         if extension_filter:
             files = [f for f in files if f.name.lower().endswith(extension_filter.lower())]
 
-        return sorted(f.name for f in files if f.is_file())
+        entries = []
+        for f in files:
+            if f.is_dir():
+                entries.append(f.name + "/")
+            else:
+                entries.append(f.name)
+        return sorted(entries)
 
 
 class ExecutePythonCode(AgentBaseFn):

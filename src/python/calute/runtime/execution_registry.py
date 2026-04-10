@@ -136,7 +136,6 @@ class ExecutionRegistry:
         self._commands: dict[str, RegistryEntry] = {}
         self._tools: dict[str, RegistryEntry] = {}
 
-
     def register_command(
         self,
         name: str,
@@ -188,7 +187,6 @@ class ExecutionRegistry:
             desc = getattr(func, "description", "")
             handler = getattr(func, "callable_func", None) or getattr(func, "handler", None)
             self.register_tool(name=name, handler=handler, description=desc)
-
 
     def route(self, prompt: str, limit: int = 5) -> list[RouteMatch]:
         """Route a prompt to the best-matching commands and tools.
@@ -247,7 +245,6 @@ class ExecutionRegistry:
 
         return score
 
-
     def execute_command(self, name: str, **kwargs: Any) -> ExecutionResult:
         """Execute a registered command by name."""
         entry = self._commands.get(name.lower())
@@ -304,7 +301,6 @@ class ExecutionRegistry:
                 duration_ms=duration_ms,
                 error=str(e),
             )
-
 
     def get_command(self, name: str) -> RegistryEntry | None:
         """Look up a command by name."""

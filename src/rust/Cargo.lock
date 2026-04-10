@@ -83,6 +83,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "libc",
  "pulldown-cmark",
  "ratatui",
  "serde",

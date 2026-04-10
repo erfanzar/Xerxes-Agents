@@ -65,10 +65,12 @@ def list_profiles() -> list[dict[str, Any]]:
     active = store.get("active")
     result = []
     for name, profile in store.get("profiles", {}).items():
-        result.append({
-            **profile,
-            "active": name == active,
-        })
+        result.append(
+            {
+                **profile,
+                "active": name == active,
+            }
+        )
     return result
 
 

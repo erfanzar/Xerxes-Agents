@@ -321,7 +321,6 @@ class QueryEngine:
             out_tokens=out_tok,
         )
 
-
     @property
     def turn_count(self) -> int:
         return self._turn_count

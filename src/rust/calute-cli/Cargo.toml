@@ -17,6 +17,9 @@ pulldown-cmark = "0.12"
 unicode-width = "0.2"
 textwrap = "0.16"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "calute"
 path = "src/main.rs"

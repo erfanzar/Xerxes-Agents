@@ -56,12 +56,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..extensions.skills import SkillRegistry
 from ..llms.registry import calc_cost, detect_provider
 from ..runtime.bootstrap import bootstrap
-from ..runtime.config_context import set_config as set_global_config
 from ..runtime.bridge import build_tool_executor, populate_registry
+from ..runtime.config_context import set_config as set_global_config
+from ..runtime.config_context import set_event_callback
 from ..runtime.cost_tracker import CostTracker
-from . import profiles
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
@@ -72,6 +73,7 @@ from ..streaming.events import (
     TurnDone,
 )
 from ..streaming.loop import run as run_agent_loop
+from . import profiles
 
 
 class BridgeServer:
@@ -87,8 +89,6 @@ class BridgeServer:
         self.tool_executor = None
         self.tool_schemas: list[dict[str, Any]] = []
         self._initialized = False
-        self._pending_permission: PermissionRequest | None = None
-        self._permission_event = threading.Event()
         self._cancel = False
         self._out_lock = threading.Lock()
         self._stdout = sys.stdout
@@ -97,7 +97,17 @@ class BridgeServer:
         self._session_id = str(uuid.uuid4())[:8]
         self._session_cwd = os.getcwd()
         self.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-
+        # Skills registry — discover from ~/.calute/skills/ and ./skills/
+        self._skill_registry = SkillRegistry()
+        self._skills_dir = Path.home() / ".calute" / "skills"
+        self._skills_dir.mkdir(parents=True, exist_ok=True)
+        self._skill_registry.discover(
+            str(self._skills_dir),
+            str(Path.cwd() / "skills"),
+        )
+        # Pending skill creation — set when /skill-create <name> is called,
+        # cleared when the next query provides the description.
+        self._pending_skill_name: str = ""
 
     def _emit(self, event: str, data: dict[str, Any] | None = None) -> None:
         """Send a JSON event line to stdout (unbuffered)."""
@@ -126,7 +136,6 @@ class BridgeServer:
                 ),
             },
         )
-
 
     def _emit_text(self, text: str) -> None:
         """Emit text chunk, suppressing <function=...>...</function> markup."""
@@ -162,6 +171,10 @@ class BridgeServer:
             return
 
         self._emit("text_chunk", {"text": text})
+
+    def _on_agent_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Forward sub-agent and orchestration events to the Rust CLI."""
+        self._emit(event_type, data)
 
     def _save_session(self) -> None:
         """Save current state to a JSON file."""
@@ -213,18 +226,19 @@ class BridgeServer:
                         if isinstance(content, str):
                             preview = content[:60]
                             break
-                sessions.append({
-                    "session_id": data.get("session_id", path.stem),
-                    "model": data.get("model", ""),
-                    "cwd": data.get("cwd", ""),
-                    "updated_at": data.get("updated_at", ""),
-                    "turns": data.get("turn_count", 0),
-                    "preview": preview,
-                })
+                sessions.append(
+                    {
+                        "session_id": data.get("session_id", path.stem),
+                        "model": data.get("model", ""),
+                        "cwd": data.get("cwd", ""),
+                        "updated_at": data.get("updated_at", ""),
+                        "turns": data.get("turn_count", 0),
+                        "preview": preview,
+                    }
+                )
             except (json.JSONDecodeError, KeyError):
                 continue
         return sessions
-
 
     def handle_init(self, params: dict[str, Any]) -> None:
         self.config = {
@@ -247,6 +261,19 @@ class BridgeServer:
                 for k, v in profile.get("sampling", {}).items():
                     self.config[k] = v
 
+                # Verify saved model is still available on the provider.
+                if base_url and model:
+                    available = profiles.fetch_models(base_url, api_key)
+                    if available and model not in available:
+                        model = available[0]
+                        profiles.save_profile(
+                            name=profile["name"],
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            provider=profile.get("provider", ""),
+                        )
+
         has_profile = bool(model)
         self.config["model"] = model if model else ""
         if base_url:
@@ -264,6 +291,7 @@ class BridgeServer:
         self._initialized = True
 
         set_global_config(self.config)
+        set_event_callback(self._on_agent_event)
 
         provider = detect_provider(model)
         self._emit(
@@ -277,7 +305,6 @@ class BridgeServer:
             },
         )
 
-
     def handle_query(self, params: dict[str, Any]) -> None:
         if not self._initialized:
             self._emit_error("Not initialized. Send 'init' first.")
@@ -286,6 +313,15 @@ class BridgeServer:
         text = params.get("text", "").strip()
         if not text:
             self._emit_error("Empty query.")
+            return
+
+        # Intercept: if we're waiting for a skill description, generate the skill.
+        if self._pending_skill_name:
+            skill_name = self._pending_skill_name
+            self._pending_skill_name = ""
+            result = self._generate_skill(skill_name, text)
+            self._emit("slash_result", {"output": result})
+            self._emit("query_done", {})
             return
 
         self._cancel = False
@@ -343,10 +379,10 @@ class BridgeServer:
                         "inputs": event.inputs,
                     },
                 )
-                self._pending_permission = event
-                self._permission_event.clear()
-                self._permission_event.wait()
-                self._pending_permission = None
+                # Read stdin inline — the main loop is blocked inside
+                # handle_query, so we must read the permission_response
+                # ourselves to avoid deadlock.
+                event.granted = self._wait_for_permission()
 
             elif isinstance(event, TurnDone):
                 self.cost_tracker.record_turn(
@@ -367,21 +403,36 @@ class BridgeServer:
         self._emit("query_done", {})
         self._emit_state()
 
+    def _wait_for_permission(self) -> bool:
+        """Block-read stdin until we get a permission_response or cancel.
+
+        This is called inline during handle_query's streaming loop.
+        The main stdin loop is blocked, so we read directly here.
+        """
+        for raw_line in sys.stdin:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+            if method == "permission_response":
+                return params.get("granted", False)
+            if method == "cancel":
+                self._cancel = True
+                return False
+        return False
 
     def handle_permission_response(self, params: dict[str, Any]) -> None:
-        if self._pending_permission is not None:
-            self._pending_permission.granted = params.get("granted", False)
-            self._permission_event.set()
-        else:
-            self._emit_error("No pending permission request.")
-
+        # Permission responses are now handled inline by _wait_for_permission.
+        # This method exists for protocol completeness but should not be reached.
+        pass
 
     def handle_cancel(self) -> None:
         self._cancel = True
-        if self._pending_permission is not None:
-            self._pending_permission.granted = False
-            self._permission_event.set()
-
 
     def handle_provider_list(self) -> None:
         """List saved provider profiles."""
@@ -424,10 +475,13 @@ class BridgeServer:
             self.config["api_key"] = api_key
         set_global_config(self.config)
 
-        self._emit("provider_saved", {
-            "profile": profile,
-            "message": f"Profile '{name}' saved and activated. Model: {model}",
-        })
+        self._emit(
+            "provider_saved",
+            {
+                "profile": profile,
+                "message": f"Profile '{name}' saved and activated. Model: {model}",
+            },
+        )
 
     def handle_provider_select(self, params: dict[str, Any]) -> None:
         """Switch to an existing saved profile."""
@@ -447,10 +501,13 @@ class BridgeServer:
             for k, v in profile.get("sampling", {}).items():
                 self.config[k] = v
             set_global_config(self.config)
-            self._emit("provider_saved", {
-                "profile": profile,
-                "message": f"Switched to profile '{name}'. Model: {profile['model']}",
-            })
+            self._emit(
+                "provider_saved",
+                {
+                    "profile": profile,
+                    "message": f"Switched to profile '{name}'. Model: {profile['model']}",
+                },
+            )
 
     def handle_provider_delete(self, params: dict[str, Any]) -> None:
         """Delete a provider profile."""
@@ -459,7 +516,6 @@ class BridgeServer:
             self._emit("slash_result", {"output": f"Profile '{name}' deleted."})
         else:
             self._emit_error(f"Profile '{name}' not found")
-
 
     def handle_slash(self, params: dict[str, Any]) -> None:
         command = params.get("command", "").strip()
@@ -470,6 +526,11 @@ class BridgeServer:
         parts = command[1:].split(None, 1)
         cmd = parts[0].lower() if parts else ""
         args = parts[1] if len(parts) > 1 else ""
+
+        # Commands that handle their own emission (e.g. they call handle_query).
+        if cmd == "skill":
+            self._handle_skill_invoke(args)
+            return
 
         output = self._run_slash(cmd, args)
         self._emit("slash_result", {"output": output})
@@ -578,6 +639,7 @@ class BridgeServer:
 
         try:
             from openai import OpenAI
+
             from ..llms.registry import PROVIDERS, get_api_key
 
             provider_name = detect_provider(model)
@@ -620,17 +682,239 @@ class BridgeServer:
             return f"Compaction failed: {exc}"
 
         original_count = len(self.state.messages)
-        self.state.messages = (
-            system_msgs
-            + [{"role": "user", "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}"}]
-            + recent
-        )
+        self.state.messages = [
+            *system_msgs,
+            {
+                "role": "user",
+                "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}",
+            },
+            *recent,
+        ]
         new_count = len(self.state.messages)
 
         return (
             f"Compacted {original_count} messages → {new_count} messages.\n"
             f"Summarized {len(older)} older messages, kept {len(recent)} recent + {len(system_msgs)} system."
         )
+
+    def _handle_plan(self, args: str) -> str:
+        """Handle /plan — create and execute a multi-step plan."""
+        objective = args.strip()
+        if not objective:
+            return "Usage: /plan <objective>\n\nExample: /plan refactor the auth module into separate files"
+
+        from ..tools.claude_tools import PlanTool
+
+        return PlanTool.static_call(objective=objective, execute=True)
+
+    def _handle_agents_list(self) -> str:
+        """Handle /agents — list available agent types and running agents."""
+        from ..agents.definitions import list_agent_definitions
+        from ..tools.claude_tools import _get_agent_manager
+
+        defs = list_agent_definitions()
+        lines = [f"Agent types ({len(defs)}):"]
+        for d in defs:
+            source_tag = f" [{d.source}]" if d.source != "built-in" else ""
+            lines.append(f"  {d.name}{source_tag} — {d.description}")
+
+        mgr = _get_agent_manager()
+        tasks = mgr.list_tasks()
+        if tasks:
+            lines.append(f"\nRunning agents ({len(tasks)}):")
+            for t in tasks:
+                agent_type = f" ({t.agent_def_name})" if t.agent_def_name else ""
+                lines.append(f"  {t.name}{agent_type} [{t.status}] — {t.prompt[:60]}")
+        else:
+            lines.append("\nNo running agents.")
+
+        return "\n".join(lines)
+
+    def _handle_skills_list(self) -> str:
+        """List all discovered skills."""
+        # Re-discover in case new skills were added.
+        self._skill_registry.discover(
+            str(self._skills_dir),
+            str(Path.cwd() / "skills"),
+        )
+        skills = self._skill_registry.get_all()
+        if not skills:
+            return f"No skills found.\n  Skills directory: {self._skills_dir}\n  Create one with /skill-create"
+        lines = [f"Skills ({len(skills)}):"]
+        for s in skills:
+            tags = f" [{', '.join(s.metadata.tags)}]" if s.metadata.tags else ""
+            lines.append(f"  {s.name}{tags} — {s.metadata.description or 'No description'}")
+        lines.append("\nUse /skill <name> to invoke a skill")
+        return "\n".join(lines)
+
+    def _handle_skill_invoke(self, args: str) -> None:
+        """Invoke a skill by name — execute it immediately as a query."""
+        name = args.strip()
+        if not name:
+            self._emit("slash_result", {"output": "Usage: /skill <name>\nUse /skills to list available skills."})
+            return
+
+        # Support colon syntax: /skill name:args
+        skill_args = ""
+        if ":" in name:
+            name, skill_args = name.split(":", 1)
+            name = name.strip()
+            skill_args = skill_args.strip()
+
+        skill = self._skill_registry.get(name)
+        if not skill:
+            matches = self._skill_registry.search(name)
+            if matches:
+                suggestions = ", ".join(s.name for s in matches[:5])
+                self._emit("slash_result", {"output": f"Skill '{name}' not found. Did you mean: {suggestions}"})
+            else:
+                self._emit(
+                    "slash_result", {"output": f"Skill '{name}' not found. Use /skills to list available skills."}
+                )
+            return
+
+        # Inject skill instructions as system context so the model follows
+        # them as instructions rather than treating them as user content.
+        prompt_section = skill.to_prompt_section()
+        self.state.messages.append(
+            {
+                "role": "system",
+                "content": f"[Skill '{name}' activated]\n\n{prompt_section}",
+            }
+        )
+
+        self._emit("slash_result", {"output": f"Running skill '{name}'..."})
+
+        # Send a trigger query — the model will follow the skill instructions.
+        trigger = skill_args if skill_args else f"Execute the '{name}' skill now."
+        self.handle_query({"text": trigger})
+
+    def _handle_skill_create(self, args: str) -> str:
+        """Create a new skill — two-step: name first, then description prompt."""
+        name = args.strip()
+        if not name:
+            return (
+                "Usage: /skill-create <name>\n"
+                "  Example: /skill-create code-review\n\n"
+                "After entering the name, describe what the skill should do\n"
+                "and the SKILL.md will be auto-generated."
+            )
+
+        if not all(c.isalnum() or c in "-_" for c in name):
+            return f"Invalid skill name '{name}'. Use only letters, numbers, hyphens, and underscores."
+
+        skill_dir = self._skills_dir / name
+        if skill_dir.exists():
+            return f"Skill '{name}' already exists at {skill_dir}"
+
+        # Set pending — next query will be the description.
+        self._pending_skill_name = name
+        return f"Creating skill '{name}'. Describe what this skill should do:"
+
+    def _generate_skill(self, name: str, description: str) -> str:
+        """Generate a SKILL.md using the LLM from the user's description."""
+        model = self.config.get("model", "")
+        if not model:
+            # Fallback: create a template with the description as-is.
+            return self._create_skill_template(name, description)
+
+        try:
+            from openai import OpenAI
+
+            from ..llms.registry import PROVIDERS, get_api_key
+
+            provider_name = detect_provider(model)
+            api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
+            prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
+            base_url = (
+                self.config.get("base_url")
+                or self.config.get("custom_base_url")
+                or (prov.base_url if prov else None)
+                or "https://api.openai.com/v1"
+            )
+            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You generate SKILL.md files for the Calute agent framework. "
+                            "A skill is a reusable set of instructions that an agent follows "
+                            "when the skill is invoked via `/skill <name>`.\n\n"
+                            "Output format (YAML frontmatter + markdown body):\n"
+                            "```\n"
+                            "---\n"
+                            "name: skill-name\n"
+                            "description: One-line description\n"
+                            'version: "1.0"\n'
+                            "tags: [tag1, tag2]\n"
+                            "---\n\n"
+                            "# Skill Title\n\n"
+                            "Detailed step-by-step instructions for the agent...\n"
+                            "```\n\n"
+                            "Write clear, actionable instructions. Be specific about what "
+                            "tools to use, what to check, and what format to output. "
+                            "Output ONLY the SKILL.md content, nothing else."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Create a skill named '{name}' that does the following:\n\n{description}",
+                    },
+                ],
+                max_tokens=2048,
+                temperature=0.3,
+            )
+
+            content = response.choices[0].message.content or ""
+            # Strip markdown code fences if the LLM wrapped it.
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[0].strip().startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            if not content.strip():
+                return self._create_skill_template(name, description)
+
+        except Exception as exc:
+            # LLM failed — fall back to template with the description embedded.
+            return self._create_skill_template(name, description, error=str(exc))
+
+        # Write the generated SKILL.md.
+        skill_dir = self._skills_dir / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(content, encoding="utf-8")
+
+        self._skill_registry.discover(str(self._skills_dir))
+
+        return f"Skill '{name}' generated and saved to {skill_dir}/SKILL.md\nUse /skill {name} to invoke it."
+
+    def _create_skill_template(self, name: str, description: str, error: str = "") -> str:
+        """Fallback: create a SKILL.md template with the description embedded."""
+        title = name.replace("-", " ").replace("_", " ").title()
+        skill_dir = self._skills_dir / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_md = skill_dir / "SKILL.md"
+        skill_md.write_text(
+            f"---\n"
+            f"name: {name}\n"
+            f"description: {description[:80]}\n"
+            f'version: "1.0"\n'
+            f"tags: []\n"
+            f"---\n\n"
+            f"# {title}\n\n"
+            f"{description}\n",
+            encoding="utf-8",
+        )
+        self._skill_registry.discover(str(self._skills_dir))
+        err_note = f"\n(LLM generation failed: {error}. Created template instead.)" if error else ""
+        return f"Skill '{name}' created at {skill_dir}/SKILL.md{err_note}\nUse /skill {name} to invoke it."
 
     def _run_slash(self, cmd: str, args: str) -> str:
         if cmd in ("help", "h"):
@@ -639,6 +923,11 @@ class BridgeServer:
                 "  /provider          Setup or switch provider profile\n"
                 "  /sampling          View or set sampling parameters\n"
                 "  /compact           Summarize conversation to free context\n"
+                "  /plan OBJECTIVE    Plan and execute a multi-step task\n"
+                "  /agents            List agent types and running agents\n"
+                "  /skills            List available skills\n"
+                "  /skill NAME        Invoke a skill by name\n"
+                "  /skill-create      Create a new skill\n"
                 "  /model NAME        Switch model\n"
                 "  /cost              Show cost summary\n"
                 "  /context           Show context info\n"
@@ -656,8 +945,25 @@ class BridgeServer:
         if cmd == "model":
             if args:
                 self.config["model"] = args
+                set_global_config(self.config)
+                self._emit("model_changed", {"model": args})
                 return f"Model set to: {args}"
-            return f"Current model: {self.config.get('model', '(none)')}"
+            # No args — show current model + fetch available models from provider.
+            current = self.config.get("model", "(none)")
+            base_url = self.config.get("base_url", "")
+            api_key = self.config.get("api_key", "")
+            lines = [f"Current model: {current}"]
+            if base_url:
+                available = profiles.fetch_models(base_url, api_key)
+                if available:
+                    lines.append(f"\nAvailable models ({len(available)}):")
+                    for m in available:
+                        marker = " (active)" if m == current else ""
+                        lines.append(f"  {m}{marker}")
+                    lines.append("\nUse /model <name> to switch")
+                else:
+                    lines.append(f"Could not fetch models from {base_url}/models")
+            return "\n".join(lines)
 
         if cmd == "cost":
             return self.cost_tracker.summary()
@@ -678,6 +984,14 @@ class BridgeServer:
 
         if cmd == "compact":
             return self._handle_compact()
+
+        if cmd == "skills":
+            return self._handle_skills_list()
+
+        # /skill is handled in handle_slash directly (it calls handle_query).
+
+        if cmd == "skill-create":
+            return self._handle_skill_create(args)
 
         if cmd == "debug":
             self.config["debug"] = not self.config.get("debug", False)
@@ -725,12 +1039,17 @@ class BridgeServer:
             lines.append(f"  ({registry.tool_count} total)")
             return "\n".join(lines)
 
+        if cmd == "plan":
+            return self._handle_plan(args)
+
+        if cmd == "agents":
+            return self._handle_agents_list()
+
         if cmd in ("exit", "quit", "q"):
             self._emit("exit", {})
             sys.exit(0)
 
         return f"Unknown command: /{cmd} (type /help)"
-
 
     def run(self) -> None:
         for raw_line in sys.stdin:
