@@ -1,7 +1,7 @@
-calute.ui.helpers
-=================
+src/python/xerxes_agent.ui.helpers
+============================
 
-.. automodule:: calute.ui.helpers
+.. automodule:: src/python/xerxes_agent.ui.helpers
    :members:
    :undoc-members:
    :show-inheritance:

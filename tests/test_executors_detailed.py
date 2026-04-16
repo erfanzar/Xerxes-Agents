@@ -1,8 +1,8 @@
-"""Tests for calute.executors — FunctionRegistry and AgentOrchestrator."""
+"""Tests for xerxes_agent.executors — FunctionRegistry and AgentOrchestrator."""
 
 from unittest.mock import MagicMock
 
-from calute.executors import AgentOrchestrator, FunctionRegistry
+from xerxes_agent.executors import AgentOrchestrator, FunctionRegistry
 
 
 def sample_func(x: int) -> int:
@@ -90,7 +90,7 @@ class TestAgentOrchestrator:
         orch.register_agent(a1)
         orch.register_agent(a2)
 
-        from calute.types.function_execution_types import AgentSwitchTrigger
+        from xerxes_agent.types.function_execution_types import AgentSwitchTrigger
 
         def handler(ctx, agents, current):
             return "a2"

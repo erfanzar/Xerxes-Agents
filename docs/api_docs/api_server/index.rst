@@ -1,5 +1,5 @@
-calute.api_server package
-=========================
+src/python/xerxes_agent.api_server package
+====================================
 
 .. toctree::
    :maxdepth: 2

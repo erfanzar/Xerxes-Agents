@@ -1,10 +1,9 @@
-"""Tests for calute.api_server models and converters."""
+"""Tests for xerxes_agent.api_server models and converters."""
 
 import pytest
-
-from calute.api_server.converters import MessageConverter
-from calute.api_server.models import HealthResponse, ModelInfo, ModelsResponse
-from calute.types.oai_protocols import ChatMessage
+from xerxes_agent.api_server.converters import MessageConverter
+from xerxes_agent.api_server.models import HealthResponse, ModelInfo, ModelsResponse
+from xerxes_agent.types.oai_protocols import ChatMessage
 
 
 class TestModelInfo:
@@ -12,7 +11,7 @@ class TestModelInfo:
         m = ModelInfo(id="gpt-4", created=1234567890)
         assert m.id == "gpt-4"
         assert m.object == "model"
-        assert m.owned_by == "calute"
+        assert m.owned_by == "xerxes"
 
     def test_custom_owner(self):
         m = ModelInfo(id="test", created=0, owned_by="custom")
@@ -37,23 +36,23 @@ class TestHealthResponse:
 class TestMessageConverter:
     def test_user_message(self):
         msgs = [ChatMessage(role="user", content="Hello")]
-        result = MessageConverter.convert_openai_to_calute(msgs)
+        result = MessageConverter.convert_openai_to_xerxes(msgs)
         assert len(result.messages) == 1
 
     def test_system_message(self):
         msgs = [ChatMessage(role="system", content="You are helpful")]
-        result = MessageConverter.convert_openai_to_calute(msgs)
+        result = MessageConverter.convert_openai_to_xerxes(msgs)
         assert len(result.messages) == 1
 
     def test_assistant_message(self):
         msgs = [ChatMessage(role="assistant", content="Hi there")]
-        result = MessageConverter.convert_openai_to_calute(msgs)
+        result = MessageConverter.convert_openai_to_xerxes(msgs)
         assert len(result.messages) == 1
 
     def test_unknown_role(self):
         msgs = [ChatMessage(role="unknown", content="test")]
         with pytest.raises(ValueError, match="Unknown"):
-            MessageConverter.convert_openai_to_calute(msgs)
+            MessageConverter.convert_openai_to_xerxes(msgs)
 
     def test_multiple_messages(self):
         msgs = [
@@ -61,10 +60,10 @@ class TestMessageConverter:
             ChatMessage(role="user", content="hi"),
             ChatMessage(role="assistant", content="hello"),
         ]
-        result = MessageConverter.convert_openai_to_calute(msgs)
+        result = MessageConverter.convert_openai_to_xerxes(msgs)
         assert len(result.messages) == 3
 
     def test_empty_content(self):
         msgs = [ChatMessage(role="user", content="")]
-        result = MessageConverter.convert_openai_to_calute(msgs)
+        result = MessageConverter.convert_openai_to_xerxes(msgs)
         assert len(result.messages) == 1

@@ -1,7 +1,7 @@
-calute.llms.ollama
-==================
+src/python/xerxes_agent.llms.ollama
+=============================
 
-.. automodule:: calute.llms.ollama
+.. automodule:: src/python/xerxes_agent.llms.ollama
    :members:
    :undoc-members:
    :show-inheritance:

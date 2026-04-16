@@ -1,7 +1,7 @@
-calute.core.streamer_buffer
-===========================
+src/python/xerxes_agent.core.streamer_buffer
+======================================
 
-.. automodule:: calute.core.streamer_buffer
+.. automodule:: src/python/xerxes_agent.core.streamer_buffer
    :members:
    :undoc-members:
    :show-inheritance:

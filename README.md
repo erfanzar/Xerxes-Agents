@@ -1,10 +1,10 @@
-# Calute
+# Xerxes
 
 A coding agent that runs in your terminal. Python runtime, Rust CLI.
 
 ```text
 ╭──────────────────────────────────────────────────────╮
-│ >_ Calute (v0.2.0)                                  │
+│ >_ Xerxes (v0.2.0)                                  │
 │                                                      │
 │ model:     qwen3-8b (custom)   /model to change      │
 │ directory: ~/Projects/myapp                          │
@@ -35,8 +35,8 @@ Requires Python 3.10+ and Rust (for the CLI binary).
 
 ```bash
 # From source
-git clone https://github.com/erfanzar/Calute.git
-cd Calute
+git clone https://github.com/erfanzar/Xerxes.git
+cd Xerxes
 pip install -e .
 ```
 
@@ -44,15 +44,15 @@ The install automatically compiles the Rust CLI via `cargo build --release` and 
 
 ```bash
 # Verify
-calute --help
+xerxes --help
 ```
 
 ## Setup
 
-On first launch, Calute asks you to configure a provider:
+On first launch, Xerxes asks you to configure a provider:
 
 ```bash
-calute
+xerxes
 ```
 
 ```text
@@ -81,22 +81,22 @@ Found 3 models. Select one (Up/Down + Enter):
 Profile 'my-server' saved and activated. Model: llama3-8b
 ```
 
-Profiles are saved in `~/.calute/profiles.json` and persist across sessions. You can have multiple profiles and switch between them with `/provider`.
+Profiles are saved in `~/.xerxes/profiles.json` and persist across sessions. You can have multiple profiles and switch between them with `/provider`.
 
 ### CLI flags
 
 ```bash
 # Use a specific provider directly (skips profile)
-calute --model gpt-4o --base-url https://api.openai.com/v1 --api-key sk-...
+xerxes --model gpt-4o --base-url https://api.openai.com/v1 --api-key sk-...
 
 # Non-interactive mode — pipe-friendly
-calute -p "explain this function" 2>/dev/null
+xerxes -p "explain this function" 2>/dev/null
 
 # Custom Python executable
-calute --python python3.12
+xerxes --python python3.12
 
 # Auto-approve all tool calls
-calute --permission-mode accept-all
+xerxes --permission-mode accept-all
 ```
 
 ## Architecture
@@ -104,7 +104,7 @@ calute --permission-mode accept-all
 ```text
 ┌──────────────────┐     JSON-RPC       ┌──────────────────────┐
 │   Rust CLI       │ ◄── stdin/stdout ──►│   Python Runtime     │
-│   (ratatui)      │                     │   (calute.bridge)    │
+│   (ratatui)      │                     │   (xerxes_agent.bridge)    │
 │                  │                     │                      │
 │ • Inline viewport│                     │ • Agent loop         │
 │ • Markdown render│                     │ • Tool execution     │
@@ -114,7 +114,7 @@ calute --permission-mode accept-all
 └──────────────────┘                     └──────────────────────┘
 ```
 
-The Rust binary (`calute`) spawns `python -m calute.bridge` as a subprocess. They communicate over newline-delimited JSON. The Rust side handles all rendering; the Python side handles all LLM and tool logic.
+The Rust binary (`xerxes`) spawns `python -m xerxes_agent.bridge` as a subprocess. They communicate over newline-delimited JSON. The Rust side handles all rendering; the Python side handles all LLM and tool logic.
 
 ## Slash Commands
 
@@ -144,7 +144,7 @@ The Rust binary (`calute`) spawns `python -m calute.bridge` as a subprocess. The
 
 ## Providers
 
-Calute works with any OpenAI-compatible API. Built-in provider detection for:
+Xerxes works with any OpenAI-compatible API. Built-in provider detection for:
 
 | Provider | Models | Env Variable |
 | -------- | ------ | ------------ |
@@ -195,11 +195,11 @@ Calute works with any OpenAI-compatible API. Built-in provider detection for:
 
 ## Python SDK
 
-Calute's Python runtime can also be used as a library:
+Xerxes's Python runtime can also be used as a library:
 
 ```python
-from calute.streaming.events import AgentState
-from calute.streaming.loop import run as run_agent_loop
+from xerxes_agent.streaming.events import AgentState
+from xerxes_agent.streaming.loop import run as run_agent_loop
 
 state = AgentState()
 
@@ -223,7 +223,7 @@ for event in run_agent_loop(
 ### Cortex — Multi-Agent Orchestration
 
 ```python
-from calute import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
+from xerxes import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
 
 llm = create_llm("openai", api_key="sk-...")
 
@@ -245,9 +245,9 @@ result = cortex.kickoff()
 ### API Server
 
 ```python
-from calute.api_server import CaluteAPIServer
+from xerxes_agent.api_server import XerxesAPIServer
 
-server = CaluteAPIServer()
+server = XerxesAPIServer()
 server.run(host="0.0.0.0", port=8000)
 # POST /v1/chat/completions
 # GET /v1/models
@@ -257,7 +257,7 @@ server.run(host="0.0.0.0", port=8000)
 
 ```text
 src/
-├── python/calute/           # Python agent runtime
+├── python/xerxes_agent/           # Python agent runtime
 │   ├── bridge/              # JSON-RPC bridge + provider profiles
 │   ├── streaming/           # Event-driven agent loop
 │   ├── tools/               # 50+ agent tools
@@ -271,7 +271,7 @@ src/
 │   ├── session/             # Session persistence
 │   ├── api_server/          # FastAPI server
 │   └── _bin/                # Rust binary launcher
-└── rust/calute-cli/         # Rust CLI frontend
+└── rust/xerxes-cli/         # Rust CLI frontend
     └── src/
         ├── main.rs          # Entry point, event loop
         ├── render.rs        # Inline viewport rendering
@@ -299,10 +299,10 @@ pytest tests/ -v
 cd src/rust && cargo build --release
 
 # Lint
-ruff check src/python/calute/
+ruff check src/python/xerxes_agent/
 
 # Format
-black src/python/calute/ tests/
+black src/python/xerxes_agent/ tests/
 ```
 
 ## Requirements

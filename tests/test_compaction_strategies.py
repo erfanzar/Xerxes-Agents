@@ -1,6 +1,6 @@
-"""Tests for calute.context.compaction_strategies module."""
+"""Tests for xerxes_agent.context.compaction_strategies module."""
 
-from calute.context.compaction_strategies import (
+from xerxes_agent.context.compaction_strategies import (
     PriorityBasedStrategy,
     SlidingWindowStrategy,
     SmartCompactionStrategy,
@@ -8,7 +8,7 @@ from calute.context.compaction_strategies import (
     TruncateStrategy,
     get_compaction_strategy,
 )
-from calute.types.function_execution_types import CompactionStrategy
+from xerxes_agent.types.function_execution_types import CompactionStrategy
 
 
 def make_messages(n, content_len=50):

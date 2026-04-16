@@ -1,6 +1,6 @@
-"""Tests for calute.mcp.types module."""
+"""Tests for xerxes_agent.mcp.types module."""
 
-from calute.mcp.types import (
+from xerxes_agent.mcp.types import (
     MCPPrompt,
     MCPResource,
     MCPServerConfig,

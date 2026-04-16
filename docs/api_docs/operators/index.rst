@@ -1,5 +1,5 @@
-calute.operators package
-========================
+src/python/xerxes_agent.operators package
+===================================
 
 .. toctree::
    :maxdepth: 2

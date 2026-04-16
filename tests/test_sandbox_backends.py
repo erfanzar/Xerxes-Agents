@@ -1,7 +1,16 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Detailed tests for sandbox backend implementations."""
 
 from __future__ import annotations
@@ -12,8 +21,7 @@ import subprocess
 from unittest import mock
 
 import pytest
-
-from calute.security.sandbox import SandboxBackendConfig, SandboxConfig, SandboxMode
+from xerxes_agent.security.sandbox import SandboxBackendConfig, SandboxConfig, SandboxMode
 
 
 def _multiply(a: int = 1, b: int = 1) -> int:
@@ -32,7 +40,7 @@ class TestDockerCommandConstruction:
     """Test that the Docker CLI commands are assembled correctly."""
 
     def _make_backend(self, **overrides):
-        from calute.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         defaults = dict(
             mode=SandboxMode.STRICT,
@@ -104,7 +112,7 @@ class TestDockerCommandConstruction:
 
 class TestDockerExecuteEdgeCases:
     def _make_backend(self):
-        from calute.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         config = SandboxConfig(
             mode=SandboxMode.STRICT,
@@ -118,14 +126,14 @@ class TestDockerExecuteEdgeCases:
         result_payload = pickle.dumps({"ok": True, "value": None})
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             result = backend.execute("t", _identity, {})
         assert result is None
 
     def test_execute_bad_stdout(self):
         backend = self._make_backend()
-        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="not-valid-b64!!!", stderr="")
             with pytest.raises(RuntimeError, match="deserialise"):
                 backend.execute("t", _identity, {})
@@ -135,7 +143,7 @@ class TestDockerExecuteEdgeCases:
         result_payload = pickle.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"})
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             with pytest.raises(RuntimeError, match="ZeroDivisionError.*division by zero"):
                 backend.execute("t", _identity, {})
@@ -143,7 +151,7 @@ class TestDockerExecuteEdgeCases:
 
 class TestSubprocessBackendExecution:
     def _make_backend(self, **overrides):
-        from calute.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
+        from xerxes_agent.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
 
         defaults = dict(
             mode=SandboxMode.STRICT,
@@ -168,7 +176,7 @@ class TestSubprocessBackendExecution:
 
     def test_greet(self):
         backend = self._make_backend()
-        assert backend.execute("t", _greet, {"name": "calute"}) == "hello calute"
+        assert backend.execute("t", _greet, {"name": "xerxes"}) == "hello xerxes"
 
     def test_timeout_very_short(self):
         """A function that takes too long should raise RuntimeError."""
@@ -177,7 +185,7 @@ class TestSubprocessBackendExecution:
         # We just verify the timeout path exists -- it may or may not trigger.
         # Use a mock to ensure the timeout path is exercised.
         with mock.patch(
-            "calute.security.sandbox_backends.subprocess_backend.subprocess.run",
+            "xerxes_agent.security.sandbox_backends.subprocess_backend.subprocess.run",
             side_effect=subprocess.TimeoutExpired("python", 0.001),
         ):
             with pytest.raises(RuntimeError, match="timed out"):

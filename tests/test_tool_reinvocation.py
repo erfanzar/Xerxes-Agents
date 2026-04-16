@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,10 +15,9 @@
 from __future__ import annotations
 
 import pytest
-
-from calute import Agent, Calute
-from calute.llms.base import BaseLLM, LLMConfig
-from calute.types import (
+from xerxes_agent import Agent, Xerxes
+from xerxes_agent.llms.base import BaseLLM, LLMConfig
+from xerxes_agent.types import (
     AssistantMessage,
     ExecutionResult,
     ExecutionStatus,
@@ -43,7 +42,7 @@ def _web_search_query(q: str, search_type: str = "text", n_results: int = 5) -> 
     }
 
 
-_web_search_query.__calute_schema__ = {
+_web_search_query.__xerxes_schema__ = {
     "name": "web.search_query",
     "description": "Search the public web through DuckDuckGo and return compact result dictionaries.",
     "parameters": {
@@ -113,9 +112,9 @@ class _FakeLLM(BaseLLM):
 
 def test_manage_messages_adds_post_tool_rules_for_native_tool_mode():
     agent = Agent(model="gpt-4o-mini", functions=[_tool_example])
-    calute = Calute()
+    xerxes = Xerxes()
 
-    messages = calute.manage_messages(agent=agent, prompt="List files in the current directory.")
+    messages = xerxes.manage_messages(agent=agent, prompt="List files in the current directory.")
     system_message = messages.messages[0]
 
     assert "Do not use functions for greetings, simple conversation" in system_message.content
@@ -136,13 +135,13 @@ def test_manage_messages_adds_post_tool_rules_for_native_tool_mode():
 
 def test_build_reinvoke_messages_appends_followup_instruction_after_tool_results():
     agent = Agent(model="gpt-4o-mini", functions=[_tool_example])
-    calute = Calute()
-    original_messages = calute.manage_messages(agent=agent, prompt="List files in the current directory.")
+    xerxes = Xerxes()
+    original_messages = xerxes.manage_messages(agent=agent, prompt="List files in the current directory.")
 
     function_calls = [RequestFunctionCall(name="_tool_example", arguments={"command": "ls"}, id="call_1")]
     results = [ExecutionResult(status=ExecutionStatus.SUCCESS, result={"stdout": "README.md\nsrc\n", "stderr": ""})]
 
-    updated_messages = calute._build_reinvoke_messages(
+    updated_messages = xerxes._build_reinvoke_messages(
         original_messages=original_messages,
         assistant_content="",
         function_calls=function_calls,
@@ -160,19 +159,19 @@ def test_build_reinvoke_messages_appends_followup_instruction_after_tool_results
 
 def test_manage_messages_dedupes_system_prompt_when_reinvoking():
     agent = Agent(model="gpt-4o-mini", functions=[_tool_example])
-    calute = Calute()
-    original_messages = calute.manage_messages(agent=agent, prompt="List files in the current directory.")
+    xerxes = Xerxes()
+    original_messages = xerxes.manage_messages(agent=agent, prompt="List files in the current directory.")
 
     function_calls = [RequestFunctionCall(name="_tool_example", arguments={"command": "ls"}, id="call_1")]
     results = [ExecutionResult(status=ExecutionStatus.SUCCESS, result={"stdout": "README.md\nsrc\n", "stderr": ""})]
 
-    updated_messages = calute._build_reinvoke_messages(
+    updated_messages = xerxes._build_reinvoke_messages(
         original_messages=original_messages,
         assistant_content="",
         function_calls=function_calls,
         results=results,
     )
-    reinvoked_messages = calute.manage_messages(agent=agent, messages=updated_messages)
+    reinvoked_messages = xerxes.manage_messages(agent=agent, messages=updated_messages)
 
     system_messages = [message for message in reinvoked_messages.messages if isinstance(message, SystemMessage)]
 
@@ -190,7 +189,7 @@ def test_manage_messages_dedupes_system_prompt_when_reinvoking():
 
 def test_extract_function_calls_parses_tagged_function_markup():
     agent = Agent(model="gpt-4o-mini", functions=[_web_search_query])
-    calute = Calute()
+    xerxes = Xerxes()
 
     content = """
 <function=web.search_query>
@@ -203,12 +202,12 @@ news
 </function>
 """.strip()
 
-    function_calls = calute._extract_function_calls(content, agent, None)
+    function_calls = xerxes._extract_function_calls(content, agent, None)
 
     assert len(function_calls) == 1
     assert function_calls[0].name == "web.search_query"
     assert function_calls[0].arguments == {"q": "latest OpenAI news", "search_type": "news"}
-    assert calute._remove_function_calls_from_content(content) == ""
+    assert xerxes._remove_function_calls_from_content(content) == ""
 
 
 @pytest.mark.asyncio
@@ -230,11 +229,11 @@ async def test_explicit_web_search_request_is_left_to_model_tool_choice():
             [[_chunk(content="Here are the current web search results.", is_final=True)]][0],
         ]
     )
-    calute = Calute(llm=llm)
+    xerxes = Xerxes(llm=llm)
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[_web_search_query])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    result = await calute.create_response(
+    result = await xerxes.create_response(
         prompt="Search the web for the latest OpenAI news.",
         agent_id=agent,
         stream=False,
@@ -252,9 +251,9 @@ async def test_explicit_web_search_request_is_left_to_model_tool_choice():
 @pytest.mark.asyncio
 async def test_generic_followup_web_search_relies_on_prompt_history_instead_of_forcing_tool():
     llm = _FakeLLM(responses=[[_chunk(content="Tell me what to search for.", is_final=True)]])
-    calute = Calute(llm=llm)
+    xerxes = Xerxes(llm=llm)
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[_web_search_query])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     history = MessagesHistory(
         messages=[
@@ -263,7 +262,7 @@ async def test_generic_followup_web_search_relies_on_prompt_history_instead_of_f
         ]
     )
 
-    await calute.create_response(
+    await xerxes.create_response(
         prompt="search the web",
         messages=history,
         agent_id=agent,
@@ -298,11 +297,11 @@ async def test_unknown_provider_tool_calls_are_ignored_instead_of_reinvoking():
             ]
         ]
     )
-    calute = Calute(llm=llm)
+    xerxes = Xerxes(llm=llm)
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[_tool_example])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    result = await calute.create_response(prompt="re do it again", agent_id=agent, stream=False)
+    result = await xerxes.create_response(prompt="re do it again", agent_id=agent, stream=False)
 
     assert result.content == "There is no prior task to redo."
     assert result.function_calls == []

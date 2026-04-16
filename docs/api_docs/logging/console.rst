@@ -1,7 +1,7 @@
-calute.logging.console
-======================
+src/python/xerxes_agent.logging.console
+=================================
 
-.. automodule:: calute.logging.console
+.. automodule:: src/python/xerxes_agent.logging.console
    :members:
    :undoc-members:
    :show-inheritance:

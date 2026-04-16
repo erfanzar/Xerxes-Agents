@@ -9,13 +9,12 @@ import os
 from pathlib import Path
 
 import openai
-
-from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
-from calute.core.config import CaluteConfig, set_config
-from calute.memory import MemoryStore, MemoryType
+from xerxes_agent import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
+from xerxes_agent.core.config import XerxesConfig, set_config
+from xerxes_agent.memory import MemoryStore, MemoryType
 
 # Configure the system
-config = CaluteConfig(
+config = XerxesConfig(
     environment="production",
     executor={"default_timeout": 30.0, "max_retries": 2},
     memory={"max_short_term": 50, "max_working": 10},
@@ -34,7 +33,7 @@ memory_store = MemoryStore(
     max_short_term=100,
     max_working=20,
     enable_persistence=True,
-    persistence_path=Path.home() / ".calute" / "conversation_memory",
+    persistence_path=Path.home() / ".xerxes" / "conversation_memory",
 )
 
 
@@ -43,7 +42,7 @@ def search_knowledge(query: str) -> str:
     # Simulate knowledge search
     knowledge = {
         "python": "Python is a high-level programming language known for readability.",
-        "calute": "Calute is an AI agent orchestration framework.",
+        "xerxes": "Xerxes is an AI agent orchestration framework.",
         "memory": "Memory systems help AI retain and recall information.",
     }
 
@@ -137,10 +136,10 @@ async def main():
         temperature=0.7,
     )
 
-    # Initialize Calute
-    calute = Calute(client, enable_memory=True)
-    calute.memory = memory_store
-    calute.register_agent(agent)
+    # Initialize Xerxes
+    xerxes = Xerxes(client, enable_memory=True)
+    xerxes.memory = memory_store
+    xerxes.register_agent(agent)
 
     # Simulate a conversation
     messages = MessagesHistory(messages=[])
@@ -149,7 +148,7 @@ async def main():
         "Hello! I'm John and I love Python programming.",
         "Can you tell me about Python?",
         "I prefer dark mode for coding, please remember that.",
-        "What do you know about Calute?",
+        "What do you know about Xerxes?",
         "Do you remember what I told you about my preferences?",
         "I'm feeling really happy today because I solved a difficult bug!",
         "Can you recall our conversation so far?",
@@ -174,7 +173,7 @@ async def main():
 
         # Get response
         try:
-            response = await calute.create_response(
+            response = await xerxes.create_response(
                 prompt=user_input,
                 messages=messages,
                 agent_id=agent.id,

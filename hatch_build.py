@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 When you run `pip install -e .` or `uv pip install -e .`, this hook:
 1. Runs `cargo build --release` in the Rust workspace
-2. Copies the resulting binaries into `src/python/calute/_bin/`
+2. Copies the resulting binaries into `src/python/xerxes_agent/_bin/`
 3. Registers them as package data so they're accessible after install
 
 The binaries are also exposed as console_scripts entry points via thin
@@ -43,7 +43,7 @@ class RustBuildHook(BuildHookInterface):
         """Called before the build — compile Rust and stage binaries."""
         root = Path(self.root)
         rust_dir = root / "src" / "rust"
-        bin_dir = root / "src" / "python" / "calute" / "_bin"
+        bin_dir = root / "src" / "python" / "xerxes" / "_bin"
 
         if not rust_dir.exists():
             print("[rust-build] No src/rust/ directory found, skipping Rust build.")
@@ -75,7 +75,7 @@ class RustBuildHook(BuildHookInterface):
 
         # Expected binaries.
         target_dir = rust_dir / "target" / "release"
-        binaries = {f"calute{ext}": "calute-cli"}
+        binaries = {f"xerxes{ext}": "xerxes-cli"}
 
         # Copy binaries into the package.
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +99,7 @@ class RustBuildHook(BuildHookInterface):
             init = bin_dir / "__init__.py"
             if not init.exists():
                 init.write_text(
-                    '"""Native Rust binaries for Calute."""\n\n'
+                    '"""Native Rust binaries for Xerxes."""\n\n'
                     "import pathlib\n\n"
                     "BIN_DIR = pathlib.Path(__file__).parent\n"
                 )
@@ -107,9 +107,9 @@ class RustBuildHook(BuildHookInterface):
             # Include _bin/ in the wheel.
             build_data.setdefault("force_include", {})
             for name in copied:
-                rel = f"calute/_bin/{name}"
+                rel = f"xerxes_agent/_bin/{name}"
                 build_data["force_include"][str(bin_dir / name)] = rel
-            build_data["force_include"][str(init)] = "calute/_bin/__init__.py"
+            build_data["force_include"][str(init)] = "xerxes_agent/_bin/__init__.py"
 
             print(f"[rust-build] {len(copied)} binaries staged for install.")
         else:

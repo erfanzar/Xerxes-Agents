@@ -1,7 +1,7 @@
-calute.audit.collector
-======================
+src/python/xerxes_agent.audit.collector
+=================================
 
-.. automodule:: calute.audit.collector
+.. automodule:: src/python/xerxes_agent.audit.collector
    :members:
    :undoc-members:
    :show-inheritance:

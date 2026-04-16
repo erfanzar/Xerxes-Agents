@@ -1,7 +1,7 @@
-calute.audit.emitter
-====================
+src/python/xerxes_agent.audit.emitter
+===============================
 
-.. automodule:: calute.audit.emitter
+.. automodule:: src/python/xerxes_agent.audit.emitter
    :members:
    :undoc-members:
    :show-inheritance:

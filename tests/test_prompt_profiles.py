@@ -1,16 +1,25 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Tests for calute.prompt_profiles — prompt profile configs and truncation."""
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for xerxes_agent.prompt_profiles — prompt profile configs and truncation."""
 
 from pathlib import Path
 
-from calute.extensions.hooks import HookRunner
-from calute.extensions.skills import Skill, SkillMetadata, SkillRegistry
-from calute.runtime.context import PromptContextBuilder
-from calute.runtime.profiles import PromptProfile, PromptProfileConfig, get_profile_config
-from calute.security.sandbox import SandboxConfig, SandboxMode
+from xerxes_agent.extensions.hooks import HookRunner
+from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry
+from xerxes_agent.runtime.context import PromptContextBuilder
+from xerxes_agent.runtime.profiles import PromptProfile, PromptProfileConfig, get_profile_config
+from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
 
 # ── PromptProfile enum ───────────────────────────────────────────────
 
@@ -99,7 +108,7 @@ class TestGetProfileConfig:
     def test_string_profile_alias_is_accepted(self):
         builder = PromptContextBuilder()
         prefix = builder.assemble_system_prompt_prefix(profile="none")
-        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
+        assert prefix == ("You are Xerxes, a runtime-managed AI agent operating inside a controlled tool environment.")
 
 
 # ── PromptProfileConfig defaults ─────────────────────────────────────
@@ -330,7 +339,7 @@ class TestNoneProfile:
             tool_names=TOOL_NAMES,
             profile=PromptProfile.NONE,
         )
-        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
+        assert prefix == ("You are Xerxes, a runtime-managed AI agent operating inside a controlled tool environment.")
         assert "[Identity]" not in prefix
         assert "[Tooling]" not in prefix
         assert "[Safety]" not in prefix

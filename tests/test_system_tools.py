@@ -1,8 +1,8 @@
-"""Tests for calute.tools.system_tools module."""
+"""Tests for xerxes_agent.tools.system_tools module."""
 
 import os
 
-from calute.tools.system_tools import (
+from xerxes_agent.tools.system_tools import (
     EnvironmentManager,
     FileSystemTools,
     ProcessManager,

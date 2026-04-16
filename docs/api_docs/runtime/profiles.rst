@@ -1,7 +1,7 @@
-calute.runtime.profiles
-=======================
+src/python/xerxes_agent.runtime.profiles
+==================================
 
-.. automodule:: calute.runtime.profiles
+.. automodule:: src/python/xerxes_agent.runtime.profiles
    :members:
    :undoc-members:
    :show-inheritance:

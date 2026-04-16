@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,14 +16,14 @@
 
 from __future__ import annotations
 
-from calute.session.models import (
+from xerxes_agent.session.models import (
     AgentTransitionRecord,
     SessionRecord,
     ToolCallRecord,
     TurnRecord,
 )
-from calute.session.replay import ReplayView, SessionReplay
-from calute.session.store import FileSessionStore, SessionManager
+from xerxes_agent.session.replay import ReplayView, SessionReplay
+from xerxes_agent.session.store import FileSessionStore, SessionManager
 
 
 def _tc(call_id: str, name: str = "tool", **kw) -> ToolCallRecord:

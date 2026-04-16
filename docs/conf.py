@@ -3,8 +3,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(".."))
 
-project = "Calute"
-copyright = "2025, Erfan Zare Chavoshi - Calute"  # noqa
+project = "Xerxes"
+copyright = "2025, Erfan Zare Chavoshi - Xerxes"  # noqa
 author = "Erfan Zare Chavoshi"
 
 extensions = [

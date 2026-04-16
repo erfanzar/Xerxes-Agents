@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,10 +13,9 @@
 # limitations under the License.
 
 import pytest
-
-from calute import Agent, AgentCapability
-from calute.types import AgentSwitchTrigger, FunctionCallStrategy
-from calute.types.agent_types import AgentBaseFn, _wrap_static_call
+from xerxes_agent import Agent, AgentCapability
+from xerxes_agent.types import AgentSwitchTrigger, FunctionCallStrategy
+from xerxes_agent.types.agent_types import AgentBaseFn, _wrap_static_call
 
 
 class TestAgentTypes:

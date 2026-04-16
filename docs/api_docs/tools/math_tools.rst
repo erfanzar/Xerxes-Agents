@@ -1,7 +1,7 @@
-calute.tools.math_tools
-=======================
+src/python/xerxes_agent.tools.math_tools
+==================================
 
-.. automodule:: calute.tools.math_tools
+.. automodule:: src/python/xerxes_agent.tools.math_tools
    :members:
    :undoc-members:
    :show-inheritance:

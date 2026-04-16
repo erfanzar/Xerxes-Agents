@@ -48,7 +48,7 @@ repos:
     rev: 1.7.6
     hooks:
       - id: bandit
-        args: ['-r', 'calute/', '-f', 'json', '-o', 'bandit-report.json']
+        args: ['-r', 'xerxes_agent/', '-f', 'json', '-o', 'bandit-report.json']
         exclude: ^tests/
 
   - repo: https://github.com/commitizen-tools/commitizen

@@ -1,8 +1,8 @@
-"""Tests for calute.core.streamer_buffer module."""
+"""Tests for xerxes_agent.core.streamer_buffer module."""
 
 import threading
 
-from calute.core.streamer_buffer import KILL_TAG, StreamerBuffer
+from xerxes_agent.core.streamer_buffer import KILL_TAG, StreamerBuffer
 
 
 class TestStreamerBuffer:

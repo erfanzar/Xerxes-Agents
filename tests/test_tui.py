@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import asyncio
 
-import calute.tui.app as tui_app_module
-from calute import Agent, Calute, OperatorRuntimeConfig, PromptProfile, RuntimeFeaturesConfig
-from calute.llms.base import BaseLLM, LLMConfig
-from calute.tui import CaluteTUI, TextualLauncher, launch_tui, parse_command, preview_value
-from calute.tui.app import ChatEntry
-from calute.tui.terminal_config import TerminalConfigStore, TerminalProfile
+import xerxes_agent.tui.app as tui_app_module
+from xerxes_agent import Agent, OperatorRuntimeConfig, PromptProfile, RuntimeFeaturesConfig, Xerxes
+from xerxes_agent.llms.base import BaseLLM, LLMConfig
+from xerxes_agent.tui import TextualLauncher, XerxesTUI, launch_tui, parse_command, preview_value
+from xerxes_agent.tui.app import ChatEntry
+from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def _chunk(
@@ -84,23 +84,23 @@ def test_preview_value_truncates():
 
 
 def test_launch_tui_returns_launcher():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    launcher = launch_tui(calute, agent)
+    launcher = launch_tui(xerxes, agent)
     assert isinstance(launcher, TextualLauncher)
-    assert calute.create_tui(agent) is not None
+    assert xerxes.create_tui(agent) is not None
 
 
-def test_calute_tui_advertises_enter_submit():
-    assert all(binding.action != "submit_input" for binding in CaluteTUI.BINDINGS)
-    assert "Enter to send" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
-    assert "Ctrl+Enter for newline" in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
-    assert "Cmd+Enter" not in CaluteTUI.DEFAULT_INPUT_PLACEHOLDER
+def test_xerxes_tui_advertises_enter_submit():
+    assert all(binding.action != "submit_input" for binding in XerxesTUI.BINDINGS)
+    assert "Enter to send" in XerxesTUI.DEFAULT_INPUT_PLACEHOLDER
+    assert "Ctrl+Enter for newline" in XerxesTUI.DEFAULT_INPUT_PLACEHOLDER
+    assert "Cmd+Enter" not in XerxesTUI.DEFAULT_INPUT_PLACEHOLDER
 
 
-async def test_calute_tui_streaming_smoke():
+async def test_xerxes_tui_streaming_smoke():
     llm = _FakeLLM(
         responses=[
             [
@@ -115,14 +115,14 @@ async def test_calute_tui_streaming_smoke():
             ]
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._current_prompt_profile() == PromptProfile.FULL
@@ -137,7 +137,7 @@ async def test_calute_tui_streaming_smoke():
         assert app.chat_history[-1].streaming is False
 
 
-async def test_calute_tui_accepts_multiline_composer_input():
+async def test_xerxes_tui_accepts_multiline_composer_input():
     llm = _FakeLLM(
         responses=[
             [
@@ -145,14 +145,14 @@ async def test_calute_tui_accepts_multiline_composer_input():
             ]
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         composer = app._input_widget()
@@ -165,7 +165,7 @@ async def test_calute_tui_accepts_multiline_composer_input():
     assert app.chat_history[-1].content == "received"
 
 
-async def test_calute_tui_submits_on_enter_key():
+async def test_xerxes_tui_submits_on_enter_key():
     llm = _FakeLLM(
         responses=[
             [
@@ -173,14 +173,14 @@ async def test_calute_tui_submits_on_enter_key():
             ]
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         composer = app._input_widget()
@@ -194,12 +194,12 @@ async def test_calute_tui_submits_on_enter_key():
     assert app.chat_history[-1].content == "received"
 
 
-async def test_calute_tui_ctrl_enter_inserts_newline():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+async def test_xerxes_tui_ctrl_enter_inserts_newline():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         composer = app._input_widget()
@@ -210,7 +210,7 @@ async def test_calute_tui_ctrl_enter_inserts_newline():
         assert composer.text == "line 1\n"
 
 
-async def test_calute_tui_passes_prior_turns_back_to_model():
+async def test_xerxes_tui_passes_prior_turns_back_to_model():
     llm = _FakeLLM(
         responses=[
             [
@@ -221,14 +221,14 @@ async def test_calute_tui_passes_prior_turns_back_to_model():
             ],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app._stream_prompt("hello")
@@ -242,12 +242,12 @@ async def test_calute_tui_passes_prior_turns_back_to_model():
     assert second_prompt[3] == {"role": "user", "content": "follow up"}
 
 
-def test_calute_tui_conversation_messages_preserve_completed_tool_summary():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+def test_xerxes_tui_conversation_messages_preserve_completed_tool_summary():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     app.chat_history = [
         ChatEntry(role="user", content="search web about prism ml"),
         ChatEntry(
@@ -272,12 +272,12 @@ def test_calute_tui_conversation_messages_preserve_completed_tool_summary():
     }
 
 
-async def test_calute_tui_tracks_tool_activity_inline():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+async def test_xerxes_tui_tracks_tool_activity_inline():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         app._start_tool_entry("call_1", "WriteFile", "1/1", agent_id="assistant")
@@ -295,12 +295,12 @@ async def test_calute_tui_tracks_tool_activity_inline():
         assert "\u2713" in (tool_entry.title or "")
 
 
-def test_calute_tui_tool_cards_keep_label_and_value_separated():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+def test_xerxes_tui_tool_cards_keep_label_and_value_separated():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     panel = app._build_message_renderable(
         ChatEntry(
             role="tool",
@@ -318,12 +318,12 @@ def test_calute_tui_tool_cards_keep_label_and_value_separated():
     assert "statusrunning" not in tool_lines[1]
 
 
-def test_calute_tui_tool_result_summary_shows_search_fallback():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+def test_xerxes_tui_tool_result_summary_shows_search_fallback():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     summary = app._summarize_tool_result(
         {
             "query": "latest OpenAI news",
@@ -337,7 +337,7 @@ def test_calute_tui_tool_result_summary_shows_search_fallback():
     assert "1 result(s)" in summary
 
 
-async def test_calute_tui_shows_compact_streamed_tool_cards():
+async def test_xerxes_tui_shows_compact_streamed_tool_cards():
     def lookup(query: str) -> dict:
         return {
             "query": query,
@@ -377,14 +377,14 @@ async def test_calute_tui_shows_compact_streamed_tool_cards():
             ],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[lookup])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app._stream_prompt("search for OpenAI")
@@ -399,7 +399,7 @@ async def test_calute_tui_shows_compact_streamed_tool_cards():
     assert "\u2713" in (tool_entry.title or "")
 
 
-async def test_calute_tui_preserves_reasoning_across_reinvocations():
+async def test_xerxes_tui_preserves_reasoning_across_reinvocations():
     def lookup(query: str) -> dict:
         return {"query": query, "results": [{"title": f"Result for {query}"}]}
 
@@ -447,14 +447,14 @@ async def test_calute_tui_preserves_reasoning_across_reinvocations():
             ],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[lookup])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app._stream_prompt("start")
@@ -468,9 +468,9 @@ async def test_calute_tui_preserves_reasoning_across_reinvocations():
     assert all(not entry.streaming for entry in assistant_entries)
 
 
-async def test_calute_tui_accepts_pending_user_question_answer():
+async def test_xerxes_tui_accepts_pending_user_question_answer():
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -478,9 +478,9 @@ async def test_calute_tui_accepts_pending_user_question_answer():
         ),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     operator_state = app._operator_state()
     assert operator_state is not None
 
@@ -507,12 +507,12 @@ async def test_calute_tui_accepts_pending_user_question_answer():
         assert app.chat_history[-1].content == "grep"
 
 
-async def test_calute_tui_footer_shows_token_stats():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+async def test_xerxes_tui_footer_shows_token_stats():
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="gpt-4o-mini", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         app._start_run_stats("hello world")
@@ -522,40 +522,37 @@ async def test_calute_tui_footer_shows_token_stats():
         assert app.tokens_per_second >= 0
 
 
-async def test_calute_tui_hides_tool_markup_from_visible_reasoning_and_content():
+async def test_xerxes_tui_hides_tool_markup_from_visible_reasoning_and_content():
     llm = _FakeLLM(
         responses=[
             [
                 _chunk(
                     reasoning_content=(
-                        "Inspect the request.\n"
-                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
+                        "Inspect the request.\n<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                     buffered_reasoning_content=(
-                        "Inspect the request.\n"
-                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
+                        "Inspect the request.\n<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                 ),
                 _chunk(
                     content="Visible answer\n<function=web.search_query></function>",
                     buffered_content="Visible answer\n<function=web.search_query></function>",
                     buffered_reasoning_content=(
-                        "Inspect the request.\n"
-                        "<function=web.search_query><parameter=q>OpenAI</parameter></function>"
+                        "Inspect the request.\n<function=web.search_query><parameter=q>OpenAI</parameter></function>"
                     ),
                     is_final=True,
                 ),
             ]
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     async with app.run_test() as pilot:
         await pilot.pause()
         await app._stream_prompt("hello")
@@ -565,7 +562,7 @@ async def test_calute_tui_hides_tool_markup_from_visible_reasoning_and_content()
         assert "<function=" not in (app.chat_history[-1].meta or "")
 
 
-async def test_calute_tui_followup_prompt_includes_prior_tool_summary():
+async def test_xerxes_tui_followup_prompt_includes_prior_tool_summary():
     llm = _FakeLLM(
         responses=[
             [
@@ -576,14 +573,14 @@ async def test_calute_tui_followup_prompt_includes_prior_tool_summary():
             ],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     app.chat_history = [
         ChatEntry(role="user", content="search web about prism ml"),
         ChatEntry(
@@ -607,14 +604,14 @@ async def test_calute_tui_followup_prompt_includes_prior_tool_summary():
     )
 
 
-async def test_calute_tui_model_change_persists(tmp_path):
+async def test_xerxes_tui_model_change_persists(tmp_path):
     llm = _FakeLLM(responses=[[_chunk(content="ok", is_final=True)]])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -627,7 +624,7 @@ async def test_calute_tui_model_change_persists(tmp_path):
     )
     store.upsert_profile(profile)
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         app._set_active_model("new-model")
@@ -639,11 +636,11 @@ async def test_calute_tui_model_change_persists(tmp_path):
 
 
 async def test_slash_hints_fuzzy_match_provider():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     hints = app._match_slash_hints("/provide")
     assert hints
     assert hints[0].usage.startswith("/provider")
@@ -654,23 +651,23 @@ async def test_slash_hints_fuzzy_match_provider():
 
 
 async def test_slash_hints_show_provider_options():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     hints = app._match_slash_hints("/provider o")
     assert [hint.usage for hint in hints] == ["/provider openai", "/provider ollama", "/provider oai"]
 
 
-async def test_calute_tui_provider_command_persists_pending_provider(tmp_path, monkeypatch):
+async def test_xerxes_tui_provider_command_persists_pending_provider(tmp_path, monkeypatch):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -699,7 +696,7 @@ async def test_calute_tui_provider_command_persists_pending_provider(tmp_path, m
         lambda *args, **kwargs: ["model-a", "model-b"],
     )
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/provider openai")
@@ -715,14 +712,14 @@ async def test_calute_tui_provider_command_persists_pending_provider(tmp_path, m
     assert loaded.available_models == []
 
 
-async def test_calute_tui_endpoint_after_pending_provider_uses_new_provider(tmp_path, monkeypatch):
+async def test_xerxes_tui_endpoint_after_pending_provider_uses_new_provider(tmp_path, monkeypatch):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -751,7 +748,7 @@ async def test_calute_tui_endpoint_after_pending_provider_uses_new_provider(tmp_
         lambda *args, **kwargs: ["model-a", "model-b"],
     )
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/provider openai")
@@ -771,14 +768,14 @@ async def test_calute_tui_endpoint_after_pending_provider_uses_new_provider(tmp_
     assert loaded.available_models == ["model-a", "model-b"]
 
 
-async def test_calute_tui_provider_alias_oai_switches_to_openai(tmp_path, monkeypatch):
+async def test_xerxes_tui_provider_alias_oai_switches_to_openai(tmp_path, monkeypatch):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -803,7 +800,7 @@ async def test_calute_tui_provider_alias_oai_switches_to_openai(tmp_path, monkey
     monkeypatch.setattr(tui_app_module, "create_llm", fake_create_llm)
     monkeypatch.setattr(tui_app_module, "discover_available_models", lambda *args, **kwargs: ["qwen3-coder"])
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/provider oai")
@@ -819,11 +816,11 @@ async def test_calute_tui_provider_alias_oai_switches_to_openai(tmp_path, monkey
 
 
 async def test_tui_formats_runtime_error_without_mozilla_link():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     message = app._format_runtime_error(
         RuntimeError(
             "Client error '404 Not Found' for url 'http://x'\n"
@@ -834,14 +831,14 @@ async def test_tui_formats_runtime_error_without_mozilla_link():
     assert "404 Not Found" in message
 
 
-async def test_calute_tui_endpoint_and_api_key_commands_persist(tmp_path, monkeypatch):
+async def test_xerxes_tui_endpoint_and_api_key_commands_persist(tmp_path, monkeypatch):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -864,7 +861,7 @@ async def test_calute_tui_endpoint_and_api_key_commands_persist(tmp_path, monkey
     monkeypatch.setattr(tui_app_module, "create_llm", fake_create_llm)
     monkeypatch.setattr(tui_app_module, "discover_available_models", lambda *args, **kwargs: ["new-model"])
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/endpoint http://0.0.0.0:11556/v1/")
@@ -884,30 +881,30 @@ async def test_calute_tui_endpoint_and_api_key_commands_persist(tmp_path, monkey
 
 
 async def test_slash_hints_show_model_options():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     app.available_models = ["qwen3-coder", "deepseek-r1"]
     hints = app._match_slash_hints("/model q")
     assert [hint.usage for hint in hints] == ["/model qwen3-coder"]
 
 
-async def test_calute_tui_set_sampling_param_persists(tmp_path):
+async def test_xerxes_tui_set_sampling_param_persists(tmp_path):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(name="lab", provider="openai", model="fake-model")
     store.upsert_profile(profile)
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/set temperature 0.35")
@@ -925,9 +922,9 @@ async def test_calute_tui_set_sampling_param_persists(tmp_path):
     assert loaded.sampling_params["top_p"] == 0.8
 
 
-async def test_calute_tui_reset_sampling_restores_defaults(tmp_path):
+async def test_xerxes_tui_reset_sampling_restores_defaults(tmp_path):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )
@@ -939,7 +936,7 @@ async def test_calute_tui_reset_sampling_restores_defaults(tmp_path):
         temperature=1.2,
         max_tokens=512,
     )
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(
@@ -950,7 +947,7 @@ async def test_calute_tui_reset_sampling_restores_defaults(tmp_path):
     )
     store.upsert_profile(profile)
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/reset-sampling")
@@ -964,9 +961,9 @@ async def test_calute_tui_reset_sampling_restores_defaults(tmp_path):
     assert loaded.sampling_params == {}
 
 
-async def test_calute_tui_power_toggle_persists_and_lists_tools(tmp_path):
+async def test_xerxes_tui_power_toggle_persists_and_lists_tools(tmp_path):
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -974,13 +971,13 @@ async def test_calute_tui_power_toggle_persists_and_lists_tools(tmp_path):
         ),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     store = TerminalConfigStore(tmp_path / "terminal_profiles.json")
     profile = TerminalProfile(name="lab", provider="openai", model="fake-model")
     store.upsert_profile(profile)
 
-    app = CaluteTUI(executor=calute, agent=agent, profile=profile, config_store=store)
+    app = XerxesTUI(executor=xerxes, agent=agent, profile=profile, config_store=store)
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app._handle_command("/power on")
@@ -996,9 +993,9 @@ async def test_calute_tui_power_toggle_persists_and_lists_tools(tmp_path):
     assert loaded.power_tools_enabled is True
 
 
-async def test_calute_tui_plans_command_shows_current_plan():
+async def test_xerxes_tui_plans_command_shows_current_plan():
     llm = _FakeLLM(responses=[])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -1006,9 +1003,9 @@ async def test_calute_tui_plans_command_shows_current_plan():
         ),
     )
     agent = Agent(id="assistant", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    app = CaluteTUI(executor=calute, agent=agent)
+    app = XerxesTUI(executor=xerxes, agent=agent)
     operator_state = app._operator_state()
     assert operator_state is not None
     operator_state.plan_manager.update(

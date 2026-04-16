@@ -1,7 +1,7 @@
-calute.tools.system_tools
-=========================
+src/python/xerxes_agent.tools.system_tools
+====================================
 
-.. automodule:: calute.tools.system_tools
+.. automodule:: src/python/xerxes_agent.tools.system_tools
    :members:
    :undoc-members:
    :show-inheritance:

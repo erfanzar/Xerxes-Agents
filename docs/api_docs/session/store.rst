@@ -1,7 +1,7 @@
-calute.session.store
-====================
+src/python/xerxes_agent.session.store
+===============================
 
-.. automodule:: calute.session.store
+.. automodule:: src/python/xerxes_agent.session.store
    :members:
    :undoc-members:
    :show-inheritance:

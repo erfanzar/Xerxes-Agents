@@ -1,7 +1,7 @@
-calute.session.models
-=====================
+src/python/xerxes_agent.session.models
+================================
 
-.. automodule:: calute.session.models
+.. automodule:: src/python/xerxes_agent.session.models
    :members:
    :undoc-members:
    :show-inheritance:

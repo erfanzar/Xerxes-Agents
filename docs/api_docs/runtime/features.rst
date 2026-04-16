@@ -1,7 +1,7 @@
-calute.runtime.features
-=======================
+src/python/xerxes_agent.runtime.features
+==================================
 
-.. automodule:: calute.runtime.features
+.. automodule:: src/python/xerxes_agent.runtime.features
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,4 +1,4 @@
-git+https://github.com/erfanzar/calute.git 
+git+https://github.com/erfanzar/xerxes_agent.git 
 
 sphinx
 sphinx-autobuild

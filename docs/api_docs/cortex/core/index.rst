@@ -1,5 +1,5 @@
-calute.cortex.core package
-==========================
+src/python/xerxes_agent.cortex.core package
+=====================================
 
 .. toctree::
    :maxdepth: 2

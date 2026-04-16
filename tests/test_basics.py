@@ -1,10 +1,10 @@
-"""Tests for calute.core.basics module."""
+"""Tests for xerxes_agent.core.basics module."""
 
-from calute.core.basics import (
+from xerxes_agent.core.basics import (
     AGENTS_REGISTRY,
-    CALUTE_REGISTRY,
     CLIENT_REGISTRY,
     REGISTRY,
+    XERXES_REGISTRY,
     _pretty_print,
     basic_registry,
 )
@@ -35,10 +35,10 @@ class TestRegisteries:
     def test_registery_structure(self):
         assert "client" in REGISTRY
         assert "agents" in REGISTRY
-        assert "calute" in REGISTRY
+        assert "xerxes" in REGISTRY
         assert REGISTRY["client"] is CLIENT_REGISTRY
         assert REGISTRY["agents"] is AGENTS_REGISTRY
-        assert REGISTRY["calute"] is CALUTE_REGISTRY
+        assert REGISTRY["xerxes"] is XERXES_REGISTRY
 
 
 class TestBasicRegistery:
@@ -62,12 +62,12 @@ class TestBasicRegistery:
 
         assert "test_client_basic" in CLIENT_REGISTRY
 
-    def test_register_calute(self):
-        @basic_registry("calute", "test_calute_basic")
-        class TestCalute:
+    def test_register_xerxes(self):
+        @basic_registry("xerxes", "test_xerxes_basic")
+        class TestXerxes:
             pass
 
-        assert "test_calute_basic" in CALUTE_REGISTRY
+        assert "test_xerxes_basic" in XERXES_REGISTRY
 
     def test_invalid_register_type(self):
         try:

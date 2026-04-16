@@ -1,6 +1,6 @@
-"""Tests for calute.cortex.tool module."""
+"""Tests for xerxes_agent.cortex.tool module."""
 
-from calute.cortex.core.tool import CortexTool
+from xerxes_agent.cortex.core.tool import CortexTool
 
 
 def sample_function(query: str, limit: int = 10) -> list:

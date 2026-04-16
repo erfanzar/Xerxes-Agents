@@ -1,12 +1,21 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Tests for calute.skills — skill discovery and indexing."""
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for xerxes_agent.skills — skill discovery and indexing."""
 
 from pathlib import Path
 
-from calute.extensions.skills import Skill, SkillMetadata, SkillRegistry, parse_skill_md
+from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry, parse_skill_md
 
 SAMPLE_SKILL_MD = """---
 name: web_research
@@ -220,7 +229,7 @@ class TestSkillDependencies:
         assert "nonexistent_skill" in errors[0]
 
     def test_validate_missing_tool_dependency(self):
-        from calute.extensions.plugins import PluginMeta, PluginRegistry
+        from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry
 
         plugin_reg = PluginRegistry()
         plugin_reg.register_plugin(PluginMeta(name="base", version="1.0"))
@@ -243,7 +252,7 @@ class TestSkillDependencies:
         assert "summarize" in errors[0]
 
     def test_validate_all_tools_satisfied(self):
-        from calute.extensions.plugins import PluginMeta, PluginRegistry
+        from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry
 
         plugin_reg = PluginRegistry()
         plugin_reg.register_plugin(PluginMeta(name="base", version="1.0"))

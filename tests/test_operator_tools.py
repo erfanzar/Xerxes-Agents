@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -8,22 +8,21 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-
-from calute import Agent, Calute, OperatorRuntimeConfig, RuntimeFeaturesConfig
-from calute.core.utils import function_to_json
-from calute.tools.duckduckgo_engine import DuckDuckGoSearch
-from calute.types import ExecutionStatus, ImageChunk, RequestFunctionCall, TextChunk, UserMessage
+from xerxes_agent import Agent, OperatorRuntimeConfig, RuntimeFeaturesConfig, Xerxes
+from xerxes_agent.core.utils import function_to_json
+from xerxes_agent.tools.google_search import GoogleSearch
+from xerxes_agent.types import ExecutionStatus, ImageChunk, RequestFunctionCall, TextChunk, UserMessage
 
 
 def test_operator_tools_use_public_names_and_dotted_aliases():
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True),
         )
     )
     agent = Agent(id="operator", model="fake", instructions="Use operator tools.", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     mapping = agent.get_functions_mapping()
     assert "web.time" in mapping
@@ -34,14 +33,14 @@ def test_operator_tools_use_public_names_and_dotted_aliases():
 
 
 def test_operator_tool_schema_descriptions_are_detailed():
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True),
         )
     )
     agent = Agent(id="operator", model="fake", instructions="Use operator tools.", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     mapping = agent.get_functions_mapping()
     exec_schema = function_to_json(mapping["exec_command"])
@@ -53,67 +52,62 @@ def test_operator_tool_schema_descriptions_are_detailed():
 
     search_schema = function_to_json(mapping["web.search_query"])
     search_props = search_schema["function"]["parameters"]["properties"]
-    assert "DuckDuckGo" in search_schema["function"]["description"]
+    assert "Google" in search_schema["function"]["description"]
     assert "up-to-date information" in search_schema["function"]["description"]
-    assert "domain allowlist" in search_props["domains"]["description"]
+    assert "domains" in search_props
 
 
-def test_duckduckgo_news_search_falls_back_to_text(monkeypatch):
-    class _FakeDDGS:
-        def __enter__(self):
-            return self
+def test_web_search_routes_through_google_search(monkeypatch):
+    """``web.search_query`` operator wraps GoogleSearch.static_call."""
+    captured: dict = {}
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
+    def fake_static(query, n_results=5, site=None, time_range=None, **kw):
+        captured.update(query=query, n_results=n_results, site=site, time_range=time_range)
+        return {
+            "engine": "google_api",
+            "query": query,
+            "count": 1,
+            "results": [{"title": "OpenAI shipping news", "url": "https://example.com/openai-news", "snippet": "x"}],
+        }
 
-        def news(self, *args, **kwargs):
-            raise RuntimeError("No results found for query")
+    monkeypatch.setattr(GoogleSearch, "static_call", staticmethod(fake_static))
 
-        def text(self, *args, **kwargs):
-            return [
-                {
-                    "title": "OpenAI shipping news",
-                    "href": "https://example.com/openai-news",
-                    "body": "Fallback text result.",
-                }
-            ]
+    from xerxes_agent.operators.config import OperatorRuntimeConfig
+    from xerxes_agent.operators.state import OperatorState
 
-    monkeypatch.setattr("calute.tools.duckduckgo_engine._get_ddgs", lambda: _FakeDDGS)
-
-    payload = DuckDuckGoSearch.static_call(
-        "latest OpenAI news",
-        search_type="news",
-        n_results=3,
-        return_metadata=True,
-    )
+    state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
+    web_search = state._build_web_search_query()
+    payload = web_search("latest OpenAI news", search_type="news", n_results=3, domains=["openai.com"])
 
     assert payload["results"][0]["title"] == "OpenAI shipping news"
-    assert payload["metadata"]["effective_search_type"] == "text"
-    assert payload["metadata"]["fallback_applied"] == "news_to_text"
+    assert payload["query"] == "latest OpenAI news"
+    assert captured["site"] == "openai.com"
+    assert captured["time_range"] == "d"
+    assert captured["n_results"] == 3
 
 
 @pytest.mark.asyncio
 async def test_operator_policy_defaults_allow_power_tools():
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True),
         )
     )
     agent = Agent(id="operator", model="fake", instructions="Use operator tools.", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    safe_call = await calute.executor._execute_single_call(
+    safe_call = await xerxes.executor._execute_single_call(
         RequestFunctionCall(name="web.time", arguments={"utc_offset": "+03:00"}),
         {},
         agent,
-        runtime_features_state=calute._runtime_features_state,
+        runtime_features_state=xerxes._runtime_features_state,
     )
-    power_call = await calute.executor._execute_single_call(
+    power_call = await xerxes.executor._execute_single_call(
         RequestFunctionCall(name="exec_command", arguments={"cmd": "printf hi"}),
         {},
         agent,
-        runtime_features_state=calute._runtime_features_state,
+        runtime_features_state=xerxes._runtime_features_state,
     )
 
     assert safe_call.status == ExecutionStatus.SUCCESS
@@ -124,16 +118,16 @@ def test_view_image_creates_multimodal_reinvoke_message(tmp_path: Path):
     image_path = tmp_path / "sample.png"
     Image.new("RGB", (16, 12), color="navy").save(image_path)
 
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True, power_tools_enabled=True),
         )
     )
     agent = Agent(id="operator", model="fake", instructions="Use operator tools.", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    operator_state = calute._runtime_features_state.operator_state
+    operator_state = xerxes._runtime_features_state.operator_state
     assert operator_state is not None
     view_image = agent.get_functions_mapping()["view_image"]
     result = view_image(path=str(image_path))
@@ -146,14 +140,14 @@ def test_view_image_creates_multimodal_reinvoke_message(tmp_path: Path):
 
 
 def test_update_plan_mutates_operator_state():
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True),
         )
     )
     agent = Agent(id="operator", model="fake", instructions="Use operator tools.", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     update_plan = agent.get_functions_mapping()["update_plan"]
     payload = update_plan(

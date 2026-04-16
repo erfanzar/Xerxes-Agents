@@ -1,5 +1,5 @@
-calute.ui package
-=================
+src/python/xerxes_agent.ui package
+============================
 
 .. toctree::
    :maxdepth: 2

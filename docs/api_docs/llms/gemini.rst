@@ -1,7 +1,7 @@
-calute.llms.gemini
-==================
+src/python/xerxes_agent.llms.gemini
+=============================
 
-.. automodule:: calute.llms.gemini
+.. automodule:: src/python/xerxes_agent.llms.gemini
    :members:
    :undoc-members:
    :show-inheritance:

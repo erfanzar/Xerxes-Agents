@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the calute.audit structured event system."""
+"""Tests for the xerxes_agent.audit structured event system."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import json
 import threading
 from io import StringIO
 
-from calute.audit import (
+from xerxes_agent.audit import (
     AuditEmitter,
     AuditEvent,
     CompositeCollector,

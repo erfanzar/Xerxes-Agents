@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "calute-cli",
+    "xerxes-cli",
 ]
 
 [workspace.package]

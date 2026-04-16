@@ -25,8 +25,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from calute import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
-from calute.context.token_counter import TIKTOKEN_AVAILABLE, ProviderTokenCounter
+from xerxes_agent import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
+from xerxes_agent.context.token_counter import TIKTOKEN_AVAILABLE, ProviderTokenCounter
 
 ENV_PY_LLM_CONFIG = {
     "provider": "openai",

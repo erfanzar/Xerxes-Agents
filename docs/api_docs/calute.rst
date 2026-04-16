@@ -1,7 +1,7 @@
-calute.calute
-=============
+src/python/xerxes_agent.xerxes
+========================
 
-.. automodule:: calute.calute
+.. automodule:: src/python/xerxes_agent.xerxes
    :members:
    :undoc-members:
    :show-inheritance:

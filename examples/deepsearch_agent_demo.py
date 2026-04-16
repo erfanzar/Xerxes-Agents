@@ -30,13 +30,12 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-
-from calute import Agent, Calute, MessagesHistory, UserMessage
-from calute.memory import MemoryStore, MemoryType
-from calute.tools import (
+from xerxes_agent import Agent, MessagesHistory, UserMessage, Xerxes
+from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes_agent.tools import (
     DataConverter,
-    DuckDuckGoSearch,
     EntityExtractor,
+    GoogleSearch,
     JSONProcessor,
     ReadFile,
     StatisticalAnalyzer,
@@ -60,7 +59,7 @@ search_memory = MemoryStore(
     max_short_term=1000,
     max_long_term=20000,
     enable_persistence=True,
-    persistence_path=Path.home() / ".calute" / "deepsearch_memory",
+    persistence_path=Path.home() / ".xerxes" / "deepsearch_memory",
     enable_vector_search=False,  # Set to True if you have embeddings
 )
 
@@ -192,7 +191,7 @@ def execute_search_batch(queries: list[str], max_results_per_query: int = 5) -> 
     for _i, query in enumerate(queries, 1):
         try:
             # Use DuckDuckGo search
-            search_result = DuckDuckGoSearch.static_call(query=query, max_results=max_results_per_query, region="us-en")
+            search_result = GoogleSearch.static_call(query=query, max_results=max_results_per_query, region="us-en")
 
             if "results" in search_result:
                 results = search_result["results"]
@@ -667,7 +666,7 @@ Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 
 def save_search_session(include_raw_data: bool = True) -> str:
     """Save the complete search session to files."""
-    session_dir = Path.home() / ".calute" / "deepsearch_sessions" / search_session.get("session_id", "unknown")
+    session_dir = Path.home() / ".xerxes" / "deepsearch_sessions" / search_session.get("session_id", "unknown")
     session_dir.mkdir(parents=True, exist_ok=True)
 
     # Save summary report
@@ -769,8 +768,8 @@ async def main():
             build_knowledge_graph,
             generate_research_report,
             save_search_session,
-            # Calute tools for enhanced capabilities
-            DuckDuckGoSearch,
+            # Xerxes tools for enhanced capabilities
+            GoogleSearch,
             WebScraper,
             URLAnalyzer,
             EntityExtractor,
@@ -789,10 +788,10 @@ async def main():
         extra_body={"chat_template_kwargs": {"enable_thinking": True}},
     )
 
-    # Initialize Calute with enhanced memory
-    calute = Calute(client, enable_memory=True)
-    calute.memory = search_memory
-    calute.register_agent(agent)
+    # Initialize Xerxes with enhanced memory
+    xerxes = Xerxes(client, enable_memory=True)
+    xerxes.memory = search_memory
+    xerxes.register_agent(agent)
 
     # Demo topics for comprehensive search
     demo_topics = [
@@ -895,7 +894,7 @@ async def main():
     print("🔄 Generating AI synthesis...\n")
 
     try:
-        response = await calute.create_response(
+        response = await xerxes.create_response(
             prompt=synthesis_query,
             messages=messages,
             agent_id=agent.id,

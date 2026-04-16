@@ -1,7 +1,7 @@
-"""Tests for calute.core.utils module."""
+"""Tests for xerxes_agent.core.utils module."""
 
-from calute.core.utils import (
-    CaluteBase,
+from xerxes_agent.core.utils import (
+    XerxesBase,
     debug_print,
     estimate_messages_tokens,
     estimate_tokens,
@@ -21,9 +21,9 @@ class TestRunSync:
         assert result == 42
 
 
-class TestCaluteBase:
+class TestXerxesBase:
     def test_basic(self):
-        class MyModel(CaluteBase):
+        class MyModel(XerxesBase):
             name: str
             count: int = 0
 
@@ -133,12 +133,12 @@ class TestFunctionToJson:
         schema = function_to_json(tool)
         assert "name" in schema["function"]["parameters"]["properties"]
 
-    def test_with_calute_schema(self):
+    def test_with_xerxes_schema(self):
         def tool():
             """Schema test."""
             pass
 
-        tool.__calute_schema__ = {
+        tool.__xerxes_schema__ = {
             "name": "custom_tool",
             "description": "A custom tool",
             "parameters": {"type": "object", "properties": {}, "required": []},

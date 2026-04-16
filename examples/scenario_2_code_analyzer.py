@@ -11,10 +11,9 @@ import re
 from pathlib import Path
 
 import openai
-
-from calute import Agent, Calute
-from calute.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from calute.memory import MemoryStore, MemoryType
+from xerxes_agent import Agent, Xerxes
+from xerxes_agent.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
+from xerxes_agent.memory import MemoryStore, MemoryType
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -24,7 +23,7 @@ client = openai.OpenAI(
 
 # Initialize memory for code patterns
 code_memory = MemoryStore(
-    max_short_term=200, enable_persistence=True, persistence_path=Path.home() / ".calute" / "code_analysis_memory"
+    max_short_term=200, enable_persistence=True, persistence_path=Path.home() / ".xerxes" / "code_analysis_memory"
 )
 
 
@@ -370,10 +369,10 @@ async def main():
 
     executor = EnhancedFunctionExecutor(orchestrator=orchestrator, default_timeout=10.0, max_concurrent_executions=5)
 
-    # Initialize Calute
-    calute = Calute(client, enable_memory=True)
-    calute.memory = code_memory
-    calute.register_agent(agent)
+    # Initialize Xerxes
+    xerxes = Xerxes(client, enable_memory=True)
+    xerxes.memory = code_memory
+    xerxes.register_agent(agent)
 
     # Example code to analyze
     test_code = """
@@ -430,7 +429,7 @@ def main():
     print()
 
     # Analyze different aspects using the enhanced executor
-    from calute.types import RequestFunctionCall
+    from xerxes_agent.types import RequestFunctionCall
 
     # Create function calls for analysis
     analysis_calls = [
@@ -444,7 +443,7 @@ def main():
     print("🔎 Running analysis with Enhanced Executor...")
 
     # Execute all analyses in parallel using the enhanced executor
-    from calute.types import FunctionCallStrategy
+    from xerxes_agent.types import FunctionCallStrategy
 
     try:
         results = await executor.execute_function_calls(

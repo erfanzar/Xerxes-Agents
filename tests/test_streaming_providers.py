@@ -1,11 +1,11 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
 from __future__ import annotations
 
-from calute.llms.anthropic import AnthropicLLM
-from calute.llms.ollama import OllamaLLM
+from xerxes_agent.llms.anthropic import AnthropicLLM
+from xerxes_agent.llms.ollama import OllamaLLM
 
 
 async def test_ollama_generate_completion_stream_returns_async_iterator(monkeypatch):

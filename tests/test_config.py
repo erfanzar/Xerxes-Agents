@@ -1,9 +1,9 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Tests for calute.core.config module."""
+"""Tests for xerxes_agent.core.config module."""
 
 import json
 import os
@@ -11,9 +11,7 @@ from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
-
-from calute.core.config import (
-    CaluteConfig,
+from xerxes_agent.core.config import (
     EnvironmentType,
     ExecutorConfig,
     LLMConfig,
@@ -23,6 +21,7 @@ from calute.core.config import (
     MemoryConfig,
     ObservabilityConfig,
     SecurityConfig,
+    XerxesConfig,
     get_config,
     load_config,
     set_config,
@@ -135,12 +134,12 @@ class TestObservabilityConfig:
         config = ObservabilityConfig()
         assert config.enable_tracing is False
         assert config.enable_metrics is True
-        assert config.service_name == "calute"
+        assert config.service_name == "xerxes"
 
 
-class TestCaluteConfig:
+class TestXerxesConfig:
     def test_defaults(self):
-        config = CaluteConfig()
+        config = XerxesConfig()
         assert config.environment == EnvironmentType.DEVELOPMENT
         assert config.debug is False
         assert isinstance(config.executor, ExecutorConfig)
@@ -161,7 +160,7 @@ class TestCaluteConfig:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps(config_data))
 
-        config = CaluteConfig.from_file(config_file)
+        config = XerxesConfig.from_file(config_file)
         assert config.environment == EnvironmentType.TESTING
         assert config.debug is True
         assert config.executor.default_timeout == 60.0
@@ -169,65 +168,65 @@ class TestCaluteConfig:
 
     def test_from_file_not_found(self):
         with pytest.raises(FileNotFoundError):
-            CaluteConfig.from_file("/nonexistent/config.json")
+            XerxesConfig.from_file("/nonexistent/config.json")
 
     def test_from_file_unsupported_format(self, tmp_path):
         bad_file = tmp_path / "config.toml"
         bad_file.write_text("key = 'value'")
         with pytest.raises(ValueError, match="Unsupported"):
-            CaluteConfig.from_file(bad_file)
+            XerxesConfig.from_file(bad_file)
 
     def test_to_json_file(self, tmp_path):
-        config = CaluteConfig(debug=True)
+        config = XerxesConfig(debug=True)
         config_file = tmp_path / "output.json"
         config.to_file(config_file)
 
-        loaded = CaluteConfig.from_file(config_file)
+        loaded = XerxesConfig.from_file(config_file)
         assert loaded.debug is True
 
     def test_to_file_unsupported_format(self, tmp_path):
-        config = CaluteConfig()
+        config = XerxesConfig()
         with pytest.raises(ValueError, match="Unsupported"):
             config.to_file(tmp_path / "config.toml")
 
     def test_merge(self):
-        base = CaluteConfig(debug=False)
-        override = CaluteConfig(debug=True, llm=LLMConfig(model="claude-3"))
+        base = XerxesConfig(debug=False)
+        override = XerxesConfig(debug=True, llm=LLMConfig(model="claude-3"))
         merged = base.merge(override)
         assert merged.debug is True
         assert merged.llm.model == "claude-3"
 
     def test_from_env(self):
         env_vars = {
-            "CALUTE_DEBUG": "true",
-            "CALUTE_ENVIRONMENT": "production",
+            "XERXES_DEBUG": "true",
+            "XERXES_ENVIRONMENT": "production",
         }
         with patch.dict(os.environ, env_vars, clear=False):
-            config = CaluteConfig.from_env()
+            config = XerxesConfig.from_env()
             assert config.debug is True
             assert config.environment == EnvironmentType.PRODUCTION
 
     def test_from_env_nested(self):
         env_vars = {
-            "CALUTE_LLM_MODEL": "gpt-3.5-turbo",
+            "XERXES_LLM_MODEL": "gpt-3.5-turbo",
         }
         with patch.dict(os.environ, env_vars, clear=False):
-            config = CaluteConfig.from_env()
+            config = XerxesConfig.from_env()
             assert config.llm.model == "gpt-3.5-turbo"
 
 
 class TestGlobalConfig:
     def setup_method(self):
-        import calute.core.config as cfg_module
+        import xerxes_agent.core.config as cfg_module
 
         cfg_module._config = None
 
     def test_get_config_creates_default(self):
         config = get_config()
-        assert isinstance(config, CaluteConfig)
+        assert isinstance(config, XerxesConfig)
 
     def test_set_config(self):
-        new_config = CaluteConfig(debug=True)
+        new_config = XerxesConfig(debug=True)
         set_config(new_config)
         assert get_config().debug is True
 
@@ -244,11 +243,11 @@ class TestGlobalConfig:
         config_file = tmp_path / "config.json"
         config_file.write_text(json.dumps(config_data))
 
-        with patch.dict(os.environ, {"CALUTE_CONFIG_FILE": str(config_file)}):
+        with patch.dict(os.environ, {"XERXES_CONFIG_FILE": str(config_file)}):
             config = load_config()
             assert config.debug is True
 
     def test_load_config_defaults_to_env(self):
         with patch.dict(os.environ, {}, clear=False):
             config = load_config()
-            assert isinstance(config, CaluteConfig)
+            assert isinstance(config, XerxesConfig)

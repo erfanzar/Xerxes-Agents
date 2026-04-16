@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,10 +15,9 @@
 import asyncio
 
 import pytest
-
-from calute import Agent
-from calute.executors import AgentOrchestrator, FunctionExecutor, FunctionRegistry
-from calute.types import (
+from xerxes_agent import Agent
+from xerxes_agent.executors import AgentOrchestrator, FunctionExecutor, FunctionRegistry
+from xerxes_agent.types import (
     AgentSwitchTrigger,
     ExecutionStatus,
     FunctionCallStrategy,

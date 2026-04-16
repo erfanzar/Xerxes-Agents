@@ -1,7 +1,7 @@
-calute.operators.browser
-========================
+src/python/xerxes_agent.operators.browser
+===================================
 
-.. automodule:: calute.operators.browser
+.. automodule:: src/python/xerxes_agent.operators.browser
    :members:
    :undoc-members:
    :show-inheritance:

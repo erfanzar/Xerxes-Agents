@@ -1,12 +1,20 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Tests for calute.plugins — plugin registration and management."""
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for xerxes_agent.plugins — plugin registration and management."""
 
 import pytest
-
-from calute.extensions.plugins import (
+from xerxes_agent.extensions.plugins import (
     PluginConflictError,
     PluginMeta,
     PluginRegistry,
@@ -88,6 +96,30 @@ class TestPluginRegistry:
         with pytest.raises(PluginConflictError):
             registry.register_provider("llm", object(), plugin_name="p2")
 
+    def test_register_channel(self):
+        registry = PluginRegistry()
+        chan = object()
+        meta = PluginMeta(name="chan_plugin", plugin_type=PluginType.CHANNEL)
+        registry.register_channel("telegram", chan, meta=meta)
+        assert registry.get_channel("telegram") is chan
+        assert registry.get_all_channels() == {"telegram": chan}
+        assert registry.get_plugin("chan_plugin").channels == {"telegram": chan}
+
+    def test_duplicate_channel_raises(self):
+        registry = PluginRegistry()
+        registry.register_channel("slack", object(), plugin_name="p1")
+        with pytest.raises(PluginConflictError):
+            registry.register_channel("slack", object(), plugin_name="p2")
+
+    def test_unregister_plugin_removes_channels(self):
+        registry = PluginRegistry()
+        meta = PluginMeta(name="chan_plugin", plugin_type=PluginType.CHANNEL)
+        registry.register_channel("discord", object(), meta=meta)
+        assert registry.get_channel("discord") is not None
+        registry.unregister_plugin("chan_plugin")
+        assert registry.get_channel("discord") is None
+        assert registry.get_all_channels() == {}
+
     def test_get_all_tools(self):
         registry = PluginRegistry()
         registry.register_tool("t1", _sample_tool, plugin_name="p1")
@@ -119,7 +151,7 @@ class TestPluginRegistry:
     def test_discover_from_directory(self, tmp_path):
         # Create a plugin file
         plugin_code = """
-from calute.extensions.plugins import PluginMeta, PluginType
+from xerxes_agent.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="discovered_plugin", version="1.0", plugin_type=PluginType.TOOL)
 
@@ -277,7 +309,7 @@ class TestPluginDependencies:
         assert set(order) == {"a", "b"}
 
     def test_get_load_order_circular_raises(self):
-        from calute.extensions.dependency import CircularDependencyError
+        from xerxes_agent.extensions.dependency import CircularDependencyError
 
         registry = PluginRegistry()
         registry.register_plugin(PluginMeta(name="a", version="1.0", dependencies=["b"]))

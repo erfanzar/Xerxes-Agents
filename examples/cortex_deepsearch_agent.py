@@ -23,9 +23,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from calute import Cortex, CortexAgent, CortexOutput, CortexTask, ProcessType, create_llm
-from calute.logging.console import stream_callback
-from calute.tools import DuckDuckGoSearch, WebScraper
+from xerxes_agent import Cortex, CortexAgent, CortexOutput, CortexTask, ProcessType, create_llm
+from xerxes_agent.logging.console import stream_callback
+from xerxes_agent.tools import GoogleSearch, WebScraper
 
 # Keep the same LLM connection settings that are already used in env.py.
 ENV_PY_LLM_CONFIG = {
@@ -219,7 +219,7 @@ def create_researcher_agent(
         ),
         model=model,
         llm=llm,
-        tools=[DuckDuckGoSearch, WebScraper],
+        tools=[GoogleSearch, WebScraper],
         temperature=0.2,
         max_tokens=4096,
         verbose=True,
@@ -336,7 +336,7 @@ def build_parallel_research_cortex(
                 f"Track name: {track['name']}\n"
                 f"Track focus: {track['focus']}\n"
                 "Requirements:\n"
-                "- use DuckDuckGoSearch and WebScraper\n"
+                "- use GoogleSearch and WebScraper\n"
                 "- gather 3-6 high-signal sources for this track\n"
                 "- for each source include title, URL, claim, why it matters, and confidence\n"
                 "- end with unresolved questions for this track\n"

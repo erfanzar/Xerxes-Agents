@@ -1,4 +1,4 @@
-# Copyright 2026 The Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROJECT_NAME = "calute"
+PROJECT_NAME = "src/python/xerxes"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DOCS_API_DIR = PROJECT_ROOT / "docs" / "api_docs"
@@ -283,7 +283,7 @@ def main(argv: list[str] | None = None) -> None:
 
     exit_code = 0
 
-    if not format_code("calute", fix=True):
+    if not format_code("xerxes", fix=True):
         exit_code = 1
 
     if not generate_api_docs(clean=True):

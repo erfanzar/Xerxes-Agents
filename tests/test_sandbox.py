@@ -1,8 +1,17 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Tests for calute.sandbox -- sandbox routing, config, and backend integration."""
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for xerxes_agent.sandbox -- sandbox routing, config, and backend integration."""
 
 from __future__ import annotations
 
@@ -10,8 +19,7 @@ import logging
 from unittest import mock
 
 import pytest
-
-from calute.security.sandbox import (
+from xerxes_agent.security.sandbox import (
     ExecutionContext,
     SandboxBackendConfig,
     SandboxConfig,
@@ -114,7 +122,7 @@ class TestDockerSandboxBackendMocked:
     """Test DockerSandboxBackend using mocked subprocess calls."""
 
     def _make_backend(self, **config_overrides):
-        from calute.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         config = SandboxConfig(
             mode=SandboxMode.STRICT,
@@ -164,7 +172,7 @@ class TestDockerSandboxBackendMocked:
         result_payload = pickle.dumps({"ok": True, "value": 42})
         encoded_result = base64.b64encode(result_payload).decode()
 
-        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=0,
                 stdout=encoded_result,
@@ -175,7 +183,7 @@ class TestDockerSandboxBackendMocked:
 
     def test_execute_container_failure(self):
         backend = self._make_backend()
-        with mock.patch("calute.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(
                 returncode=1,
                 stdout="",
@@ -189,7 +197,7 @@ class TestDockerSandboxBackendMocked:
 
         backend = self._make_backend()
         with mock.patch(
-            "calute.security.sandbox_backends.docker_backend.subprocess.run",
+            "xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run",
             side_effect=sp.TimeoutExpired("docker", 10),
         ):
             with pytest.raises(RuntimeError, match="timed out"):
@@ -213,7 +221,7 @@ class TestDockerSandboxBackendMocked:
 
 class TestSubprocessSandboxBackend:
     def _make_backend(self, **config_overrides):
-        from calute.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
+        from xerxes_agent.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
 
         config = SandboxConfig(
             mode=SandboxMode.STRICT,
@@ -249,7 +257,7 @@ class TestSubprocessSandboxBackend:
 
 class TestSandboxRouterWithBackend:
     def test_strict_mode_with_available_backend_succeeds(self):
-        from calute.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
+        from xerxes_agent.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
 
         config = SandboxConfig(
             mode=SandboxMode.STRICT,
@@ -285,7 +293,7 @@ class TestSandboxRouterWithBackend:
         )
         router = SandboxRouter(config=config, backend=None)
 
-        with caplog.at_level(logging.WARNING, logger="calute.sandbox"):
+        with caplog.at_level(logging.WARNING, logger="xerxes_agent.sandbox"):
             decision = router.decide("test_tool")
 
         assert decision.context == ExecutionContext.HOST
@@ -295,36 +303,36 @@ class TestSandboxRouterWithBackend:
 
 class TestBackendRegistry:
     def test_list_backends(self):
-        from calute.security.sandbox_backends import list_backends
+        from xerxes_agent.security.sandbox_backends import list_backends
 
         names = list_backends()
         assert "docker" in names
         assert "subprocess" in names
 
     def test_get_subprocess_backend(self):
-        from calute.security.sandbox_backends import get_backend
-        from calute.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
+        from xerxes_agent.security.sandbox_backends import get_backend
+        from xerxes_agent.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
 
         config = SandboxConfig()
         backend = get_backend("subprocess", config)
         assert isinstance(backend, SubprocessSandboxBackend)
 
     def test_get_docker_backend(self):
-        from calute.security.sandbox_backends import get_backend
-        from calute.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes_agent.security.sandbox_backends import get_backend
+        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         config = SandboxConfig()
         backend = get_backend("docker", config)
         assert isinstance(backend, DockerSandboxBackend)
 
     def test_unknown_backend_raises(self):
-        from calute.security.sandbox_backends import get_backend
+        from xerxes_agent.security.sandbox_backends import get_backend
 
         with pytest.raises(ValueError, match="Unknown sandbox backend"):
             get_backend("nonexistent", SandboxConfig())
 
     def test_register_custom_backend(self):
-        from calute.security.sandbox_backends import get_backend, register_backend
+        from xerxes_agent.security.sandbox_backends import get_backend, register_backend
 
         class _DummyBackend:
             def __init__(self, sandbox_config):

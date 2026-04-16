@@ -77,23 +77,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
-name = "calute-cli"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "libc",
- "pulldown-cmark",
- "ratatui",
- "serde",
- "serde_json",
- "textwrap",
- "tokio",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "cassowary"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -884,6 +867,23 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "xerxes-cli"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "libc",
+ "pulldown-cmark",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "textwrap",
+ "tokio",
+ "unicode-width 0.2.0",
+]
 
 [[package]]
 name = "zmij"

@@ -1,6 +1,6 @@
-"""Tests for calute.memory.entity_memory module."""
+"""Tests for xerxes_agent.memory.entity_memory module."""
 
-from calute.memory.entity_memory import EntityMemory
+from xerxes_agent.memory.entity_memory import EntityMemory
 
 
 class TestEntityMemory:

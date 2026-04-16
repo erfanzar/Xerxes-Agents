@@ -1,8 +1,8 @@
-"""Tests for calute.tools.data_tools module."""
+"""Tests for xerxes_agent.tools.data_tools module."""
 
 import json
 
-from calute.tools.data_tools import (
+from xerxes_agent.tools.data_tools import (
     CSVProcessor,
     DataConverter,
     DateTimeProcessor,

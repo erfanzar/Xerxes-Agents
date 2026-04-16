@@ -1,7 +1,7 @@
-calute.extensions.dependency
-============================
+src/python/xerxes_agent.extensions.dependency
+=======================================
 
-.. automodule:: calute.extensions.dependency
+.. automodule:: src/python/xerxes_agent.extensions.dependency
    :members:
    :undoc-members:
    :show-inheritance:

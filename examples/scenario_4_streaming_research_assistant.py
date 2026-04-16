@@ -12,10 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-
-from calute import Agent, Calute, FunctionExecutionComplete, MessagesHistory, StreamChunk, UserMessage
-from calute.memory import MemoryStore, MemoryType
-from calute.tools import DuckDuckGoSearch, ReadFile, WriteFile
+from xerxes_agent import Agent, FunctionExecutionComplete, MessagesHistory, StreamChunk, UserMessage, Xerxes
+from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes_agent.tools import GoogleSearch, ReadFile, WriteFile
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -28,7 +27,7 @@ research_memory = MemoryStore(
     max_short_term=500,
     max_long_term=10000,
     enable_persistence=True,
-    persistence_path=Path.home() / ".calute" / "research_assistant_memory",
+    persistence_path=Path.home() / ".xerxes" / "research_assistant_memory",
     enable_vector_search=False,  # Set to True if you have embeddings
 )
 
@@ -256,7 +255,7 @@ def track_research_progress(topic: str) -> str:
     return result
 
 
-async def stream_research_response(calute, agent, prompt, messages):
+async def stream_research_response(xerxes, agent, prompt, messages):
     """Stream a research response with real-time updates."""
     print("\n🔄 Streaming response...")
     print("-" * 40)
@@ -265,7 +264,7 @@ async def stream_research_response(calute, agent, prompt, messages):
     function_calls = []
 
     try:
-        stream = await calute.create_response(
+        stream = await xerxes.create_response(
             prompt=prompt,
             messages=messages,
             agent_id=agent.id,
@@ -333,7 +332,7 @@ async def main():
             synthesize_research,
             create_research_outline,
             track_research_progress,
-            DuckDuckGoSearch,  # Real web search if available
+            GoogleSearch,  # Real web search if available
             WriteFile,  # Save research results
             ReadFile,  # Read saved research
         ],
@@ -342,10 +341,10 @@ async def main():
         extra_body={"chat_template_kwargs": {"enable_thinking": True}},
     )
 
-    # Initialize Calute
-    calute = Calute(client, enable_memory=True)
-    calute.memory = research_memory
-    calute.register_agent(agent)
+    # Initialize Xerxes
+    xerxes = Xerxes(client, enable_memory=True)
+    xerxes.memory = research_memory
+    xerxes.register_agent(agent)
 
     # Research topics
     research_topics = ["artificial intelligence", "machine learning applications", "neural networks"]
@@ -398,7 +397,7 @@ async def main():
         messages.messages.append(UserMessage(content=query))
 
         # Stream response
-        response, functions_used = await stream_research_response(calute, agent, query, messages)
+        response, functions_used = await stream_research_response(xerxes, agent, query, messages)
 
         if functions_used:
             print(f"\n📊 Functions used: {len(functions_used)}")
@@ -464,7 +463,7 @@ async def main():
         "memory_stats": stats,
     }
 
-    output_path = Path.home() / ".calute" / "research_output.json"
+    output_path = Path.home() / ".xerxes" / "research_output.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, "w") as f:

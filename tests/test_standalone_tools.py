@@ -1,8 +1,7 @@
-"""Tests for calute.tools.standalone module."""
+"""Tests for xerxes_agent.tools.standalone module."""
 
 import pytest
-
-from calute.tools.standalone import (
+from xerxes_agent.tools.standalone import (
     AppendFile,
     ExecutePythonCode,
     ExecuteShell,

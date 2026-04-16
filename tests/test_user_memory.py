@@ -1,6 +1,6 @@
-"""Tests for calute.memory.user_memory module."""
+"""Tests for xerxes_agent.memory.user_memory module."""
 
-from calute.memory.user_memory import UserMemory
+from xerxes_agent.memory.user_memory import UserMemory
 
 
 class TestUserMemory:

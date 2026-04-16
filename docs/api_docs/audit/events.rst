@@ -1,7 +1,7 @@
-calute.audit.events
-===================
+src/python/xerxes_agent.audit.events
+==============================
 
-.. automodule:: calute.audit.events
+.. automodule:: src/python/xerxes_agent.audit.events
    :members:
    :undoc-members:
    :show-inheritance:

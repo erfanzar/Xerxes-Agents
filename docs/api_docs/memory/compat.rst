@@ -1,7 +1,7 @@
-calute.memory.compat
-====================
+src/python/xerxes_agent.memory.compat
+===============================
 
-.. automodule:: calute.memory.compat
+.. automodule:: src/python/xerxes_agent.memory.compat
    :members:
    :undoc-members:
    :show-inheritance:

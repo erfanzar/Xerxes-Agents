@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from calute.tui.terminal_config import TerminalConfigStore, TerminalProfile
+from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def test_terminal_config_round_trip(tmp_path: Path):

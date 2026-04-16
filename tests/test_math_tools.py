@@ -1,6 +1,12 @@
-"""Tests for calute.tools.math_tools module."""
+"""Tests for xerxes_agent.tools.math_tools module."""
 
-from calute.tools.math_tools import Calculator, MathematicalFunctions, NumberTheory, StatisticalAnalyzer, UnitConverter
+from xerxes_agent.tools.math_tools import (
+    Calculator,
+    MathematicalFunctions,
+    NumberTheory,
+    StatisticalAnalyzer,
+    UnitConverter,
+)
 
 
 class TestCalculator:

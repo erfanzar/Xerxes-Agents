@@ -11,11 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-
-from calute import Agent, Calute
-from calute.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from calute.memory import MemoryStore, MemoryType
-from calute.types import AgentSwitchTrigger
+from xerxes_agent import Agent, Xerxes
+from xerxes_agent.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
+from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes_agent.types import AgentSwitchTrigger
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -28,14 +27,12 @@ shared_memory = MemoryStore(
     max_short_term=200,
     max_working=50,
     enable_persistence=True,
-    persistence_path=Path.home() / ".calute" / "multi_agent_memory",
+    persistence_path=Path.home() / ".xerxes" / "multi_agent_memory",
 )
 
 # Global task queue for coordination
 task_queue = []
 completed_tasks = []
-
-
 
 
 def search_information(query: str) -> str:
@@ -93,8 +90,6 @@ def compile_report(topic: str) -> str:
     )
 
     return report
-
-
 
 
 def create_project_plan(project_name: str, requirements: str) -> str:
@@ -213,8 +208,6 @@ Overall Progress: {progress:.1f}%
     return result
 
 
-
-
 def implement_feature(feature_name: str, specifications: str = "") -> str:
     """Implement a software feature."""
     # Simulate implementation
@@ -283,8 +276,6 @@ def review_code(code_or_feature: str) -> str:
     result += f"\n\nOverall Score: {len(reviews)}/{len(reviews) + len(issues)} ⭐"
 
     return result
-
-
 
 
 def coordinate_agents(task_description: str) -> str:
@@ -394,13 +385,13 @@ async def main():
     # Create executor
     executor = EnhancedFunctionExecutor(orchestrator=orchestrator, default_timeout=30.0, max_concurrent_executions=4)
 
-    # Initialize Calute
-    calute = Calute(client, enable_memory=True)
-    calute.memory = shared_memory
+    # Initialize Xerxes
+    xerxes = Xerxes(client, enable_memory=True)
+    xerxes.memory = shared_memory
 
-    # Register agents with Calute
+    # Register agents with Xerxes
     for agent in [research_agent, planning_agent, implementation_agent, coordinator_agent]:
-        calute.register_agent(agent)
+        xerxes.register_agent(agent)
 
     # Complex multi-agent task
     print("🎯 COMPLEX TASK: Build a web application for task management\n")
@@ -408,7 +399,7 @@ async def main():
     # Step 1: Coordinator breaks down the task using enhanced executor
     print("Step 1: Coordinator analyzes the task...")
 
-    from calute.types import FunctionCallStrategy, RequestFunctionCall
+    from xerxes_agent.types import FunctionCallStrategy, RequestFunctionCall
 
     # Create function call for coordination
     coordination_call = RequestFunctionCall(

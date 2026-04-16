@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Example demonstrating Calute's OpenClaw-class capabilities.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Example demonstrating Xerxes's OpenClaw-class capabilities.
 
 This example shows:
 1. Registering a plugin tool
@@ -21,7 +30,7 @@ Run with:
 import tempfile
 from pathlib import Path
 
-from calute.extensions.plugins import PluginMeta, PluginRegistry, PluginType
+from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry, PluginType
 
 print("=" * 60)
 print("1. PLUGIN REGISTRATION")
@@ -47,7 +56,7 @@ registry.register_tool("web_search", web_search, meta=meta)
 print(f"Registered plugins: {registry.plugin_names}")
 print(f"Available tools: {list(registry.get_all_tools().keys())}")
 
-from calute.extensions.skills import SkillRegistry
+from xerxes_agent.extensions.skills import SkillRegistry
 
 print("\n" + "=" * 60)
 print("2. SKILL DISCOVERY")
@@ -83,7 +92,7 @@ When asked to research a topic:
     if skill:
         print(f"\nSkill prompt section:\n{skill.to_prompt_section()[:200]}...")
 
-from calute.security.policy import PolicyAction, PolicyEngine, ToolPolicy, ToolPolicyViolation
+from xerxes_agent.security.policy import PolicyEngine, ToolPolicy, ToolPolicyViolation
 
 print("\n" + "=" * 60)
 print("3. TOOL POLICY (Allow/Deny)")
@@ -110,7 +119,7 @@ try:
 except ToolPolicyViolation as e:
     print(f"Policy violation: {e}")
 
-from calute.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopSeverity
+from xerxes_agent.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopSeverity
 
 print("\n" + "=" * 60)
 print("4. LOOP DETECTION")
@@ -123,11 +132,11 @@ detector = LoopDetector(config)
 for i in range(6):
     event = detector.record_call("web_search", {"query": "same query"})
     status = "OK" if event.severity == LoopSeverity.OK else event.severity.value.upper()
-    print(f"  Call {i+1}: {status}" + (f" - {event.details}" if event.details else ""))
+    print(f"  Call {i + 1}: {status}" + (f" - {event.details}" if event.details else ""))
 
 print(f"\nTotal calls tracked: {detector.call_count}")
 
-from calute.extensions.hooks import HookRunner
+from xerxes_agent.extensions.hooks import HookRunner
 
 print("\n" + "=" * 60)
 print("5. HOOK SYSTEM")
@@ -147,7 +156,7 @@ def audit_hook(tool_name, arguments, agent_id):
 # After tool call hook — sanitize results
 def sanitize_hook(tool_name, result, agent_id):
     if isinstance(result, str) and "secret" in result.lower():
-        print(f"  [HOOK] after_tool_call: REDACTING sensitive data")
+        print("  [HOOK] after_tool_call: REDACTING sensitive data")
         return "[REDACTED]"
     return result
 
@@ -171,8 +180,8 @@ print(f"  Sanitized result: {result}")
 bootstrap = runner.run("bootstrap_files", agent_id="test_agent")
 print(f"  Bootstrap content: {bootstrap}")
 
-from calute.runtime.context import PromptContextBuilder
-from calute.security.sandbox import SandboxConfig, SandboxMode
+from xerxes_agent.runtime.context import PromptContextBuilder
+from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
 
 print("\n" + "=" * 60)
 print("6. ENRICHED SYSTEM PROMPT")
@@ -190,7 +199,7 @@ prefix = builder.assemble_system_prompt_prefix(
 )
 print(prefix)
 
-from calute.security.sandbox import SandboxRouter
+from xerxes_agent.security.sandbox import SandboxRouter
 
 print("=" * 60)
 print("7. SANDBOX ROUTING")

@@ -1,5 +1,5 @@
-calute.logging package
-======================
+src/python/xerxes_agent.logging package
+=================================
 
 .. toctree::
    :maxdepth: 2

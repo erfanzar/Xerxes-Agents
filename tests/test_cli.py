@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from types import SimpleNamespace
 
-from calute.tui.cli import (
+from xerxes_agent.tui.cli import (
     DEFAULT_INSTRUCTIONS,
     _resolve_profile,
     build_default_agent,
@@ -16,12 +16,12 @@ from calute.tui.cli import (
     looks_openai_compatible_endpoint,
     main,
 )
-from calute.tui.terminal_config import TerminalConfigStore, TerminalProfile
+from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def test_detect_provider_prefers_explicit_env():
     env = {
-        "CALUTE_PROVIDER": "openai",
+        "XERXES_PROVIDER": "openai",
         "OPENAI_API_KEY": "sk-test",
     }
     assert detect_provider(env) == "openai"
@@ -33,7 +33,7 @@ def test_detect_provider_falls_back_to_ollama():
 
 def test_detect_model_prefers_generic_env():
     env = {
-        "CALUTE_MODEL": "gpt-4.1-mini",
+        "XERXES_MODEL": "gpt-4.1-mini",
         "OPENAI_MODEL": "ignored",
     }
     assert detect_model("openai", env) == "gpt-4.1-mini"
@@ -88,12 +88,14 @@ def test_main_launches_tui(monkeypatch, tmp_path):
         def launch(self):
             captured["launched"] = True
 
-    monkeypatch.setattr("calute.tui.cli.create_llm", lambda provider, **kwargs: object())
-    monkeypatch.setattr("calute.tui.cli.discover_available_models", lambda *args, **kwargs: ["llama3", "qwen2.5"])
+    monkeypatch.setattr("xerxes_agent.tui.cli.create_llm", lambda provider, **kwargs: object())
+    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", lambda *args, **kwargs: ["llama3", "qwen2.5"])
     monkeypatch.setattr(
-        "calute.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
-    monkeypatch.setattr("calute.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json"))
+    monkeypatch.setattr(
+        "xerxes_agent.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
+    )
 
     exit_code = main(["tui", "--provider", "ollama", "--model", "llama3", "--no-tools"])
     assert exit_code == 0
@@ -144,15 +146,17 @@ def test_main_saves_profile(monkeypatch, tmp_path):
         def launch(self):
             captured["launched"] = True
 
-    monkeypatch.setattr("calute.tui.cli.create_llm", lambda provider, **kwargs: object())
+    monkeypatch.setattr("xerxes_agent.tui.cli.create_llm", lambda provider, **kwargs: object())
     monkeypatch.setattr(
-        "calute.tui.cli.discover_available_models",
+        "xerxes_agent.tui.cli.discover_available_models",
         lambda *args, **kwargs: ["qwen3-coder", "deepseek-r1"],
     )
     monkeypatch.setattr(
-        "calute.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
-    monkeypatch.setattr("calute.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json"))
+    monkeypatch.setattr(
+        "xerxes_agent.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
+    )
 
     exit_code = main(
         [
@@ -204,14 +208,14 @@ def test_main_loads_power_tools_enabled_from_profile(monkeypatch, tmp_path):
         )
     )
 
-    monkeypatch.setattr("calute.tui.cli.TerminalConfigStore", lambda: store)
+    monkeypatch.setattr("xerxes_agent.tui.cli.TerminalConfigStore", lambda: store)
     monkeypatch.setattr(
-        "calute.tui.cli.create_llm",
+        "xerxes_agent.tui.cli.create_llm",
         lambda provider, **kwargs: SimpleNamespace(config=SimpleNamespace(model=kwargs.get("model"))),
     )
-    monkeypatch.setattr("calute.tui.cli.discover_available_models", lambda *args, **kwargs: ["qwen3-coder"])
+    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", lambda *args, **kwargs: ["qwen3-coder"])
     monkeypatch.setattr(
-        "calute.tui.cli.launch_tui",
+        "xerxes_agent.tui.cli.launch_tui",
         lambda executor, agent, profile=None, config_store=None: _Launcher(executor),
     )
 
@@ -238,18 +242,18 @@ def test_main_skips_model_discovery_when_profile_already_has_model(monkeypatch, 
         )
     )
 
-    monkeypatch.setattr("calute.tui.cli.TerminalConfigStore", lambda: store)
+    monkeypatch.setattr("xerxes_agent.tui.cli.TerminalConfigStore", lambda: store)
     monkeypatch.setattr(
-        "calute.tui.cli.create_llm",
+        "xerxes_agent.tui.cli.create_llm",
         lambda provider, **kwargs: SimpleNamespace(config=SimpleNamespace(model=kwargs.get("model"))),
     )
 
     def _fail_discovery(*args, **kwargs):
         raise AssertionError("discover_available_models should not run for normal startup when model is preset")
 
-    monkeypatch.setattr("calute.tui.cli.discover_available_models", _fail_discovery)
+    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", _fail_discovery)
     monkeypatch.setattr(
-        "calute.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
 
     exit_code = main(["tui", "--profile-name", "lab"])

@@ -1,14 +1,13 @@
-"""Tests for calute.types.converters module."""
+"""Tests for xerxes_agent.types.converters module."""
 
 import pytest
-
-from calute.types.converters import (
+from xerxes_agent.types.converters import (
     check_openai_fields_names,
     convert_openai_messages,
     convert_openai_tools,
     is_openai_field_name,
 )
-from calute.types.messages import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from xerxes_agent.types.messages import AssistantMessage, SystemMessage, ToolMessage, UserMessage
 
 
 class TestConvertOpenaiMessages:

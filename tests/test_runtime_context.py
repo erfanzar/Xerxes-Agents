@@ -1,16 +1,25 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
-"""Tests for calute.runtime_context — enriched prompt assembly."""
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for xerxes_agent.runtime_context — enriched prompt assembly."""
 
 from pathlib import Path
 
-from calute.extensions.hooks import HookRunner
-from calute.extensions.skills import Skill, SkillMetadata, SkillRegistry
-from calute.runtime.context import PromptContextBuilder, RuntimeInfo
-from calute.runtime.profiles import PromptProfile, PromptProfileConfig
-from calute.security.sandbox import SandboxConfig, SandboxMode
+from xerxes_agent.extensions.hooks import HookRunner
+from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry
+from xerxes_agent.runtime.context import PromptContextBuilder, RuntimeInfo
+from xerxes_agent.runtime.profiles import PromptProfile, PromptProfileConfig
+from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
 
 
 class TestRuntimeInfo:
@@ -19,7 +28,7 @@ class TestRuntimeInfo:
         assert info.timestamp != ""
         assert info.platform != ""
         assert info.python_version != ""
-        assert info.calute_version != ""
+        assert info.xerxes_version != ""
         assert info.working_directory != ""
 
     def test_capture_uses_explicit_workspace_root(self, tmp_path):
@@ -33,7 +42,7 @@ class TestPromptContextBuilder:
         builder = PromptContextBuilder()
         ctx = builder.build()
         assert "[Runtime Context]" in ctx.runtime_section
-        assert "Calute:" in ctx.runtime_section
+        assert "Xerxes:" in ctx.runtime_section
 
     def test_build_workspace_section(self):
         builder = PromptContextBuilder()
@@ -212,7 +221,7 @@ class TestPromptContextBuilderProfiles:
     def test_build_none_prefix(self):
         builder = PromptContextBuilder(guardrails=["G1"])
         prefix = builder.build_none_prefix()
-        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
+        assert prefix == ("You are Xerxes, a runtime-managed AI agent operating inside a controlled tool environment.")
 
     def test_custom_profile_config(self):
         cfg = PromptProfileConfig(
@@ -242,7 +251,7 @@ class TestPromptContextBuilderProfiles:
             sandbox_config=SandboxConfig(mode=SandboxMode.OFF),
         )
         prefix = builder.assemble_system_prompt_prefix(tool_names=["t"], profile=PromptProfile.NONE)
-        assert prefix == ("You are Calute, a runtime-managed AI agent operating inside a controlled tool environment.")
+        assert prefix == ("You are Xerxes, a runtime-managed AI agent operating inside a controlled tool environment.")
         assert "[Tooling]" not in prefix
         assert "[Safety]" not in prefix
         assert "[Sandbox]" not in prefix

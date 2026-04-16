@@ -1,7 +1,7 @@
-calute.memory.storage
-=====================
+src/python/xerxes_agent.memory.storage
+================================
 
-.. automodule:: calute.memory.storage
+.. automodule:: src/python/xerxes_agent.memory.storage
    :members:
    :undoc-members:
    :show-inheritance:

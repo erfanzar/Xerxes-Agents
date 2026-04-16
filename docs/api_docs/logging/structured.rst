@@ -1,7 +1,7 @@
-calute.logging.structured
-=========================
+src/python/xerxes_agent.logging.structured
+====================================
 
-.. automodule:: calute.logging.structured
+.. automodule:: src/python/xerxes_agent.logging.structured
    :members:
    :undoc-members:
    :show-inheritance:

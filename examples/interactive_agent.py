@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Interactive Agent - Test all Calute improvements interactively.
+Interactive Agent - Test all Xerxes improvements interactively.
 This agent demonstrates all the enhanced features and allows you to interact with them.
 """
 
@@ -11,19 +11,18 @@ from pathlib import Path
 
 from openai import OpenAI
 
-# Import core Calute
-from calute import Agent, AssistantMessage, Calute, MessagesHistory, UserMessage
+# Import core Xerxes
+from xerxes_agent import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
 
 # Import all improvements
-from calute.core.config import CaluteConfig, get_config, set_config
-from calute.core.errors import CaluteTimeoutError
-from calute.logging.structured import get_logger
-from calute.memory import MemoryStore, MemoryType
-
+from xerxes_agent.core.config import XerxesConfig, get_config, set_config
+from xerxes_agent.core.errors import XerxesTimeoutError
+from xerxes_agent.logging.structured import get_logger
+from xerxes_agent.memory import MemoryStore, MemoryType
 
 
 def list_improvements() -> str:
-    """List all improvements made to Calute."""
+    """List all improvements made to Xerxes."""
     improvements = [
         "1. Enhanced Memory with indexing and search",
         "2. Configuration management (YAML/JSON)",
@@ -36,7 +35,7 @@ def list_improvements() -> str:
         "9. Developer tools (Makefile, pre-commit)",
         "10. Observability (Prometheus, OpenTelemetry)",
     ]
-    return "Calute Improvements:\n" + "\n".join(improvements)
+    return "Xerxes Improvements:\n" + "\n".join(improvements)
 
 
 def test_memory_system(action: str = "demo", content: str = "", tags: str = "") -> str:
@@ -81,7 +80,7 @@ def test_memory_system(action: str = "demo", content: str = "", tags: str = "") 
         # Add demo memories
         demo_data = [
             ("Python is a programming language", ["programming", "python"]),
-            ("Calute is an AI agent framework", ["ai", "framework", "calute"]),
+            ("Xerxes is an AI agent framework", ["ai", "framework", "xerxes"]),
             ("Machine learning uses neural networks", ["ai", "ml", "neural"]),
         ]
         for content, tags in demo_data:
@@ -146,7 +145,7 @@ def test_configuration(action: str = "show", key: str = "", value: str = "") -> 
     elif action == "load":
         path = Path("interactive_config.json")
         if path.exists():
-            loaded = CaluteConfig.from_file(path)
+            loaded = XerxesConfig.from_file(path)
             set_config(loaded)
             return f"✅ Configuration loaded from {path}"
         return "No saved configuration found"
@@ -171,7 +170,7 @@ def test_error_handling(scenario: str = "timeout") -> str:
         try:
             # This would timeout with proper executor
             return "Simulating timeout... (In real use, this would timeout after configured seconds)"
-        except CaluteTimeoutError as e:
+        except XerxesTimeoutError as e:
             return f"✅ Timeout handled: {e}"
 
     elif scenario == "retry":
@@ -301,15 +300,15 @@ Top classes: {", ".join([c.replace("class ", "") for c in classes[:5]])}"""
 
 
 def get_system_info() -> str:
-    """Get information about the Calute system and environment."""
+    """Get information about the Xerxes system and environment."""
     import platform
 
     info = {
         "Python Version": platform.python_version(),
         "Platform": platform.platform(),
-        "Calute Version": "0.0.18 (enhanced)",
+        "Xerxes Version": "0.0.18 (enhanced)",
         "Working Directory": os.getcwd(),
-        "Memory Store Path": os.path.expanduser("~/.calute/memory_store"),
+        "Memory Store Path": os.path.expanduser("~/.xerxes/memory_store"),
         "Config Path": "interactive_config.json",
     }
 
@@ -341,13 +340,12 @@ def get_system_info() -> str:
     return result
 
 
-
 # Global memory store for the agent
 agent_memory = MemoryStore(
     max_short_term=100,
     max_working=10,
     enable_persistence=True,
-    persistence_path=Path.home() / ".calute" / "interactive_memory",
+    persistence_path=Path.home() / ".xerxes" / "interactive_memory",
 )
 
 # Configure logging
@@ -371,9 +369,9 @@ def create_interactive_agent() -> Agent:
     # Create agent with enhanced features
     agent = Agent(
         id="interactive_test_agent",
-        name="Calute Test Agent",
+        name="Xerxes Test Agent",
         model="gpt-4o",
-        instructions="""You are an interactive test agent for the Calute framework improvements.
+        instructions="""You are an interactive test agent for the Xerxes framework improvements.
 
 Your purpose is to help users test and understand all the new features:
 1. Enhanced memory system with indexing and search
@@ -402,8 +400,8 @@ Be helpful and explain what each feature does when demonstrating it.""",
     return agent
 
 
-class InteractiveCalute:
-    """Interactive Calute wrapper for testing."""
+class InteractiveXerxes:
+    """Interactive Xerxes wrapper for testing."""
 
     def __init__(self):
         self.agent = create_interactive_agent()
@@ -411,7 +409,7 @@ class InteractiveCalute:
         self.logger = logger
 
         # Set up configuration
-        self.config = CaluteConfig(
+        self.config = XerxesConfig(
             environment="development",
             executor={"default_timeout": 30.0},
             memory={"max_short_term": 100},
@@ -421,11 +419,11 @@ class InteractiveCalute:
 
         # Create real OpenAI client
         self.client = OpenAI(api_key="N", base_url="http://137.184.183.6:11558/v1")
-        self.calute = Calute(self.client, enable_memory=True)
-        self.calute.memory = agent_memory
-        self.calute.register_agent(self.agent)
+        self.xerxes = Xerxes(self.client, enable_memory=True)
+        self.xerxes.memory = agent_memory
+        self.xerxes.register_agent(self.agent)
 
-        print("🤖 Interactive Calute Agent Ready!")
+        print("🤖 Interactive Xerxes Agent Ready!")
         print("=" * 60)
 
     async def process_command(self, user_input: str) -> str:
@@ -435,8 +433,8 @@ class InteractiveCalute:
         self.messages.messages.append(UserMessage(content=user_input))
 
         try:
-            # Use the actual Calute agent to process the command
-            response = await self.calute.create_response(
+            # Use the actual Xerxes agent to process the command
+            response = await self.xerxes.create_response(
                 prompt=user_input,
                 messages=self.messages,
                 agent_id=self.agent,
@@ -528,8 +526,8 @@ class InteractiveCalute:
             for part in parts:
                 if ".py" in part:
                     return analyze_code_file(part)
-            # Default to analyzing calute.py
-            return analyze_code_file("calute/calute.py")
+            # Default to analyzing xerxes.py
+            return analyze_code_file("xerxes_agent/xerxes.py")
 
         elif "system" in input_lower or "info" in input_lower:
             return get_system_info()
@@ -564,7 +562,7 @@ class InteractiveCalute:
 
 🔍 **Code Analysis:**
 - "analyze [filepath]" - Analyze Python file
-- "analyze calute/calute.py" - Analyze main file
+- "analyze xerxes_agent/xerxes.py" - Analyze main file
 
 Type 'quit' to exit."""
 
@@ -572,12 +570,12 @@ Type 'quit' to exit."""
             # Try to be helpful
             return f"""I understood: "{user_input}"
 
-I can help you test these Calute improvements:
+I can help you test these Xerxes improvements:
 1. Memory system (try: "test memory")
 2. Configuration (try: "show config")
 3. Error handling (try: "test timeout")
 4. Logging (try: "test logging")
-5. Code analysis (try: "analyze calute/calute.py")
+5. Code analysis (try: "analyze xerxes_agent/xerxes.py")
 
 Type 'help' for all commands."""
 
@@ -611,13 +609,11 @@ Type 'help' for all commands."""
                 logger.logger.error(f"Error processing command: {e}")
 
 
-
-
 def main():
     """Main entry point."""
     print("""
 ╔══════════════════════════════════════════════════════════╗
-║     🚀 CALUTE INTERACTIVE TEST AGENT 🚀                  ║
+║     🚀 XERXES INTERACTIVE TEST AGENT 🚀                  ║
 ║                                                          ║
 ║  Test all improvements and enhanced features            ║
 ║  Type 'help' for available commands                     ║
@@ -625,7 +621,7 @@ def main():
     """)
 
     # Create and run interactive agent
-    interactive = InteractiveCalute()
+    interactive = InteractiveXerxes()
 
     # Show initial status
     print("📊 Initial Status:")

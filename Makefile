@@ -3,7 +3,7 @@
 # Variables
 PYTHON := python3
 PIP := $(PYTHON) -m pip
-PROJECT_NAME := calute
+PROJECT_NAME := xerxes
 DOCKER_IMAGE := $(PROJECT_NAME):latest
 
 # Colors for output

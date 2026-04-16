@@ -1,7 +1,7 @@
-calute.operators.state
-======================
+src/python/xerxes_agent.operators.state
+=================================
 
-.. automodule:: calute.operators.state
+.. automodule:: src/python/xerxes_agent.operators.state
    :members:
    :undoc-members:
    :show-inheritance:

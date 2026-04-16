@@ -1,6 +1,6 @@
-"""Tests for calute.tools.ai_tools module."""
+"""Tests for xerxes_agent.tools.ai_tools module."""
 
-from calute.tools.ai_tools import (
+from xerxes_agent.tools.ai_tools import (
     EntityExtractor,
     TextClassifier,
     TextEmbedder,

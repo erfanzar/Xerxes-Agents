@@ -1,5 +1,5 @@
-calute.cortex.orchestration package
-===================================
+src/python/xerxes_agent.cortex.orchestration package
+==============================================
 
 .. toctree::
    :maxdepth: 2

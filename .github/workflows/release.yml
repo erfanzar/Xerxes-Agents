@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/calute
+      url: https://pypi.org/p/xerxes
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v3
@@ -122,7 +122,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            erfanzar/calute
+            erfanzar/xerxes
             ghcr.io/${{ github.repository }}
           tags: |
             type=ref,event=branch

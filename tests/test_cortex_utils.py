@@ -1,14 +1,13 @@
-"""Tests for calute.cortex string_utils, templates, and enums."""
+"""Tests for xerxes_agent.cortex string_utils, templates, and enums."""
 
 import pytest
-
-from calute.cortex.core.enums import ChainType, ProcessType
-from calute.cortex.core.string_utils import (
+from xerxes_agent.cortex.core.enums import ChainType, ProcessType
+from xerxes_agent.cortex.core.string_utils import (
     extract_template_variables,
     interpolate_inputs,
     validate_inputs_for_template,
 )
-from calute.cortex.core.templates import PromptTemplate
+from xerxes_agent.cortex.core.templates import PromptTemplate
 
 
 class TestProcessType:

@@ -1,7 +1,7 @@
-calute.memory.entity_memory
-===========================
+src/python/xerxes_agent.memory.entity_memory
+======================================
 
-.. automodule:: calute.memory.entity_memory
+.. automodule:: src/python/xerxes_agent.memory.entity_memory
    :members:
    :undoc-members:
    :show-inheritance:

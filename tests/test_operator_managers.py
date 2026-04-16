@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
@@ -12,9 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from calute import Agent, AgentRuntimeOverrides
-from calute.operators import (
+from xerxes_agent import Agent, AgentRuntimeOverrides
+from xerxes_agent.operators import (
     BrowserPageState,
     OperatorRuntimeConfig,
     OperatorState,
@@ -22,11 +21,11 @@ from calute.operators import (
     SpawnedAgentManager,
     UserPromptManager,
 )
-from calute.types import Completion, ResponseResult
+from xerxes_agent.types import Completion, ResponseResult
 
 
 def _operator_tools(state: OperatorState) -> dict[str, callable]:
-    return {getattr(func, "__calute_schema__", {}).get("name", func.__name__): func for func in state.build_tools()}
+    return {getattr(func, "__xerxes_schema__", {}).get("name", func.__name__): func for func in state.build_tools()}
 
 
 def test_pty_session_manager_round_trip():
@@ -90,7 +89,7 @@ class _FakePage:
     def __init__(self):
         self.url = "https://example.com"
         self._title = "Example"
-        self.body_text = "hello world from calute"
+        self.body_text = "hello world from xerxes"
         self.links = ["https://example.com/next"]
 
     async def goto(self, url: str, wait_until: str = "domcontentloaded"):
@@ -114,7 +113,7 @@ class _FakePage:
 
 @pytest.mark.asyncio
 async def test_browser_manager_open_click_find_and_screenshot(tmp_path: Path):
-    from calute.operators.browser import BrowserManager
+    from xerxes_agent.operators.browser import BrowserManager
 
     manager = BrowserManager()
     manager._browser = object()
@@ -146,7 +145,7 @@ class _FakeOrchestrator:
         return self._agent
 
 
-class _FakeCalute:
+class _FakeXerxes:
     def __init__(self, agent: Agent):
         self.orchestrator = _FakeOrchestrator(agent)
 
@@ -170,7 +169,7 @@ class _FakeRuntimeState:
 @pytest.mark.asyncio
 async def test_spawned_agent_manager_lifecycle():
     source_agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    manager = SpawnedAgentManager(_FakeCalute(source_agent), _FakeRuntimeState())
+    manager = SpawnedAgentManager(_FakeXerxes(source_agent), _FakeRuntimeState())
 
     spawned = await manager.spawn(message="hello")
     waited = await manager.wait([spawned["id"]], timeout_ms=1000)
@@ -186,10 +185,10 @@ async def test_spawned_agent_manager_lifecycle():
 @pytest.mark.asyncio
 async def test_spawn_agent_tool_accepts_task_description_alias():
     source_agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute = _FakeCalute(source_agent)
+    xerxes = _FakeXerxes(source_agent)
     runtime_state = _FakeRuntimeState()
     state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
-    state.attach_runtime(calute, runtime_state)
+    state.attach_runtime(xerxes, runtime_state)
 
     spawn_agent = _operator_tools(state)["spawn_agent"]
     spawned = await spawn_agent(task_description="hello from alias")
@@ -202,10 +201,10 @@ async def test_spawn_agent_tool_accepts_task_description_alias():
 @pytest.mark.asyncio
 async def test_send_input_tool_supports_missing_target_and_id_alias():
     source_agent = Agent(id="assistant", model="fake", instructions="Help", functions=[])
-    calute = _FakeCalute(source_agent)
+    xerxes = _FakeXerxes(source_agent)
     runtime_state = _FakeRuntimeState()
     state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
-    state.attach_runtime(calute, runtime_state)
+    state.attach_runtime(xerxes, runtime_state)
 
     tools = _operator_tools(state)
     spawn_agent = tools["spawn_agent"]
@@ -255,7 +254,12 @@ async def test_web_adapter_tools_use_search_and_http_mocks(monkeypatch):
 
     def fake_search(query: str, **kwargs):
         search_calls.append((query, kwargs))
-        return [{"title": "Result", "url": "https://example.com"}]
+        return {
+            "engine": "google_api",
+            "query": query,
+            "count": 1,
+            "results": [{"title": "Result", "url": "https://example.com", "snippet": ""}],
+        }
 
     class _FakeResponse:
         def __init__(self, payload):
@@ -287,13 +291,13 @@ async def test_web_adapter_tools_use_search_and_http_mocks(monkeypatch):
                 return _FakeResponse({"events": [{"id": "1"}]})
             raise AssertionError(f"Unexpected URL: {url}")
 
-    monkeypatch.setattr("calute.operators.state.DuckDuckGoSearch.static_call", fake_search)
-    monkeypatch.setattr("calute.operators.state.httpx.AsyncClient", lambda timeout=20: _FakeClient())
+    monkeypatch.setattr("xerxes_agent.operators.state.GoogleSearch.static_call", fake_search)
+    monkeypatch.setattr("xerxes_agent.operators.state.httpx.AsyncClient", lambda timeout=20: _FakeClient())
 
     state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
     tools = _operator_tools(state)
 
-    search_result = tools["web.search_query"]("calute")
+    search_result = tools["web.search_query"]("xerxes")
     image_result = tools["web.image_query"]("waterfalls")
     weather = await tools["web.weather"]("Istanbul")
     finance = await tools["web.finance"]("AMD")
@@ -301,29 +305,33 @@ async def test_web_adapter_tools_use_search_and_http_mocks(monkeypatch):
 
     assert search_result["results"][0]["title"] == "Result"
     assert image_result["results"][0]["url"] == "https://example.com"
-    assert search_calls[0][0] == "calute"
+    assert search_calls[0][0] == "xerxes"
     assert weather["location"] == "Istanbul"
     assert finance["price"] == 42
     assert sports["league"] == "nba"
 
 
-def test_web_search_query_surfaces_fallback_metadata(monkeypatch):
+def test_web_search_query_passes_recency_for_news(monkeypatch):
+    """``search_type='news'`` should translate to GoogleSearch ``time_range='d'``."""
+    captured: dict = {}
+
     def fake_search(query: str, **kwargs):
-        assert kwargs["search_type"] == "news"
-        assert kwargs["return_metadata"] is True
+        captured.update(kwargs)
         return {
-            "results": [{"title": "Fallback result", "url": "https://example.com/fallback"}],
-            "metadata": {"effective_search_type": "text", "fallback_applied": "news_to_text"},
+            "engine": "google_api",
+            "query": query,
+            "count": 1,
+            "results": [{"title": "Recent news", "url": "https://example.com/news", "snippet": ""}],
         }
 
-    monkeypatch.setattr("calute.operators.state.DuckDuckGoSearch.static_call", fake_search)
+    monkeypatch.setattr("xerxes_agent.operators.state.GoogleSearch.static_call", fake_search)
 
     state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
     tools = _operator_tools(state)
 
-    search_result = tools["web.search_query"]("latest OpenAI news", search_type="news")
+    search_result = tools["web.search_query"]("latest OpenAI news", search_type="news", domains=["openai.com"])
 
     assert search_result["search_type"] == "news"
-    assert search_result["effective_search_type"] == "text"
-    assert search_result["fallback_applied"] == "news_to_text"
-    assert search_result["results"][0]["title"] == "Fallback result"
+    assert search_result["results"][0]["title"] == "Recent news"
+    assert captured["time_range"] == "d"
+    assert captured["site"] == "openai.com"

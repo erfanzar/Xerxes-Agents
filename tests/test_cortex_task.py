@@ -1,8 +1,8 @@
-"""Tests for calute.cortex.task module."""
+"""Tests for xerxes_agent.cortex.task module."""
 
 from unittest.mock import MagicMock
 
-from calute.cortex.orchestration.task import (
+from xerxes_agent.cortex.orchestration.task import (
     ChainLink,
     CortexTask,
     CortexTaskOutput,

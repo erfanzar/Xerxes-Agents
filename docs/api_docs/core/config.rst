@@ -1,7 +1,7 @@
-calute.core.config
-==================
+src/python/xerxes_agent.core.config
+=============================
 
-.. automodule:: calute.core.config
+.. automodule:: src/python/xerxes_agent.core.config
    :members:
    :undoc-members:
    :show-inheritance:

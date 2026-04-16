@@ -1,13 +1,13 @@
-"""Tests for calute.types.messages module — focus on uncovered branches."""
+"""Tests for xerxes_agent.types.messages module — focus on uncovered branches."""
 
-from calute.types.messages import (
+from xerxes_agent.types.messages import (
     AssistantMessage,
     MessagesHistory,
     SystemMessage,
     ToolMessage,
     UserMessage,
 )
-from calute.types.tool_calls import FunctionCall, ToolCall
+from xerxes_agent.types.tool_calls import FunctionCall, ToolCall
 
 
 class TestMessagesHistory:

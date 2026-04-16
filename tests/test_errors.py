@@ -1,31 +1,31 @@
-"""Tests for calute.core.errors module."""
+"""Tests for xerxes_agent.core.errors module."""
 
-from calute.core.errors import (
+from xerxes_agent.core.errors import (
     AgentError,
-    CaluteError,
-    CaluteMemoryError,
-    CaluteTimeoutError,
     ClientError,
     ConfigurationError,
     FunctionExecutionError,
     RateLimitError,
     ValidationError,
+    XerxesError,
+    XerxesMemoryError,
+    XerxesTimeoutError,
 )
 
 
-class TestCaluteError:
+class TestXerxesError:
     def test_basic(self):
-        e = CaluteError("something went wrong")
+        e = XerxesError("something went wrong")
         assert str(e) == "something went wrong"
         assert e.message == "something went wrong"
         assert e.details == {}
 
     def test_with_details(self):
-        e = CaluteError("err", details={"key": "val"})
+        e = XerxesError("err", details={"key": "val"})
         assert e.details == {"key": "val"}
 
     def test_is_exception(self):
-        assert issubclass(CaluteError, Exception)
+        assert issubclass(XerxesError, Exception)
 
 
 class TestAgentError:
@@ -48,9 +48,9 @@ class TestFunctionExecutionError:
         assert e.original_error is orig
 
 
-class TestCaluteTimeoutError:
+class TestXerxesTimeoutError:
     def test_basic(self):
-        e = CaluteTimeoutError("llm_call", 30.0)
+        e = XerxesTimeoutError("llm_call", 30.0)
         assert "30" in str(e)
         assert e.operation == "llm_call"
         assert e.timeout == 30.0
@@ -83,9 +83,9 @@ class TestRateLimitError:
         assert e.retry_after == 30.0
 
 
-class TestCaluteMemoryError:
+class TestXerxesMemoryError:
     def test_basic(self):
-        e = CaluteMemoryError("store", "disk full")
+        e = XerxesMemoryError("store", "disk full")
         assert "store" in str(e)
         assert e.operation == "store"
 

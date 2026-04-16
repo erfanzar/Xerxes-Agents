@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,7 @@
 from datetime import datetime, timedelta
 
 import numpy as np
-
-from calute import MemoryEntry, MemoryStore, MemoryType
+from xerxes_agent import MemoryEntry, MemoryStore, MemoryType
 
 
 class TestMemory:

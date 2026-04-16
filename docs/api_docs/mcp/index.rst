@@ -1,5 +1,5 @@
-calute.mcp package
-==================
+src/python/xerxes_agent.mcp package
+=============================
 
 .. toctree::
    :maxdepth: 2

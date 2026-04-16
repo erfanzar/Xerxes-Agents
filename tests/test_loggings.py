@@ -1,12 +1,12 @@
-"""Tests for calute.loggings module."""
+"""Tests for xerxes_agent.loggings module."""
 
 import logging
 
-from calute.logging.console import (
+from xerxes_agent.logging.console import (
     COLORS,
     LEVEL_COLORS,
-    CaluteLogger,
     ColorFormatter,
+    XerxesLogger,
     get_logger,
     log_step,
     set_verbosity,
@@ -58,14 +58,14 @@ class TestColorFormatter:
         assert "line2" in result
 
 
-class TestCaluteLogger:
+class TestXerxesLogger:
     def test_singleton(self):
-        l1 = CaluteLogger()
-        l2 = CaluteLogger()
+        l1 = XerxesLogger()
+        l2 = XerxesLogger()
         assert l1 is l2
 
     def test_log_methods(self):
-        logger = CaluteLogger()
+        logger = XerxesLogger()
         logger.debug("debug msg")
         logger.info("info msg")
         logger.warning("warning msg")
@@ -73,16 +73,16 @@ class TestCaluteLogger:
         logger.critical("critical msg")
 
     def test_set_level(self):
-        logger = CaluteLogger()
+        logger = XerxesLogger()
         logger.set_level("DEBUG")
         assert logger.logger.level == logging.DEBUG
         logger.set_level("INFO")
 
 
 class TestGetLogger:
-    def test_returns_calute_logger(self):
+    def test_returns_xerxes_logger(self):
         logger = get_logger()
-        assert isinstance(logger, CaluteLogger)
+        assert isinstance(logger, XerxesLogger)
 
 
 class TestSetVerbosity:

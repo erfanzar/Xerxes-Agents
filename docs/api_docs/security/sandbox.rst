@@ -1,7 +1,7 @@
-calute.security.sandbox
-=======================
+src/python/xerxes_agent.security.sandbox
+==================================
 
-.. automodule:: calute.security.sandbox
+.. automodule:: src/python/xerxes_agent.security.sandbox
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
-calute.mcp.client
-=================
+src/python/xerxes_agent.mcp.client
+============================
 
-.. automodule:: calute.mcp.client
+.. automodule:: src/python/xerxes_agent.mcp.client
    :members:
    :undoc-members:
    :show-inheritance:

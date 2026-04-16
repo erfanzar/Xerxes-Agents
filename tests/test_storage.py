@@ -1,6 +1,6 @@
-"""Tests for calute.memory.storage module."""
+"""Tests for xerxes_agent.memory.storage module."""
 
-from calute.memory.storage import (
+from xerxes_agent.memory.storage import (
     FileStorage,
     RAGStorage,
     SimpleStorage,

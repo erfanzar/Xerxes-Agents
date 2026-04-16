@@ -1,8 +1,7 @@
-"""Tests for calute.llms.base module."""
+"""Tests for xerxes_agent.llms.base module."""
 
 import pytest
-
-from calute.llms.base import BaseLLM, LLMConfig
+from xerxes_agent.llms.base import BaseLLM, LLMConfig
 
 
 class TestLLMConfig:

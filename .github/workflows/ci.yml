@@ -37,13 +37,13 @@ jobs:
           pip install ruff black mypy
       
       - name: Run ruff
-        run: ruff check calute/
+        run: ruff check xerxes_agent/
       
       - name: Run black
-        run: black --check calute/
+        run: black --check xerxes_agent/
       
       - name: Run mypy
-        run: mypy calute/ --ignore-missing-imports
+        run: mypy xerxes_agent/ --ignore-missing-imports
 
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -80,7 +80,7 @@ jobs:
       
       - name: Run tests with coverage
         run: |
-          pytest tests/ -v --cov=calute --cov-report=xml --cov-report=html --cov-report=term
+          pytest tests/ -v --cov=xerxes --cov-report=xml --cov-report=html --cov-report=term
       
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
@@ -105,9 +105,9 @@ jobs:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_USER: calute
+          POSTGRES_USER: xerxes
           POSTGRES_PASSWORD: testpass
-          POSTGRES_DB: calute_test
+          POSTGRES_DB: xerxes_test
         ports:
           - 5432:5432
         options: >-
@@ -141,7 +141,7 @@ jobs:
       
       - name: Run integration tests
         env:
-          DATABASE_URL: postgresql://calute:testpass@localhost:5432/calute_test
+          DATABASE_URL: postgresql://xerxes:testpass@localhost:5432/xerxes_test
           REDIS_URL: redis://localhost:6379
         run: |
           pytest tests/ -v -m integration
@@ -163,7 +163,7 @@ jobs:
           pip install bandit safety pip-audit
       
       - name: Run bandit
-        run: bandit -r calute/ -f json -o bandit-report.json
+        run: bandit -r xerxes_agent/ -f json -o bandit-report.json
         continue-on-error: true
       
       - name: Run safety check

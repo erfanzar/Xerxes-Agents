@@ -1,7 +1,7 @@
-calute.cortex.orchestration.cortex
-==================================
+src/python/xerxes_agent.cortex.orchestration.cortex
+=============================================
 
-.. automodule:: calute.cortex.orchestration.cortex
+.. automodule:: src/python/xerxes_agent.cortex.orchestration.cortex
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
-calute.cortex.orchestration.dynamic
-===================================
+src/python/xerxes_agent.cortex.orchestration.dynamic
+==============================================
 
-.. automodule:: calute.cortex.orchestration.dynamic
+.. automodule:: src/python/xerxes_agent.cortex.orchestration.dynamic
    :members:
    :undoc-members:
    :show-inheritance:

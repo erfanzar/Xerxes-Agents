@@ -1,7 +1,7 @@
-calute.cortex.core.tool
-=======================
+src/python/xerxes_agent.cortex.core.tool
+==================================
 
-.. automodule:: calute.cortex.core.tool
+.. automodule:: src/python/xerxes_agent.cortex.core.tool
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
-calute.agents._data_analyst_agent
-=================================
+src/python/xerxes_agent.agents._data_analyst_agent
+============================================
 
-.. automodule:: calute.agents._data_analyst_agent
+.. automodule:: src/python/xerxes_agent.agents._data_analyst_agent
    :members:
    :undoc-members:
    :show-inheritance:

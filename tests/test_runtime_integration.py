@@ -1,7 +1,16 @@
-# Copyright 2025 The EasyDeL/Calute Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Licensed under the Apache License, Version 2.0 (the "License")
-
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Runtime integration tests for the opt-in OpenClaw-style feature layer."""
 
 from __future__ import annotations
@@ -9,15 +18,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-from calute import Agent, AgentRuntimeOverrides, Calute, RuntimeFeaturesConfig, create_llm
-from calute.extensions.plugins import PluginRegistry
-from calute.llms.base import BaseLLM, LLMConfig
-from calute.runtime.loop_detection import LoopDetectionConfig
-from calute.security.policy import ToolPolicy
-from calute.security.sandbox import SandboxConfig, SandboxMode
-from calute.tools.standalone import WriteFile
-from calute.types import ExecutionStatus, RequestFunctionCall
+from xerxes_agent import Agent, AgentRuntimeOverrides, RuntimeFeaturesConfig, Xerxes, create_llm
+from xerxes_agent.extensions.plugins import PluginRegistry
+from xerxes_agent.llms.base import BaseLLM, LLMConfig
+from xerxes_agent.runtime.loop_detection import LoopDetectionConfig
+from xerxes_agent.security.policy import ToolPolicy
+from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
+from xerxes_agent.tools.standalone import WriteFile
+from xerxes_agent.types import ExecutionStatus, RequestFunctionCall
 
 
 def _chunk(*, content: str | None = None, function_calls: list[dict] | None = None, is_final: bool = False) -> dict:
@@ -104,7 +112,7 @@ def tool_result_persist(tool_name, result, agent_id):
         )
 
     path.write_text(
-        f"""from calute.extensions.plugins import PluginMeta, PluginType
+        f"""from xerxes_agent.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="runtime_plugin", version="1.0.0", plugin_type=PluginType.TOOL)
 
@@ -138,23 +146,23 @@ Break the task into smaller questions and synthesize the answers.
 
 
 def test_runtime_prompt_lists_tool_summaries_instead_of_names_only():
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="writer", model="fake", instructions="Help with files.", functions=[WriteFile])
 
-    messages = calute.manage_messages(agent=agent, prompt="write a report")
+    messages = xerxes.manage_messages(agent=agent, prompt="write a report")
     system_prompt = messages.to_openai()["messages"][0]["content"]
 
     assert "WriteFile:" in system_prompt
     assert "Write text to a file" in system_prompt
 
 
-def test_calute_enables_operator_runtime_by_default():
-    calute = Calute()
+def test_xerxes_enables_operator_runtime_by_default():
+    xerxes = Xerxes()
 
-    assert calute._runtime_features_state is not None
-    assert calute._runtime_features_state.operator_state is not None
-    assert calute._runtime_features_state.operator_state.config.power_tools_enabled is True
-    assert calute.runtime_features.enabled is True
+    assert xerxes._runtime_features_state is not None
+    assert xerxes._runtime_features_state.operator_state is not None
+    assert xerxes._runtime_features_state.operator_state.config.power_tools_enabled is True
+    assert xerxes.runtime_features.enabled is True
 
 
 def _tool_messages(messages: list[dict]) -> list[dict]:
@@ -171,12 +179,12 @@ def test_runtime_disabled_keeps_existing_behavior(tmp_path, monkeypatch):
     skill_dir.mkdir(parents=True)
     _write_skill(skill_dir / "SKILL.md")
 
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=False))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=False))
     agent = Agent(id="plain", model="fake", instructions="Base instructions", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     assert "plugin_echo" not in agent.get_available_functions()
-    system_content = calute.manage_messages(agent=agent, prompt="hello").messages[0].content
+    system_content = xerxes.manage_messages(agent=agent, prompt="hello").messages[0].content
     assert "[Runtime Context]" not in system_content
     assert "Bootstrap hook from plugin" not in system_content
     assert "Research Skill" not in system_content
@@ -192,7 +200,7 @@ def test_runtime_enabled_discovers_extensions_and_enriches_prompt(tmp_path, monk
     skill_dir.mkdir(parents=True)
     _write_skill(skill_dir / "SKILL.md")
 
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             enabled_skills=["research"],
@@ -200,10 +208,10 @@ def test_runtime_enabled_discovers_extensions_and_enriches_prompt(tmp_path, monk
         )
     )
     agent = Agent(id="runtime", model="fake", instructions="Base instructions", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     assert "plugin_echo" in agent.get_available_functions()
-    system_content = calute.manage_messages(agent=agent, prompt="hello").messages[0].content
+    system_content = xerxes.manage_messages(agent=agent, prompt="hello").messages[0].content
     assert system_content.startswith("[Identity]\n")
     assert "[Identity]" in system_content
     assert "[Tooling]" in system_content
@@ -225,18 +233,18 @@ def test_runtime_workspace_is_pinned_to_launch_directory(tmp_path, monkeypatch):
     other_root.mkdir()
 
     monkeypatch.chdir(launch_root)
-    calute = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="runtime", model="fake", instructions="Base instructions", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     monkeypatch.chdir(other_root)
-    system_content = calute.manage_messages(agent=agent, prompt="where am I").messages[0].content
+    system_content = xerxes.manage_messages(agent=agent, prompt="where am I").messages[0].content
 
     assert f"Directory: {launch_root}" in system_content
     assert f"Directory: {other_root}" not in system_content
-    assert calute._runtime_features_state is not None
-    assert calute._runtime_features_state.operator_state is not None
-    assert calute._runtime_features_state.operator_state.config.shell_default_workdir == str(launch_root)
+    assert xerxes._runtime_features_state is not None
+    assert xerxes._runtime_features_state.operator_state is not None
+    assert xerxes._runtime_features_state.operator_state.config.shell_default_workdir == str(launch_root)
 
 
 @pytest.mark.asyncio
@@ -256,11 +264,11 @@ async def test_runtime_hooks_and_plugin_tool_apply_in_live_execution(tmp_path, m
             [_chunk(content="final", is_final=True)],
         ]
     )
-    calute = Calute(llm=llm, runtime_features=RuntimeFeaturesConfig(enabled=True))
+    xerxes = Xerxes(llm=llm, runtime_features=RuntimeFeaturesConfig(enabled=True))
     agent = Agent(id="hooked", model="fake-model", instructions="Base instructions", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    result = await calute.create_response(prompt="say hi", agent_id=agent, stream=False)
+    result = await xerxes.create_response(prompt="say hi", agent_id=agent, stream=False)
 
     assert result.content == "final"
     persisted_messages = llm.calls[1]["prompt"]
@@ -281,61 +289,61 @@ async def test_runtime_policy_override_and_sandbox_routing_apply_at_execution_se
             "allowed": AgentRuntimeOverrides(policy=ToolPolicy(allow={"dangerous"})),
         },
     )
-    calute = Calute(runtime_features=runtime_features)
+    xerxes = Xerxes(runtime_features=runtime_features)
     allowed = Agent(id="allowed", model="fake", instructions="Allowed", functions=[dangerous])
     denied = Agent(id="denied", model="fake", instructions="Denied", functions=[dangerous])
-    calute.register_agent(allowed)
-    calute.register_agent(denied)
+    xerxes.register_agent(allowed)
+    xerxes.register_agent(denied)
 
-    allowed_call = await calute.executor._execute_single_call(
+    allowed_call = await xerxes.executor._execute_single_call(
         RequestFunctionCall(name="dangerous", arguments={}),
         {},
         allowed,
-        runtime_features_state=calute._runtime_features_state,
+        runtime_features_state=xerxes._runtime_features_state,
     )
-    denied_call = await calute.executor._execute_single_call(
+    denied_call = await xerxes.executor._execute_single_call(
         RequestFunctionCall(name="dangerous", arguments={}),
         {},
         denied,
-        runtime_features_state=calute._runtime_features_state,
+        runtime_features_state=xerxes._runtime_features_state,
     )
 
     assert allowed_call.status == ExecutionStatus.SUCCESS
     assert denied_call.status == ExecutionStatus.FAILURE
     assert "denied by policy" in (denied_call.error or "")
 
-    strict_calute = Calute(
+    strict_xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             sandbox=SandboxConfig(mode=SandboxMode.STRICT, sandboxed_tools={"dangerous"}),
         )
     )
     strict_agent = Agent(id="strict", model="fake", instructions="Strict", functions=[dangerous])
-    strict_calute.register_agent(strict_agent)
+    strict_xerxes.register_agent(strict_agent)
 
-    strict_call = await strict_calute.executor._execute_single_call(
+    strict_call = await strict_xerxes.executor._execute_single_call(
         RequestFunctionCall(name="dangerous", arguments={}),
         {},
         strict_agent,
-        runtime_features_state=strict_calute._runtime_features_state,
+        runtime_features_state=strict_xerxes._runtime_features_state,
     )
     assert strict_call.status == ExecutionStatus.FAILURE
     assert "requires sandbox execution" in (strict_call.error or "")
 
-    warn_calute = Calute(
+    warn_xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             sandbox=SandboxConfig(mode=SandboxMode.WARN, sandboxed_tools={"dangerous"}),
         )
     )
     warn_agent = Agent(id="warn", model="fake", instructions="Warn", functions=[dangerous])
-    warn_calute.register_agent(warn_agent)
+    warn_xerxes.register_agent(warn_agent)
 
-    warn_call = await warn_calute.executor._execute_single_call(
+    warn_call = await warn_xerxes.executor._execute_single_call(
         RequestFunctionCall(name="dangerous", arguments={}),
         {},
         warn_agent,
-        runtime_features_state=warn_calute._runtime_features_state,
+        runtime_features_state=warn_xerxes._runtime_features_state,
     )
     assert warn_call.status == ExecutionStatus.SUCCESS
 
@@ -365,7 +373,7 @@ async def test_loop_detector_is_reused_across_reinvocation_cycles():
             [_chunk(content="stopped", is_final=True)],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -379,9 +387,9 @@ async def test_loop_detector_is_reused_across_reinvocation_cycles():
         ),
     )
     agent = Agent(id="looping", model="fake-model", instructions="Looping", functions=[repeat_tool])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    result = await calute.create_response(prompt="loop", agent_id=agent, stream=False)
+    result = await xerxes.create_response(prompt="loop", agent_id=agent, stream=False)
 
     assert result.content == "stopped"
     assert call_counter["count"] == 1
@@ -406,7 +414,7 @@ def test_create_llm_resolves_provider_plugins():
 
 def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
     """Audit events must be emitted from real runtime flow, not only unit tests."""
-    from calute.audit import InMemoryCollector
+    from xerxes_agent.audit import InMemoryCollector
 
     monkeypatch.chdir(tmp_path)
     collector = InMemoryCollector()
@@ -420,7 +428,7 @@ def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
             [_chunk(content="done", is_final=True)],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -428,12 +436,12 @@ def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
         ),
     )
     agent = Agent(id="audited", model="fake-model", instructions="Test", functions=[greet])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     import asyncio
 
     result = asyncio.get_event_loop().run_until_complete(
-        calute.create_response(prompt="hi", agent_id=agent, stream=False)
+        xerxes.create_response(prompt="hi", agent_id=agent, stream=False)
     )
     assert result.content == "done"
 
@@ -452,7 +460,7 @@ def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
 
 def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
     """Session manager must record turns from real runs."""
-    from calute.session import InMemorySessionStore
+    from xerxes_agent.session import InMemorySessionStore
 
     monkeypatch.chdir(tmp_path)
     store = InMemorySessionStore()
@@ -466,7 +474,7 @@ def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
             [_chunk(content="pong", is_final=True)],
         ]
     )
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -474,12 +482,12 @@ def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
         ),
     )
     agent = Agent(id="sessioned", model="fake-model", instructions="Test", functions=[echo])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     import asyncio
 
     result = asyncio.get_event_loop().run_until_complete(
-        calute.create_response(prompt="test", agent_id=agent, stream=False)
+        xerxes.create_response(prompt="test", agent_id=agent, stream=False)
     )
     assert result.content == "pong"
 
@@ -499,13 +507,13 @@ def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
 
 def test_non_tool_runtime_path_emits_turn_end_and_persists_session():
     """Plain completion turns should still emit end events and persist a turn."""
-    from calute.audit import InMemoryCollector
-    from calute.session import InMemorySessionStore
+    from xerxes_agent.audit import InMemoryCollector
+    from xerxes_agent.session import InMemorySessionStore
 
     collector = InMemoryCollector()
     store = InMemorySessionStore()
     llm = _FakeLLM(responses=[[_chunk(content="plain answer", is_final=True)]])
-    calute = Calute(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
@@ -514,12 +522,12 @@ def test_non_tool_runtime_path_emits_turn_end_and_persists_session():
         ),
     )
     agent = Agent(id="plain_runtime", model="fake-model", instructions="Test", functions=[])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
     import asyncio
 
     result = asyncio.get_event_loop().run_until_complete(
-        calute.create_response(prompt="hello", agent_id=agent, stream=False, apply_functions=False)
+        xerxes.create_response(prompt="hello", agent_id=agent, stream=False, apply_functions=False)
     )
     assert result.content == "plain answer"
 
@@ -541,16 +549,16 @@ def test_non_tool_runtime_path_emits_turn_end_and_persists_session():
 
 def test_prompt_profile_compact_mode_produces_shorter_output(tmp_path, monkeypatch):
     """Compact prompt profile must produce a shorter prompt than full."""
-    from calute.runtime.profiles import PromptProfile
+    from xerxes_agent.runtime.profiles import PromptProfile
 
     monkeypatch.chdir(tmp_path)
 
-    calute_full = Calute(runtime_features=RuntimeFeaturesConfig(enabled=True, guardrails=["Be safe"]))
+    xerxes_full = Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True, guardrails=["Be safe"]))
     agent_full = Agent(id="full", model="fake", instructions="Base", functions=[])
-    calute_full.register_agent(agent_full)
-    full_prompt = calute_full.manage_messages(agent=agent_full, prompt="hello").messages[0].content
+    xerxes_full.register_agent(agent_full)
+    full_prompt = xerxes_full.manage_messages(agent=agent_full, prompt="hello").messages[0].content
 
-    calute_compact = Calute(
+    xerxes_compact = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             guardrails=["Be safe"],
@@ -558,8 +566,8 @@ def test_prompt_profile_compact_mode_produces_shorter_output(tmp_path, monkeypat
         )
     )
     agent_compact = Agent(id="compact", model="fake", instructions="Base", functions=[])
-    calute_compact.register_agent(agent_compact)
-    compact_prompt = calute_compact.manage_messages(agent=agent_compact, prompt="hello").messages[0].content
+    xerxes_compact.register_agent(agent_compact)
+    compact_prompt = xerxes_compact.manage_messages(agent=agent_compact, prompt="hello").messages[0].content
 
     assert "[Identity]" in full_prompt
     assert "[Tooling]" in full_prompt
@@ -572,7 +580,7 @@ def test_prompt_profile_compact_mode_produces_shorter_output(tmp_path, monkeypat
 
 def test_sandbox_backend_instantiation_from_config():
     """Runtime features should instantiate sandbox backend from config backend_type."""
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             sandbox=SandboxConfig(
@@ -582,7 +590,7 @@ def test_sandbox_backend_instantiation_from_config():
             ),
         )
     )
-    state = calute._runtime_features_state
+    state = xerxes._runtime_features_state
     assert state is not None
     assert state.sandbox_backend is not None
     assert state.sandbox_backend.is_available()
@@ -599,7 +607,7 @@ def _sandbox_compute(x: int) -> int:
 @pytest.mark.asyncio
 async def test_strict_sandbox_with_subprocess_backend_executes():
     """Strict sandbox with subprocess backend should actually execute in sandbox."""
-    calute = Calute(
+    xerxes = Xerxes(
         runtime_features=RuntimeFeaturesConfig(
             enabled=True,
             sandbox=SandboxConfig(
@@ -610,13 +618,13 @@ async def test_strict_sandbox_with_subprocess_backend_executes():
         )
     )
     agent = Agent(id="strict_sb", model="fake", instructions="Test", functions=[_sandbox_compute])
-    calute.register_agent(agent)
+    xerxes.register_agent(agent)
 
-    result = await calute.executor._execute_single_call(
+    result = await xerxes.executor._execute_single_call(
         RequestFunctionCall(name="_sandbox_compute", arguments={"x": 5}),
         {},
         agent,
-        runtime_features_state=calute._runtime_features_state,
+        runtime_features_state=xerxes._runtime_features_state,
     )
     assert result.status == ExecutionStatus.SUCCESS
     assert result.result == 10
@@ -629,7 +637,7 @@ def test_plugin_dependency_validation_runs_at_startup(tmp_path, monkeypatch):
     plugin_dir.mkdir()
     # Plugin with unmet dependency
     plugin_dir.joinpath("needy_plugin.py").write_text(
-        """from calute.extensions.plugins import PluginMeta, PluginType
+        """from xerxes_agent.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(
     name="needy",
@@ -647,4 +655,4 @@ def register(registry):
     )
 
     with pytest.raises(ValueError, match="nonexistent_dep"):
-        Calute(runtime_features=RuntimeFeaturesConfig(enabled=True))
+        Xerxes(runtime_features=RuntimeFeaturesConfig(enabled=True))

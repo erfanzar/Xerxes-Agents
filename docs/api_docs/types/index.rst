@@ -1,5 +1,5 @@
-calute.types package
-====================
+src/python/xerxes_agent.types package
+===============================
 
 .. toctree::
    :maxdepth: 2

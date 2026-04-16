@@ -1,7 +1,7 @@
-calute.types.converters
-=======================
+src/python/xerxes_agent.types.converters
+==================================
 
-.. automodule:: calute.types.converters
+.. automodule:: src/python/xerxes_agent.types.converters
    :members:
    :undoc-members:
    :show-inheritance:

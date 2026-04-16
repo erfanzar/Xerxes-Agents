@@ -1,7 +1,7 @@
-"""Tests for calute.memory.base and calute.memory.short_term_memory modules."""
+"""Tests for xerxes_agent.memory.base and xerxes_agent.memory.short_term_memory modules."""
 
-from calute.memory.base import MemoryItem
-from calute.memory.short_term_memory import ShortTermMemory
+from xerxes_agent.memory.base import MemoryItem
+from xerxes_agent.memory.short_term_memory import ShortTermMemory
 
 
 class TestMemoryItem:

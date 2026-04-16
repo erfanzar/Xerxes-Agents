@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # Test original and enhanced memory systems
-from calute.memory import MemoryEntry, MemoryStore, MemoryType
+from xerxes_agent.memory import MemoryEntry, MemoryStore, MemoryType
 
 
 def test_original_memory():

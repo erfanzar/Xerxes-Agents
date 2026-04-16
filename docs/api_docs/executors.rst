@@ -1,7 +1,7 @@
-calute.executors
-================
+src/python/xerxes_agent.executors
+===========================
 
-.. automodule:: calute.executors
+.. automodule:: src/python/xerxes_agent.executors
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
-calute.llms.openai
-==================
+src/python/xerxes_agent.llms.openai
+=============================
 
-.. automodule:: calute.llms.openai
+.. automodule:: src/python/xerxes_agent.llms.openai
    :members:
    :undoc-members:
    :show-inheritance:

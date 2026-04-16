@@ -3,12 +3,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from calute.cortex import CortexAgent
-from calute.llms import OpenAILLM
-from calute.mcp import MCPClient, MCPManager, MCPServerConfig
-from calute.mcp.integration import add_mcp_tools_to_agent, mcp_tool_to_calute_function
-from calute.mcp.types import MCPPrompt, MCPResource, MCPTool, MCPTransportType
+from xerxes_agent.cortex import CortexAgent
+from xerxes_agent.llms import OpenAILLM
+from xerxes_agent.mcp import MCPClient, MCPManager, MCPServerConfig
+from xerxes_agent.mcp.integration import add_mcp_tools_to_agent, mcp_tool_to_xerxes_function
+from xerxes_agent.mcp.types import MCPPrompt, MCPResource, MCPTool, MCPTransportType
 
 
 @pytest.fixture
@@ -278,11 +277,11 @@ class TestMCPManager:
 class TestMCPIntegration:
     """Tests for MCP integration helpers."""
 
-    def test_mcp_tool_to_calute_function(self, mock_mcp_tool):
-        """Test converting MCP tool to Calute function."""
+    def test_mcp_tool_to_xerxes_function(self, mock_mcp_tool):
+        """Test converting MCP tool to Xerxes function."""
         manager = MagicMock()
 
-        func = mcp_tool_to_calute_function(mock_mcp_tool, manager)
+        func = mcp_tool_to_xerxes_function(mock_mcp_tool, manager)
 
         assert callable(func)
         assert func.__name__ == "test_tool"

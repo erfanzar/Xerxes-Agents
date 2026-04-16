@@ -1,6 +1,6 @@
-"""Tests for calute.tools.coding_tools module."""
+"""Tests for xerxes_agent.tools.coding_tools module."""
 
-from calute.tools.coding_tools import (
+from xerxes_agent.tools.coding_tools import (
     analyze_code_structure,
     apply_diff,
     copy_file,
