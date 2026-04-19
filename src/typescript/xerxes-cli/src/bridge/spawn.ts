@@ -69,6 +69,7 @@ export function resolvePython(requested: string): string {
   const home = require("node:os").homedir();
   const venvCandidates = [
     `${home}/Documents/Projects/Xerxes-Agents/.venv/bin/python3`,
+    `${home}/.local/share/uv/tools/xerxes-agent/bin/python`,
     `${home}/.local/share/uv/tools/xerxes/bin/python`,
     `${home}/.venv/bin/python`,
   ];
