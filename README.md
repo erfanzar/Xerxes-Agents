@@ -30,6 +30,11 @@ This is a Python web application using FastAPI...
 Requires Python 3.10+ and Node.js 20+ (for the CLI).
 
 ```bash
+# One-line install (uv + bun auto-installed if missing)
+curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
+```
+
+```bash
 # From source
 git clone https://github.com/erfanzar/Xerxes-Agents.git
 cd Xerxes-Agents
