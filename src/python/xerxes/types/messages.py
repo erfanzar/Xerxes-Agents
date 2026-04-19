@@ -32,7 +32,7 @@ Example:
 
 import re
 import textwrap
-from enum import StrEnum
+from ..core.compat import StrEnum
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import ConfigDict, Field

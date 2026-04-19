@@ -35,7 +35,7 @@ Example:
 import time
 import typing as tp
 import uuid
-from enum import StrEnum
+from ..core.compat import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 

@@ -41,7 +41,7 @@ Example:
 """
 
 import json
-from enum import StrEnum
+from ..core.compat import StrEnum
 from typing import Any, TypeVar
 
 from pydantic import field_validator
