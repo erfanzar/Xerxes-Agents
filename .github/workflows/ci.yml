@@ -41,7 +41,7 @@ jobs:
         run: ruff format --check src/python/xerxes/
 
       - name: Run mypy
-        run: mypy src/python/xerxes/ --ignore-missing-imports
+        run: cd src/python && mypy xerxes --ignore-missing-imports
 
   security:
     name: Security Scan

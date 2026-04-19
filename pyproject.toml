@@ -151,7 +151,7 @@ ignore = ["F722", "B008", "UP015", "A005", "E501"]
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["src/python/xerxes/"]
+exclude = ["tests/", "examples/", "scripts/", "docs/"]
 
 [tool.basedpyright]
 # Disabled diagnostic rules to reduce type-checking noise
