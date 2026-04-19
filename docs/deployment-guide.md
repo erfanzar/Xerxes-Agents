@@ -17,7 +17,7 @@ uv build --wheel
 # → dist/xerxes_agent-0.2.0-py3-none-any.whl
 ```
 
-Under the hood, [hatch_build.py](../hatch_build.py) runs `cargo build --release --workspace` and copies the resulting `xerxes` binary into `src/python/xerxes/_bin/` before hatch packs the wheel. If `cargo` is unavailable, the Python wheel is still built but the Rust CLI won't be bundled.
+Under the hood, [hatch_build.py](../hatch_build.py) bundles the TypeScript CLI before hatch packs the wheel.
 
 ### Install
 

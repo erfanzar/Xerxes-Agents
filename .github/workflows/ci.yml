@@ -37,13 +37,13 @@ jobs:
           pip install ruff black mypy
       
       - name: Run ruff
-        run: ruff check xerxes_agent/
+        run: ruff check src/python/xerxes/
       
       - name: Run black
-        run: black --check xerxes_agent/
+        run: black --check src/python/xerxes/
       
       - name: Run mypy
-        run: mypy xerxes_agent/ --ignore-missing-imports
+        run: mypy src/python/xerxes/ --ignore-missing-imports
 
   test:
     name: Test Python ${{ matrix.python-version }}
@@ -163,7 +163,7 @@ jobs:
           pip install bandit safety pip-audit
       
       - name: Run bandit
-        run: bandit -r xerxes_agent/ -f json -o bandit-report.json
+        run: bandit -r src/python/xerxes/ -f json -o bandit-report.json
         continue-on-error: true
       
       - name: Run safety check

@@ -269,7 +269,7 @@ main() {
     modify_path
     verify
     printf '\n'
-    ok "done. Run %sxerxes --help%s to get started." "$BOLD" "$RESET"
+    ok "done. Run xerxes --help to get started." "$BOLD" "$RESET"
     printf '   docs:  %s\n' "https://erfanzar.github.io/Xerxes-Agents"
     printf '   issues: %s/issues\n' "$REPO_URL"
 }
