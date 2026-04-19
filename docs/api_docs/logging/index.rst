@@ -1,4 +1,4 @@
-src/python/xerxes_agent.logging package
+src/python/xerxes.logging package
 =================================
 
 .. toctree::

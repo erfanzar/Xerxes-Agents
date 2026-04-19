@@ -1,7 +1,7 @@
-src/python/xerxes_agent.logging.console
+src/python/xerxes.logging.console
 =================================
 
-.. automodule:: src/python/xerxes_agent.logging.console
+.. automodule:: src/python/xerxes.logging.console
    :members:
    :undoc-members:
    :show-inheritance:

@@ -3,11 +3,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from xerxes_agent.cortex import CortexAgent
-from xerxes_agent.llms import OpenAILLM
-from xerxes_agent.mcp import MCPClient, MCPManager, MCPServerConfig
-from xerxes_agent.mcp.integration import add_mcp_tools_to_agent, mcp_tool_to_xerxes_function
-from xerxes_agent.mcp.types import MCPPrompt, MCPResource, MCPTool, MCPTransportType
+from xerxes.cortex import CortexAgent
+from xerxes.llms import OpenAILLM
+from xerxes.mcp import MCPClient, MCPManager, MCPServerConfig
+from xerxes.mcp.integration import add_mcp_tools_to_agent, mcp_tool_to_xerxes_function
+from xerxes.mcp.types import MCPPrompt, MCPResource, MCPTool, MCPTransportType
 
 
 @pytest.fixture

@@ -1,9 +1,10 @@
-src/python/xerxes_agent.session package
+src/python/xerxes.session package
 =================================
 
 .. toctree::
    :maxdepth: 2
 
+   fts_index
    index
    models
    replay

@@ -1,7 +1,7 @@
-src/python/xerxes_agent.audit.collector
+src/python/xerxes.audit.collector
 =================================
 
-.. automodule:: src/python/xerxes_agent.audit.collector
+.. automodule:: src/python/xerxes.audit.collector
    :members:
    :undoc-members:
    :show-inheritance:

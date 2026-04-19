@@ -1,4 +1,4 @@
-src/python/xerxes_agent.mcp package
+src/python/xerxes.mcp package
 =============================
 
 .. toctree::

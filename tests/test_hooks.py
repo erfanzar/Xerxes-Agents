@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.hooks — lifecycle hook system."""
+"""Tests for xerxes.hooks — lifecycle hook system."""
 
 import pytest
-from xerxes_agent.extensions.hooks import HOOK_POINTS, HookRunner
+from xerxes.extensions.hooks import HOOK_POINTS, HookRunner
 
 
 class TestHookRunner:
@@ -36,6 +36,7 @@ class TestHookRunner:
             "bootstrap_files",
             "on_turn_start",
             "on_turn_end",
+            "on_loop_warning",
             "on_error",
         }
         assert HOOK_POINTS == expected

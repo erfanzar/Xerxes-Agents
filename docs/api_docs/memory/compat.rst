@@ -1,7 +1,7 @@
-src/python/xerxes_agent.memory.compat
+src/python/xerxes.memory.compat
 ===============================
 
-.. automodule:: src/python/xerxes_agent.memory.compat
+.. automodule:: src/python/xerxes.memory.compat
    :members:
    :undoc-members:
    :show-inheritance:

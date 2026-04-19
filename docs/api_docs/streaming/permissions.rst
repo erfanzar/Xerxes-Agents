@@ -1,7 +1,7 @@
-src/python/xerxes_agent.streaming.permissions
+src/python/xerxes.streaming.permissions
 =======================================
 
-.. automodule:: src/python/xerxes_agent.streaming.permissions
+.. automodule:: src/python/xerxes.streaming.permissions
    :members:
    :undoc-members:
    :show-inheritance:

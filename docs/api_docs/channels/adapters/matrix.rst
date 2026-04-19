@@ -1,7 +1,7 @@
-src/python/xerxes_agent.channels.adapters.matrix
+src/python/xerxes.channels.adapters.matrix
 ==========================================
 
-.. automodule:: src/python/xerxes_agent.channels.adapters.matrix
+.. automodule:: src/python/xerxes.channels.adapters.matrix
    :members:
    :undoc-members:
    :show-inheritance:

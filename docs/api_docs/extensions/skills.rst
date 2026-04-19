@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.skills
+src/python/xerxes.extensions.skills
 ===================================
 
-.. automodule:: src/python/xerxes_agent.extensions.skills
+.. automodule:: src/python/xerxes.extensions.skills
    :members:
    :undoc-members:
    :show-inheritance:

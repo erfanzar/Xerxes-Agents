@@ -1,4 +1,4 @@
-src/python/xerxes_agent.types package
+src/python/xerxes.types package
 ===============================
 
 .. toctree::

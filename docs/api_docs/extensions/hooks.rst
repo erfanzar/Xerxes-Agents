@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.hooks
+src/python/xerxes.extensions.hooks
 ==================================
 
-.. automodule:: src/python/xerxes_agent.extensions.hooks
+.. automodule:: src/python/xerxes.extensions.hooks
    :members:
    :undoc-members:
    :show-inheritance:

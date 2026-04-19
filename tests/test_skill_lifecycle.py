@@ -15,14 +15,14 @@
 
 from __future__ import annotations
 
-from xerxes_agent.audit.events import SkillUsedEvent
-from xerxes_agent.extensions.skill_authoring import (
+from xerxes.audit.events import SkillUsedEvent
+from xerxes.extensions.skill_authoring import (
     SkillLifecycleManager,
     SkillTelemetry,
     SkillVariant,
     SkillVariantPicker,
 )
-from xerxes_agent.extensions.skills import SkillRegistry
+from xerxes.extensions.skills import SkillRegistry
 
 
 class TestSkillVariantPicker:

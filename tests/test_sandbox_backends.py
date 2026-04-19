@@ -14,6 +14,7 @@
 """Detailed tests for sandbox backend implementations."""
 
 from __future__ import annotations
+import json
 
 import base64
 import pickle
@@ -21,7 +22,7 @@ import subprocess
 from unittest import mock
 
 import pytest
-from xerxes_agent.security.sandbox import SandboxBackendConfig, SandboxConfig, SandboxMode
+from xerxes.security.sandbox import SandboxBackendConfig, SandboxConfig, SandboxMode
 
 
 def _multiply(a: int = 1, b: int = 1) -> int:
@@ -40,7 +41,7 @@ class TestDockerCommandConstruction:
     """Test that the Docker CLI commands are assembled correctly."""
 
     def _make_backend(self, **overrides):
-        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         defaults = dict(
             mode=SandboxMode.STRICT,
@@ -112,7 +113,7 @@ class TestDockerCommandConstruction:
 
 class TestDockerExecuteEdgeCases:
     def _make_backend(self):
-        from xerxes_agent.security.sandbox_backends.docker_backend import DockerSandboxBackend
+        from xerxes.security.sandbox_backends.docker_backend import DockerSandboxBackend
 
         config = SandboxConfig(
             mode=SandboxMode.STRICT,
@@ -123,27 +124,27 @@ class TestDockerExecuteEdgeCases:
 
     def test_execute_returns_none(self):
         backend = self._make_backend()
-        result_payload = pickle.dumps({"ok": True, "value": None})
+        result_payload = json.dumps({"ok": True, "value": None}).encode("utf-8")
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             result = backend.execute("t", _identity, {})
         assert result is None
 
     def test_execute_bad_stdout(self):
         backend = self._make_backend()
-        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout="not-valid-b64!!!", stderr="")
             with pytest.raises(RuntimeError, match="deserialise"):
                 backend.execute("t", _identity, {})
 
     def test_execute_tool_error_inside_container(self):
         backend = self._make_backend()
-        result_payload = pickle.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"})
+        result_payload = json.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"}).encode("utf-8")
         encoded = base64.b64encode(result_payload).decode()
 
-        with mock.patch("xerxes_agent.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
+        with mock.patch("xerxes.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
             with pytest.raises(RuntimeError, match="ZeroDivisionError.*division by zero"):
                 backend.execute("t", _identity, {})
@@ -151,7 +152,7 @@ class TestDockerExecuteEdgeCases:
 
 class TestSubprocessBackendExecution:
     def _make_backend(self, **overrides):
-        from xerxes_agent.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
+        from xerxes.security.sandbox_backends.subprocess_backend import SubprocessSandboxBackend
 
         defaults = dict(
             mode=SandboxMode.STRICT,
@@ -185,7 +186,7 @@ class TestSubprocessBackendExecution:
         # We just verify the timeout path exists -- it may or may not trigger.
         # Use a mock to ensure the timeout path is exercised.
         with mock.patch(
-            "xerxes_agent.security.sandbox_backends.subprocess_backend.subprocess.run",
+            "xerxes.security.sandbox_backends.subprocess_backend.subprocess.run",
             side_effect=subprocess.TimeoutExpired("python", 0.001),
         ):
             with pytest.raises(RuntimeError, match="timed out"):

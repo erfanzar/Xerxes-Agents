@@ -1,4 +1,4 @@
-src/python/xerxes_agent.cortex.agents package
+src/python/xerxes.cortex.agents package
 =======================================
 
 .. toctree::

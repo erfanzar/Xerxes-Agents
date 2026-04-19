@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from xerxes_agent.extensions.skill_authoring import (
+from xerxes.extensions.skill_authoring import (
     SkillDrafter,
     ToolSequenceTracker,
     render_skill_template,

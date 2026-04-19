@@ -1,7 +1,7 @@
-src/python/xerxes_agent.cortex.orchestration.dynamic
+src/python/xerxes.cortex.orchestration.dynamic
 ==============================================
 
-.. automodule:: src/python/xerxes_agent.cortex.orchestration.dynamic
+.. automodule:: src/python/xerxes.cortex.orchestration.dynamic
    :members:
    :undoc-members:
    :show-inheritance:

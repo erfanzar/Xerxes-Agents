@@ -1,4 +1,4 @@
-src/python/xerxes_agent.security package
+src/python/xerxes.security package
 ==================================
 
 .. toctree::
@@ -6,4 +6,5 @@ src/python/xerxes_agent.security package
 
    sandbox_backends/index
    policy
+   prompt_scanner
    sandbox

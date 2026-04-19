@@ -1,7 +1,7 @@
-src/python/xerxes_agent.operators.types
+src/python/xerxes.operators.types
 =================================
 
-.. automodule:: src/python/xerxes_agent.operators.types
+.. automodule:: src/python/xerxes.operators.types
    :members:
    :undoc-members:
    :show-inheritance:

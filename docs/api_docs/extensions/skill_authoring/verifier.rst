@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.skill_authoring.verifier
+src/python/xerxes.extensions.skill_authoring.verifier
 =====================================================
 
-.. automodule:: src/python/xerxes_agent.extensions.skill_authoring.verifier
+.. automodule:: src/python/xerxes.extensions.skill_authoring.verifier
    :members:
    :undoc-members:
    :show-inheritance:

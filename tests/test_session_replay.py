@@ -16,14 +16,14 @@
 
 from __future__ import annotations
 
-from xerxes_agent.session.models import (
+from xerxes.session.models import (
     AgentTransitionRecord,
     SessionRecord,
     ToolCallRecord,
     TurnRecord,
 )
-from xerxes_agent.session.replay import ReplayView, SessionReplay
-from xerxes_agent.session.store import FileSessionStore, SessionManager
+from xerxes.session.replay import ReplayView, SessionReplay
+from xerxes.session.store import FileSessionStore, SessionManager
 
 
 def _tc(call_id: str, name: str = "tool", **kw) -> ToolCallRecord:

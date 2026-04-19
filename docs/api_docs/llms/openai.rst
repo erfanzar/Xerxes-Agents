@@ -1,7 +1,7 @@
-src/python/xerxes_agent.llms.openai
+src/python/xerxes.llms.openai
 =============================
 
-.. automodule:: src/python/xerxes_agent.llms.openai
+.. automodule:: src/python/xerxes.llms.openai
    :members:
    :undoc-members:
    :show-inheritance:

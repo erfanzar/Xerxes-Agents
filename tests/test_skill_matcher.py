@@ -16,9 +16,9 @@
 from __future__ import annotations
 
 import pytest
-from xerxes_agent.extensions.skill_authoring import SkillMatcher
-from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry
-from xerxes_agent.memory import HashEmbedder
+from xerxes.extensions.skill_authoring import SkillMatcher
+from xerxes.extensions.skills import Skill, SkillMetadata, SkillRegistry
+from xerxes.memory import HashEmbedder
 
 
 def _skill(tmp_path, name, description, tags, instructions="body"):

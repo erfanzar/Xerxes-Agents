@@ -1,4 +1,4 @@
-"""Tests for xerxes_agent.core.multimodal module."""
+"""Tests for xerxes.core.multimodal module."""
 
 import base64
 import io
@@ -6,7 +6,7 @@ import typing
 
 import pytest
 from PIL import Image
-from xerxes_agent.core.multimodal import (
+from xerxes.core.multimodal import (
     maybe_load_image_from_str_or_bytes,
     serialize_image_to_byte_str,
 )

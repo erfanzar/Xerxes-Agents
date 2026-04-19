@@ -16,8 +16,8 @@
 from __future__ import annotations
 
 import pytest
-from xerxes_agent.extensions.skills import SkillRegistry
-from xerxes_agent.tools.agent_meta_tools import (
+from xerxes.extensions.skills import SkillRegistry
+from xerxes.tools.agent_meta_tools import (
     configure_mixture_of_agents,
     mixture_of_agents,
     session_search,

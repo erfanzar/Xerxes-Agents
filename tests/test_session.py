@@ -19,13 +19,13 @@ from __future__ import annotations
 import json
 
 import pytest
-from xerxes_agent.session.models import (
+from xerxes.session.models import (
     AgentTransitionRecord,
     SessionRecord,
     ToolCallRecord,
     TurnRecord,
 )
-from xerxes_agent.session.store import (
+from xerxes.session.store import (
     FileSessionStore,
     InMemorySessionStore,
     SessionManager,

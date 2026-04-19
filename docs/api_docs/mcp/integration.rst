@@ -1,7 +1,7 @@
-src/python/xerxes_agent.mcp.integration
+src/python/xerxes.mcp.integration
 =================================
 
-.. automodule:: src/python/xerxes_agent.mcp.integration
+.. automodule:: src/python/xerxes.mcp.integration
    :members:
    :undoc-members:
    :show-inheritance:

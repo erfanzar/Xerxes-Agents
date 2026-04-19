@@ -1,4 +1,4 @@
-src/python/xerxes_agent.memory package
+src/python/xerxes.memory package
 ================================
 
 .. toctree::
@@ -6,6 +6,7 @@ src/python/xerxes_agent.memory package
 
    base
    compat
+   context_fencing
    contextual_memory
    embedders
    entity_memory

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the xerxes_agent.audit structured event system."""
+"""Tests for the xerxes.audit structured event system."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import json
 import threading
 from io import StringIO
 
-from xerxes_agent.audit import (
+from xerxes.audit import (
     AuditEmitter,
     AuditEvent,
     CompositeCollector,

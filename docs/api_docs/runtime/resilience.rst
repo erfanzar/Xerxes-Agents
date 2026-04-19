@@ -1,7 +1,7 @@
-src/python/xerxes_agent.runtime.resilience
+src/python/xerxes.runtime.resilience
 ====================================
 
-.. automodule:: src/python/xerxes_agent.runtime.resilience
+.. automodule:: src/python/xerxes.runtime.resilience
    :members:
    :undoc-members:
    :show-inheritance:

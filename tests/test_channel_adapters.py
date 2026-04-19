@@ -19,8 +19,8 @@ import asyncio
 import json
 
 import pytest
-from xerxes_agent.channels import ChannelMessage, MessageDirection
-from xerxes_agent.channels.adapters import (
+from xerxes.channels import ChannelMessage, MessageDirection
+from xerxes.channels.adapters import (
     BlueBubblesChannel,
     DingTalkChannel,
     DiscordChannel,

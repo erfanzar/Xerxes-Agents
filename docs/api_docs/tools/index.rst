@@ -1,4 +1,4 @@
-src/python/xerxes_agent.tools package
+src/python/xerxes.tools package
 ===============================
 
 .. toctree::
@@ -11,6 +11,7 @@ src/python/xerxes_agent.tools package
    coding_tools
    data_tools
    duckduckgo_engine
+   google_search
    history_tool
    home_assistant_tools
    math_tools

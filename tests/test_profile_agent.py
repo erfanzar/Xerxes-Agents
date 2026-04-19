@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from xerxes_agent.agents.profile_agent import ProfileAgent
-from xerxes_agent.memory import UserProfileStore
+from xerxes.agents.profile_agent import ProfileAgent
+from xerxes.memory import UserProfileStore
 
 
 def _agent():

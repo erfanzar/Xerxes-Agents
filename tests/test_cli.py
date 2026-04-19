@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 from types import SimpleNamespace
 
-from xerxes_agent.tui.cli import (
+from xerxes.tui.cli import (
     DEFAULT_INSTRUCTIONS,
     _resolve_profile,
     build_default_agent,
@@ -16,7 +16,7 @@ from xerxes_agent.tui.cli import (
     looks_openai_compatible_endpoint,
     main,
 )
-from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
+from xerxes.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def test_detect_provider_prefers_explicit_env():
@@ -88,13 +88,13 @@ def test_main_launches_tui(monkeypatch, tmp_path):
         def launch(self):
             captured["launched"] = True
 
-    monkeypatch.setattr("xerxes_agent.tui.cli.create_llm", lambda provider, **kwargs: object())
-    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", lambda *args, **kwargs: ["llama3", "qwen2.5"])
+    monkeypatch.setattr("xerxes.tui.cli.create_llm", lambda provider, **kwargs: object())
+    monkeypatch.setattr("xerxes.tui.cli.discover_available_models", lambda *args, **kwargs: ["llama3", "qwen2.5"])
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
+        "xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
     )
 
     exit_code = main(["tui", "--provider", "ollama", "--model", "llama3", "--no-tools"])
@@ -146,16 +146,16 @@ def test_main_saves_profile(monkeypatch, tmp_path):
         def launch(self):
             captured["launched"] = True
 
-    monkeypatch.setattr("xerxes_agent.tui.cli.create_llm", lambda provider, **kwargs: object())
+    monkeypatch.setattr("xerxes.tui.cli.create_llm", lambda provider, **kwargs: object())
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.discover_available_models",
+        "xerxes.tui.cli.discover_available_models",
         lambda *args, **kwargs: ["qwen3-coder", "deepseek-r1"],
     )
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
+        "xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
     )
 
     exit_code = main(
@@ -208,14 +208,14 @@ def test_main_loads_power_tools_enabled_from_profile(monkeypatch, tmp_path):
         )
     )
 
-    monkeypatch.setattr("xerxes_agent.tui.cli.TerminalConfigStore", lambda: store)
+    monkeypatch.setattr("xerxes.tui.cli.TerminalConfigStore", lambda: store)
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.create_llm",
+        "xerxes.tui.cli.create_llm",
         lambda provider, **kwargs: SimpleNamespace(config=SimpleNamespace(model=kwargs.get("model"))),
     )
-    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", lambda *args, **kwargs: ["qwen3-coder"])
+    monkeypatch.setattr("xerxes.tui.cli.discover_available_models", lambda *args, **kwargs: ["qwen3-coder"])
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.launch_tui",
+        "xerxes.tui.cli.launch_tui",
         lambda executor, agent, profile=None, config_store=None: _Launcher(executor),
     )
 
@@ -242,18 +242,18 @@ def test_main_skips_model_discovery_when_profile_already_has_model(monkeypatch, 
         )
     )
 
-    monkeypatch.setattr("xerxes_agent.tui.cli.TerminalConfigStore", lambda: store)
+    monkeypatch.setattr("xerxes.tui.cli.TerminalConfigStore", lambda: store)
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.create_llm",
+        "xerxes.tui.cli.create_llm",
         lambda provider, **kwargs: SimpleNamespace(config=SimpleNamespace(model=kwargs.get("model"))),
     )
 
     def _fail_discovery(*args, **kwargs):
         raise AssertionError("discover_available_models should not run for normal startup when model is preset")
 
-    monkeypatch.setattr("xerxes_agent.tui.cli.discover_available_models", _fail_discovery)
+    monkeypatch.setattr("xerxes.tui.cli.discover_available_models", _fail_discovery)
     monkeypatch.setattr(
-        "xerxes_agent.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
+        "xerxes.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
 
     exit_code = main(["tui", "--profile-name", "lab"])

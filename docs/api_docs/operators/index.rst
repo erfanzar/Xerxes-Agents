@@ -1,4 +1,4 @@
-src/python/xerxes_agent.operators package
+src/python/xerxes.operators package
 ===================================
 
 .. toctree::

@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.skill_authoring.matcher
+src/python/xerxes.extensions.skill_authoring.matcher
 ====================================================
 
-.. automodule:: src/python/xerxes_agent.extensions.skill_authoring.matcher
+.. automodule:: src/python/xerxes.extensions.skill_authoring.matcher
    :members:
    :undoc-members:
    :show-inheritance:

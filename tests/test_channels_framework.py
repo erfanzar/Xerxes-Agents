@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from xerxes_agent.channels import (
+from xerxes.channels import (
     Channel,
     ChannelMessage,
     ChannelRegistry,
@@ -29,7 +29,7 @@ from xerxes_agent.channels import (
     WebhookDispatcher,
     WebhookResponse,
 )
-from xerxes_agent.memory import SimpleStorage
+from xerxes.memory import SimpleStorage
 
 
 class DummyChannel(Channel):

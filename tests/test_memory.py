@@ -15,7 +15,7 @@
 from datetime import datetime, timedelta
 
 import numpy as np
-from xerxes_agent import MemoryEntry, MemoryStore, MemoryType
+from xerxes import MemoryEntry, MemoryStore, MemoryType
 
 
 class TestMemory:

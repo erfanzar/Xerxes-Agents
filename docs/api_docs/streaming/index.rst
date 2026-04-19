@@ -1,4 +1,4 @@
-src/python/xerxes_agent.streaming package
+src/python/xerxes.streaming package
 ===================================
 
 .. toctree::
@@ -6,5 +6,6 @@ src/python/xerxes_agent.streaming package
 
    events
    loop
+   loop_debug
    messages
    permissions

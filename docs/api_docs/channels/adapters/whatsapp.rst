@@ -1,7 +1,7 @@
-src/python/xerxes_agent.channels.adapters.whatsapp
+src/python/xerxes.channels.adapters.whatsapp
 ============================================
 
-.. automodule:: src/python/xerxes_agent.channels.adapters.whatsapp
+.. automodule:: src/python/xerxes.channels.adapters.whatsapp
    :members:
    :undoc-members:
    :show-inheritance:

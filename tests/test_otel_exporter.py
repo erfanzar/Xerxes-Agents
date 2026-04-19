@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from xerxes_agent.audit import (
+from xerxes.audit import (
     AuditEmitter,
     CompositeCollector,
     InMemoryCollector,
@@ -59,7 +59,7 @@ class TestOTelCollector:
         assert any(e["name"].startswith("tool.attempt") for e in log)
 
     def test_unknown_event_type_does_not_crash(self):
-        from xerxes_agent.audit.events import HookMutationEvent
+        from xerxes.audit.events import HookMutationEvent
 
         otel = OTelCollector()
         otel.emit(HookMutationEvent(hook_name="x", mutated_field="y"))

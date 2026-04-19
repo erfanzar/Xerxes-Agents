@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.policy — tool policy allow/deny enforcement."""
+"""Tests for xerxes.policy — tool policy allow/deny enforcement."""
 
 import pytest
-from xerxes_agent.security.policy import PolicyAction, PolicyEngine, ToolPolicy, ToolPolicyViolation
+from xerxes.security.policy import PolicyAction, PolicyEngine, ToolPolicy, ToolPolicyViolation
 
 
 class TestToolPolicy:

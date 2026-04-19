@@ -1,7 +1,7 @@
-src/python/xerxes_agent.memory.base
+src/python/xerxes.memory.base
 =============================
 
-.. automodule:: src/python/xerxes_agent.memory.base
+.. automodule:: src/python/xerxes.memory.base
    :members:
    :undoc-members:
    :show-inheritance:

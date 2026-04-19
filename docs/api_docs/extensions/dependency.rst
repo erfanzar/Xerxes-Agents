@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.dependency
+src/python/xerxes.extensions.dependency
 =======================================
 
-.. automodule:: src/python/xerxes_agent.extensions.dependency
+.. automodule:: src/python/xerxes.extensions.dependency
    :members:
    :undoc-members:
    :show-inheritance:

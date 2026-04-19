@@ -1,7 +1,7 @@
-src/python/xerxes_agent.core.multimodal
+src/python/xerxes.core.multimodal
 =================================
 
-.. automodule:: src/python/xerxes_agent.core.multimodal
+.. automodule:: src/python/xerxes.core.multimodal
    :members:
    :undoc-members:
    :show-inheritance:

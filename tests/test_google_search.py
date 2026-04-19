@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import pytest
-from xerxes_agent.tools.google_search import (
+from xerxes.tools.google_search import (
     GoogleSearch,
     configure_google_search,
     get_google_search_config,
@@ -207,12 +207,12 @@ class TestScrapeMode:
 
 class TestRegistryWiring:
     def test_exported_from_tools_package(self):
-        from xerxes_agent.tools import GoogleSearch as G
+        from xerxes.tools import GoogleSearch as G
 
         assert G is GoogleSearch
 
     def test_listed_in_web_category(self):
-        from xerxes_agent.tools import TOOL_CATEGORIES
+        from xerxes.tools import TOOL_CATEGORIES
 
         assert "GoogleSearch" in TOOL_CATEGORIES["web"]
         # GoogleSearch should be the first/canonical web search tool.

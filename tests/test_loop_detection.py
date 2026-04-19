@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.loop_detection — tool loop prevention."""
+"""Tests for xerxes.loop_detection — tool loop prevention."""
 
-from xerxes_agent.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopEvent, LoopSeverity, ToolLoopError
+from xerxes.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopEvent, LoopSeverity, ToolLoopError
 
 
 class TestLoopDetector:

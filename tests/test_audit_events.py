@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from xerxes_agent.audit.events import (
+from xerxes.audit.events import (
     AuditEvent,
     ErrorEvent,
     HookMutationEvent,

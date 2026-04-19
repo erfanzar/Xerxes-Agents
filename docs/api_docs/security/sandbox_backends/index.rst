@@ -1,4 +1,4 @@
-src/python/xerxes_agent.security.sandbox_backends package
+src/python/xerxes.security.sandbox_backends package
 ===================================================
 
 .. toctree::

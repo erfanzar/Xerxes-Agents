@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from xerxes_agent.session.models import SessionRecord, ToolCallRecord, TurnRecord
-from xerxes_agent.session.store import InMemorySessionStore
-from xerxes_agent.session.summarizer import SessionSummarizer
-from xerxes_agent.tools.history_tool import SearchHistoryTool
+from xerxes.session.models import SessionRecord, ToolCallRecord, TurnRecord
+from xerxes.session.store import InMemorySessionStore
+from xerxes.session.summarizer import SessionSummarizer
+from xerxes.tools.history_tool import SearchHistoryTool
 
 
 def _now() -> str:
@@ -135,7 +135,7 @@ class TestSearchHistoryTool:
         assert result["hits"][0]["session_id"] == "s1"
 
     def test_via_index(self):
-        from xerxes_agent.session.index import SessionIndex
+        from xerxes.session.index import SessionIndex
 
         idx = SessionIndex(":memory:")
         idx.index_session(_session("s1", [_turn("t1", "deploy with terraform")]))

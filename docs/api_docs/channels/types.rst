@@ -1,7 +1,7 @@
-src/python/xerxes_agent.channels.types
+src/python/xerxes.channels.types
 ================================
 
-.. automodule:: src/python/xerxes_agent.channels.types
+.. automodule:: src/python/xerxes.channels.types
    :members:
    :undoc-members:
    :show-inheritance:

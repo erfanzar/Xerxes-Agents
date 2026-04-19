@@ -1,0 +1,104 @@
+# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+#     https://www.apache.org/licenses/LICENSE-2.0
+
+
+# distributed under the License is distributed on an "AS IS" BASIS,
+
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Global runtime config context.
+
+Stores the active runtime config (model, base_url, api_key, sampling params)
+so that sub-agents and tools can inherit provider settings without explicit
+threading through every call site.
+
+Usage::
+
+    from xerxes.runtime.config_context import set_config, get_config
+
+
+    set_config({"model": "qwen3-8.19b", "base_url": "http://...", "api_key": "sk-..."})
+
+
+    cfg = get_config()
+    base_url = cfg.get("base_url", "")
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable
+from typing import Any
+
+_lock = threading.Lock()
+_config: dict[str, Any] = {}
+_event_callback: Callable[[str, dict[str, Any]], None] | None = None
+
+_INHERITABLE = {
+    "model",
+    "base_url",
+    "api_key",
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_tokens",
+    "min_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "permission_mode",
+}
+
+
+def set_config(config: dict[str, Any]) -> None:
+    """Set the global runtime config. Called by the bridge server."""
+    global _config
+    with _lock:
+        _config = dict(config)
+
+
+def get_config() -> dict[str, Any]:
+    """Get a copy of the global runtime config."""
+    with _lock:
+        return dict(_config)
+
+
+def get_inheritable() -> dict[str, Any]:
+    """Get only the inheritable keys (provider + sampling) for sub-agents."""
+    with _lock:
+        return {k: v for k, v in _config.items() if k in _INHERITABLE and v is not None and v != ""}
+
+
+def set_event_callback(cb: Callable[[str, dict[str, Any]], None] | None) -> None:
+    """Set a global event callback for sub-agent progress reporting.
+
+    The callback receives ``(event_type, data)`` where event_type is one of:
+    ``"agent_spawn"``, ``"agent_text"``, ``"agent_tool_start"``,
+    ``"agent_tool_end"``, ``"agent_done"``, ``"agent_handoff"``,
+    ``"plan_created"``, ``"plan_step_start"``, ``"plan_step_done"``.
+    """
+    global _event_callback
+    with _lock:
+        _event_callback = cb
+
+
+def get_event_callback() -> Callable[[str, dict[str, Any]], None] | None:
+    """Get the current global event callback (if any)."""
+    with _lock:
+        return _event_callback
+
+
+def emit_event(event_type: str, data: dict[str, Any]) -> None:
+    """Emit an event through the global callback (no-op if none set)."""
+    cb = get_event_callback()
+    if cb is not None:
+        try:
+            cb(event_type, data)
+        except Exception:
+            pass

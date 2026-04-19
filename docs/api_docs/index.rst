@@ -26,6 +26,5 @@ src/python/xerxes API Reference
    streaming/index
    tools/index
    types/index
-   ui/index
-   xerxes
    executors
+   xerxes

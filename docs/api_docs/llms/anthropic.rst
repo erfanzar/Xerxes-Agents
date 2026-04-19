@@ -1,7 +1,7 @@
-src/python/xerxes_agent.llms.anthropic
+src/python/xerxes.llms.anthropic
 ================================
 
-.. automodule:: src/python/xerxes_agent.llms.anthropic
+.. automodule:: src/python/xerxes.llms.anthropic
    :members:
    :undoc-members:
    :show-inheritance:

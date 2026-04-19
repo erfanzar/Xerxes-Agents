@@ -1,4 +1,4 @@
-src/python/xerxes_agent.bridge package
+src/python/xerxes.bridge package
 ================================
 
 .. toctree::

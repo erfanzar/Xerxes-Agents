@@ -6,12 +6,12 @@ from __future__ import annotations
 
 import asyncio
 
-import xerxes_agent.tui.app as tui_app_module
-from xerxes_agent import Agent, OperatorRuntimeConfig, PromptProfile, RuntimeFeaturesConfig, Xerxes
-from xerxes_agent.llms.base import BaseLLM, LLMConfig
-from xerxes_agent.tui import TextualLauncher, XerxesTUI, launch_tui, parse_command, preview_value
-from xerxes_agent.tui.app import ChatEntry
-from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
+import xerxes.tui.app as tui_app_module
+from xerxes import Agent, OperatorRuntimeConfig, PromptProfile, RuntimeFeaturesConfig, Xerxes
+from xerxes.llms.base import BaseLLM, LLMConfig
+from xerxes.tui import TextualLauncher, XerxesTUI, launch_tui, parse_command, preview_value
+from xerxes.tui.app import ChatEntry
+from xerxes.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def _chunk(

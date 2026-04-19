@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.prompt_profiles — prompt profile configs and truncation."""
+"""Tests for xerxes.prompt_profiles — prompt profile configs and truncation."""
 
 from pathlib import Path
 
-from xerxes_agent.extensions.hooks import HookRunner
-from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry
-from xerxes_agent.runtime.context import PromptContextBuilder
-from xerxes_agent.runtime.profiles import PromptProfile, PromptProfileConfig, get_profile_config
-from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
+from xerxes.extensions.hooks import HookRunner
+from xerxes.extensions.skills import Skill, SkillMetadata, SkillRegistry
+from xerxes.runtime.context import PromptContextBuilder
+from xerxes.runtime.profiles import PromptProfile, PromptProfileConfig, get_profile_config
+from xerxes.security.sandbox import SandboxConfig, SandboxMode
 
 # ── PromptProfile enum ───────────────────────────────────────────────
 

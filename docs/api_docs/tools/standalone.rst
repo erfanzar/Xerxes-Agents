@@ -1,7 +1,7 @@
-src/python/xerxes_agent.tools.standalone
+src/python/xerxes.tools.standalone
 ==================================
 
-.. automodule:: src/python/xerxes_agent.tools.standalone
+.. automodule:: src/python/xerxes.tools.standalone
    :members:
    :undoc-members:
    :show-inheritance:

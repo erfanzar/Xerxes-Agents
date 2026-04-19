@@ -46,7 +46,7 @@ Repository = "https://github.com/erfanzar/Xerxes"
 Documentation = "https://erfanzar.github.io/Xerxes"
 
 [project.scripts]
-xerxes = "xerxes_agent._bin._launcher:launch"
+xerxes = "xerxes._bin._launcher:launch"
 
 [project.optional-dependencies]
 # Development tools
@@ -124,10 +124,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/python/xerxes_agent"]
+packages = ["src/python/xerxes"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/python/xerxes_agent/py.typed" = "xerxes_agent/py.typed"
+"src/python/xerxes/py.typed" = "xerxes/py.typed"
 
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
@@ -151,7 +151,7 @@ ignore = ["F722", "B008", "UP015", "A005", "E501"]
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
-exclude = ["src/python/xerxes_agent/"]
+exclude = ["src/python/xerxes/"]
 
 [tool.basedpyright]
 # Disabled diagnostic rules to reduce type-checking noise

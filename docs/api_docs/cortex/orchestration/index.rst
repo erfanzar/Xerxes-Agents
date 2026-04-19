@@ -1,4 +1,4 @@
-src/python/xerxes_agent.cortex.orchestration package
+src/python/xerxes.cortex.orchestration package
 ==============================================
 
 .. toctree::

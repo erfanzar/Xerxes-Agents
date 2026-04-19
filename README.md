@@ -1,46 +1,42 @@
 # Xerxes
 
-A coding agent that runs in your terminal. Python runtime, Rust CLI.
+A coding agent that runs in your terminal. Python runtime, TypeScript/Ink CLI.
 
 ```text
-╭──────────────────────────────────────────────────────╮
-│ >_ Xerxes (v0.2.0)                                  │
-│                                                      │
-│ model:     qwen3-8b (custom)   /model to change      │
-│ directory: ~/Projects/myapp                          │
-╰──────────────────────────────────────────────────────╯
+ ██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗  ┌────────────────────────────┐
+ ╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝  │ >_ Xerxes (v0.2.0)         │
+  ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗  ├────────────────────────────┤
+  ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║  │ model:  qwen3-8b (custom)  │
+ ██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║  │ dir:    ~/Projects/myapp   │
+ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝  └────────────────────────────┘
+
 
 › explain this codebase
 
-• This is a Python web application using FastAPI...
+This is a Python web application using FastAPI...
 
-• Read README.md ✓
+✓ ReadFile README.md ✓
   └ # MyApp - A REST API for...
 
-• Ran find src -name "*.py" | head -20 ✓
+✓ ExecuteShell find src -name "*.py" | head -20 ✓
   └ src/main.py
     src/routes/users.py
     src/models/user.py
     … +17 lines
-
-• The project is structured as follows:
-  - **src/main.py** — FastAPI application entry point
-  - **src/routes/** — API route handlers
-  ...
 ```
 
 ## Install
 
-Requires Python 3.10+ and Rust (for the CLI binary).
+Requires Python 3.10+ and Node.js 20+ (for the CLI).
 
 ```bash
 # From source
-git clone https://github.com/erfanzar/Xerxes.git
-cd Xerxes
-pip install -e .
+git clone https://github.com/erfanzar/Xerxes-Agents.git
+cd Xerxes-Agents
+pip install -e ".[dev]"
 ```
 
-The install automatically compiles the Rust CLI via `cargo build --release` and places the binary in your PATH. If you don't have Rust installed, get it from [rustup.rs](https://rustup.rs).
+The install automatically bundles the TypeScript CLI via `bun build` and places the launcher in your PATH. If you don't have Bun installed, get it from [bun.sh](https://bun.sh).
 
 ```bash
 # Verify
@@ -102,35 +98,40 @@ xerxes --permission-mode accept-all
 ## Architecture
 
 ```text
-┌──────────────────┐     JSON-RPC       ┌──────────────────────┐
-│   Rust CLI       │ ◄── stdin/stdout ──►│   Python Runtime     │
-│   (ratatui)      │                     │   (xerxes_agent.bridge)    │
+┌──────────────────┐     JSON-RPC        ┌──────────────────────┐
+│  TypeScript CLI  │ ◄── stdin/stdout ──►│   Python Runtime     │
+│   (Ink + React)  │                     │   (xerxes.bridge)    │
 │                  │                     │                      │
 │ • Inline viewport│                     │ • Agent loop         │
 │ • Markdown render│                     │ • Tool execution     │
 │ • Input handling │                     │ • LLM streaming      │
 │ • Slash commands │                     │ • Provider registry  │
 │ • Provider setup │                     │ • Profile management │
+│ • Skill registry │                     │ • 98 tools           │
 └──────────────────┘                     └──────────────────────┘
 ```
 
-The Rust binary (`xerxes`) spawns `python -m xerxes_agent.bridge` as a subprocess. They communicate over newline-delimited JSON. The Rust side handles all rendering; the Python side handles all LLM and tool logic.
+The TypeScript CLI (`xerxes`) spawns `python -m xerxes.bridge` as a subprocess. They communicate over newline-delimited JSON-RPC. The TypeScript side handles all rendering; the Python side handles all LLM and tool logic.
 
 ## Slash Commands
 
-| Command | Description |
-| ------- | ----------- |
-| `/provider` | Setup or switch provider profile |
-| `/sampling` | View/set sampling params (temperature, top_p, etc.) |
-| `/compact` | Summarize conversation using LLM to free context |
-| `/model NAME` | Switch model |
-| `/cost` | Show token usage and cost |
-| `/context` | Show session info |
-| `/clear` | Clear conversation |
-| `/tools` | List available tools |
-| `/thinking` | Toggle thinking display |
-| `/help` | Show all commands |
-| `/exit` | Exit |
+| Command         | Description                                         |
+| --------------- | --------------------------------------------------- |
+| `/provider`     | Setup or switch provider profile                    |
+| `/sampling`     | View/set sampling params (temperature, top_p, etc.) |
+| `/compact`      | Summarize conversation using LLM to free context    |
+| `/model NAME`   | Switch model                                        |
+| `/cost`         | Show token usage and cost                           |
+| `/context`      | Show session info                                   |
+| `/clear`        | Clear conversation                                  |
+| `/tools`        | List available tools                                |
+| `/skills`       | List available skills                               |
+| `/skill-create` | Create a new skill from current session             |
+| `/thinking`     | Toggle thinking display                             |
+| `/yolo`         | Toggle accept-all permission mode                   |
+| `/permissions`  | View/set permission mode                            |
+| `/help`         | Show all commands                                   |
+| `/exit`         | Exit                                                |
 
 ### Sampling
 
@@ -146,32 +147,36 @@ The Rust binary (`xerxes`) spawns `python -m xerxes_agent.bridge` as a subproces
 
 Xerxes works with any OpenAI-compatible API. Built-in provider detection for:
 
-| Provider | Models | Env Variable |
-| -------- | ------ | ------------ |
-| OpenAI | gpt-4o, o3, o1 | `OPENAI_API_KEY` |
-| Anthropic | claude-opus-4-6, claude-sonnet-4-6 | `ANTHROPIC_API_KEY` |
-| Google | gemini-2.5-pro, gemini-2.0-flash | `GEMINI_API_KEY` |
-| DeepSeek | deepseek-chat, deepseek-reasoner | `DEEPSEEK_API_KEY` |
-| Qwen | qwen-max, qwq-32b | `DASHSCOPE_API_KEY` |
-| Ollama | llama3, mistral, phi4 | (local, no key) |
-| LM Studio | any loaded model | (local, no key) |
-| Any OpenAI-compatible | custom | via `--base-url` |
+| Provider              | Models                             | Env Variable        |
+| --------------------- | ---------------------------------- | ------------------- |
+| OpenAI                | gpt-4o, o3, o1                     | `OPENAI_API_KEY`    |
+| Anthropic             | claude-opus-4-6, claude-sonnet-4-6 | `ANTHROPIC_API_KEY` |
+| Google                | gemini-2.5-pro, gemini-2.0-flash   | `GEMINI_API_KEY`    |
+| DeepSeek              | deepseek-chat, deepseek-reasoner   | `DEEPSEEK_API_KEY`  |
+| Qwen                  | qwen-max, qwq-32b                  | `DASHSCOPE_API_KEY` |
+| MiniMax               | minimax-text-01                    | `MINIMAX_API_KEY`   |
+| Ollama                | llama3, mistral, phi4              | (local, no key)     |
+| LM Studio             | any loaded model                   | (local, no key)     |
+| Any OpenAI-compatible | custom                             | via `--base-url`    |
 
 ## Tools
 
-50+ built-in tools the agent can use:
+98 built-in tools the agent can use:
 
-| Category | Tools |
-| -------- | ----- |
-| **File** | Read, Write, Edit, Glob, Grep, ListDir, Append |
-| **Shell** | Bash execution, Python execution, process management |
-| **Web** | DuckDuckGo search, web scraping, API calls, RSS, URL analysis |
-| **Data** | JSON, CSV, text processing, data conversion, datetime |
-| **Math** | Calculator, statistics, number theory, unit conversion |
-| **AI** | Text embedding, similarity, classification, summarization, NER |
-| **Agent** | Spawn sub-agents, task management, plan mode, worktrees |
-| **Memory** | Save/search/delete persistent memories |
-| **MCP** | Model Context Protocol tool integration |
+| Category     | Tools                                                                                                                                              |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **File**     | ReadFile, WriteFile, AppendFile, FileEditTool, GlobTool, GrepTool, ListDir, TempFileManager                                                        |
+| **Shell**    | ExecuteShell, PythonExecution, ProcessManager                                                                                                      |
+| **Web**      | DuckDuckGoSearch, GoogleSearch, WebScraper, APIClient, RSSReader, URLAnalyzer                                                                      |
+| **Data**     | JSONProcessor, CSVProcessor, TextProcessor, DateTimeProcessor                                                                                      |
+| **Math**     | Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter                                                                |
+| **AI/ML**    | TextEmbedding, SimilaritySearch, Classifier, Summarizer, NERTagger                                                                                 |
+| **Agent**    | SpawnAgents, TaskCreateTool, TaskListTool, TaskGetTool, TaskOutputTool, SendMessageTool, AgentTool                                                 |
+| **Memory**   | save_memory, search_memory, delete_memory, get_memory_statistics, consolidate_agent_memories                                                       |
+| **Meta**     | configure_mixture_of_agents, session_search, skill_view, skills_list, skill_manage                                                                 |
+| **MCP**      | ListMcpResourcesTool, ReadMcpResourceTool                                                                                                          |
+| **Planning** | EnterPlanModeTool, ExitPlanModeTool, TodoWriteTool, AskUserQuestionTool                                                                            |
+| **RL**       | rl_list_environments, rl_select_environment, rl_start_training, rl_stop_training, rl_check_status, rl_get_results, rl_list_runs, rl_test_inference |
 
 ### Permission modes
 
@@ -179,27 +184,43 @@ Xerxes works with any OpenAI-compatible API. Built-in provider detection for:
 - **accept-all** — approve everything (use with trusted models)
 - **manual** — prompt for every tool call
 
+## Skills
+
+82+ built-in skills covering software development, research, GitHub, productivity, ML/AI training, media, and more. Skills are markdown instruction sets that the agent loads into context when invoked via `/skill-name`.
+
+| Category         | Skills                                                                                                                                                                       |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Software Dev** | plan, test-driven-development, systematic-debugging, subagent-driven-development, requesting-code-review, writing-plans                                                      |
+| **Research**     | arxiv, blogwatcher, dspy, llm-wiki, polymarket, research-paper-writing                                                                                                       |
+| **GitHub**       | codebase-inspection, github-auth, github-code-review, github-issues, github-pr-workflow, github-repo-management                                                              |
+| **ML/Training**  | axolotl, grpo-rl-training, peft-fine-tuning, pytorch-fsdp, fine-tuning-with-trl, unsloth, evaluating-llms-harness, weights-and-biases, huggingface-hub, modal-serverless-gpu |
+| **Productivity** | notion, google-workspace, linear, nano-pdf, ocr-and-documents, powerpoint                                                                                                    |
+| **Creative**     | ascii-art, ascii-video, excalidraw, architecture-diagram, manim-video, p5js, popular-web-designs, songwriting-and-ai-music                                                   |
+| **Other**        | deepscan, obsidian, youtube-content, gif-search, jupyter-live-kernel, webhook-subscriptions, pokemon-player, minecraft-modpack-server                                        |
+
+Create your own with `/skill-create`.
+
 ## Keyboard Shortcuts
 
-| Key | Action |
-| --- | ------ |
-| Enter | Submit query |
-| Up/Down | Input history |
-| Ctrl+C | Cancel streaming / quit |
-| Ctrl+W | Delete word |
-| Ctrl+U | Clear line |
-| Ctrl+A/E | Home / End |
-| Esc | Cancel provider setup |
-| Tab | Autocomplete slash command |
-| y/n | Approve/deny permission |
+| Key      | Action                     |
+| -------- | -------------------------- |
+| Enter    | Submit query               |
+| Up/Down  | Input history              |
+| Ctrl+C   | Cancel streaming / quit    |
+| Ctrl+W   | Delete word                |
+| Ctrl+U   | Clear line                 |
+| Ctrl+A/E | Home / End                 |
+| Esc      | Cancel provider setup      |
+| Tab      | Autocomplete slash command |
+| y/n      | Approve/deny permission    |
 
 ## Python SDK
 
 Xerxes's Python runtime can also be used as a library:
 
 ```python
-from xerxes_agent.streaming.events import AgentState
-from xerxes_agent.streaming.loop import run as run_agent_loop
+from xerxes.streaming.events import AgentState
+from xerxes.streaming.loop import run as run_agent_loop
 
 state = AgentState()
 
@@ -245,7 +266,7 @@ result = cortex.kickoff()
 ### API Server
 
 ```python
-from xerxes_agent.api_server import XerxesAPIServer
+from xerxes.api_server import XerxesAPIServer
 
 server = XerxesAPIServer()
 server.run(host="0.0.0.0", port=8000)
@@ -257,33 +278,28 @@ server.run(host="0.0.0.0", port=8000)
 
 ```text
 src/
-├── python/xerxes_agent/           # Python agent runtime
-│   ├── bridge/              # JSON-RPC bridge + provider profiles
-│   ├── streaming/           # Event-driven agent loop
-│   ├── tools/               # 50+ agent tools
-│   ├── llms/                # LLM provider registry
-│   ├── runtime/             # Bootstrap, config, execution
-│   ├── context/             # Token counting, compaction
-│   ├── agents/              # Agent definitions
-│   ├── cortex/              # Multi-agent orchestration
-│   ├── memory/              # Memory backends
-│   ├── security/            # Sandbox, policies
-│   ├── session/             # Session persistence
-│   ├── api_server/          # FastAPI server
-│   └── _bin/                # Rust binary launcher
-└── rust/xerxes-cli/         # Rust CLI frontend
-    └── src/
-        ├── main.rs          # Entry point, event loop
-        ├── render.rs        # Inline viewport rendering
-        ├── markdown.rs      # Markdown → terminal
-        ├── app.rs           # State machine, cell model
-        ├── input.rs         # Keyboard handling
-        ├── bridge.rs        # Python subprocess IPC
-        ├── events.rs        # Protocol types
-        ├── theme.rs         # Colors and styles
-        ├── spinner.rs       # Loading animation
-        ├── slash.rs         # Command definitions
-        └── diff.rs          # Diff rendering
+├── python/xerxes/              # Python agent runtime
+│   ├── bridge/                 # JSON-RPC bridge + provider profiles
+│   ├── streaming/              # Event-driven agent loop
+│   ├── tools/                  # 98 agent tools
+│   ├── llms/                   # LLM provider registry
+│   ├── runtime/                # Bootstrap, config, execution
+│   ├── context/                # Token counting, compaction
+│   ├── agents/                 # Agent definitions
+│   ├── cortex/                 # Multi-agent orchestration
+│   ├── memory/                 # Memory backends
+│   ├── security/               # Sandbox, policies
+│   ├── session/                # Session persistence
+│   ├── api_server/             # FastAPI server
+│   └── _bin/                   # CLI launcher + bundled JS
+├── typescript/xerxes-cli/      # TypeScript/Ink CLI frontend
+│   └── src/
+│       ├── index.tsx           # Entry point
+│       ├── App.tsx             # Main Ink app
+│       ├── components/         # Cell renderers, Markdown, Banner
+│       ├── state/              # Cell reducer, bridge events
+│       └── bridge/             # Spawn, types
+└── tests/                      # pytest suite
 ```
 
 ## Development
@@ -295,20 +311,21 @@ pip install -e ".[dev]"
 # Run tests
 pytest tests/ -v
 
-# Build Rust CLI only
-cd src/rust && cargo build --release
+# Build TypeScript CLI bundle
+cd src/typescript/xerxes-cli && bun build src/index.tsx --target=node --minify --outfile=../../python/xerxes/_bin/xerxes.mjs
 
 # Lint
-ruff check src/python/xerxes_agent/
+ruff check src/python/xerxes/
 
 # Format
-black src/python/xerxes_agent/ tests/
+black src/python/xerxes/ tests/
 ```
 
 ## Requirements
 
 - Python 3.10+
-- Rust toolchain (for building the CLI)
+- Node.js 20+ (for CLI runtime)
+- Bun (for building the CLI bundle)
 - An LLM provider (cloud API key or local Ollama/LM Studio)
 
 ## License

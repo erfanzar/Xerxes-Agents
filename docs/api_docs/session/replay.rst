@@ -1,7 +1,7 @@
-src/python/xerxes_agent.session.replay
+src/python/xerxes.session.replay
 ================================
 
-.. automodule:: src/python/xerxes_agent.session.replay
+.. automodule:: src/python/xerxes.session.replay
    :members:
    :undoc-members:
    :show-inheritance:

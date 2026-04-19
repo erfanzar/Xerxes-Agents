@@ -1,7 +1,7 @@
-src/python/xerxes_agent.runtime.context
+src/python/xerxes.runtime.context
 =================================
 
-.. automodule:: src/python/xerxes_agent.runtime.context
+.. automodule:: src/python/xerxes.runtime.context
    :members:
    :undoc-members:
    :show-inheritance:

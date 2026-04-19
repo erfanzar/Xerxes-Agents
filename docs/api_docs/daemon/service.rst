@@ -1,7 +1,7 @@
-src/python/xerxes_agent.daemon.service
+src/python/xerxes.daemon.service
 ================================
 
-.. automodule:: src/python/xerxes_agent.daemon.service
+.. automodule:: src/python/xerxes.daemon.service
    :members:
    :undoc-members:
    :show-inheritance:

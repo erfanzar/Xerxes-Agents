@@ -1,4 +1,4 @@
-src/python/xerxes_agent.channels package
+src/python/xerxes.channels package
 ==================================
 
 .. toctree::

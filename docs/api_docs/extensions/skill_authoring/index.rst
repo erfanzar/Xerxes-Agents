@@ -1,4 +1,4 @@
-src/python/xerxes_agent.extensions.skill_authoring package
+src/python/xerxes.extensions.skill_authoring package
 ====================================================
 
 .. toctree::

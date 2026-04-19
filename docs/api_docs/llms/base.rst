@@ -1,7 +1,7 @@
-src/python/xerxes_agent.llms.base
+src/python/xerxes.llms.base
 ===========================
 
-.. automodule:: src/python/xerxes_agent.llms.base
+.. automodule:: src/python/xerxes.llms.base
    :members:
    :undoc-members:
    :show-inheritance:

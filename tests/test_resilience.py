@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import random
 
-from xerxes_agent.runtime.resilience import BackoffPolicy, JitterMode, ToolResultCache, hash_args
+from xerxes.runtime.resilience import BackoffPolicy, JitterMode, ToolResultCache, hash_args
 
 
 class TestBackoff:

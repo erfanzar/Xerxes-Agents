@@ -1,4 +1,4 @@
-src/python/xerxes_agent.runtime package
+src/python/xerxes.runtime package
 =================================
 
 .. toctree::

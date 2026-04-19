@@ -15,9 +15,9 @@
 import asyncio
 
 import pytest
-from xerxes_agent import Agent
-from xerxes_agent.executors import AgentOrchestrator, FunctionExecutor, FunctionRegistry
-from xerxes_agent.types import (
+from xerxes import Agent
+from xerxes.executors import AgentOrchestrator, FunctionExecutor, FunctionRegistry
+from xerxes.types import (
     AgentSwitchTrigger,
     ExecutionStatus,
     FunctionCallStrategy,
@@ -38,7 +38,6 @@ class TestFunctionRegistry:
         registry.register(test_func, "agent1", {"description": "Test function"})
 
         assert "test_func" in registry._functions
-        assert registry._function_agents["test_func"] == "agent1"
         assert registry._function_metadata["test_func"]["description"] == "Test function"
 
     def test_get_function(self):

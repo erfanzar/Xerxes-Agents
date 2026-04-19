@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.plugins — plugin registration and management."""
+"""Tests for xerxes.plugins — plugin registration and management."""
 
 import pytest
-from xerxes_agent.extensions.plugins import (
+from xerxes.extensions.plugins import (
     PluginConflictError,
     PluginMeta,
     PluginRegistry,
@@ -151,7 +151,7 @@ class TestPluginRegistry:
     def test_discover_from_directory(self, tmp_path):
         # Create a plugin file
         plugin_code = """
-from xerxes_agent.extensions.plugins import PluginMeta, PluginType
+from xerxes.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="discovered_plugin", version="1.0", plugin_type=PluginType.TOOL)
 
@@ -309,7 +309,7 @@ class TestPluginDependencies:
         assert set(order) == {"a", "b"}
 
     def test_get_load_order_circular_raises(self):
-        from xerxes_agent.extensions.dependency import CircularDependencyError
+        from xerxes.extensions.dependency import CircularDependencyError
 
         registry = PluginRegistry()
         registry.register_plugin(PluginMeta(name="a", version="1.0", dependencies=["b"]))

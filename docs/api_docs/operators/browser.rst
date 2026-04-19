@@ -1,7 +1,7 @@
-src/python/xerxes_agent.operators.browser
+src/python/xerxes.operators.browser
 ===================================
 
-.. automodule:: src/python/xerxes_agent.operators.browser
+.. automodule:: src/python/xerxes.operators.browser
    :members:
    :undoc-members:
    :show-inheritance:

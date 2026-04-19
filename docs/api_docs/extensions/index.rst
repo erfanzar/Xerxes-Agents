@@ -1,4 +1,4 @@
-src/python/xerxes_agent.extensions package
+src/python/xerxes.extensions package
 ====================================
 
 .. toctree::
@@ -9,3 +9,5 @@ src/python/xerxes_agent.extensions package
    hooks
    plugins
    skills
+   skills_guard
+   skills_hub

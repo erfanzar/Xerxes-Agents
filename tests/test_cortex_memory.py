@@ -1,6 +1,6 @@
-"""Tests for xerxes_agent.cortex.memory_integration module."""
+"""Tests for xerxes.cortex.memory_integration module."""
 
-from xerxes_agent.cortex.agents.memory_integration import CortexMemory
+from xerxes.cortex.agents.memory_integration import CortexMemory
 
 
 class TestCortexMemory:

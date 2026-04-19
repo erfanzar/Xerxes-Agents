@@ -1,7 +1,7 @@
-src/python/xerxes_agent.channels.identity
+src/python/xerxes.channels.identity
 ===================================
 
-.. automodule:: src/python/xerxes_agent.channels.identity
+.. automodule:: src/python/xerxes.channels.identity
    :members:
    :undoc-members:
    :show-inheritance:

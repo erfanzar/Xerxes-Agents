@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import pytest
-from xerxes_agent.tools.rl_tools import (
+from xerxes.tools.rl_tools import (
     InMemoryRLBackend,
     reset_rl_backend,
     rl_check_status,

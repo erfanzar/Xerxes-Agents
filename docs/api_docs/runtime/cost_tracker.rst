@@ -1,7 +1,7 @@
-src/python/xerxes_agent.runtime.cost_tracker
+src/python/xerxes.runtime.cost_tracker
 ======================================
 
-.. automodule:: src/python/xerxes_agent.runtime.cost_tracker
+.. automodule:: src/python/xerxes.runtime.cost_tracker
    :members:
    :undoc-members:
    :show-inheritance:

@@ -1,7 +1,7 @@
-src/python/xerxes_agent.audit.events
+src/python/xerxes.audit.events
 ==============================
 
-.. automodule:: src/python/xerxes_agent.audit.events
+.. automodule:: src/python/xerxes.audit.events
    :members:
    :undoc-members:
    :show-inheritance:

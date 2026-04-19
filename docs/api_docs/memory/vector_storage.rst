@@ -1,7 +1,7 @@
-src/python/xerxes_agent.memory.vector_storage
+src/python/xerxes.memory.vector_storage
 =======================================
 
-.. automodule:: src/python/xerxes_agent.memory.vector_storage
+.. automodule:: src/python/xerxes.memory.vector_storage
    :members:
    :undoc-members:
    :show-inheritance:

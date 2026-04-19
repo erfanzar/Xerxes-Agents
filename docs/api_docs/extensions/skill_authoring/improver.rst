@@ -1,7 +1,7 @@
-src/python/xerxes_agent.extensions.skill_authoring.improver
+src/python/xerxes.extensions.skill_authoring.improver
 =====================================================
 
-.. automodule:: src/python/xerxes_agent.extensions.skill_authoring.improver
+.. automodule:: src/python/xerxes.extensions.skill_authoring.improver
    :members:
    :undoc-members:
    :show-inheritance:

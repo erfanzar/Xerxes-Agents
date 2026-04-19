@@ -1,7 +1,7 @@
-src/python/xerxes_agent.types.converters
+src/python/xerxes.types.converters
 ==================================
 
-.. automodule:: src/python/xerxes_agent.types.converters
+.. automodule:: src/python/xerxes.types.converters
    :members:
    :undoc-members:
    :show-inheritance:

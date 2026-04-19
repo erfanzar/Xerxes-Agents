@@ -1,7 +1,7 @@
-src/python/xerxes_agent.core.basics
+src/python/xerxes.core.basics
 =============================
 
-.. automodule:: src/python/xerxes_agent.core.basics
+.. automodule:: src/python/xerxes.core.basics
    :members:
    :undoc-members:
    :show-inheritance:

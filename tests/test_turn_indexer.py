@@ -15,9 +15,9 @@
 
 from __future__ import annotations
 
-from xerxes_agent.extensions.hooks import HookRunner
-from xerxes_agent.memory import LongTermMemory, make_memory_provider, make_turn_indexer_hook
-from xerxes_agent.memory.storage import SimpleStorage
+from xerxes.extensions.hooks import HookRunner
+from xerxes.memory import LongTermMemory, make_memory_provider, make_turn_indexer_hook
+from xerxes.memory.storage import SimpleStorage
 
 
 class _FakeMemory:
@@ -33,7 +33,7 @@ class _FakeMemory:
         return _Item()
 
     def search(self, query, limit=10, **kwargs):
-        from xerxes_agent.memory.base import MemoryItem
+        from xerxes.memory.base import MemoryItem
 
         return [MemoryItem(content=s["content"]) for s in self.saved[:limit]]
 

@@ -1,7 +1,7 @@
-src/python/xerxes_agent.logging.structured
+src/python/xerxes.logging.structured
 ====================================
 
-.. automodule:: src/python/xerxes_agent.logging.structured
+.. automodule:: src/python/xerxes.logging.structured
    :members:
    :undoc-members:
    :show-inheritance:

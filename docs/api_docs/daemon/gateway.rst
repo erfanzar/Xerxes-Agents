@@ -1,7 +1,7 @@
-src/python/xerxes_agent.daemon.gateway
+src/python/xerxes.daemon.gateway
 ================================
 
-.. automodule:: src/python/xerxes_agent.daemon.gateway
+.. automodule:: src/python/xerxes.daemon.gateway
    :members:
    :undoc-members:
    :show-inheritance:

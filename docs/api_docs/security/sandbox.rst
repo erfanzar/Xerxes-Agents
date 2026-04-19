@@ -1,7 +1,7 @@
-src/python/xerxes_agent.security.sandbox
+src/python/xerxes.security.sandbox
 ==================================
 
-.. automodule:: src/python/xerxes_agent.security.sandbox
+.. automodule:: src/python/xerxes.security.sandbox
    :members:
    :undoc-members:
    :show-inheritance:

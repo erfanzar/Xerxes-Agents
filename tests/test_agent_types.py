@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import pytest
-from xerxes_agent import Agent, AgentCapability
-from xerxes_agent.types import AgentSwitchTrigger, FunctionCallStrategy
-from xerxes_agent.types.agent_types import AgentBaseFn, _wrap_static_call
+from xerxes import Agent, AgentCapability
+from xerxes.types import AgentSwitchTrigger, FunctionCallStrategy
+from xerxes.types.agent_types import AgentBaseFn, _wrap_static_call
 
 
 class TestAgentTypes:

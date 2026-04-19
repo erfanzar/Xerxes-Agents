@@ -15,6 +15,7 @@ public/
 run.py
 env.py
 exp.py
+dist-bin/
 outputs/
 # Distribution / packaging
 assistant_memory

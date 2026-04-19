@@ -1,4 +1,4 @@
-src/python/xerxes_agent.audit package
+src/python/xerxes.audit package
 ===============================
 
 .. toctree::

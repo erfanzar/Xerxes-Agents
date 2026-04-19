@@ -1,7 +1,7 @@
-src/python/xerxes_agent.runtime.session
+src/python/xerxes.runtime.session
 =================================
 
-.. automodule:: src/python/xerxes_agent.runtime.session
+.. automodule:: src/python/xerxes.runtime.session
    :members:
    :undoc-members:
    :show-inheritance:

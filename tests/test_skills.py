@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.skills — skill discovery and indexing."""
+"""Tests for xerxes.skills — skill discovery and indexing."""
 
 from pathlib import Path
 
-from xerxes_agent.extensions.skills import Skill, SkillMetadata, SkillRegistry, parse_skill_md
+from xerxes.extensions.skills import Skill, SkillMetadata, SkillRegistry, parse_skill_md
 
 SAMPLE_SKILL_MD = """---
 name: web_research
@@ -229,7 +229,7 @@ class TestSkillDependencies:
         assert "nonexistent_skill" in errors[0]
 
     def test_validate_missing_tool_dependency(self):
-        from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry
+        from xerxes.extensions.plugins import PluginMeta, PluginRegistry
 
         plugin_reg = PluginRegistry()
         plugin_reg.register_plugin(PluginMeta(name="base", version="1.0"))
@@ -252,7 +252,7 @@ class TestSkillDependencies:
         assert "summarize" in errors[0]
 
     def test_validate_all_tools_satisfied(self):
-        from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry
+        from xerxes.extensions.plugins import PluginMeta, PluginRegistry
 
         plugin_reg = PluginRegistry()
         plugin_reg.register_plugin(PluginMeta(name="base", version="1.0"))

@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from xerxes_agent import Agent, MemoryStore
+from xerxes import Agent, MemoryStore
 
 
 @pytest.fixture

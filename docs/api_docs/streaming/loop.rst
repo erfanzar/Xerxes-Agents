@@ -1,7 +1,7 @@
-src/python/xerxes_agent.streaming.loop
+src/python/xerxes.streaming.loop
 ================================
 
-.. automodule:: src/python/xerxes_agent.streaming.loop
+.. automodule:: src/python/xerxes.streaming.loop
    :members:
    :undoc-members:
    :show-inheritance:

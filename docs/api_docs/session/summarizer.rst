@@ -1,7 +1,7 @@
-src/python/xerxes_agent.session.summarizer
+src/python/xerxes.session.summarizer
 ====================================
 
-.. automodule:: src/python/xerxes_agent.session.summarizer
+.. automodule:: src/python/xerxes.session.summarizer
    :members:
    :undoc-members:
    :show-inheritance:

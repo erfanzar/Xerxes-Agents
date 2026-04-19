@@ -18,14 +18,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from xerxes_agent import Agent, AgentRuntimeOverrides, RuntimeFeaturesConfig, Xerxes, create_llm
-from xerxes_agent.extensions.plugins import PluginRegistry
-from xerxes_agent.llms.base import BaseLLM, LLMConfig
-from xerxes_agent.runtime.loop_detection import LoopDetectionConfig
-from xerxes_agent.security.policy import ToolPolicy
-from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
-from xerxes_agent.tools.standalone import WriteFile
-from xerxes_agent.types import ExecutionStatus, RequestFunctionCall
+from xerxes import Agent, AgentRuntimeOverrides, RuntimeFeaturesConfig, Xerxes, create_llm
+from xerxes.extensions.plugins import PluginRegistry
+from xerxes.llms.base import BaseLLM, LLMConfig
+from xerxes.runtime.loop_detection import LoopDetectionConfig
+from xerxes.security.policy import ToolPolicy
+from xerxes.security.sandbox import SandboxConfig, SandboxMode
+from xerxes.tools.standalone import WriteFile
+from xerxes.types import ExecutionStatus, RequestFunctionCall
 
 
 def _chunk(*, content: str | None = None, function_calls: list[dict] | None = None, is_final: bool = False) -> dict:
@@ -112,7 +112,7 @@ def tool_result_persist(tool_name, result, agent_id):
         )
 
     path.write_text(
-        f"""from xerxes_agent.extensions.plugins import PluginMeta, PluginType
+        f"""from xerxes.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(name="runtime_plugin", version="1.0.0", plugin_type=PluginType.TOOL)
 
@@ -414,7 +414,7 @@ def test_create_llm_resolves_provider_plugins():
 
 def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
     """Audit events must be emitted from real runtime flow, not only unit tests."""
-    from xerxes_agent.audit import InMemoryCollector
+    from xerxes.audit import InMemoryCollector
 
     monkeypatch.chdir(tmp_path)
     collector = InMemoryCollector()
@@ -460,7 +460,7 @@ def test_audit_events_emitted_during_live_tool_execution(tmp_path, monkeypatch):
 
 def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
     """Session manager must record turns from real runs."""
-    from xerxes_agent.session import InMemorySessionStore
+    from xerxes.session import InMemorySessionStore
 
     monkeypatch.chdir(tmp_path)
     store = InMemorySessionStore()
@@ -507,8 +507,8 @@ def test_session_persistence_during_live_execution(tmp_path, monkeypatch):
 
 def test_non_tool_runtime_path_emits_turn_end_and_persists_session():
     """Plain completion turns should still emit end events and persist a turn."""
-    from xerxes_agent.audit import InMemoryCollector
-    from xerxes_agent.session import InMemorySessionStore
+    from xerxes.audit import InMemoryCollector
+    from xerxes.session import InMemorySessionStore
 
     collector = InMemoryCollector()
     store = InMemorySessionStore()
@@ -549,7 +549,7 @@ def test_non_tool_runtime_path_emits_turn_end_and_persists_session():
 
 def test_prompt_profile_compact_mode_produces_shorter_output(tmp_path, monkeypatch):
     """Compact prompt profile must produce a shorter prompt than full."""
-    from xerxes_agent.runtime.profiles import PromptProfile
+    from xerxes.runtime.profiles import PromptProfile
 
     monkeypatch.chdir(tmp_path)
 
@@ -637,7 +637,7 @@ def test_plugin_dependency_validation_runs_at_startup(tmp_path, monkeypatch):
     plugin_dir.mkdir()
     # Plugin with unmet dependency
     plugin_dir.joinpath("needy_plugin.py").write_text(
-        """from xerxes_agent.extensions.plugins import PluginMeta, PluginType
+        """from xerxes.extensions.plugins import PluginMeta, PluginType
 
 PLUGIN_META = PluginMeta(
     name="needy",

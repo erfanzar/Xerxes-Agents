@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from xerxes_agent.tui.terminal_config import TerminalConfigStore, TerminalProfile
+from xerxes.tui.terminal_config import TerminalConfigStore, TerminalProfile
 
 
 def test_terminal_config_round_trip(tmp_path: Path):

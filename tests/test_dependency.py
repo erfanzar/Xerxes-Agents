@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for xerxes_agent.dependency — version constraints and dependency resolution."""
+"""Tests for xerxes.dependency — version constraints and dependency resolution."""
 
 import pytest
-from xerxes_agent.extensions.dependency import (
+from xerxes.extensions.dependency import (
     CircularDependencyError,
     DependencyResolver,
     DependencySpec,
