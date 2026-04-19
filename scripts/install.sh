@@ -4,27 +4,26 @@
 #
 # Xerxes installer — zero-dependency bootstrap.
 #
-#   curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
 #
 # What it does, in order:
 #   1. Detect OS + arch, refuse on unsupported targets.
-#   2. Install rustup + a stable toolchain (needed to build native Python
-#      extensions on fresh machines that don't ship a Rust compiler).
-#   3. Install uv (Astral's Python manager) for fast resolution + venv.
-#   4. Install the `xerxes` CLI as an isolated uv tool.
-#   5. Ensure ~/.local/bin and ~/.cargo/bin are on PATH.
+#   2. Install uv (Astral's Python manager) for fast resolution + venv.
+#   3. Install the `xerxes` CLI as an isolated uv tool from GitHub.
+#   4. Ensure Node.js ≥20 is available (required by the TypeScript CLI at runtime).
+#   5. Ensure ~/.local/bin is on PATH.
 #
 # Environment overrides:
 #   XERXES_VERSION      Pin a specific PyPI version (default: latest).
 #   XERXES_REF          Install from a git ref instead of PyPI.
-#   XERXES_NO_RUST=1    Skip the rustup step (use when Rust is pre-installed).
+#   XERXES_NO_NODE_CHECK=1  Skip the Node.js version check.
 #   XERXES_NO_MODIFY_PATH=1  Do not touch shell rc files.
 #   XERXES_INSTALL_EXTRAS Comma-separated PEP 508 extras (e.g. "tui,server").
 
 set -eu
 
-REPO_URL="https://github.com/erfanzar/Xerxes"
-RAW_URL="https://raw.githubusercontent.com/erfanzar/Xerxes/main"
+REPO_URL="https://github.com/erfanzar/Xerxes-Agents"
+RAW_URL="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main"
 
 RED=""
 GREEN=""
@@ -98,22 +97,22 @@ ensure_build_prereqs() {
     esac
 }
 
-install_rust() {
-    if [ "${XERXES_NO_RUST:-0}" = "1" ]; then
-        info "skipping rustup (XERXES_NO_RUST=1)"
+check_node() {
+    if [ "${XERXES_NO_NODE_CHECK:-0}" = "1" ]; then
+        info "skipping Node.js check (XERXES_NO_NODE_CHECK=1)"
         return 0
     fi
-    if command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
-        ok "rust toolchain already present ($(rustc --version))"
-        return 0
+    if command -v node >/dev/null 2>&1; then
+        node_version=$(node --version 2>/dev/null | sed 's/^v//')
+        major=$(echo "$node_version" | cut -d. -f1)
+        if [ "$major" -ge 20 ] 2>/dev/null; then
+            ok "Node.js $node_version already present (≥20 required)"
+            return 0
+        fi
+        warn "Node.js $node_version found but ≥20 required"
     fi
-    info "installing rustup (stable toolchain, default profile)"
-    download "https://sh.rustup.rs" | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
-    # shellcheck disable=SC1091
-    if [ -f "$HOME/.cargo/env" ]; then
-        . "$HOME/.cargo/env"
-    fi
-    ok "rust installed ($(rustc --version 2>/dev/null || echo unknown))"
+    warn "Node.js ≥20 not found. The Xerxes CLI requires Node.js at runtime."
+    warn "Install from https://nodejs.org or run: brew install node"
 }
 
 install_uv() {
@@ -136,7 +135,8 @@ install_uv() {
 }
 
 install_xerxes() {
-    spec="xerxes-agent"
+    # Default to git install since the package is not yet on PyPI.
+    spec="xerxes-agent @ git+${REPO_URL}.git"
     if [ -n "${XERXES_REF:-}" ]; then
         spec="xerxes-agent @ git+${REPO_URL}.git@${XERXES_REF}"
     elif [ -n "${XERXES_VERSION:-}" ]; then
@@ -164,7 +164,7 @@ modify_path() {
         return 0
     fi
     bin_dir=""
-    for candidate in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+    for candidate in "$HOME/.local/bin"; do
         [ -d "$candidate" ] || continue
         case ":$PATH:" in
             *":$candidate:"*) ;;
@@ -229,7 +229,7 @@ main() {
     detect_platform
     info "target: $PLATFORM"
     ensure_build_prereqs
-    install_rust
+    check_node
     install_uv
     install_xerxes
     modify_path

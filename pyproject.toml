@@ -41,8 +41,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/erfanzar/Xerxes"
-Repository = "https://github.com/erfanzar/Xerxes"
+Homepage = "https://github.com/erfanzar/Xerxes-Agents"
+Repository = "https://github.com/erfanzar/Xerxes-Agents"
 Documentation = "https://erfanzar.github.io/Xerxes"
 
 [project.scripts]
