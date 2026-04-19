@@ -32,11 +32,11 @@ Example:
 
 import re
 import textwrap
+from enum import StrEnum
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 from pydantic import ConfigDict, Field
 
-from enum import StrEnum
 from ..core.multimodal import SerializableImage
 from ..core.utils import XerxesBase
 from .tool_calls import ToolCall

@@ -35,10 +35,9 @@ Example:
 import time
 import typing as tp
 import uuid
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from enum import StrEnum
 
 
 class OpenAIBaseModel(BaseModel):
