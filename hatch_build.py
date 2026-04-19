@@ -6,27 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Custom hatch build hook that compiles Rust binaries during install.
+"""Custom hatch build hook that bundles the TypeScript CLI during install.
 
 When you run `pip install -e .` or `uv pip install -e .`, this hook:
-1. Runs `cargo build --release` in the Rust workspace
-2. Copies the resulting binaries into `src/python/xerxes_agent/_bin/`
-3. Registers them as package data so they're accessible after install
-
-The binaries are also exposed as console_scripts entry points via thin
-Python wrappers, but the native binaries in _bin/ can be called directly.
+1. Looks for the pre-built CLI bundle at `src/python/xerxes/_bin/xerxes.mjs`
+2. If missing, tries to build it with `bun` from `src/typescript/xerxes-cli/`
+3. Stages the bundle and launcher into the wheel
 """
 
 from __future__ import annotations
 
 import os
-import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,83 +28,91 @@ from pathlib import Path
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
-class RustBuildHook(BuildHookInterface):
-    """Hatch build hook that compiles the Rust workspace."""
+class TSBuildHook(BuildHookInterface):
+    """Hatch build hook that stages the TypeScript CLI bundle."""
 
-    PLUGIN_NAME = "rust-build"
+    PLUGIN_NAME = "ts-build"
 
     def initialize(self, version: str, build_data: dict) -> None:
-        """Called before the build — compile Rust and stage binaries."""
+        """Called before the build — ensure bundle exists and stage it."""
         root = Path(self.root)
-        rust_dir = root / "src" / "rust"
+        ts_dir = root / "src" / "typescript" / "xerxes-cli"
         bin_dir = root / "src" / "python" / "xerxes" / "_bin"
+        bundle = bin_dir / "xerxes.mjs"
+        launcher = bin_dir / "_launcher.py"
 
-        if not rust_dir.exists():
-            print("[rust-build] No src/rust/ directory found, skipping Rust build.")
+        # If bundle is missing, try to build it.
+        if not bundle.exists():
+            self._try_build_bundle(ts_dir, bundle)
+
+        if not bundle.exists():
+            print("[ts-build] WARNING: xerxes.mjs bundle not found — CLI will not work.")
+            print("[ts-build] Install Bun (https://bun.sh) and rebuild.")
             return
 
-        # Check for cargo.
-        cargo = shutil.which("cargo")
-        if not cargo:
-            print("[rust-build] WARNING: cargo not found — skipping Rust build.")
-            print("[rust-build] Install Rust via https://rustup.rs to build native binaries.")
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure __init__.py exists.
+        init = bin_dir / "__init__.py"
+        if not init.exists():
+            init.write_text(
+                '"""CLI launcher and bundled TypeScript bundle for Xerxes."""\n\n'
+                "import pathlib\n\n"
+                "BIN_DIR = pathlib.Path(__file__).parent\n"
+            )
+
+        # Include _bin/ in the wheel.
+        build_data.setdefault("force_include", {})
+        build_data["force_include"][str(bundle)] = "xerxes/_bin/xerxes.mjs"
+        build_data["force_include"][str(launcher)] = "xerxes/_bin/_launcher.py"
+        build_data["force_include"][str(init)] = "xerxes/_bin/__init__.py"
+        print(f"[ts-build] Staged CLI bundle ({bundle.stat().st_size / 1024:.0f} KB) for install.")
+
+    def _try_build_bundle(self, ts_dir: Path, bundle: Path) -> None:
+        """Attempt to build the TypeScript bundle with bun."""
+        bun = shutil.which("bun")
+        if not bun:
+            # Try common fallback paths.
+            for candidate in [
+                Path.home() / ".bun" / "bin" / "bun",
+                Path("/usr/local/bin/bun"),
+                Path("/opt/homebrew/bin/bun"),
+            ]:
+                if candidate.exists():
+                    bun = str(candidate)
+                    break
+
+        if not bun:
+            print("[ts-build] bun not found — skipping TypeScript build.")
             return
 
-        print(f"[rust-build] Building Rust workspace in {rust_dir} ...")
+        if not ts_dir.exists():
+            print(f"[ts-build] TypeScript source dir not found: {ts_dir}")
+            return
+
+        print(f"[ts-build] Building TypeScript CLI with bun ...")
+
+        # Install dependencies if needed.
+        if not (ts_dir / "node_modules").exists():
+            try:
+                subprocess.run([bun, "install"], cwd=str(ts_dir), check=True)
+            except subprocess.CalledProcessError as exc:
+                print(f"[ts-build] bun install failed (exit {exc.returncode}).")
+                return
 
         try:
             subprocess.run(
-                [cargo, "build", "--release", "--workspace"],
-                cwd=str(rust_dir),
+                [
+                    bun,
+                    "build",
+                    "src/index.tsx",
+                    "--target=node",
+                    "--minify",
+                    f"--outfile={bundle}",
+                ],
+                cwd=str(ts_dir),
                 check=True,
-                env={**os.environ, "CARGO_TERM_COLOR": "always"},
             )
+            print(f"[ts-build] Bundle built → {bundle}")
         except subprocess.CalledProcessError as exc:
-            print(f"[rust-build] WARNING: Rust build failed (exit {exc.returncode}).")
-            print("[rust-build] Python package will install without native binaries.")
-            return
-
-        # Determine binary extension.
-        ext = ".exe" if platform.system() == "Windows" else ""
-
-        # Expected binaries.
-        target_dir = rust_dir / "target" / "release"
-        binaries = {f"xerxes{ext}": "xerxes-cli"}
-
-        # Copy binaries into the package.
-        bin_dir.mkdir(parents=True, exist_ok=True)
-
-        copied = []
-        for binary_name, _crate_name in binaries.items():
-            src = target_dir / binary_name
-            if src.exists():
-                dst = bin_dir / binary_name
-                shutil.copy2(str(src), str(dst))
-                # Ensure executable on Unix.
-                if platform.system() != "Windows":
-                    dst.chmod(0o755)
-                copied.append(binary_name)
-                print(f"[rust-build] Copied {binary_name} → {dst}")
-            else:
-                print(f"[rust-build] WARNING: Expected binary not found: {src}")
-
-        if copied:
-            # Write a __init__.py so the _bin dir is a package (for importlib.resources).
-            init = bin_dir / "__init__.py"
-            if not init.exists():
-                init.write_text(
-                    '"""Native Rust binaries for Xerxes."""\n\n'
-                    "import pathlib\n\n"
-                    "BIN_DIR = pathlib.Path(__file__).parent\n"
-                )
-
-            # Include _bin/ in the wheel.
-            build_data.setdefault("force_include", {})
-            for name in copied:
-                rel = f"xerxes_agent/_bin/{name}"
-                build_data["force_include"][str(bin_dir / name)] = rel
-            build_data["force_include"][str(init)] = "xerxes_agent/_bin/__init__.py"
-
-            print(f"[rust-build] {len(copied)} binaries staged for install.")
-        else:
-            print("[rust-build] No binaries were produced.")
+            print(f"[ts-build] Bundle build failed (exit {exc.returncode}).")

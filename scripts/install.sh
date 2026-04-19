@@ -115,6 +115,31 @@ check_node() {
     warn "Install from https://nodejs.org or run: brew install node"
 }
 
+install_bun() {
+    if command -v bun >/dev/null 2>&1; then
+        ok "bun already present ($(bun --version))"
+        return 0
+    fi
+    info "installing bun (required for CLI build)"
+    # Try curl install first.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://bun.sh/install | bash
+    else
+        warn "curl not found — cannot auto-install bun"
+        warn "Install manually from https://bun.sh"
+        return 0
+    fi
+    # shellcheck disable=SC1091
+    if [ -f "$HOME/.bun/bin/bun" ]; then
+        export PATH="$HOME/.bun/bin:$PATH"
+    fi
+    if command -v bun >/dev/null 2>&1; then
+        ok "bun installed ($(bun --version))"
+    else
+        warn "bun installed but not on PATH; you may need to restart your shell"
+    fi
+}
+
 install_uv() {
     if command -v uv >/dev/null 2>&1; then
         ok "uv already present ($(uv --version))"
@@ -135,6 +160,14 @@ install_uv() {
 }
 
 install_xerxes() {
+    # Clean up stale/broken installs from previous attempts.
+    info "cleaning up stale installs"
+    uv tool uninstall xerxes-agent 2>/dev/null || true
+    # Also remove any old pip-installed entry points that might shadow uv's.
+    for old_bin in "$HOME/.local/bin/xerxes" "$HOME/.cargo/bin/xerxes"; do
+        [ -f "$old_bin" ] && rm -f "$old_bin" && ok "removed stale binary: $old_bin"
+    done
+
     # Default to git install since the package is not yet on PyPI.
     spec="xerxes-agent @ git+${REPO_URL}.git"
     if [ -n "${XERXES_REF:-}" ]; then
@@ -231,6 +264,7 @@ main() {
     ensure_build_prereqs
     check_node
     install_uv
+    install_bun
     install_xerxes
     modify_path
     verify
