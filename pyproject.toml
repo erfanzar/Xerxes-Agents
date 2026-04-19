@@ -43,7 +43,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/erfanzar/Xerxes-Agents"
 Repository = "https://github.com/erfanzar/Xerxes-Agents"
-Documentation = "https://erfanzar.github.io/Xerxes"
+Documentation = "https://erfanzar.github.io/Xerxes-Agents"
 
 [project.scripts]
 xerxes = "xerxes._bin._launcher:launch"
