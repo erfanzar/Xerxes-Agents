@@ -316,7 +316,7 @@ class ShortTermMemory(Memory):
 
         summary = ["Recent activity:"]
 
-        conversations = {}
+        conversations: dict[str, list[MemoryItem]] = {}
         for item in self._items:
             conv_id = item.conversation_id or "default"
             if conv_id not in conversations:

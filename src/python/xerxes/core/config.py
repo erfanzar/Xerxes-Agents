@@ -36,15 +36,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field, field_validator
+
+yaml: Any = None
 try:
     import yaml
 
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
-    yaml = None
-
-from pydantic import BaseModel, Field, field_validator
 
 
 class LogLevel(StrEnum):
@@ -389,7 +389,7 @@ class XerxesConfig(BaseModel):
             >>> config = XerxesConfig.from_env()
             >>> print(config.llm.model)
         """
-        config_dict = {}
+        config_dict: dict[str, Any] = {}
 
         for key, value in os.environ.items():
             if key.startswith(prefix):
@@ -539,7 +539,9 @@ def load_config(path: str | Path | None = None) -> XerxesConfig:
     if path:
         config = XerxesConfig.from_file(path)
     elif os.getenv("XERXES_CONFIG_FILE"):
-        config = XerxesConfig.from_file(os.getenv("XERXES_CONFIG_FILE"))
+        _config_file = os.getenv("XERXES_CONFIG_FILE")
+        assert _config_file is not None
+        config = XerxesConfig.from_file(_config_file)
     else:
         from xerxes.core.paths import xerxes_home
 

@@ -34,18 +34,18 @@ Example:
 import logging
 import logging.handlers
 import sys
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 try:
-    import structlog
-
+    import structlog as _structlog_module
+    structlog = _structlog_module
     HAS_STRUCTLOG = True
 except ImportError:
     HAS_STRUCTLOG = False
-    structlog = None
 
 try:
     from opentelemetry import trace
@@ -58,97 +58,98 @@ try:
     HAS_OTEL = True
 except ImportError:
     HAS_OTEL = False
-    trace = None
 
-try:
-    from prometheus_client import Counter, Gauge, Histogram, generate_latest
+def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
+    try:
+        from prometheus_client import Counter, Gauge, Histogram, generate_latest
+        return True, Counter, Gauge, Histogram, generate_latest
+    except ImportError:
 
-    HAS_PROMETHEUS = True
-except ImportError:
-    HAS_PROMETHEUS = False
+        class DummyMetric:
+            """No-op metric implementation for when prometheus_client is not installed.
 
-    class DummyMetric:
-        """No-op metric implementation for when prometheus_client is not installed.
+            Provides the same interface as Prometheus ``Counter``, ``Gauge``, and
+            ``Histogram`` metrics but performs no actual operations, allowing code
+            to function without the ``prometheus_client`` dependency.
 
-        Provides the same interface as Prometheus ``Counter``, ``Gauge``, and
-        ``Histogram`` metrics but performs no actual operations, allowing code
-        to function without the ``prometheus_client`` dependency.
+            All methods are intentionally no-ops and return ``self`` where
+            appropriate to support fluent method chaining (e.g.,
+            ``metric.labels(foo="bar").inc()``).
 
-        All methods are intentionally no-ops and return ``self`` where
-        appropriate to support fluent method chaining (e.g.,
-        ``metric.labels(foo="bar").inc()``).
+            Attributes:
+                None. This class carries no state.
+            """
 
-        Attributes:
-            None. This class carries no state.
-        """
+            def labels(self, **kwargs):
+                """Return self for method chaining compatibility.
 
-        def labels(self, **kwargs):
-            """Return self for method chaining compatibility.
+                Mimics the Prometheus ``labels()`` method which returns a
+                child metric filtered by the given label values.
 
-            Mimics the Prometheus ``labels()`` method which returns a
-            child metric filtered by the given label values.
+                Args:
+                    **kwargs: Label key-value pairs (ignored).
 
-            Args:
-                **kwargs: Label key-value pairs (ignored).
+                Returns:
+                    ``self``, allowing subsequent calls to ``inc``, ``dec``,
+                    or ``observe`` to succeed silently.
+                """
+                return self
+
+            def inc(self, amount=1):
+                """No-op increment operation.
+
+                Mimics the Prometheus ``Counter.inc`` / ``Gauge.inc`` method.
+
+                Args:
+                    amount: The amount to increment by (ignored). Defaults to 1.
+                """
+                pass
+
+            def dec(self, amount=1):
+                """No-op decrement operation.
+
+                Mimics the Prometheus ``Gauge.dec`` method.
+
+                Args:
+                    amount: The amount to decrement by (ignored). Defaults to 1.
+                """
+                pass
+
+            def observe(self, value):
+                """No-op observation operation.
+
+                Mimics the Prometheus ``Histogram.observe`` method.
+
+                Args:
+                    value: The observed value (ignored).
+                """
+                pass
+
+        def _generate_latest(*args, **kwargs) -> bytes:
+            """Return empty bytes when prometheus_client is not installed.
+
+            This is a fallback replacement for
+            ``prometheus_client.generate_latest`` that returns an empty byte
+            string when the Prometheus client library is unavailable.
 
             Returns:
-                ``self``, allowing subsequent calls to ``inc``, ``dec``,
-                or ``observe`` to succeed silently.
+                An empty ``bytes`` object (``b""``).
             """
-            return self
+            return b""
 
-        def inc(self, amount=1):
-            """No-op increment operation.
-
-            Mimics the Prometheus ``Counter.inc`` / ``Gauge.inc`` method.
-
-            Args:
-                amount: The amount to increment by (ignored). Defaults to 1.
-            """
-            pass
-
-        def dec(self, amount=1):
-            """No-op decrement operation.
-
-            Mimics the Prometheus ``Gauge.dec`` method.
-
-            Args:
-                amount: The amount to decrement by (ignored). Defaults to 1.
-            """
-            pass
-
-        def observe(self, value):
-            """No-op observation operation.
-
-            Mimics the Prometheus ``Histogram.observe`` method.
-
-            Args:
-                value: The observed value (ignored).
-            """
-            pass
-
-    Counter = Histogram = Gauge = lambda *args, **kwargs: DummyMetric()
-
-    def generate_latest():
-        """Return empty bytes when prometheus_client is not installed.
-
-        This is a fallback replacement for
-        ``prometheus_client.generate_latest`` that returns an empty byte
-        string when the Prometheus client library is unavailable.
-
-        Returns:
-            An empty ``bytes`` object (``b""``).
-        """
-        return b""
+        return False, (lambda *a, **k: DummyMetric()), (lambda *a, **k: DummyMetric()), (lambda *a, **k: DummyMetric()), _generate_latest
 
 
+HAS_PROMETHEUS, Counter, Gauge, Histogram, generate_latest = _get_prometheus()
+
+
+jsonlogger: Any = None
 try:
     from pythonjsonlogger import jsonlogger
 
     HAS_JSON_LOGGER = True
 except ImportError:
     HAS_JSON_LOGGER = False
-    jsonlogger = None
 
 
 FUNCTION_CALLS = Counter(

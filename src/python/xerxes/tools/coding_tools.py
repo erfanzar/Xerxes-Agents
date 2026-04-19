@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 
 def read_file(
@@ -211,7 +212,7 @@ def list_directory(
         return f"Error listing directory: {e!s}"
 
 
-def format_size(size: int) -> str:
+def format_size(size: int | float) -> str:
     """Format file size in human-readable format.
 
     Converts a byte count to a human-readable string with appropriate
@@ -859,7 +860,7 @@ def analyze_code_structure(file_path: str, context_variables: dict | None = None
         ext = path.suffix.lower()
         language = detect_language(ext)
 
-        analysis = {
+        analysis: dict[str, Any] = {
             "file": file_path,
             "language": language,
             "lines": len(lines),

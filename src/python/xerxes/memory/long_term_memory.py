@@ -378,7 +378,8 @@ class LongTermMemory(Memory):
                 to_remove.append(item)
 
         if len(to_remove) < len(self._items) * 0.2:
-            self._items.sort(
+            self._items = sorted(
+                self._items,
                 key=lambda x: (
                     x.metadata.get("importance", 0.5) * 0.3
                     + (x.access_count / 100) * 0.3

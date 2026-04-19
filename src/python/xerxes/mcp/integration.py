@@ -29,7 +29,7 @@ LLM function calling.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from ..core.utils import run_sync
 from ..logging.console import get_logger
@@ -130,9 +130,9 @@ def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
     docstring_parts.append(f"\n\nMCP Server: {tool.server_name}")
     sync_wrapper.__doc__ = "\n".join(docstring_parts)
 
-    sync_wrapper.__annotations__ = annotations
-
-    sync_wrapper.__signature__ = inspect.Signature(parameters=params, return_annotation=dict)
+    _wrapper = cast(Any, sync_wrapper)
+    _wrapper.__annotations__ = annotations
+    _wrapper.__signature__ = inspect.Signature(parameters=params, return_annotation=dict)
 
     return sync_wrapper
 

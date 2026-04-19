@@ -156,7 +156,7 @@ class CortexAgent:
     _auto_compact_agent: AutoCompactAgent | None = None
     _conversation_history: list[dict[str, str]] = field(default_factory=list)
     _messages_history: Any = None
-    _logger = None
+    _logger: Any | None = None
     _template_engine: PromptTemplate | None = None
     _delegation_count: int = 0
     _times_executed: int = 0
@@ -428,7 +428,7 @@ class CortexAgent:
         if self._internal_agent:
             run_sync(add_mcp_tools_to_agent(self._internal_agent, manager, server_names))
         else:
-            if self.verbose:
+            if self.verbose and self._logger:
                 self._logger.warning(
                     "Internal agent not yet initialized. MCP tools will be added during initialization."
                 )
@@ -664,7 +664,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
         properties = resolved_schema.get("properties", {})
         definitions = schema.get("definitions", {})
-        example = {}
+        example: dict[str, Any] = {}
 
         for field_name, field_info in properties.items():
             field_type = field_info.get("type")
@@ -745,7 +745,7 @@ Ensure your response is valid JSON that can be parsed directly.
         """
         properties = schema.get("properties", {})
 
-        example = {}
+        example: dict[str, Any] = {}
         for field_name, field_info in properties.items():
             field_type = field_info.get("type")
             field_description = field_info.get("description", "")
@@ -923,11 +923,12 @@ Ensure your response is valid JSON that can be parsed directly.
                 )
 
             full_context = ""
-            contexts = [knowledge_context, memory_context, context]
-            contexts = [ctx for ctx in contexts if ctx]
+            contexts: list[str] = [ctx for ctx in [knowledge_context, memory_context, context] if ctx is not None]
             if contexts:
                 full_context = "\n\n".join(contexts)
 
+            if self._template_engine is None:
+                raise RuntimeError("Template engine not initialized")
             prompt = self._template_engine.render_task_prompt(
                 description=task_description,
                 expected_output="",
@@ -967,7 +968,7 @@ Ensure your response is valid JSON that can be parsed directly.
                             UserMessage,
                         )
 
-                        new_messages = []
+                        new_messages: list[SystemMessage | UserMessage | AssistantMessage] = []
                         for msg in compacted_messages:
                             role = msg.get("role", "user")
                             content = msg.get("content", "")
@@ -979,7 +980,7 @@ Ensure your response is valid JSON that can be parsed directly.
                             else:
                                 new_messages.append(UserMessage(content=content))
 
-                        self._messages_history = MessagesHistory(messages=new_messages)
+                        self._messages_history = MessagesHistory(messages=list(new_messages))
 
                         new_conversation_tokens = self._auto_compact_agent.token_counter.count_tokens(compacted_messages)
                         if self.verbose:
@@ -1003,6 +1004,8 @@ Ensure your response is valid JSON that can be parsed directly.
                         if streamer_buffer is None:
                             streamer_buffer = StreamerBuffer()
 
+                        from typing import cast
+
                         response_gen = self.xerxes_instance.run(
                             prompt=prompt,
                             messages=self._messages_history,
@@ -1013,9 +1016,11 @@ Ensure your response is valid JSON that can be parsed directly.
                             streamer_buffer=streamer_buffer,
                         )
 
-                        if stream_callback:
+                        if isinstance(response_gen, ResponseResult):
+                            response = response_gen
+                        elif stream_callback:
                             collected_content = []
-                            final_response = None
+                            final_response: Any = None
                             for chunk in response_gen:
                                 stream_callback(chunk)
                                 if hasattr(chunk, "content") and chunk.content:
@@ -1024,8 +1029,8 @@ Ensure your response is valid JSON that can be parsed directly.
 
                             response = ResponseResult(
                                 content="".join(collected_content),
-                                response=final_response,
-                                completion=getattr(final_response, "completion", None),
+                                response=cast(Any, final_response),
+                                completion=cast(Any, getattr(final_response, "completion", None)),
                             )
                         else:
                             final_response = None
@@ -1034,21 +1039,24 @@ Ensure your response is valid JSON that can be parsed directly.
 
                             response = ResponseResult(
                                 content=getattr(final_response, "final_content", "") if final_response else "",
-                                response=final_response,
-                                completion=getattr(final_response, "completion", final_response),
+                                response=cast(Any, final_response),
+                                completion=cast(Any, getattr(final_response, "completion", final_response)),
                             )
 
                         if buffer_was_none:
                             streamer_buffer.close()
                     else:
-                        response = self.xerxes_instance.run(
-                            prompt=prompt,
-                            messages=self._messages_history,
-                            agent_id=self._internal_agent,
-                            stream=False,
-                            apply_functions=True,
-                            reinvoke_after_function=self.reinvoke_after_function,
-                            streamer_buffer=None,
+                        response = cast(
+                            ResponseResult,
+                            self.xerxes_instance.run(
+                                prompt=prompt,
+                                messages=self._messages_history,
+                                agent_id=self._internal_agent,
+                                stream=False,
+                                apply_functions=True,
+                                reinvoke_after_function=self.reinvoke_after_function,
+                                streamer_buffer=None,
+                            ),
                         )
 
                     break
@@ -1169,11 +1177,12 @@ Ensure your response is valid JSON that can be parsed directly.
             )
 
         full_context = ""
-        contexts = [knowledge_context, memory_context, context]
-        contexts = [ctx for ctx in contexts if ctx]
+        contexts: list[str] = [ctx for ctx in [knowledge_context, memory_context, context] if ctx is not None]
         if contexts:
             full_context = "\n\n".join(contexts)
 
+        if self._template_engine is None:
+            raise RuntimeError("Template engine not initialized")
         prompt = self._template_engine.render_task_prompt(
             description=task_description,
             expected_output="",
@@ -1188,8 +1197,8 @@ Ensure your response is valid JSON that can be parsed directly.
             streamer_buffer=streamer_buffer,
         )
 
-        buffer.task_description = task_description
-        buffer.agent_role = self.role
+        setattr(buffer, "task_description", task_description)
+        setattr(buffer, "agent_role", self.role)
 
         if stream_callback:
 
@@ -1200,7 +1209,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
             callback_thread = threading.Thread(target=consume_and_callback, daemon=True)
             callback_thread.start()
-            buffer.callback_thread = callback_thread
+            setattr(buffer, "callback_thread", callback_thread)
 
         return buffer, thread
 
@@ -1290,6 +1299,8 @@ Ensure your response is valid JSON that can be parsed directly.
         """
 
         try:
+            if self.xerxes_instance is None:
+                raise RuntimeError("Xerxes instance not available")
             response_generator = self.xerxes_instance.run(
                 prompt=selection_prompt,
                 agent_id=self._internal_agent,
@@ -1298,12 +1309,15 @@ Ensure your response is valid JSON that can be parsed directly.
                 reinvoke_after_function=False,
             )
 
-            response_content = []
-            for chunk in response_generator:
-                if hasattr(chunk, "content") and chunk.content is not None:
-                    response_content.append(chunk.content)
+            if isinstance(response_generator, ResponseResult):
+                selected_role = response_generator.content if hasattr(response_generator, "content") else str(response_generator)
+            else:
+                response_content = []
+                for chunk in response_generator:
+                    if hasattr(chunk, "content") and chunk.content is not None:
+                        response_content.append(chunk.content)
 
-            selected_role = "".join(response_content).strip()
+                selected_role = "".join(response_content).strip()
 
             for agent in available_agents:
                 if agent.role.lower() == selected_role.lower() or selected_role.lower() in agent.role.lower():
@@ -1347,7 +1361,10 @@ Ensure your response is valid JSON that can be parsed directly.
         """
         from xerxes.types import StreamChunk
 
-        buffer, thread = self.execute(task_description=task_description, context=context, use_thread=True)
+        exec_result = self.execute(task_description=task_description, context=context, use_thread=True)
+        if isinstance(exec_result, str):
+            return exec_result
+        buffer, thread = exec_result
 
         for chunk in buffer.stream():
             if callback:
@@ -1358,7 +1375,10 @@ Ensure your response is valid JSON that can be parsed directly.
                     self._logger.info(f"[{self.role}]: {chunk.content}")
 
         thread.join(timeout=1.0)
-        result = buffer.get_result()
+        if buffer.get_result is not None:
+            result = buffer.get_result(1.0)
+        else:
+            result = ""
 
         if hasattr(result, "content"):
             return result.content
@@ -1409,7 +1429,8 @@ Ensure your response is valid JSON that can be parsed directly.
         """
 
         delegate._delegation_count = self._delegation_count
-        result = delegate.execute(task_description, delegation_context)
+        _delegated = delegate.execute(task_description, delegation_context)
+        result = _delegated if isinstance(_delegated, str) else _delegated[0].get_result(1.0) if (_delegated[0].get_result is not None) else str(_delegated[0])
 
         if self.verbose:
             if self._logger:
@@ -1455,6 +1476,8 @@ Ensure your response is valid JSON that can be parsed directly.
         """
 
         initial_result = self.execute(task_description, context)
+        if not isinstance(initial_result, str):
+            initial_result = initial_result[0].get_result(1.0) if (initial_result[0].get_result is not None) else str(initial_result[0])
 
         needs_delegation, reason = self._check_delegation_needed(task_description, initial_result)
 
@@ -1474,6 +1497,8 @@ Ensure your response is valid JSON that can be parsed directly.
             """
 
             try:
+                if self.xerxes_instance is None:
+                    raise RuntimeError("Xerxes instance not available")
                 response_generator = self.xerxes_instance.run(
                     prompt=final_prompt,
                     agent_id=self._internal_agent,
@@ -1481,6 +1506,9 @@ Ensure your response is valid JSON that can be parsed directly.
                     apply_functions=False,
                     reinvoke_after_function=False,
                 )
+
+                if isinstance(response_generator, ResponseResult):
+                    return response_generator.content if hasattr(response_generator, "content") else str(response_generator)
 
                 response_content = []
                 for chunk in response_generator:

@@ -180,6 +180,7 @@ class VersionConstraint:
                 upper = tuple(prefix) + (0,) * (len(target) - len(prefix))
                 return ver < upper
             return True
+        return False
 
     def __repr__(self) -> str:
         """Return a developer-friendly string representation.

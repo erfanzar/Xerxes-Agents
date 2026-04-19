@@ -366,7 +366,7 @@ class SlidingWindowStrategy(BaseCompactionStrategy):
         else:
             compacted = test_compacted
 
-        messages_to_add = []
+        messages_to_add: list[dict[str, str]] = []
         for msg in reversed(remaining_messages):
             msg_tokens = self.token_counter.count_tokens([msg])
             if tokens_used + msg_tokens <= self.target_tokens:
@@ -575,7 +575,7 @@ class SmartCompactionStrategy(BaseCompactionStrategy):
 
         if current_tokens <= self.target_tokens:
             substrategy = "sliding_window"
-            strategy = SlidingWindowStrategy(
+            strategy: BaseCompactionStrategy = SlidingWindowStrategy(
                 target_tokens=self.target_tokens,
                 model=self.model,
                 preserve_system=self.preserve_system,

@@ -476,6 +476,7 @@ class OpenAILLM(BaseLLM):
         if self.async_client is not None:
             return await self.async_client.chat.completions.create(**params)
 
+        assert self.client is not None
         response = await asyncio.to_thread(self.client.chat.completions.create, **params)
         if params["stream"] and not hasattr(response, "__aiter__"):
             return _AsyncIteratorFromSyncStream(response)
@@ -840,7 +841,7 @@ class OpenAILLM(BaseLLM):
         buffered_content = ""
         buffered_reasoning_content = ""
         function_calls = []
-        tool_call_accumulator = {}
+        tool_call_accumulator: dict[int, dict[str, Any]] = {}
 
         for chunk in response:
             chunk_data = {
@@ -933,7 +934,7 @@ class OpenAILLM(BaseLLM):
 
             yield chunk_data
 
-    async def astream_completion(
+    def astream_completion(
         self,
         response: Any,
         agent: Any | None = None,
@@ -974,100 +975,103 @@ class OpenAILLM(BaseLLM):
                 if chunk["is_final"]:
                     print()
         """
-        buffered_content = ""
-        buffered_reasoning_content = ""
-        function_calls = []
-        tool_call_accumulator = {}
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            buffered_content = ""
+            buffered_reasoning_content = ""
+            function_calls: list[dict[str, Any]] = []
+            tool_call_accumulator: dict[int, dict[str, Any]] = {}
 
-        async for chunk in response:
-            chunk_data = {
-                "content": None,
-                "buffered_content": buffered_content,
-                "reasoning_content": None,
-                "buffered_reasoning_content": buffered_reasoning_content,
-                "function_calls": [],
-                "tool_calls": None,
-                "streaming_tool_calls": None,
-                "raw_chunk": chunk,
-                "is_final": False,
-            }
+            async for chunk in response:
+                chunk_data = {
+                    "content": None,
+                    "buffered_content": buffered_content,
+                    "reasoning_content": None,
+                    "buffered_reasoning_content": buffered_reasoning_content,
+                    "function_calls": [],
+                    "tool_calls": None,
+                    "streaming_tool_calls": None,
+                    "raw_chunk": chunk,
+                    "is_final": False,
+                }
 
-            reasoning = self._extract_reasoning_from_chunk(chunk)
-            if reasoning:
-                buffered_reasoning_content += reasoning
-                chunk_data["reasoning_content"] = reasoning
-                chunk_data["buffered_reasoning_content"] = buffered_reasoning_content
+                reasoning = self._extract_reasoning_from_chunk(chunk)
+                if reasoning:
+                    buffered_reasoning_content += reasoning
+                    chunk_data["reasoning_content"] = reasoning
+                    chunk_data["buffered_reasoning_content"] = buffered_reasoning_content
 
-            if hasattr(chunk, "choices") and chunk.choices:
-                delta = chunk.choices[0].delta
+                if hasattr(chunk, "choices") and chunk.choices:
+                    delta = chunk.choices[0].delta
 
-                if hasattr(delta, "content") and delta.content:
-                    buffered_content += delta.content
-                    chunk_data["content"] = delta.content
-                    chunk_data["buffered_content"] = buffered_content
+                    if hasattr(delta, "content") and delta.content:
+                        buffered_content += delta.content
+                        chunk_data["content"] = delta.content
+                        chunk_data["buffered_content"] = buffered_content
 
-                if hasattr(delta, "tool_calls") and delta.tool_calls:
-                    streaming_tool_calls = {}
-                    accumulated_tool_calls = {}
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        streaming_tool_calls = {}
+                        accumulated_tool_calls = {}
 
-                    for tool_call_delta in delta.tool_calls:
-                        idx = getattr(tool_call_delta, "index", 0)
-                        if isinstance(tool_call_delta, dict):
-                            idx = tool_call_delta.get("index", 0)
+                        for tool_call_delta in delta.tool_calls:
+                            idx = getattr(tool_call_delta, "index", 0)
+                            if isinstance(tool_call_delta, dict):
+                                idx = tool_call_delta.get("index", 0)
 
-                        if idx not in tool_call_accumulator:
-                            tool_call_accumulator[idx] = {
-                                "id": None,
+                            if idx not in tool_call_accumulator:
+                                tool_call_accumulator[idx] = {
+                                    "id": None,
+                                    "type": "function",
+                                    "function": {"name": None, "arguments": ""},
+                                }
+
+                            streaming_update = {}
+
+                            if hasattr(tool_call_delta, "id") and tool_call_delta.id:
+                                tool_call_accumulator[idx]["id"] = tool_call_delta.id
+                                streaming_update["id"] = tool_call_delta.id
+                            if hasattr(tool_call_delta, "function") and tool_call_delta.function:
+                                func = tool_call_delta.function
+                                if hasattr(func, "name") and func.name:
+                                    tool_call_accumulator[idx]["function"]["name"] = func.name
+                                    streaming_update["name"] = func.name
+                                if hasattr(func, "arguments") and func.arguments:
+                                    tool_call_accumulator[idx]["function"]["arguments"] += func.arguments
+                                    streaming_update["arguments"] = func.arguments
+
+                            if streaming_update:
+                                streaming_tool_calls[idx] = streaming_update
+
+                            accumulated_tool_calls[idx] = {
+                                "id": tool_call_accumulator[idx]["id"],
                                 "type": "function",
-                                "function": {"name": None, "arguments": ""},
+                                "function": {
+                                    "name": tool_call_accumulator[idx]["function"]["name"],
+                                    "arguments": tool_call_accumulator[idx]["function"]["arguments"],
+                                },
                             }
 
-                        streaming_update = {}
+                        chunk_data["tool_calls"] = accumulated_tool_calls if accumulated_tool_calls else None
+                        chunk_data["streaming_tool_calls"] = streaming_tool_calls if streaming_tool_calls else None
 
-                        if hasattr(tool_call_delta, "id") and tool_call_delta.id:
-                            tool_call_accumulator[idx]["id"] = tool_call_delta.id
-                            streaming_update["id"] = tool_call_delta.id
-                        if hasattr(tool_call_delta, "function") and tool_call_delta.function:
-                            func = tool_call_delta.function
-                            if hasattr(func, "name") and func.name:
-                                tool_call_accumulator[idx]["function"]["name"] = func.name
-                                streaming_update["name"] = func.name
-                            if hasattr(func, "arguments") and func.arguments:
-                                tool_call_accumulator[idx]["function"]["arguments"] += func.arguments
-                                streaming_update["arguments"] = func.arguments
+                    if chunk.choices[0].finish_reason:
+                        chunk_data["is_final"] = True
 
-                        if streaming_update:
-                            streaming_tool_calls[idx] = streaming_update
+                        if tool_call_accumulator:
+                            for idx in sorted(tool_call_accumulator.keys()):
+                                tc = tool_call_accumulator[idx]
+                                if tc["id"] and tc["function"]["name"]:
+                                    function_calls.append(
+                                        {
+                                            "id": tc["id"],
+                                            "name": tc["function"]["name"],
+                                            "arguments": tc["function"]["arguments"],
+                                        }
+                                    )
+                            chunk_data["function_calls"] = function_calls
 
-                        accumulated_tool_calls[idx] = {
-                            "id": tool_call_accumulator[idx]["id"],
-                            "type": "function",
-                            "function": {
-                                "name": tool_call_accumulator[idx]["function"]["name"],
-                                "arguments": tool_call_accumulator[idx]["function"]["arguments"],
-                            },
-                        }
+                yield chunk_data
 
-                    chunk_data["tool_calls"] = accumulated_tool_calls if accumulated_tool_calls else None
-                    chunk_data["streaming_tool_calls"] = streaming_tool_calls if streaming_tool_calls else None
-
-                if chunk.choices[0].finish_reason:
-                    chunk_data["is_final"] = True
-
-                    if tool_call_accumulator:
-                        for idx in sorted(tool_call_accumulator.keys()):
-                            tc = tool_call_accumulator[idx]
-                            if tc["id"] and tc["function"]["name"]:
-                                function_calls.append(
-                                    {
-                                        "id": tc["id"],
-                                        "name": tc["function"]["name"],
-                                        "arguments": tc["function"]["arguments"],
-                                    }
-                                )
-                        chunk_data["function_calls"] = function_calls
-
-            yield chunk_data
+        return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
         """Parse tool/function calls from an OpenAI response message.
@@ -1142,6 +1146,7 @@ class OpenAILLM(BaseLLM):
                 print(f"Context window: {info['max_model_len']} tokens")
         """
         try:
+            assert self.client is not None
             models = self.client.models.list()
             for model in models.data:
                 if model.id == self.config.model:
@@ -1179,14 +1184,16 @@ class OpenAILLM(BaseLLM):
             async with OpenAILLM(model="gpt-4") as llm:
                 response = await llm.generate_completion("Hello")
         """
-        if hasattr(self.async_client, "aclose"):
-            await self.async_client.aclose()
-        elif hasattr(self.async_client, "close"):
-            maybe_result = self.async_client.close()
-            if hasattr(maybe_result, "__await__"):
-                await maybe_result
+        if self.async_client is not None:
+            if hasattr(self.async_client, "aclose"):
+                await self.async_client.aclose()
+            elif hasattr(self.async_client, "close"):
+                maybe_result = self.async_client.close()
+                if hasattr(maybe_result, "__await__"):
+                    await maybe_result
 
-        if hasattr(self.client, "close"):
-            maybe_result = self.client.close()
-            if hasattr(maybe_result, "__await__"):
-                await maybe_result
+        if self.client is not None:
+            if hasattr(self.client, "close"):
+                maybe_result = self.client.close()
+                if hasattr(maybe_result, "__await__"):
+                    await maybe_result

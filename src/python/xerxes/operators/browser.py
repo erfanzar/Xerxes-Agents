@@ -78,9 +78,9 @@ class BrowserManager:
         """
         self._headless = headless
         self._screenshot_dir = screenshot_dir
-        self._playwright = None
-        self._browser = None
-        self._context = None
+        self._playwright: tp.Any = None
+        self._browser: tp.Any = None
+        self._context: tp.Any = None
         self._pages: dict[str, tp.Any] = {}
         self._page_state: dict[str, BrowserPageState] = {}
 

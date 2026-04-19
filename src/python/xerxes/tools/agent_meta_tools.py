@@ -342,10 +342,11 @@ class skill_manage(AgentBaseFn):
         """
         from pathlib import Path
 
+        xerxes_subdir: tp.Callable[..., tp.Any] | None = None
         try:
             from ..core.paths import xerxes_subdir
         except Exception:
-            xerxes_subdir = None
+            pass
         target_dir = (
             Path(skills_dir).expanduser()
             if skills_dir

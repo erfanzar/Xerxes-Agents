@@ -36,12 +36,13 @@ import ast
 import math
 import operator
 import statistics
+from collections.abc import Callable
 from decimal import Decimal, getcontext
 from typing import Any
 
 from ..types import AgentBaseFn
 
-_ALLOWED_FUNCS = {
+_ALLOWED_FUNCS: dict[str, Callable[..., Any]] = {
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
@@ -52,7 +53,7 @@ _ALLOWED_FUNCS = {
     "exp": math.exp,
 }
 _ALLOWED_NAMES = {"pi": math.pi, "e": math.e}
-_ALLOWED_BINOPS = {
+_ALLOWED_BINOPS: dict[type, Callable[..., Any]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -61,7 +62,7 @@ _ALLOWED_BINOPS = {
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
 }
-_ALLOWED_UNARYOPS = {ast.USub: operator.neg, ast.UAdd: operator.pos}
+_ALLOWED_UNARYOPS: dict[type, Callable[..., Any]] = {ast.USub: operator.neg, ast.UAdd: operator.pos}
 
 
 def _safe_eval(expression: str) -> float:
@@ -84,15 +85,13 @@ def _safe_eval(expression: str) -> float:
                 return _ALLOWED_NAMES[node.id]
             raise ValueError(f"Name {node.id!r} is not allowed")
         if isinstance(node, ast.BinOp):
-            op_type = type(node.op)
-            if op_type not in _ALLOWED_BINOPS:
-                raise ValueError(f"Operator {op_type.__name__} is not allowed")
-            return _ALLOWED_BINOPS[op_type](_eval(node.left), _eval(node.right))
+            if type(node.op) not in _ALLOWED_BINOPS:
+                raise ValueError(f"Operator {type(node.op).__name__} is not allowed")
+            return _ALLOWED_BINOPS[type(node.op)](_eval(node.left), _eval(node.right))
         if isinstance(node, ast.UnaryOp):
-            op_type = type(node.op)
-            if op_type not in _ALLOWED_UNARYOPS:
-                raise ValueError(f"Unary operator {op_type.__name__} is not allowed")
-            return _ALLOWED_UNARYOPS[op_type](_eval(node.operand))
+            if type(node.op) not in _ALLOWED_UNARYOPS:
+                raise ValueError(f"Unary operator {type(node.op).__name__} is not allowed")
+            return _ALLOWED_UNARYOPS[type(node.op)](_eval(node.operand))
         if isinstance(node, ast.Call):
             if not isinstance(node.func, ast.Name):
                 raise ValueError("Only direct function calls are allowed")
@@ -180,7 +179,7 @@ class Calculator(AgentBaseFn):
             >>> print(result["result"])
             12.0
         """
-        result = {}
+        result: dict[str, Any] = {}
         getcontext().prec = precision
 
         if expression:
@@ -227,7 +226,7 @@ class Calculator(AgentBaseFn):
                 elif operation == "root_mean_square":
                     value = math.sqrt(sum(x**2 for x in operands) / len(operands))
                 elif operation == "geometric_mean":
-                    product = 1
+                    product: float = 1
                     for x in operands:
                         if x <= 0:
                             return {"error": "Geometric mean requires positive numbers"}
@@ -322,7 +321,7 @@ class StatisticalAnalyzer(AgentBaseFn):
         if not data:
             return {"error": "Data cannot be empty"}
 
-        result = {"data_points": len(data)}
+        result: dict[str, Any] = {"data_points": len(data)}
 
         if analysis_type == "descriptive":
             result["statistics"] = {
@@ -492,7 +491,7 @@ class MathematicalFunctions(AgentBaseFn):
             >>> print(result["result"])
             2.0
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if input_value is None:
             return {"error": "input_value required"}
@@ -641,7 +640,7 @@ class NumberTheory(AgentBaseFn):
             >>> print(result["is_prime"])
             True
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "prime":
             if number is None:
@@ -849,7 +848,7 @@ class UnitConverter(AgentBaseFn):
             >>> print(result["result"])
             212.0
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         conversions = {
             "length": {

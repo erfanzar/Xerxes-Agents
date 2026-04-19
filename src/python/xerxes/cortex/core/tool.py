@@ -101,7 +101,7 @@ class CortexTool:
             hints for best results. The tool name and description from this
             instance will override any auto-generated values.
         """
-        if self.auto_generate_schema and not self.parameters and self.function:
+        if self.auto_generate_schema and not self.parameters:
             schema = function_to_json(self.function)
 
             schema["function"]["name"] = self.name

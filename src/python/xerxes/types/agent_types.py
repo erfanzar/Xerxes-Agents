@@ -220,7 +220,7 @@ class Agent(BaseModel):
     capabilities: list[AgentCapability] = Field(default_factory=list)
 
     function_call_strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL
-    tool_choice: str | list[str] = None
+    tool_choice: str | list[str] | None = None
     parallel_tool_calls: bool = True
     function_timeout: float | None = 30.0
     max_function_retries: int = 3

@@ -64,6 +64,7 @@ from typing import Any
 
 from .base import BaseLLM, LLMConfig
 
+httpx: Any
 try:
     import httpx
 
@@ -165,7 +166,7 @@ class OllamaLLM(BaseLLM):
                 **kwargs,
             )
 
-        self.client = None
+        self.client: httpx.AsyncClient | None = None
         super().__init__(config)
 
     def _initialize_client(self) -> None:
@@ -185,7 +186,7 @@ class OllamaLLM(BaseLLM):
             (defaults to 120 seconds for long generations).
         """
         self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
+            base_url=self.config.base_url or "",
             timeout=self.config.timeout,
         )
         self._auto_fetch_model_info()
@@ -263,6 +264,7 @@ class OllamaLLM(BaseLLM):
         """
         use_stream = stream if stream is not None else self.config.stream
 
+        payload: dict[str, Any]
         if isinstance(prompt, list):
             endpoint = "/api/chat"
             payload = {
@@ -302,6 +304,7 @@ class OllamaLLM(BaseLLM):
             if use_stream:
                 return self._stream_completion(endpoint, payload)
             else:
+                assert self.client is not None
                 response = await self.client.post(endpoint, json=payload)
                 response.raise_for_status()
                 return response.json()
@@ -335,6 +338,7 @@ class OllamaLLM(BaseLLM):
             efficiently process large responses without buffering the
             entire response in memory.
         """
+        assert self.client is not None
         async with self.client.stream("POST", endpoint, json=payload) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
@@ -486,7 +490,7 @@ class OllamaLLM(BaseLLM):
 
             yield chunk_data
 
-    async def astream_completion(
+    def astream_completion(
         self,
         response: Any,
         agent: Any | None = None,
@@ -524,33 +528,36 @@ class OllamaLLM(BaseLLM):
                 if chunk["content"]:
                     print(chunk["content"], end="", flush=True)
         """
-        buffered_content = ""
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            buffered_content = ""
 
-        async for chunk in response:
-            chunk_data = {
-                "content": None,
-                "buffered_content": buffered_content,
-                "function_calls": [],
-                "tool_calls": None,
-                "raw_chunk": chunk,
-                "is_final": False,
-            }
+            async for chunk in response:
+                chunk_data = {
+                    "content": None,
+                    "buffered_content": buffered_content,
+                    "function_calls": [],
+                    "tool_calls": None,
+                    "raw_chunk": chunk,
+                    "is_final": False,
+                }
 
-            if isinstance(chunk, dict):
-                if "message" in chunk:
-                    content = chunk["message"].get("content", "")
-                else:
-                    content = chunk.get("response", "")
+                if isinstance(chunk, dict):
+                    if "message" in chunk:
+                        content = chunk["message"].get("content", "")
+                    else:
+                        content = chunk.get("response", "")
 
-                if content:
-                    buffered_content += content
-                    chunk_data["content"] = content
-                    chunk_data["buffered_content"] = buffered_content
+                    if content:
+                        buffered_content += content
+                        chunk_data["content"] = content
+                        chunk_data["buffered_content"] = buffered_content
 
-                if chunk.get("done", False):
-                    chunk_data["is_final"] = True
+                    if chunk.get("done", False):
+                        chunk_data["is_final"] = True
 
-            yield chunk_data
+                yield chunk_data
+
+        return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
         """Parse tool/function calls from Ollama response format.
@@ -601,7 +608,7 @@ class OllamaLLM(BaseLLM):
             looked up in multiple possible locations in the response.
         """
         try:
-            with httpx.Client(base_url=self.config.base_url, timeout=10.0) as client:
+            with httpx.Client(base_url=self.config.base_url or "", timeout=10.0) as client:
                 resp = client.post("/api/show", json={"name": self.config.model})
                 if resp.status_code == 200:
                     data = resp.json()

@@ -475,7 +475,7 @@ class CortexTask:
         try:
             root = ET.fromstring(f"<root>{xml_content}</root>")
 
-            def xml_to_dict(element) -> dict:
+            def xml_to_dict(element) -> dict[str, Any]:
                 """Recursively convert an XML element tree to a nested dictionary.
 
                 Args:
@@ -485,7 +485,7 @@ class CortexTask:
                     Dictionary representation of the element's children.
                     Repeated tags are converted to lists.
                 """
-                result = {}
+                result: dict[str, Any] = {}
                 for child in element:
                     if len(child) > 0:
                         if child.tag in result:
@@ -507,7 +507,7 @@ class CortexTask:
         except ET.ParseError:
             return {}
 
-    def _validate_output(self, output: str) -> tuple[bool, Any, dict]:
+    def _validate_output(self, output: str) -> tuple[bool, Any, dict[str, Any]]:
         """Validate task output against configured Pydantic models.
 
         Supports multiple extraction strategies for finding structured data
@@ -522,7 +522,7 @@ class CortexTask:
             - pydantic_output: Parsed Pydantic model instance if successful.
             - validation_results: Dictionary with validation details and any errors.
         """
-        validation_results = {}
+        validation_results: dict[str, Any] = {}
         pydantic_output = None
 
         if self.output_json:
@@ -772,6 +772,8 @@ class CortexTask:
             CortexTaskOutput with the reason as output and skipped=True
             in execution_metadata.
         """
+        if self.agent is None:
+            raise ValueError("Task must have an assigned agent")
         return CortexTaskOutput(
             task=self,
             output=reason,
@@ -894,15 +896,31 @@ class CortexTask:
                 initial_delegations = getattr(self.agent, "_delegation_count", 0)
 
                 if use_streaming:
-                    buffer, thread = self.agent.execute(
+                    exec_result = self.agent.execute(
                         task_description=task_prompt,
                         context=enhanced_context,
                         use_thread=True,
                     )
+                    if isinstance(exec_result, str):
+                        from xerxes.types import StreamChunk
+                        buffer = StreamerBuffer()
+                        thread = threading.Thread(target=lambda: None, daemon=True)
+                        buffer.put(
+                            StreamChunk(
+                                chunk=None,
+                                agent_id="cortex",
+                                content=exec_result,
+                                buffered_content=exec_result,
+                                function_calls_detected=False,
+                                reinvoked=False,
+                            )
+                        )
+                    else:
+                        buffer, thread = exec_result
 
                     if stream_callback:
 
-                        def process_stream(buffer=buffer) -> None:
+                        def process_stream(buffer: StreamerBuffer = buffer) -> None:
                             """Consume streaming chunks from the buffer and forward each to the callback."""
                             for chunk in buffer.stream():
                                 stream_callback(chunk)
@@ -910,22 +928,24 @@ class CortexTask:
                         callback_thread = threading.Thread(target=process_stream, daemon=True)
                         callback_thread.start()
 
-                    buffer.task = self
-                    buffer.agent = self.agent
+                    setattr(buffer, "task", self)
+                    setattr(buffer, "agent", self.agent)
 
                     return buffer, thread
 
                 if self.agent.allow_delegation:
-                    result = self.agent.execute_with_delegation(task_description=task_prompt, context=enhanced_context)
+                    delegated = self.agent.execute_with_delegation(task_description=task_prompt, context=enhanced_context)
+                    result = delegated
                 else:
-                    result = self.agent.execute(task_description=task_prompt, context=enhanced_context)
+                    executed = self.agent.execute(task_description=task_prompt, context=enhanced_context)
+                    result = executed if isinstance(executed, str) else executed[0].get_result(1.0) if (executed[0].get_result is not None) else str(executed[0])
 
                 final_delegations = getattr(self.agent, "_delegation_count", 0)
                 self._execution_stats["delegations"] = final_delegations - initial_delegations
 
                 validation_passed = True
                 pydantic_output = None
-                validation_results = {}
+                validation_results: dict[str, Any] = {}
 
                 if self.output_json or self.output_pydantic:
                     validation_passed, pydantic_output, validation_results = self._validate_output(result)
@@ -955,12 +975,14 @@ class CortexTask:
                 if self.human_feedback and os.getenv("ALLOW_HUMAN_FEEDBACK", "0") == "1":
                     feedback = input("\n💭 Please provide feedback on this output (or press Enter to accept): ")
                     if feedback:
-                        result = self.agent.execute(
+                        revised = self.agent.execute(
                             task_description=(
                                 f"Revise the following based on feedback:\n{result}\n\nFeedback: {feedback}"
                             ),
                             context=enhanced_context,
                         )
+                        if isinstance(revised, str):
+                            result = revised
                         self._output = result
 
                 if self.save_to_memory and self.memory:

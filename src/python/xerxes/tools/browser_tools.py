@@ -117,8 +117,8 @@ class BrowserSession:
         self._page = _Page()
         self._http_client: tp.Any | None = None
         self._playwright_page: tp.Any | None = None
-        self._playwright = None
-        self._playwright_browser = None
+        self._playwright: tp.Any | None = None
+        self._playwright_browser: tp.Any | None = None
 
     @classmethod
     def instance(cls) -> BrowserSession:
@@ -225,6 +225,7 @@ class BrowserSession:
         with self._lock:
             if self._ensure_playwright():
                 self._page.console.clear()
+                assert self._playwright_page is not None
                 self._playwright_page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 final_url = self._playwright_page.url
                 title = self._playwright_page.title()
@@ -266,6 +267,7 @@ class BrowserSession:
         """Return a base64 PNG screenshot (Playwright) or a text summary fallback."""
         with self._lock:
             if self._ensure_playwright():
+                assert self._playwright_page is not None
                 png = self._playwright_page.screenshot(full_page=False)
                 return {
                     "url": self._page.url,
@@ -357,6 +359,7 @@ class BrowserSession:
     def _sync_from_playwright(self) -> None:
         """Refresh cached url/title/elements from the live Playwright page."""
         try:
+            assert self._playwright_page is not None
             self._page.url = self._playwright_page.url
             self._page.title = self._playwright_page.title()
             content = self._playwright_page.content()
@@ -388,7 +391,7 @@ class BrowserSession:
         otherwise strips tags with a regex to produce plain-text content only.
         """
         try:
-            from bs4 import BeautifulSoup
+            from bs4 import BeautifulSoup, Tag
         except ImportError:
             self._page.text = re.sub(r"<[^>]+>", " ", html or "")
             self._page.text = re.sub(r"\s+", " ", self._page.text).strip()
@@ -403,6 +406,8 @@ class BrowserSession:
         elements: list[_Element] = []
         counter = 0
         for tag in soup.find_all(["a", "button", "input", "textarea", "select"]):
+            if not isinstance(tag, Tag):
+                continue
             counter += 1
             ref = f"e{counter}"
             attrs = {k: " ".join(v) if isinstance(v, list) else str(v) for k, v in (tag.attrs or {}).items()}
@@ -416,7 +421,7 @@ class BrowserSession:
                 "input": attrs.get("type", "textbox") if tag.name == "input" else "textbox",
                 "textarea": "textbox",
                 "select": "combobox",
-            }.get(tag.name, "generic")
+            }.get(tag.name or "", "generic")
             name = (
                 attrs.get("aria-label")
                 or tag.get_text(strip=True)
@@ -424,14 +429,19 @@ class BrowserSession:
                 or attrs.get("value")
                 or ""
             )[:120]
-            elements.append(_Element(ref=ref, tag=tag.name, role=role, name=name, href=href, attrs=attrs))
+            elements.append(_Element(ref=ref, tag=tag.name or "", role=role, name=name, href=href, attrs=attrs))
         self._page.elements = elements
         images: list[dict[str, str]] = []
         for img in soup.find_all("img"):
-            src = img.get("src") or ""
+            if not isinstance(img, Tag):
+                continue
+            src_val = img.get("src")
+            if isinstance(src_val, list):
+                src_val = src_val[0] if src_val else ""
+            src = str(src_val or "")
             if src:
                 src = urljoin(self._page.url or "", src)
-            images.append({"src": src, "alt": img.get("alt", "")[:120]})
+            images.append({"src": src, "alt": str(img.get("alt", ""))[:120]})
         self._page.images = images
 
 

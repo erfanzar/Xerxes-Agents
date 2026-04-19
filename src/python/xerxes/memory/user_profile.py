@@ -175,6 +175,7 @@ class UserProfile:
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> UserProfile:
         """Round-trip a profile saved via :meth:`to_dict`."""
+        tone_data = data.get("tone")
         return cls(
             user_id=data["user_id"],
             domains=list(data.get("domains", [])),
@@ -182,7 +183,7 @@ class UserProfile:
             notes=list(data.get("notes", [])),
             last_seen=_parse_dt(data.get("last_seen")),
             feedback_history=list(data.get("feedback_history", [])),
-            tone=_cv_from_dict(data.get("tone")) if data.get("tone") else None,
+            tone=_cv_from_dict(tone_data) if tone_data else None,
             expertise={k: _cv_from_dict(v) for k, v in data.get("expertise", {}).items()},
             explicit_preferences={k: _cv_from_dict(v) for k, v in data.get("explicit_preferences", {}).items()},
             implicit_preferences={k: _cv_from_dict(v) for k, v in data.get("implicit_preferences", {}).items()},

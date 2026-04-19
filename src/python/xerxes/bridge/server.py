@@ -441,16 +441,16 @@ class BridgeServer:
                 break
 
         if not self._cancel:
-            result = self._authoring_pipeline.on_turn_end(final_response=final_response)
-            if result.authored and result.skill_path:
+            authoring_result = self._authoring_pipeline.on_turn_end(final_response=final_response)
+            if authoring_result.authored and authoring_result.skill_path:
                 self._emit(
                     "skill_suggested",
                     {
-                        "skill_name": result.skill_name,
-                        "version": result.version,
-                        "source_path": str(result.skill_path),
-                        "tool_count": len(result.candidate.events),
-                        "unique_tools": result.candidate.unique_tools,
+                        "skill_name": authoring_result.skill_name,
+                        "version": authoring_result.version,
+                        "source_path": str(authoring_result.skill_path),
+                        "tool_count": len(authoring_result.candidate.events),
+                        "unique_tools": authoring_result.candidate.unique_tools,
                     },
                 )
 
@@ -596,9 +596,9 @@ class BridgeServer:
         if not args.strip():
             lines = ["Sampling parameters (current session):"]
             for k in sorted(valid):
-                val = self.config.get(k, None)
-                if val is not None:
-                    lines.append(f"  {k}: {val}")
+                current_val = self.config.get(k, None)
+                if current_val is not None:
+                    lines.append(f"  {k}: {current_val}")
                 else:
                     lines.append(f"  {k}: (default)")
             lines.append("")

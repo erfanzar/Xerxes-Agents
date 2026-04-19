@@ -138,6 +138,8 @@ class StreamerBuffer:
         while True:
             try:
                 item = self.get(timeout=1.0)
+                if item is None:
+                    continue
                 if item is KILL_TAG:
                     if DEBUG_STREAMING:
                         import sys
@@ -163,7 +165,7 @@ class StreamerBuffer:
         with self._lock:
             if not self._closed:
                 self._closed = True
-                self._queue.put(KILL_TAG)
+                self._queue.put(tp.cast(StreamingResponseType, KILL_TAG))
 
     @property
     def closed(self) -> bool:

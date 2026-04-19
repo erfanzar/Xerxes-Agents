@@ -231,7 +231,7 @@ class Xerxes:
             ... )
         """
 
-        self.llm_client: BaseLLM = llm
+        self.llm_client: BaseLLM | None = llm
 
         self.template = template or PromptTemplate()
         self.orchestrator = EnhancedAgentOrchestrator()
@@ -386,7 +386,7 @@ class Xerxes:
         if not model and agent:
             model = agent.model or ""
         if not system_prompt and agent:
-            system_prompt = agent.instructions or ""
+            system_prompt = (agent.instructions() if callable(agent.instructions) else agent.instructions) or ""
 
         return create_query_engine(
             xerxes_instance=self,
@@ -679,7 +679,9 @@ class Xerxes:
     @classmethod
     def _is_reinvoke_followup_message(cls, message: ChatMessage) -> bool:
         """Return True if the message is the standard reinvoke follow-up instruction."""
-        return isinstance(message, UserMessage) and (message.content or "").strip() == cls.REINVOKE_FOLLOWUP_INSTRUCTION
+        if not isinstance(message, UserMessage) or not isinstance(message.content, str):
+            return False
+        return message.content.strip() == cls.REINVOKE_FOLLOWUP_INSTRUCTION
 
     @staticmethod
     def _is_operator_reinvoke_attachment(message: ChatMessage) -> bool:
@@ -1272,7 +1274,7 @@ class Xerxes:
         Returns:
             List of RequestFunctionCall objects extracted from XML.
         """
-        function_calls = []
+        function_calls: list[RequestFunctionCall] = []
         valid_function_names = set(agent.get_available_functions())
         pattern = r"<(\w+)>\s*<arguments>(.*?)</arguments>\s*</\w+>"
         matches = re.findall(pattern, content, re.DOTALL)
@@ -1362,7 +1364,7 @@ class Xerxes:
         Returns:
             List of RequestFunctionCall objects.
         """
-        function_calls = []
+        function_calls: list[RequestFunctionCall] = []
         valid_function_names = set(agent.get_available_functions())
         for call_data in function_calls_data:
             try:
@@ -1915,13 +1917,14 @@ class Xerxes:
                 messages=messages,
             )
 
+            prompt_str: str | list[dict[str, str]]
             if use_instructed_prompt:
                 prompt_str = prompt_messages.make_instruction_prompt(
                     conversation_name_holder=conversation_name_holder,
                     mention_last_turn=mention_last_turn,
                 )
             else:
-                prompt_str = prompt_messages.to_openai()["messages"]
+                prompt_str = tp.cast(list[dict[str, str]], prompt_messages.to_openai()["messages"])
 
             if print_formatted_prompt:
                 if use_instructed_prompt:
@@ -1931,6 +1934,7 @@ class Xerxes:
             with open("debug_prompt.json", "a") as f:
                 json.dump({"key": prompt_str}, f, indent=2)
                 f.write("\n")
+            assert self.llm_client is not None
             response = await self.llm_client.generate_completion(
                 prompt=prompt_str,
                 model=agent.model,
@@ -1984,7 +1988,7 @@ class Xerxes:
                     response=response,
                     completion=completion,
                     function_calls=[],
-                    agent_id=agent.id,
+                    agent_id=agent.id or "default",
                     execution_history=[],
                     reinvoked=reinvoked_runtime,
                 )
@@ -2005,7 +2009,7 @@ class Xerxes:
         else:
             collected_content = []
             collected_reasoning = ""
-            function_calls = []
+            function_calls: list[RequestFunctionCall] = []
             execution_history = []
             completion = None
             async for chunk in self._handle_streaming_with_functions(
@@ -2027,7 +2031,7 @@ class Xerxes:
                 if hasattr(chunk, "reasoning_content") and chunk.reasoning_content and not collected_reasoning:
                     collected_reasoning = chunk.reasoning_content
                 if hasattr(chunk, "function_calls"):
-                    function_calls = chunk.function_calls
+                    function_calls = tp.cast(list[RequestFunctionCall], chunk.function_calls)
                 if hasattr(chunk, "result"):
                     execution_history.append(chunk)
                 if isinstance(chunk, Completion):
@@ -2081,11 +2085,13 @@ class Xerxes:
         function_calls_detected = False
         function_calls = []
         tool_id_by_index: dict[int, str] = {}
+        out: StreamingResponseType
 
+        assert self.llm_client is not None
         try:
             if hasattr(response, "__aiter__"):
-                stream_generator = self.llm_client.astream_completion(response, agent)
-                async for chunk_data in stream_generator:
+                async_stream = self.llm_client.astream_completion(response, agent)
+                async for chunk_data in async_stream:
                     content = chunk_data.get("content")
                     buffered_content = chunk_data.get("buffered_content", buffered_content)
                     buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
@@ -2138,8 +2144,8 @@ class Xerxes:
                             buffered_content, agent
                         )
             else:
-                stream_generator = self.llm_client.stream_completion(response, agent)
-                for chunk_data in stream_generator:
+                sync_stream = self.llm_client.stream_completion(response, agent)
+                for chunk_data in sync_stream:
                     content = chunk_data.get("content")
                     buffered_content = chunk_data.get("buffered_content", buffered_content)
                     buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
@@ -2400,11 +2406,13 @@ class Xerxes:
         """
         buffered_content = ""
         buffered_reasoning_content = ""
+        out: StreamingResponseType
 
+        assert self.llm_client is not None
         try:
             if hasattr(response, "__aiter__"):
-                stream_generator = self.llm_client.astream_completion(response, agent)
-                async for chunk_data in stream_generator:
+                async_stream = self.llm_client.astream_completion(response, agent)
+                async for chunk_data in async_stream:
                     content = chunk_data.get("content")
                     buffered_content = chunk_data.get("buffered_content", buffered_content)
                     buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
@@ -2423,8 +2431,8 @@ class Xerxes:
                         streamer_buffer.put(out)
                     yield out
             else:
-                stream_generator = self.llm_client.stream_completion(response, agent)
-                for chunk_data in stream_generator:
+                sync_stream = self.llm_client.stream_completion(response, agent)
+                for chunk_data in sync_stream:
                     content = chunk_data.get("content")
                     buffered_content = chunk_data.get("buffered_content", buffered_content)
                     buffered_reasoning_content = chunk_data.get("buffered_reasoning_content", buffered_reasoning_content)
@@ -2549,7 +2557,7 @@ class Xerxes:
             collected_content = []
             response = None
             completion = None
-            function_calls = []
+            function_calls: list[RequestFunctionCall] = []
             agent_id_result = "default"
             execution_history = []
             reinvoked = False
@@ -2562,7 +2570,7 @@ class Xerxes:
                 if hasattr(chunk, "reinvoked"):
                     reinvoked = chunk.reinvoked
                 if hasattr(chunk, "function_calls"):
-                    function_calls = chunk.function_calls
+                    function_calls = tp.cast(list[RequestFunctionCall], chunk.function_calls)
                 if hasattr(chunk, "result"):
                     execution_history.append(chunk)
                 if isinstance(chunk, Completion):
@@ -2609,8 +2617,8 @@ class Xerxes:
         Raises:
             Any exception that occurs during async execution.
         """
-        output_queue = queue.Queue()
-        exception_holder = [None]
+        output_queue: queue.Queue[StreamingResponseType | None] = queue.Queue()
+        exception_holder: list[Exception | None] = [None]
 
         def run_async() -> None:
             """Run the async response pipeline on a dedicated event loop in a background thread."""
@@ -2637,6 +2645,7 @@ class Xerxes:
                             streamer_buffer=streamer_buffer,
                         )
 
+                        assert not isinstance(response, ResponseResult)
                         async for output in response:
                             if output is not None:
                                 output_queue.put(output)
@@ -2724,8 +2733,8 @@ class Xerxes:
         if streamer_buffer is None:
             streamer_buffer = StreamerBuffer()
 
-        result_holder = [None]
-        exception_holder = [None]
+        result_holder: list[ResponseResult | None] = [None]
+        exception_holder: list[Exception | None] = [None]
 
         def run_in_thread() -> None:
             """Execute the synchronous run loop and store the result or exception."""
@@ -2745,6 +2754,7 @@ class Xerxes:
                     reinvoked_runtime=reinvoked_runtime,
                     streamer_buffer=streamer_buffer,
                 )
+                assert isinstance(result, ResponseResult)
                 result_holder[0] = result
             except Exception as e:
                 exception_holder[0] = e
@@ -2764,6 +2774,7 @@ class Xerxes:
             thread.join(timeout=timeout)
             if exception_holder[0]:
                 raise exception_holder[0]
+            assert result_holder[0] is not None
             return result_holder[0]
 
         streamer_buffer.get_result = get_result
@@ -2808,8 +2819,8 @@ class Xerxes:
         if streamer_buffer is None:
             streamer_buffer = StreamerBuffer()
 
-        result_holder = [None]
-        exception_holder = [None]
+        result_holder: list[ResponseResult | None] = [None]
+        exception_holder: list[Exception | None] = [None]
 
         async def run_async() -> None:
             """Stream the response into the buffer and build the final ResponseResult."""
@@ -2832,6 +2843,7 @@ class Xerxes:
 
                 collected_content = []
                 final_response = None
+                assert not isinstance(stream, ResponseResult)
                 async for chunk in stream:
                     if hasattr(chunk, "content") and chunk.content:
                         collected_content.append(chunk.content)
@@ -2865,6 +2877,7 @@ class Xerxes:
             await task
             if exception_holder[0]:
                 raise exception_holder[0]
+            assert result_holder[0] is not None
             return result_holder[0]
 
         streamer_buffer.aget_result = aget_result

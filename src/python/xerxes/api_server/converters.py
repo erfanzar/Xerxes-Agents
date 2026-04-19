@@ -30,7 +30,7 @@ Example:
 """
 
 from xerxes.types import MessagesHistory
-from xerxes.types.messages import AssistantMessage, SystemMessage, UserMessage
+from xerxes.types.messages import AssistantMessage, SystemMessage, ToolMessage, UserMessage
 from xerxes.types.oai_protocols import ChatMessage
 
 
@@ -92,7 +92,7 @@ class MessageConverter:
             >>> history.messages[0].content
             'Hi'
         """
-        xerxes_messages = []
+        xerxes_messages: list[SystemMessage | UserMessage | AssistantMessage | ToolMessage] = []
 
         for msg in messages:
             content = str(msg.content) if msg.content else ""

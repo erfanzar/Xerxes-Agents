@@ -82,8 +82,8 @@ class OAuthToken:
     access_token: str
     refresh_token: str = ""
     expires_at: float = 0.0
-    scopes: list[str] = None
-    raw: dict[str, tp.Any] = None
+    scopes: list[str] | None = None
+    raw: dict[str, tp.Any] | None = None
 
     def __post_init__(self) -> None:
         """Normalise ``scopes`` and ``raw`` to empty containers when ``None``."""
@@ -106,8 +106,8 @@ class OAuthToken:
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
             "expires_at": self.expires_at,
-            "scopes": list(self.scopes),
-            "raw": dict(self.raw),
+            "scopes": list(self.scopes or []),
+            "raw": dict(self.raw or {}),
         }
 
     @classmethod

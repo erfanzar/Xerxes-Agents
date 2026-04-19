@@ -384,13 +384,18 @@ Respond ONLY with the XML plan, no additional text.
 
         try:
             if stream:
-                response = self.creator_agent.execute(
+                raw_response = self.creator_agent.execute(
                     task_description=creation_prompt,
                     streamer_buffer=streamer_buffer,
                     stream_callback=stream_callback,
                 )
             else:
-                response = self.creator_agent.execute(task_description=creation_prompt)
+                raw_response = self.creator_agent.execute(task_description=creation_prompt)
+
+            if isinstance(raw_response, tuple):
+                response = raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+            else:
+                response = raw_response
 
             task_plan = self._parse_xml_tasks(response, prompt)
 
@@ -434,16 +439,22 @@ Respond ONLY with the XML plan, no additional text.
 
             root = ET.fromstring(xml_content)
 
+            _objective = root.find("objective")
+            _approach = root.find("approach")
+            _complexity = root.find("complexity")
+            _sequential = root.find("sequential")
+            from typing import cast
+
             plan = TaskCreationPlan(
                 plan_id=f"plan_{hash(objective) % 10000}",
-                objective=root.find("objective").text or objective,
-                approach=root.find("approach").text or "Standard approach",
-                estimated_complexity=root.find("complexity").text or "medium",
-                sequential=root.find("sequential").text == "true" if root.find("sequential") is not None else True,
+                objective=(_objective.text if _objective is not None else None) or objective,
+                approach=(_approach.text if _approach is not None else None) or "Standard approach",
+                estimated_complexity=cast(Literal["simple", "medium", "complex"], (_complexity.text if _complexity is not None else None) or "medium"),
+                sequential=(_sequential.text if _sequential is not None else None) == "true" if _sequential is not None else True,
             )
 
             for task_elem in root.findall("task"):
-                task_id = int(task_elem.get("id"))
+                task_id = int(task_elem.get("id", "0"))
 
                 dependencies = []
                 deps_elem = task_elem.find("dependencies")
@@ -467,27 +478,33 @@ Respond ONLY with the XML plan, no additional text.
                     except ValueError:
                         importance = 0.5
 
+                _desc = task_elem.find("description")
+                _exp = task_elem.find("expected_output")
+                _agent_role = task_elem.find("agent_role")
+                _ctx_needed = task_elem.find("context_needed")
+                _val_req = task_elem.find("validation_required")
+                _hum_fb = task_elem.find("human_feedback")
                 task_def = TaskDefinition(
                     task_id=task_id,
-                    description=task_elem.find("description").text or "",
-                    expected_output=task_elem.find("expected_output").text or "",
-                    agent_role=task_elem.find("agent_role").text if task_elem.find("agent_role") is not None else None,
+                    description=(_desc.text if _desc is not None else None) or "",
+                    expected_output=(_exp.text if _exp is not None else None) or "",
+                    agent_role=(_agent_role.text if _agent_role is not None else None),
                     dependencies=dependencies,
                     context_needed=(
-                        task_elem.find("context_needed").text == "true"
-                        if task_elem.find("context_needed") is not None
+                        (_ctx_needed.text if _ctx_needed is not None else None) == "true"
+                        if _ctx_needed is not None
                         else False
                     ),
                     tools_needed=tools_needed,
                     importance=importance,
                     validation_required=(
-                        task_elem.find("validation_required").text == "true"
-                        if task_elem.find("validation_required") is not None
+                        (_val_req.text if _val_req is not None else None) == "true"
+                        if _val_req is not None
                         else False
                     ),
                     human_feedback=(
-                        task_elem.find("human_feedback").text == "true"
-                        if task_elem.find("human_feedback") is not None
+                        (_hum_fb.text if _hum_fb is not None else None) == "true"
+                        if _hum_fb is not None
                         else False
                     ),
                 )
@@ -520,7 +537,7 @@ Respond ONLY with the XML plan, no additional text.
             List of CortexTask instances with agents assigned and
             dependencies linked to previously created tasks.
         """
-        cortex_tasks = []
+        cortex_tasks: list[CortexTask] = []
         agent_map = {agent.role: agent for agent in available_agents}
 
         for task_def in task_plan.tasks:
@@ -542,7 +559,7 @@ Respond ONLY with the XML plan, no additional text.
                 agent=agent,
                 importance=task_def.importance,
                 human_feedback=task_def.human_feedback,
-                context=dependencies if dependencies else (True if task_def.context_needed else None),
+                context=dependencies if dependencies else None,
                 dependencies=dependencies,
             )
 
@@ -654,6 +671,8 @@ Respond ONLY with the XML plan, no additional text.
         else:
             raise ValueError("Cortex must have agents defined")
 
+        if cortex_tasks is None:
+            raise RuntimeError("Task creation failed")
         cortex.tasks = cortex_tasks
 
         if process_type:
@@ -661,7 +680,9 @@ Respond ONLY with the XML plan, no additional text.
             cortex.process = process_type
 
         if use_streaming:
-            buffer, thread = cortex.kickoff(use_streaming=True, stream_callback=stream_callback, log_process=log_process)
+            kickoff_result = cortex.kickoff(use_streaming=True, stream_callback=stream_callback, log_process=log_process)
+            assert isinstance(kickoff_result, tuple)
+            buffer, thread = kickoff_result
         else:
             result = cortex.kickoff(use_streaming=False, stream_callback=stream_callback, log_process=log_process)
 

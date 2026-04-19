@@ -274,17 +274,20 @@ def _search_via_scrape(
             "results": [],
         }
     out: list[dict[str, str]] = []
+    _BeautifulSoup: type | None = None
     try:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, Tag
+        _BeautifulSoup = BeautifulSoup
     except ImportError:
-        BeautifulSoup = None
-    if BeautifulSoup is not None:
-        soup = BeautifulSoup(html, "html.parser")
+        pass
+    if _BeautifulSoup is not None:
+        soup = _BeautifulSoup(html, "html.parser")
         for h3 in soup.find_all("h3")[: n_results * 4]:
             link = h3.find_parent("a")
             if not link:
                 continue
-            url = link.get("href", "")
+            tag_link = tp.cast(Tag, link)
+            url = str(tag_link.get("href", ""))
             if not url.startswith(("http://", "https://")):
                 continue
             host = urllib.parse.urlparse(url).netloc.lower()
@@ -292,10 +295,11 @@ def _search_via_scrape(
                 continue
             title = h3.get_text(" ", strip=True)
             snippet = ""
-            container = link.find_parent(class_=lambda c: bool(c and "g" in c.split()))
+            container = tag_link.find_parent(class_=lambda c: bool(c and "g" in c.split()))
             if container is None:
-                container = link
-            for cand in container.find_all(class_=lambda c: bool(c and ("VwiC3b" in c or "MUxGbd" in c))):
+                container = tag_link
+            tag_container = tp.cast(Tag, container)
+            for cand in tag_container.find_all(class_=lambda c: bool(c and ("VwiC3b" in c or "MUxGbd" in c))):
                 txt = cand.get_text(" ", strip=True)
                 if txt and len(txt) > 20:
                     snippet = txt[:300]

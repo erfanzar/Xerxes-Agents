@@ -45,7 +45,7 @@ Typical usage example:
     )
 """
 
-from typing import Any
+from typing import Any, cast
 
 from ...tools import ExecutePythonCode, GoogleSearch, WriteFile
 from ...tools.coding_tools import (
@@ -64,6 +64,7 @@ from ...tools.coding_tools import (
     move_file,
     read_file,
 )
+from ...types import AgentCapability
 from ..core.tool import CortexTool
 from ..orchestration.task import CortexTask
 from .agent import CortexAgent
@@ -169,7 +170,7 @@ class UniversalAgent(CortexAgent):
             max_tokens=max_tokens,
         )
 
-        self.capabilities = self._define_capabilities()
+        self.capabilities = cast(list[AgentCapability], self._define_capabilities())
 
     def _build_tool_set(self, additional_tools: list[Any] | None = None) -> list[Any]:
         """Build the comprehensive set of real, functional tools.

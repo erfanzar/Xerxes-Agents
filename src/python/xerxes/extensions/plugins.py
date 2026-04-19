@@ -47,6 +47,7 @@ Example plugin module (``my_plugin.py``)::
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import logging
 import sys
 import typing as tp
@@ -572,7 +573,7 @@ class PluginRegistry:
             logger.warning("Plugin directory not found: %s", dir_path)
             return []
 
-        discovered = []
+        discovered: list[tp.Any] = []
         for py_file in dir_path.glob("*.py"):
             if py_file.name.startswith("_"):
                 continue

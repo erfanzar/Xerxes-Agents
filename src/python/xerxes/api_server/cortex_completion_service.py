@@ -42,6 +42,7 @@ from xerxes.types.function_execution_types import (
     FunctionExecutionStart,
     ReinvokeSignal,
     StreamChunk,
+    StreamingResponseType,
 )
 
 from ..core.streamer_buffer import StreamerBuffer
@@ -129,7 +130,7 @@ class CortexCompletionService:
 
         self.agents = agents or []
         if use_universal_agent:
-            self.universal_agent = UniversalAgent(
+            self.universal_agent: UniversalAgent | None = UniversalAgent(
                 llm=llm,
                 verbose=verbose,
                 allow_delegation=True,
@@ -237,9 +238,11 @@ class CortexCompletionService:
 
         for msg in reversed(messages.messages):
             if hasattr(msg, "role") and msg.role == "user":
-                return msg.content
+                content = msg.content
+                return content if isinstance(content, str) else str(content)
             elif msg.__class__.__name__ == "UserMessage":
-                return msg.content
+                content = msg.content
+                return content if isinstance(content, str) else str(content)
 
         return "\n".join(str(msg.content) for msg in messages.messages)
 
@@ -364,13 +367,13 @@ class CortexCompletionService:
         chunk_id = 0
         for chunk in streamer_buffer.stream():
             content = None
-            metadata = {}
+            metadata: dict[str, typing.Any] = {}
 
             if isinstance(chunk, StreamChunk):
                 if chunk.content:
                     content = chunk.content
                 if hasattr(chunk, "streaming_tool_calls") and chunk.streaming_tool_calls:
-                    tool_info = []
+                    tool_info: list[dict[str, typing.Any]] = []
                     for tc in chunk.streaming_tool_calls:
                         tool_info.append({"name": tc.function_name, "arguments": tc.arguments})
                     metadata["tool_calls"] = tool_info
@@ -442,7 +445,7 @@ class CortexCompletionService:
                 )
 
                 if metadata:
-                    stream_response.metadata = metadata
+                    setattr(stream_response, "metadata", metadata)
 
                 yield f"data: {json.dumps(stream_response.model_dump())}\n\n"
                 chunk_id += 1
@@ -549,6 +552,7 @@ class CortexCompletionService:
                 stream=True,
                 streamer_buffer=streamer_buffer,
             )
+            tasks = tasks or []
             cortex = DynamicCortex(
                 agents=self.agents,
                 tasks=tasks,
@@ -557,14 +561,17 @@ class CortexCompletionService:
                 verbose=self.verbose,
             )
 
-            cortex.kickoff(use_streaming=True, streamer_buffer=streamer_buffer, log_process=False)[-1].join()
+            result = cortex.kickoff(use_streaming=True, streamer_buffer=streamer_buffer, log_process=False)
+            if isinstance(result, tuple):
+                result[-1].join()
+            return ""
 
         except Exception as e:
             error_msg = f"Error in task mode execution: {e!s}"
             if self.verbose and self.logger:
                 self.logger.error(error_msg)
             if streamer_buffer:
-                streamer_buffer.put(error_msg)
+                streamer_buffer.put(typing.cast(StreamingResponseType, error_msg))
                 streamer_buffer.close()
             return error_msg
 
@@ -648,18 +655,21 @@ class CortexCompletionService:
                 verbose=self.verbose,
             )
 
-            cortex.execute_prompt(
+            result = cortex.execute_prompt(
                 prompt=prompt,
                 agent=self.agents[0] if self.agents else None,
                 stream=True,
                 streamer_buffer=streamer_buffer,
-            )[-1].join()
+            )
+            if isinstance(result, tuple):
+                result[-1].join()
+            return ""
 
         except Exception as e:
             error_msg = f"Error in instruction mode execution: {e!s}"
             if self.verbose and self.logger:
                 self.logger.error(error_msg)
             if streamer_buffer:
-                streamer_buffer.put(error_msg)
+                streamer_buffer.put(typing.cast(StreamingResponseType, error_msg))
                 streamer_buffer.close()
             return error_msg

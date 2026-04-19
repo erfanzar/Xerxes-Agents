@@ -475,7 +475,7 @@ def get_available_tools() -> dict[str, list[str]]:
         >>> print(tools["math"])
         ['Calculator', 'StatisticalAnalyzer', 'MathematicalFunctions', 'NumberTheory', 'UnitConverter']
     """
-    available = {}
+    available: dict[str, list[str]] = {}
 
     for category, tools in TOOL_CATEGORIES.items():
         available[category] = []
@@ -577,7 +577,7 @@ def list_tools_by_category(category: str | None = None) -> list[str] | dict[str,
             return []
         return [tool for tool in TOOL_CATEGORIES[category] if tool in __all__]
 
-    result = {}
+    result: dict[str, list[str]] = {}
     for cat in TOOL_CATEGORIES:
-        result[cat] = list_tools_by_category(cat)
+        result[cat] = [tool for tool in TOOL_CATEGORIES[cat] if tool in __all__]
     return result

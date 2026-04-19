@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from ...core.streamer_buffer import StreamerBuffer
 from ...logging.console import get_logger
+from ...types import StreamChunk
 from ..agents.agent import CortexAgent
 from ..core.templates import PromptTemplate
 
@@ -312,12 +313,16 @@ class CortexPlanner:
             if not self.planner_agent.xerxes_instance and self.cortex_instance:
                 self.planner_agent.xerxes_instance = self.cortex_instance.xerxes
 
-            plan_response = self.planner_agent.execute(
+            raw_response = self.planner_agent.execute(
                 task_description=planning_prompt,
                 context=context,
                 streamer_buffer=streamer_buffer,
                 stream_callback=stream_callback,
             )
+            if isinstance(raw_response, tuple):
+                plan_response = raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+            else:
+                plan_response = raw_response
 
             execution_plan = self._parse_xml_plan(plan_response, objective)
 
@@ -326,7 +331,16 @@ class CortexPlanner:
                 if stream_callback:
                     stream_callback(success_msg)
                 if streamer_buffer:
-                    streamer_buffer.put(success_msg + "\n")
+                    streamer_buffer.put(
+                        StreamChunk(
+                            chunk=None,
+                            agent_id="planner",
+                            content=success_msg + "\n",
+                            buffered_content=success_msg + "\n",
+                            function_calls_detected=False,
+                            reinvoked=False,
+                        )
+                    )
                 if self.logger:
                     self.logger.info(success_msg)
                 self._log_plan_summary(execution_plan)
@@ -338,7 +352,16 @@ class CortexPlanner:
             if stream_callback:
                 stream_callback(error_msg)
             if streamer_buffer:
-                streamer_buffer.put(error_msg + "\n")
+                streamer_buffer.put(
+                    StreamChunk(
+                        chunk=None,
+                        agent_id="planner",
+                        content=error_msg + "\n",
+                        buffered_content=error_msg + "\n",
+                        function_calls_detected=False,
+                        reinvoked=False,
+                    )
+                )
             if self.verbose and self.logger:
                 self.logger.error(error_msg)
 
@@ -379,8 +402,8 @@ class CortexPlanner:
                     task_context += f"   Expected: {task.expected_output}\n"
             task_context += "\n"
 
-        completed_steps = set()
-        step_results = {}
+        completed_steps: set[int] = set()
+        step_results: dict[int, str] = {}
 
         while len(completed_steps) < len(plan.steps):
             next_steps = plan.get_next_steps(completed_steps)
@@ -526,18 +549,27 @@ Respond ONLY with the XML plan, no additional text.
 
             root = ET.fromstring(xml_content)
 
+            _objective = root.find("objective")
+            _complexity = root.find("complexity")
+            _estimated_time = root.find("estimated_time")
+
+            from typing import cast
+
             plan = ExecutionPlan(
                 plan_id=f"plan_{hash(objective) % 10000}",
-                objective=root.find("objective").text or objective,
-                complexity=root.find("complexity").text or "medium",
-                estimated_time=float(root.find("estimated_time").text or 10),
+                objective=(_objective.text if _objective is not None else None) or objective,
+                complexity=cast(Literal["low", "medium", "high"], (_complexity.text if _complexity is not None else None) or "medium"),
+                estimated_time=float((_estimated_time.text if _estimated_time is not None else None) or 10),
             )
 
             for step_elem in root.findall("step"):
-                step_id = int(step_elem.get("id"))
-                agent = step_elem.find("agent").text
-                action = step_elem.find("action").text
-                description = step_elem.find("description").text or ""
+                step_id = int(step_elem.get("id", "0"))
+                _agent_elem = step_elem.find("agent")
+                _action_elem = step_elem.find("action")
+                _description_elem = step_elem.find("description")
+                agent = (_agent_elem.text if _agent_elem is not None else None) or ""
+                action = (_action_elem.text if _action_elem is not None else None) or ""
+                description = (_description_elem.text if _description_elem is not None else None) or ""
 
                 arguments = {}
                 args_elem = step_elem.find("arguments")
@@ -585,7 +617,7 @@ Respond ONLY with the XML plan, no additional text.
             ExecutionPlan: Simple plan with one step using the first agent.
         """
         plan = ExecutionPlan(
-            plan_id=f"fallback_{hash(objective) % 10000}", objective=objective, complexity="simple", estimated_time=5.0
+            plan_id=f"fallback_{hash(objective) % 10000}", objective=objective, complexity="low", estimated_time=5.0
         )
 
         if agents:
@@ -660,11 +692,12 @@ Respond ONLY with the XML plan, no additional text.
                 self.logger.info(f"🔄 Executing step {step.step_id}: {step.agent} -> {step.action}")
 
         if agent.allow_delegation:
-            result = agent.execute_with_delegation(task_description, context)
-        else:
-            result = agent.execute(task_description, context)
-
-        return result
+            delegated = agent.execute_with_delegation(task_description, context)
+            return delegated
+        executed = agent.execute(task_description, context)
+        if isinstance(executed, tuple):
+            return executed[0].get_result(1.0) if executed[0].get_result is not None else str(executed[0])
+        return executed
 
     def _log_plan_summary(self, plan: ExecutionPlan):
         """Log a summary of the execution plan.

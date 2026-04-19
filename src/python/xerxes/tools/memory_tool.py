@@ -39,6 +39,7 @@ Example:
     ... )
 """
 
+from collections.abc import Callable
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -342,7 +343,7 @@ def consolidate_agent_memories(
         if not memories:
             summary = "No memories found for this agent."
         else:
-            tagged_memories = {}
+            tagged_memories: dict[str, list[str]] = {}
             for mem in memories:
                 mem_tags = mem.metadata.get("tags", ["untagged"])
                 for tag in mem_tags:
@@ -421,7 +422,7 @@ def delete_memory(
     try:
         deleted_count = 0
 
-        filters = {}
+        filters: dict[str, Any] = {}
         if tags:
             filters["tags"] = tags
         if agent_id:
@@ -501,7 +502,7 @@ def get_memory_tags_and_terms(
             limit=1000,
         )
 
-        tags_by_type = {
+        tags_by_type: dict[str, set[str]] = {
             "short_term": set(),
             "long_term": set(),
             "working": set(),
@@ -510,7 +511,7 @@ def get_memory_tags_and_terms(
             "procedural": set(),
         }
 
-        tag_frequency = {}
+        tag_frequency: dict[str, int] = {}
 
         for mem in memories:
             mem_type = mem.memory_type.lower() if hasattr(mem, "memory_type") else "unknown"
@@ -593,7 +594,7 @@ def get_memory_statistics(
         return {"status": "error", "message": str(e)}
 
 
-MEMORY_TOOLS = [
+MEMORY_TOOLS: list[Callable[..., Any]] = [
     save_memory,
     search_memory,
     consolidate_agent_memories,
@@ -666,7 +667,7 @@ def add_memory_tools_to_agent(
     if include_tools is None:
         tools_to_add = MEMORY_TOOLS
     else:
-        tool_map = {tool.__name__: tool for tool in MEMORY_TOOLS}
+        tool_map: dict[str, Callable[..., Any]] = {tool.__name__: tool for tool in MEMORY_TOOLS}
         tools_to_add = [tool_map[name] for name in include_tools if name in tool_map]
 
     for tool in tools_to_add:

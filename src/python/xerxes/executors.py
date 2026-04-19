@@ -723,7 +723,7 @@ class FunctionExecutor:
                 ):
                     skill_name = ""
                     if isinstance(result, dict):
-                        skill_name = result.get("skill_name", result.get("name", ""))
+                        skill_name = str(result.get("skill_name", result.get("name", "")) or "")
                     elif isinstance(result, str):
                         try:
                             parsed = json.loads(result)
@@ -984,43 +984,51 @@ class FunctionExecutor:
         return all(dep in completed_ids for dep in call.dependencies)
 
 
-try:
+if tp.TYPE_CHECKING:
     from .core.errors import (
         AgentError,
         FunctionExecutionError,
         ValidationError,
         XerxesTimeoutError,
     )
-except ImportError:
+else:
+    try:
+        from .core.errors import (
+            AgentError,
+            FunctionExecutionError,
+            ValidationError,
+            XerxesTimeoutError,
+        )
+    except ImportError:
 
-    class AgentError(Exception):
-        """Raised when an agent-level error occurs."""
+        class AgentError(Exception):
+            """Raised when an agent-level error occurs."""
 
-        def __init__(self, agent_id: str, message: str) -> None:
-            """Initialize with the agent ID and error message."""
-            super().__init__(f"Agent {agent_id}: {message}")
+            def __init__(self, agent_id: str, message: str) -> None:
+                """Initialize with the agent ID and error message."""
+                super().__init__(f"Agent {agent_id}: {message}")
 
-    class XerxesTimeoutError(Exception):
-        """Raised when a function execution exceeds its time limit."""
+        class XerxesTimeoutError(Exception):
+            """Raised when a function execution exceeds its time limit."""
 
-        def __init__(self, func_name: str, timeout: float) -> None:
-            """Initialize with the function name and timeout duration."""
-            super().__init__(f"Function {func_name} timed out after {timeout}s")
+            def __init__(self, func_name: str, timeout: float) -> None:
+                """Initialize with the function name and timeout duration."""
+                super().__init__(f"Function {func_name} timed out after {timeout}s")
 
-    class FunctionExecutionError(Exception):
-        """Raised when a function call fails during execution."""
+        class FunctionExecutionError(Exception):
+            """Raised when a function call fails during execution."""
 
-        def __init__(self, func_name: str, message: str, original_error: BaseException | None = None) -> None:
-            """Initialize with the function name, error message, and optional original exception."""
-            super().__init__(f"Function {func_name}: {message}")
-            self.original_error = original_error
+            def __init__(self, func_name: str, message: str, original_error: BaseException | None = None) -> None:
+                """Initialize with the function name, error message, and optional original exception."""
+                super().__init__(f"Function {func_name}: {message}")
+                self.original_error = original_error
 
-    class ValidationError(Exception):
-        """Raised when function argument validation fails."""
+        class ValidationError(Exception):
+            """Raised when function argument validation fails."""
 
-        def __init__(self, param_name: str, message: str) -> None:
-            """Initialize with the parameter name and validation message."""
-            super().__init__(f"Validation error for {param_name}: {message}")
+            def __init__(self, param_name: str, message: str) -> None:
+                """Initialize with the parameter name and validation message."""
+                super().__init__(f"Validation error for {param_name}: {message}")
 
 
 class RetryPolicy:
@@ -1105,7 +1113,7 @@ class EnhancedFunctionRegistry(FunctionRegistry):
 
     def __init__(self) -> None:
         super().__init__()
-        self._function_validators: dict[str, tp.Callable] = {}
+        self._function_validators: dict[str, tp.Callable | None] = {}
         self._function_metrics: dict[str, ExecutionMetrics] = {}
 
     def register(
@@ -1294,7 +1302,8 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                 if not func:
                     raise FunctionExecutionError(func_name, "Function not found")
 
-                self.orchestrator.function_registry.validate_arguments(func_name, call.arguments)
+                registry = tp.cast(EnhancedFunctionRegistry, self.orchestrator.function_registry)
+                registry.validate_arguments(func_name, call.arguments)
 
                 if __CTX_VARS_NAME__ in inspect.signature(func).parameters:
                     call.arguments[__CTX_VARS_NAME__] = context_variables or {}
@@ -1312,11 +1321,11 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                 else:
                     call.status = ExecutionStatus.SUCCESS
                 if not hasattr(call, "execution_time"):
-                    call.execution_time = time.time() - start_time
+                    setattr(call, "execution_time", time.time() - start_time)
                 else:
-                    call.execution_time = time.time() - start_time
+                    setattr(call, "execution_time", time.time() - start_time)
 
-                logger.info(f"Successfully executed {func_name} in {call.execution_time:.2f}s")
+                logger.info(f"Successfully executed {func_name} in {getattr(call, 'execution_time', 0):.2f}s")
 
             except XerxesTimeoutError as e:
                 call.result = f"Function timed out: {e}"
@@ -1325,7 +1334,7 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                 if hasattr(call, "error"):
                     call.error = str(e)
                 if hasattr(call, "execution_time"):
-                    call.execution_time = time.time() - start_time
+                    setattr(call, "execution_time", time.time() - start_time)
                 logger.error(f"Function {func_name} timed out: {e}")
 
             except (FunctionExecutionError, ValidationError) as e:
@@ -1335,7 +1344,7 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                 if hasattr(call, "error"):
                     call.error = str(e)
                 if hasattr(call, "execution_time"):
-                    call.execution_time = time.time() - start_time
+                    setattr(call, "execution_time", time.time() - start_time)
                 logger.error(f"Function {func_name} failed: {e}")
 
             except Exception as e:
@@ -1345,12 +1354,13 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                 if hasattr(call, "error"):
                     call.error = f"Unexpected error: {e!s}"
                 if hasattr(call, "execution_time"):
-                    call.execution_time = time.time() - start_time
+                    setattr(call, "execution_time", time.time() - start_time)
                 logger.error(f"Unexpected error in {func_name}: {e}", exc_info=True)
 
             finally:
                 if self.orchestrator.enable_metrics:
-                    metrics = self.orchestrator.function_registry.get_metrics(func_name)
+                    registry = tp.cast(EnhancedFunctionRegistry, self.orchestrator.function_registry)
+                    metrics = registry.get_metrics(func_name)
                     if metrics:
                         exec_time = getattr(call, "execution_time", 0)
                         status = getattr(call, "status", ExecutionStatus.SUCCESS)
@@ -1364,6 +1374,8 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         strategy: FunctionCallStrategy = FunctionCallStrategy.SEQUENTIAL,
         context_variables: dict | None = None,
         agent: Agent | None = None,
+        runtime_features_state: RuntimeFeaturesState | None = None,
+        loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
         """Execute multiple function calls with specified strategy."""
         context_variables = context_variables or {}

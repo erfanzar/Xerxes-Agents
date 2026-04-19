@@ -32,10 +32,11 @@ Example:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from bs4 import Tag
 
 from ..core.utils import run_sync
 from ..types import AgentBaseFn
@@ -131,25 +132,28 @@ class WebScraper(AgentBaseFn):
         if extract_links:
             links = []
             for link in soup.find_all("a", href=True):
-                href = link["href"]
+                tag = cast(Tag, link)
+                href = str(tag["href"])
                 absolute_url = urljoin(url, href)
-                links.append({"text": link.get_text(strip=True), "url": absolute_url})
+                links.append({"text": tag.get_text(strip=True), "url": absolute_url})
             result["links"] = links[:100]
 
         if extract_images:
             images = []
             for img in soup.find_all("img", src=True):
-                src = img["src"]
+                tag = cast(Tag, img)
+                src = str(tag["src"])
                 absolute_url = urljoin(url, src)
-                images.append({"alt": img.get("alt", ""), "src": absolute_url})
+                images.append({"alt": tag.get("alt", ""), "src": absolute_url})
             result["images"] = images[:50]
 
         meta_tags = {}
         for meta in soup.find_all("meta"):
-            if meta.get("name"):
-                meta_tags[meta["name"]] = meta.get("content", "")
-            elif meta.get("property"):
-                meta_tags[meta["property"]] = meta.get("content", "")
+            tag = cast(Tag, meta)
+            if tag.get("name"):
+                meta_tags[tag["name"]] = tag.get("content", "")
+            elif tag.get("property"):
+                meta_tags[tag["property"]] = tag.get("content", "")
         result["meta"] = meta_tags
 
         return result
@@ -254,7 +258,7 @@ class APIClient(AgentBaseFn):
 
         async with httpx.AsyncClient() as client:
             try:
-                kwargs = {
+                kwargs: dict[str, Any] = {
                     "timeout": timeout,
                     "follow_redirects": True,
                 }
@@ -540,13 +544,14 @@ class URLAnalyzer(AgentBaseFn):
 
                 og_tags = {}
                 for meta in soup.find_all("meta", property=re.compile(r"^og:")):
-                    og_tags[meta["property"]] = meta.get("content", "")
+                    tag = cast(Tag, meta)
+                    og_tags[tag["property"]] = tag.get("content", "")
                 if og_tags:
                     result["open_graph"] = og_tags
 
                 description = soup.find("meta", attrs={"name": "description"})
                 if description:
-                    result["description"] = description.get("content", "")
+                    result["description"] = cast(Tag, description).get("content", "")
 
             except Exception:
                 pass

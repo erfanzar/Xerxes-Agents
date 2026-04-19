@@ -341,6 +341,9 @@ def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[s
     if content_type_str is None:
         raise ValueError("Content chunk must have a type field.")
 
+    if not isinstance(content_type_str, str):
+        raise ValueError("Content chunk type must be a string.")
+
     content_type = ChunkTypes(content_type_str)
 
     if content_type == ChunkTypes.text:
@@ -603,12 +606,11 @@ class AssistantMessage(BaseMessage):
         Returns:
             A new AssistantMessage instance with parsed content and tool calls.
         """
-        openai_tool_calls = openai_message.get("tool_calls", None)
-        tools_calls = (
-            [ToolCall.from_openai(openai_tool_call) for openai_tool_call in openai_tool_calls]
-            if openai_tool_calls is not None
-            else None
-        )
+        openai_tool_calls = openai_message.get("tool_calls")
+        if isinstance(openai_tool_calls, list):
+            tools_calls = [ToolCall.from_openai(openai_tool_call) for openai_tool_call in openai_tool_calls]
+        else:
+            tools_calls = None
         return cls.model_validate(
             {
                 "role": openai_message["role"],
@@ -688,7 +690,12 @@ _map_type_to_role = {
     SystemMessage: Roles.system,
 }
 
-_map_role_to_type = {v: k for k, v in _map_type_to_role.items()}
+_map_role_to_type = {
+    Roles.tool: ToolMessage,
+    Roles.user: UserMessage,
+    Roles.assistant: AssistantMessage,
+    Roles.system: SystemMessage,
+}
 
 
 class MessagesHistory(XerxesBase):
@@ -718,7 +725,7 @@ class MessagesHistory(XerxesBase):
         ]
     ]
 
-    def to_openai(self) -> list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]:
+    def to_openai(self) -> dict[str, list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]]:
         """Convert all messages to OpenAI API format.
 
         Iterates through all messages, converts each to OpenAI format,
@@ -730,11 +737,11 @@ class MessagesHistory(XerxesBase):
         """
         message = []
         for msg in self.messages:
-            msg = msg.to_openai()
-            if msg.get("role", "") == "system" and msg.get("content", "default") == "":
+            msg_dict = msg.to_openai()
+            if msg_dict.get("role", "") == "system" and msg_dict.get("content", "default") == "":
                 ...
             else:
-                message.append(msg)
+                message.append(msg_dict)
         return {"messages": message}
 
     @classmethod
@@ -762,9 +769,21 @@ class MessagesHistory(XerxesBase):
             ... ]
             >>> history = MessagesHistory.from_openai(openai_msgs)
         """
-        messages = []
+        messages: list[SystemMessage | UserMessage | AssistantMessage | ToolMessage] = []
         for message in openai_messages:
-            messages.append(_map_role_to_type[message.get("role")].from_openai(message))
+            role = message.get("role")
+            if not isinstance(role, str):
+                raise ValueError("Message role must be a string.")
+            if role == Roles.system:
+                messages.append(SystemMessage.from_openai(message))
+            elif role == Roles.user:
+                messages.append(UserMessage.from_openai(message))
+            elif role == Roles.assistant:
+                messages.append(AssistantMessage.from_openai(message))
+            elif role == Roles.tool:
+                messages.append(ToolMessage.from_openai(message))
+            else:
+                raise ValueError(f"Unknown message role: {role}")
         return MessagesHistory(messages=messages)
 
     def make_instruction_prompt(
@@ -793,7 +812,13 @@ class MessagesHistory(XerxesBase):
         system_msg: SystemMessage | None = next((m for m in self.messages if isinstance(m, SystemMessage)), None)
         prompt_parts.append("# Instruction")
         if system_msg and system_msg.content:
-            prompt_parts.append(textwrap.indent(system_msg.content.strip(), ind1))
+            if isinstance(system_msg.content, str):
+                prompt_parts.append(textwrap.indent(system_msg.content.strip(), ind1))
+            else:
+                content_text = "".join(
+                    chunk.text for chunk in system_msg.content if isinstance(chunk, TextChunk)
+                )
+                prompt_parts.append(textwrap.indent(content_text.strip(), ind1))
         else:
             prompt_parts.append(f"{ind1}(No system prompt provided)")
 

@@ -31,6 +31,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Final
 
@@ -116,7 +117,7 @@ def scan_context_content(content: str, filename: str = "unknown") -> str:
     return f"[BLOCKED: {filename} contained potential prompt injection ({', '.join(findings)}). Content not loaded.]"
 
 
-def scan_context_file(path: str | object, filename: str | None = None) -> str:
+def scan_context_file(path: str | os.PathLike[str], filename: str | None = None) -> str:
     """Convenience wrapper that reads a file and scans it.
 
     Args:

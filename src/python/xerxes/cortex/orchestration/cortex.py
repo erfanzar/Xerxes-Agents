@@ -283,7 +283,8 @@ class Cortex:
 
             agent.reinvoke_after_function = self.reinvoke_after_function
 
-            self.xerxes.register_agent(agent._internal_agent)
+            if agent._internal_agent is not None:
+                self.xerxes.register_agent(agent._internal_agent)
 
             if agent.memory_enabled and not agent.memory:
                 agent.memory = self.cortex_memory
@@ -312,7 +313,8 @@ class Cortex:
 
             self.manager_agent.reinvoke_after_function = self.reinvoke_after_function
 
-            self.xerxes.register_agent(self.manager_agent._internal_agent)
+            if self.manager_agent._internal_agent is not None:
+                self.xerxes.register_agent(self.manager_agent._internal_agent)
 
             if self.manager_agent.memory_enabled and not self.manager_agent.memory:
                 self.manager_agent.memory = self.cortex_memory
@@ -325,7 +327,8 @@ class Cortex:
                 self.planner.planner_agent.model = model
             self.planner.planner_agent.reinvoke_after_function = self.reinvoke_after_function
 
-            self.xerxes.register_agent(self.planner.planner_agent._internal_agent)
+            if self.planner.planner_agent._internal_agent is not None:
+                self.xerxes.register_agent(self.planner.planner_agent._internal_agent)
 
             if self.planner.planner_agent.memory_enabled and not self.planner.planner_agent.memory:
                 self.planner.planner_agent.memory = self.cortex_memory
@@ -624,20 +627,21 @@ class Cortex:
             Task dependencies are resolved before execution. If a task has
             a chain defined, conditional branching may insert additional tasks.
         """
-        context_outputs = []
+        context_outputs: list[str] = []
 
         for i, task in enumerate(self.tasks):
             if not hasattr(task, "task_id"):
-                task.task_id = str(uuid.uuid4())[:18]
+                setattr(task, "task_id", str(uuid.uuid4())[:18])
             log_task_start(f"Task {i + 1}/{len(self.tasks)}")
 
-            task_context = []
+            task_context: list[str] = []
 
             if hasattr(task, "dependencies") and task.dependencies:
                 for dep_task in task.dependencies:
                     for completed_task in self.task_outputs:
                         if completed_task.task.description == dep_task.description:
-                            task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
+                            if dep_task.agent is not None:
+                                task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
                             break
 
             if task.context:
@@ -645,12 +649,21 @@ class Cortex:
                     for j, prev_output in enumerate(context_outputs, 1):
                         task_context.append(f"Task {j} Output: {prev_output}")
 
-            task_output = task.execute(task_context if (task_context or task.context) else None)
+            _exec_result = task.execute(task_context if (task_context or task.context) else None)
+            if isinstance(_exec_result, tuple):
+                task_output = CortexTaskOutput(
+                    task=task,
+                    output=_exec_result[0].get_result(1.0) if _exec_result[0].get_result is not None else str(_exec_result[0]),
+                    agent=task.agent if task.agent is not None else self.agents[0],
+                )
+            else:
+                task_output = _exec_result
 
             context_outputs.append(task_output.output)
             self.task_outputs.append(task_output)
 
-            log_success(f"Task completed by {task.agent.role}")
+            if task.agent is not None:
+                log_success(f"Task completed by {task.agent.role}")
 
             if task.chain:
                 if task.chain.condition and task.chain.condition(task_output.output):
@@ -678,27 +691,31 @@ class Cortex:
         Returns:
             The output string from the last completed task.
         """
-        context_outputs = []
-        all_content = []
+        context_outputs: list[str] = []
+        all_content: list[str] = []
 
         for i, task in enumerate(self.tasks):
             if not hasattr(task, "task_id"):
-                task.task_id = str(uuid.uuid4())[:18]
+                setattr(task, "task_id", str(uuid.uuid4())[:18])
             log_task_start(f"Task {i + 1}/{len(self.tasks)}")
 
-            task_context = []
+            task_context: list[str] = []
 
             if hasattr(task, "dependencies") and task.dependencies:
                 for dep_task in task.dependencies:
                     for completed_task in self.task_outputs:
                         if completed_task.task.description == dep_task.description:
-                            task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
+                            if dep_task.agent is not None:
+                                task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
                             break
 
             if task.context:
                 if context_outputs:
                     for j, prev_output in enumerate(context_outputs, 1):
                         task_context.append(f"Task {j} Output: {prev_output}")
+
+            if task.agent is None:
+                raise ValueError(f"Task '{task.description[:50]}...' has no assigned agent")
 
             start_chunk = StreamChunk(
                 chunk=None,
@@ -784,13 +801,16 @@ class Cortex:
             loop = asyncio.get_running_loop()
 
             if streamer_buffer:
+                if task.agent is None:
+                    raise ValueError(f"Task '{task.description[:50]}...' has no assigned agent")
+                _task_agent = task.agent
                 task_description = f"{task.description}\n\nExpected Output: {task.expected_output}"
                 context_str = "\n\n".join(context_outputs) if context_outputs else None
 
                 output_content = await loop.run_in_executor(
                     executor,
                     lambda: cortex_self._stream_agent_execution(
-                        agent=task.agent,
+                        agent=_task_agent,
                         task_description=task_description,
                         context=context_str,
                         main_buffer=streamer_buffer,
@@ -803,11 +823,18 @@ class Cortex:
                     agent=task.agent,
                 )
             else:
-                task_output = await loop.run_in_executor(
+                _task_output = await loop.run_in_executor(
                     executor,
                     lambda: task.execute(context_outputs if task.context else None),
                 )
-                return task_output
+                if isinstance(_task_output, tuple):
+                    _output = _task_output[0].get_result(1.0) if _task_output[0].get_result is not None else str(_task_output[0])
+                    return CortexTaskOutput(
+                        task=task,
+                        output=_output,
+                        agent=task.agent if task.agent is not None else self.agents[0],
+                    )
+                return _task_output
 
         async def run_all_tasks() -> str:
             """Gather independent and dependent tasks, run them concurrently, and return final output."""
@@ -859,10 +886,14 @@ class Cortex:
             tasks=self.tasks,
         )
 
-        plan_response = self.manager_agent.execute(
+        raw_plan_response = self.manager_agent.execute(
             task_description=manager_prompt,
             context=None,
         )
+        if isinstance(raw_plan_response, tuple):
+            plan_response = raw_plan_response[0].get_result(1.0) if raw_plan_response[0].get_result is not None else str(raw_plan_response[0])
+        else:
+            plan_response = raw_plan_response
 
         try:
             json_match = re.search(r"\{[\s\S]*\}", plan_response)
@@ -874,7 +905,7 @@ class Cortex:
             self.logger.error(f"❌ Failed to parse manager plan: {e}")
             raise RuntimeError(f"Manager agent failed to create valid execution plan: {e}") from e
 
-        completed_tasks = {}
+        completed_tasks: dict[int, str] = {}
 
         if "execution_plan" not in plan:
             raise ValueError("Manager plan missing 'execution_plan' key")
@@ -926,10 +957,14 @@ class Cortex:
                 output=output,
             )
 
-            review = self.manager_agent.execute(
+            raw_review = self.manager_agent.execute(
                 task_description=review_prompt,
                 context=None,
             )
+            if isinstance(raw_review, tuple):
+                review = raw_review[0].get_result(1.0) if raw_review[0].get_result is not None else str(raw_review[0])
+            else:
+                review = raw_review
 
             try:
                 review_json_match = re.search(r"\{[\s\S]*\}", review)
@@ -955,10 +990,11 @@ class Cortex:
                         f"Please improve your previous output based on this feedback:\n{feedback}\n\n"
                         f"Improvements needed:\n" + "\n".join([f"- {imp}" for imp in improvements])
                     )
-                    output = assigned_agent.execute(
+                    improved = assigned_agent.execute(
                         task_description=improvement_prompt,
                         context=output,
                     )
+                    output = improved if isinstance(improved, str) else improved[0].get_result(1.0) if improved[0].get_result is not None else str(improved[0])
                     completed_tasks[task_id + 1] = output
             except Exception as e:
                 self.logger.error(f"❌ Failed to parse manager review: {e}")
@@ -971,12 +1007,13 @@ class Cortex:
             )
             self.task_outputs.append(task_output)
 
-        final_summary = self.manager_agent.execute(
+        raw_summary = self.manager_agent.execute(
             task_description="Provide a final summary of all completed tasks and their outcomes",
             context="\n\n".join([o.output for o in self.task_outputs]),
         )
-
-        return final_summary
+        if isinstance(raw_summary, tuple):
+            return raw_summary[0].get_result(1.0) if raw_summary[0].get_result is not None else str(raw_summary[0])
+        return raw_summary
 
     def _run_consensus(
         self,
@@ -998,7 +1035,7 @@ class Cortex:
             The consensus output from the final task, or an empty string if
             no tasks were executed.
         """
-        final_outputs = []
+        final_outputs: list[str] = []
 
         for i, task in enumerate(self.tasks, 1):
             task_description = task.description
@@ -1022,10 +1059,11 @@ class Cortex:
                         stream_callback=stream_callback,
                     )
                 else:
-                    output = agent.execute(
+                    _agent_output = agent.execute(
                         task_description=task_description,
                         context=context,
                     )
+                    output = _agent_output if isinstance(_agent_output, str) else _agent_output[0].get_result(1.0) if _agent_output[0].get_result is not None else str(_agent_output[0])
 
                 agent_outputs[agent.role] = output
                 log_success(f"{agent.role} completed contribution")
@@ -1047,10 +1085,11 @@ class Cortex:
                     stream_callback=stream_callback,
                 )
             else:
-                consensus = lead_agent.execute(
+                _consensus = lead_agent.execute(
                     task_description=consensus_prompt,
                     context=None,
                 )
+                consensus = _consensus if isinstance(_consensus, str) else _consensus[0].get_result(1.0) if _consensus[0].get_result is not None else str(_consensus[0])
 
             final_outputs.append(consensus)
 
@@ -1170,7 +1209,7 @@ class Cortex:
             self.logger.error(f"❌ Failed to parse manager plan: {e}")
             raise RuntimeError(f"Manager agent failed to create valid execution plan: {e}") from e
 
-        completed_tasks = {}
+        completed_tasks: dict[int, str] = {}
 
         for task_plan in plan.get("execution_plan", []):
             task_id = task_plan.get("task_id", 1) - 1
@@ -1192,16 +1231,16 @@ class Cortex:
             task.agent = assigned_agent
             self.logger.info(f"📌 Manager delegating Task {task_id + 1} to {assigned_agent.role}")
 
-            context = []
+            context_parts: list[str] = []
             if "dependencies" in task_plan:
                 for dep_id in task_plan["dependencies"]:
                     if dep_id in completed_tasks:
-                        context.append(completed_tasks[dep_id])
+                        context_parts.append(completed_tasks[dep_id])
 
             output = self._stream_agent_execution(
                 agent=task.agent,
                 task_description=task.description,
-                context="\n\n".join(context) if context else None,
+                context="\n\n".join(context_parts) if context_parts else None,
                 main_buffer=buffer,
                 stream_callback=stream_callback,
             )
@@ -1351,7 +1390,11 @@ class Cortex:
             agent = tasks[0].agent
             if isinstance(agent, list):
                 agent = agent[0]
+            if agent is None:
+                raise ValueError("First task must have an assigned agent")
             llm = agent.llm
+            if llm is None:
+                raise ValueError("Agent must have an LLM configured")
         _agents = []
         if agents is None:
             for task in tasks:

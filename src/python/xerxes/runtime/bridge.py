@@ -386,8 +386,8 @@ def create_query_engine(
         **config_kwargs,
     )
 
-    engine._default_tool_executor = tool_executor
-    engine._default_tool_schemas = tool_schemas
+    setattr(engine, "_default_tool_executor", tool_executor)
+    setattr(engine, "_default_tool_schemas", tool_schemas)
 
     return engine
 

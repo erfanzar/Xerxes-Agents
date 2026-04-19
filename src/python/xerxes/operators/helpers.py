@@ -70,8 +70,9 @@ def operator_tool(
         schema["name"] = name
         if description is not None:
             schema["description"] = description
-        func.__xerxes_schema__ = schema
-        func.category = category
-        return func
+        any_func = tp.cast(tp.Any, func)
+        any_func.__xerxes_schema__ = schema
+        any_func.category = category
+        return any_func
 
     return _decorate

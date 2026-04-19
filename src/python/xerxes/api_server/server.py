@@ -124,11 +124,11 @@ class XerxesAPIServer:
             version="2.0.0",
         )
 
+        self.completion_service: CompletionService | None = None
         if self.xerxes:
             self.completion_service = CompletionService(self.xerxes, can_overide_samplings=can_overide_samplings)
-        else:
-            self.completion_service = None
 
+        self.cortex_completion_service: CortexCompletionService | None = None
         if enable_cortex and llm:
             self.cortex_completion_service = CortexCompletionService(
                 llm=llm,
@@ -136,8 +136,6 @@ class XerxesAPIServer:
                 use_universal_agent=use_universal_agent,
                 verbose=True,
             )
-        else:
-            self.cortex_completion_service = None
 
         self._routers_initialized = False
 
@@ -174,6 +172,7 @@ class XerxesAPIServer:
 
         self.xerxes.register_agent(agent)
         agent_key = agent.id or agent.name or agent.model
+        assert agent_key is not None
         self.agents[agent_key] = agent
 
         if not self._routers_initialized:
@@ -266,7 +265,7 @@ class XerxesAPIServer:
             virtual models) containing ``type``, ``mode``, and optionally
             ``process`` keys.
         """
-        models = dict(self.agents)
+        models: dict[str, Any] = dict(self.agents)
 
         if self.enable_cortex:
             cortex_base_models = {

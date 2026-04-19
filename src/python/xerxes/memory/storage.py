@@ -459,7 +459,7 @@ class SQLiteStorage(MemoryStorage):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_db()
         else:
-            self._memory_storage = {}
+            self._memory_storage: dict[str, Any] = {}
 
     def _init_db(self) -> None:
         """Initialize the database schema with the ``memory`` table and indexes.

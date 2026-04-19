@@ -24,7 +24,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 class DaemonLogger:
@@ -33,7 +33,7 @@ class DaemonLogger:
     def __init__(self, log_dir: str) -> None:
         self._dir = Path(log_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._file = None
+        self._file: TextIO | None = None
         self._current_date = ""
 
     def _ensure_file(self) -> None:

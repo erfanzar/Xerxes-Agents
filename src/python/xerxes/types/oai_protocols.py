@@ -614,24 +614,6 @@ class FunctionCall(OpenAIBaseModel):
     arguments: str
 
 
-class Function(OpenAIBaseModel):
-    """Function definition used within ``ToolCall`` for response-side tool calls.
-
-    This is the response-side counterpart to the request-side ``FunctionDefinition``.
-    It appears within ``ToolCall`` objects in model responses to describe the
-    function being invoked.
-
-    Attributes:
-        name: The function name matching a defined tool.
-        description: Optional description of the function's purpose.
-        parameters: JSON Schema object for the function's parameters.
-    """
-
-    name: str
-    description: str | None = None
-    parameters: dict[str, tp.Any] = Field(default_factory=dict)
-
-
 class ToolCall(OpenAIBaseModel):
     """Represents a tool call made by the model in a response.
 

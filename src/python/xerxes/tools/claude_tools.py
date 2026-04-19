@@ -621,6 +621,8 @@ class TodoWriteTool(AgentBaseFn):
             except json.JSONDecodeError:
                 return "Error: todos must be a JSON array of {content, status} objects."
 
+        if not isinstance(todos, list):
+            return "Error: todos must be a JSON array of {content, status} objects."
         _todo_items = list(todos)
 
         lines = ["# Todo List", ""]

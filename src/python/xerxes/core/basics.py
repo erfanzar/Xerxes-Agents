@@ -19,7 +19,8 @@ It also includes utility functions for pretty-printing and object serialization.
 """
 
 import pprint
-from typing import Any, Literal, TypeVar
+from collections.abc import Callable
+from typing import Any, Literal, TypeVar, cast
 
 CLIENT_REGISTRY: dict[str, Any] = dict()
 """Registry for client instances."""
@@ -75,7 +76,7 @@ def _pretty_print(dict_in: dict[str, Any], indent: int = 0) -> str:
 def basic_registry(
     register_type: Literal["xerxes", "agents", "client"],
     register_name: str,
-) -> callable:
+) -> Callable[[T], T]:
     """Decorator for registering Xerxes components and adding utility methods.
 
     This decorator registers a class in the appropriate registry and adds
@@ -128,9 +129,10 @@ def basic_registry(
         Returns:
             The enhanced class with added utility methods.
         """
-        obj.to_dict = to_dict
-        obj.__str__ = str_func
-        obj.__repr__ = str_func
+        any_obj = cast(Any, obj)
+        any_obj.to_dict = to_dict
+        any_obj.__str__ = str_func
+        any_obj.__repr__ = str_func
         REGISTRY[register_type][register_name] = obj
         return obj
 

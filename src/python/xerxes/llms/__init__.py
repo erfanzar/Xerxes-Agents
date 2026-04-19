@@ -33,7 +33,7 @@ Example:
     >>> response = await llm.generate_completion("Hello!")
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from .anthropic import AnthropicLLM
 from .base import BaseLLM, LLMConfig
@@ -63,10 +63,11 @@ from .registry import (
     list_all_models,
 )
 
+PluginRegistry: type[Any] | None = None
 try:
     from ..extensions.plugins import PluginRegistry
 except ImportError:
-    PluginRegistry = None
+    pass
 
 
 def _instantiate_provider(provider_impl, config: LLMConfig | None, kwargs: dict) -> BaseLLM:
@@ -151,7 +152,7 @@ def create_llm(
         | str
     ),
     config: LLMConfig | None = None,
-    plugin_registry: PluginRegistry | None = None,
+    plugin_registry: Any | None = None,
     **kwargs,
 ) -> BaseLLM:
     """Factory function to create an LLM provider instance by name.

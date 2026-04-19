@@ -45,12 +45,12 @@ class _ThinkingParser:
     _in_thinking: bool = False
     _thinking_buf: str = ""
 
-    def process(self, chunk_text: str) -> list[object]:
+    def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
         """Parse a text fragment and return a list of (is_thinking, text) tuples.
 
         Each emitted item is either a TextChunk or ThinkingChunk.
         """
-        events: list[object] = []
+        events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
 
         if not chunk_text and self._in_thinking:
@@ -105,40 +105,6 @@ def _parse_thinking_tags(
     thinking_text = "".join(thinking_parts).strip()
     visible_text = thinking_pattern.sub("", text).strip()
     return visible_text, thinking_text
-
-
-def _stream_llm(
-    model: str,
-    provider_type: str,
-    system: str,
-    messages: list[dict[str, Any]],
-    tool_schemas: list[dict[str, Any]],
-    config: dict[str, Any],
-) -> Generator[object, None, None]:
-    """Stream from the appropriate LLM provider.
-
-    1. Sends the conversation to the LLM provider (streaming).
-    2. Yields :class:`TextChunk` / :class:`ThinkingChunk` events as tokens arrive.
-    3. When the LLM returns tool calls, yields :class:`ToolStart` events.
-    4. Checks permissions via the permission system.
-    5. Executes approved tools and yields :class:`ToolEnd` events.
-    6. Appends tool results to the conversation and loops back to step 1.
-    7. When no more tool calls are returned, the loop ends.
-
-    The loop is designed to be consumed by any frontend (TUI, API server, web UI)
-    through a simple ``for event in run(...):`` pattern.
-    """
-    from xerxes.llms.registry import detect_provider, get_provider_config
-
-    PermissionMode(config.get("permission_mode", "auto"))
-    model = config.get("model", "")
-    provider_name = detect_provider(model)
-
-    try:
-        get_provider_config(provider_name)
-    except KeyError:
-        provider_name = "openai"
-        get_provider_config("openai")
 
 
 from .events import (  # noqa: E402
@@ -403,10 +369,13 @@ async def arun(
         runtime_features_state=runtime_features_state,
     )
 
-    _sentinel = object()
+    class _Sentinel:
+        pass
+
+    _sentinel = _Sentinel()
     while True:
         event = await loop.run_in_executor(None, lambda: next(gen, _sentinel))
-        if event is _sentinel:
+        if isinstance(event, _Sentinel):
             break
         yield event
 

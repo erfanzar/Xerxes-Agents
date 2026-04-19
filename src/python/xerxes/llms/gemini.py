@@ -146,7 +146,7 @@ class GeminiLLM(BaseLLM):
             config = LLMConfig(model=kwargs.pop("model", "gemini-pro"), api_key=kwargs.pop("api_key", None), **kwargs)
 
         self.client = client
-        self.genai = None
+        self.genai: Any = None
         super().__init__(config)
 
     def _initialize_client(self) -> None:
@@ -500,7 +500,7 @@ class GeminiLLM(BaseLLM):
             "is_final": True,
         }
 
-    async def astream_completion(
+    def astream_completion(
         self,
         response: Any,
         agent: Any | None = None,
@@ -537,42 +537,45 @@ class GeminiLLM(BaseLLM):
                 if chunk["content"]:
                     print(chunk["content"], end="", flush=True)
         """
-        buffered_content = ""
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            buffered_content = ""
 
-        async for chunk in response:
-            chunk_data = {
+            async for chunk in response:
+                chunk_data = {
+                    "content": None,
+                    "buffered_content": buffered_content,
+                    "function_calls": [],
+                    "tool_calls": None,
+                    "raw_chunk": chunk,
+                    "is_final": False,
+                }
+
+                if hasattr(chunk, "text") and chunk.text:
+                    buffered_content += chunk.text
+                    chunk_data["content"] = chunk.text
+                    chunk_data["buffered_content"] = buffered_content
+                elif hasattr(chunk, "candidates") and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                        parts = candidate.content.parts
+                        if parts:
+                            text = parts[0].text
+                            buffered_content += text
+                            chunk_data["content"] = text
+                            chunk_data["buffered_content"] = buffered_content
+
+                yield chunk_data
+
+            yield {
                 "content": None,
                 "buffered_content": buffered_content,
                 "function_calls": [],
                 "tool_calls": None,
-                "raw_chunk": chunk,
-                "is_final": False,
+                "raw_chunk": None,
+                "is_final": True,
             }
 
-            if hasattr(chunk, "text") and chunk.text:
-                buffered_content += chunk.text
-                chunk_data["content"] = chunk.text
-                chunk_data["buffered_content"] = buffered_content
-            elif hasattr(chunk, "candidates") and chunk.candidates:
-                candidate = chunk.candidates[0]
-                if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
-                    parts = candidate.content.parts
-                    if parts:
-                        text = parts[0].text
-                        buffered_content += text
-                        chunk_data["content"] = text
-                        chunk_data["buffered_content"] = buffered_content
-
-            yield chunk_data
-
-        yield {
-            "content": None,
-            "buffered_content": buffered_content,
-            "function_calls": [],
-            "tool_calls": None,
-            "raw_chunk": None,
-            "is_final": True,
-        }
+        return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
         """Parse tool/function calls from Gemini response format.

@@ -91,7 +91,7 @@ class SystemInfo(AgentBaseFn):
                 - disk: Total, used, free, percent, partitions list
                 - network: Hostname, interfaces with addresses
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if info_type in ["all", "os"]:
             result["os"] = {
@@ -229,7 +229,7 @@ class ProcessManager(AgentBaseFn):
                 - run: completed, returncode, stdout, stderr
                 - error: Error message if operation failed
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "list":
             processes = []
@@ -406,7 +406,7 @@ class FileSystemTools(AgentBaseFn):
                 - tree: nested directory tree structure
                 - error: Error message if operation failed
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "copy":
             if not path or not destination:
@@ -612,7 +612,7 @@ class EnvironmentManager(AgentBaseFn):
             Environment changes are process-scoped and do not persist
             after the program exits.
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "get":
             if not key:
@@ -737,7 +737,7 @@ class TempFileManager(AgentBaseFn):
             Files created with cleanup=False will persist after program exit.
             The cleanup operation only removes files with "xerxes_" prefix.
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "create_file":
             try:

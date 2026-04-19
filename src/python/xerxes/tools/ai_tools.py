@@ -100,7 +100,7 @@ class TextEmbedder(AgentBaseFn):
             >>> print(result["shape"])
             (1, 2)
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if isinstance(text, str):
             texts = [text]
@@ -236,7 +236,7 @@ class TextSimilarity(AgentBaseFn):
             >>> print(result["similarity"])
             0.5
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if method == "cosine":
             words1 = text1.lower().split()
@@ -252,7 +252,7 @@ class TextSimilarity(AgentBaseFn):
             norm2 = math.sqrt(sum(b * b for b in vec2))
 
             if norm1 * norm2 == 0:
-                similarity = 0
+                similarity = 0.0
             else:
                 similarity = dot_product / (norm1 * norm2)
 
@@ -267,7 +267,7 @@ class TextSimilarity(AgentBaseFn):
             intersection = set1.intersection(set2)
             union = set1.union(set2)
 
-            similarity = len(intersection) / len(union) if union else 0
+            similarity = len(intersection) / len(union) if union else 0.0
 
             result["similarity"] = similarity
             result["method"] = "jaccard"
@@ -411,7 +411,7 @@ class TextClassifier(AgentBaseFn):
             >>> print(result["topic"])
             'technology'
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if method == "keyword":
             if not categories:
@@ -426,7 +426,7 @@ class TextClassifier(AgentBaseFn):
                 scores[category] = score
 
             if scores:
-                top_category = max(scores, key=scores.get)
+                top_category = max(scores, key=lambda k: scores[k])
                 result["category"] = top_category
                 result["confidence"] = scores[top_category] / sum(scores.values()) if sum(scores.values()) > 0 else 0
                 result["scores"] = scores
@@ -500,7 +500,7 @@ class TextClassifier(AgentBaseFn):
                 scores[lang] = score
 
             if scores:
-                detected_lang = max(scores, key=scores.get)
+                detected_lang = max(scores, key=lambda k: scores[k])
                 result["language"] = detected_lang
                 result["confidence"] = scores[detected_lang] / len(text_words) if text_words else 0
                 result["scores"] = scores
@@ -580,7 +580,7 @@ class TextClassifier(AgentBaseFn):
                 topic_scores[topic] = score
 
             if topic_scores:
-                top_topic = max(topic_scores, key=topic_scores.get)
+                top_topic = max(topic_scores, key=lambda k: topic_scores[k])
                 result["topic"] = top_topic
                 result["confidence"] = (
                     topic_scores[top_topic] / sum(topic_scores.values()) if sum(topic_scores.values()) > 0 else 0
@@ -668,7 +668,7 @@ class TextSummarizer(AgentBaseFn):
             ... )
             >>> print(result["summary"])
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if method == "extractive":
             sentences = re.split(r"[.!?]+", text)
@@ -700,7 +700,8 @@ class TextSummarizer(AgentBaseFn):
                 "are",
                 "were",
             }
-            word_freq = {w: f for w, f in word_freq.items() if w not in common_words}
+            filtered_freq: dict[str, int] = {w: f for w, f in word_freq.items() if w not in common_words}
+            word_freq = Counter(filtered_freq)
 
             sentence_scores = []
             for sentence in sentences:
@@ -853,7 +854,7 @@ class EntityExtractor(AgentBaseFn):
             >>> print(result["entities"]["emails"])
             ['john@example.com']
         """
-        result = {"entities": {}}
+        result: dict[str, Any] = {"entities": {}}
 
         patterns = {
             "emails": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",

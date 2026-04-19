@@ -34,7 +34,7 @@ Example:
 
 import typing as tp
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from ..types import AgentBaseFn
 
@@ -282,7 +282,7 @@ class DuckDuckGoSearch(AgentBaseFn):
                 query = f"{query} -site:{domain}"
 
         results: list[dict] = []
-        search_metadata = {
+        search_metadata: dict[str, Any] = {
             "query": query,
             "search_type": search_type,
             "timestamp": datetime.now().isoformat(),
@@ -450,7 +450,7 @@ class DuckDuckGoSearch(AgentBaseFn):
         sources: list[SearchType] | None = None,
         n_results_per_source: int = 3,
         **kwargs,
-    ) -> dict[str, list[dict]]:
+    ) -> dict[str, Any]:
         """Search across multiple source types and return categorized results.
 
         Performs separate searches for each specified source type and
@@ -484,7 +484,7 @@ class DuckDuckGoSearch(AgentBaseFn):
         """
         if sources is None:
             sources = ["text", "news"]
-        all_results = {}
+        all_results: dict[str, Any] = {}
 
         for source in sources:
             try:

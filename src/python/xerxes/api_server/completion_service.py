@@ -31,6 +31,7 @@ import typing
 from collections.abc import AsyncIterator
 
 from ..types import Agent, MessagesHistory, StreamChunk
+from ..types.function_execution_types import ResponseResult
 from ..types.oai_protocols import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -165,15 +166,18 @@ class CompletionService:
         """
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            self.xerxes.run,
-            None,
-            None,
-            messages,
-            agent,
-            False,
-            True,
+        response = typing.cast(
+            ResponseResult,
+            await loop.run_in_executor(
+                None,
+                self.xerxes.run,
+                None,
+                None,
+                messages,
+                agent,
+                False,
+                True,
+            ),
         )
         usage_info = response.response.usage
         return ChatCompletionResponse(
@@ -185,14 +189,14 @@ class CompletionService:
                     finish_reason="stop",
                 )
             ],
-            usage=UsageInfo(
-                completion_tokens=usage_info.completion_tokens,
-                completion_tokens_details=usage_info.completion_tokens_details,
-                processing_time=usage_info.processing_time,
-                prompt_tokens=usage_info.prompt_tokens,
-                prompt_tokens_details=usage_info.prompt_tokens_details,
-                tokens_per_second=usage_info.tokens_per_second,
-                total_tokens=usage_info.total_tokens,
+            usage=UsageInfo.model_construct(
+                completion_tokens=getattr(usage_info, "completion_tokens", 0) or 0,
+                completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
+                processing_time=getattr(usage_info, "processing_time", 0.0) or 0.0,
+                prompt_tokens=getattr(usage_info, "prompt_tokens", 0) or 0,
+                prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
+                tokens_per_second=getattr(usage_info, "tokens_per_second", 0.0) or 0.0,
+                total_tokens=getattr(usage_info, "total_tokens", 0) or 0,
             ),
         )
 
@@ -201,7 +205,7 @@ class CompletionService:
         agent: Agent,
         messages: MessagesHistory,
         request: ChatCompletionRequest,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[str | bytes]:
         """Create a streaming chat completion using server-sent events.
 
         Executes the Xerxes agent in streaming mode and yields response
@@ -233,14 +237,17 @@ class CompletionService:
         """
 
         usage_info = None
-        for chunk in self.xerxes.run(
+        stream_result = self.xerxes.run(
             messages=messages,
             agent_id=agent,
             stream=True,
             apply_functions=True,
-        ):
+        )
+        if isinstance(stream_result, ResponseResult):
+            return
+        for chunk in stream_result:
             if isinstance(chunk, StreamChunk):
-                usage_info = chunk.chunk.usage
+                usage_info = getattr(chunk.chunk, "usage", None) if chunk.chunk is not None else None
 
                 stream_response = ChatCompletionStreamResponse(
                     model=request.model,
@@ -251,14 +258,14 @@ class CompletionService:
                             finish_reason=None,
                         )
                     ],
-                    usage=UsageInfo(
-                        completion_tokens=usage_info.completion_tokens,
-                        completion_tokens_details=usage_info.completion_tokens_details,
-                        processing_time=usage_info.processing_time,
-                        prompt_tokens=usage_info.prompt_tokens,
-                        prompt_tokens_details=usage_info.prompt_tokens_details,
-                        tokens_per_second=usage_info.tokens_per_second,
-                        total_tokens=usage_info.total_tokens,
+                    usage=UsageInfo.model_construct(
+                        completion_tokens=getattr(usage_info, "completion_tokens", 0) or 0,
+                        completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
+                        processing_time=getattr(usage_info, "processing_time", 0.0) or 0.0,
+                        prompt_tokens=getattr(usage_info, "prompt_tokens", 0) or 0,
+                        prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
+                        tokens_per_second=getattr(usage_info, "tokens_per_second", 0.0) or 0.0,
+                        total_tokens=getattr(usage_info, "total_tokens", 0) or 0,
                     ),
                 )
                 yield f"data: {stream_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()
@@ -273,14 +280,14 @@ class CompletionService:
                     finish_reason="stop",
                 )
             ],
-            usage=UsageInfo(
-                completion_tokens=usage_info.completion_tokens,
-                completion_tokens_details=usage_info.completion_tokens_details,
-                processing_time=usage_info.processing_time,
-                prompt_tokens=usage_info.prompt_tokens,
-                prompt_tokens_details=usage_info.prompt_tokens_details,
-                tokens_per_second=usage_info.tokens_per_second,
-                total_tokens=usage_info.total_tokens,
+            usage=UsageInfo.model_construct(
+                completion_tokens=getattr(usage_info, "completion_tokens", 0) or 0,
+                completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
+                processing_time=getattr(usage_info, "processing_time", 0.0) or 0.0,
+                prompt_tokens=getattr(usage_info, "prompt_tokens", 0) or 0,
+                prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
+                tokens_per_second=getattr(usage_info, "tokens_per_second", 0.0) or 0.0,
+                total_tokens=getattr(usage_info, "total_tokens", 0) or 0,
             ),
         )
         yield f"data: {final_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()

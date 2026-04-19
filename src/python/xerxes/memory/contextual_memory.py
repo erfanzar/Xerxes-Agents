@@ -255,7 +255,7 @@ class ContextualMemory(Memory):
         """
         if memory_id:
             item = self.short_term.retrieve(memory_id)
-            if item:
+            if isinstance(item, MemoryItem):
                 self._check_promotion(item)
                 return item
 

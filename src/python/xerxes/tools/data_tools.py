@@ -108,7 +108,7 @@ class JSONProcessor(AgentBaseFn):
             >>> print(result["valid"])
             True
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "load":
             if not file_path:
@@ -240,7 +240,7 @@ class CSVProcessor(AgentBaseFn):
             >>> print(result["count"])
             5
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "read":
             if not file_path:
@@ -277,6 +277,7 @@ class CSVProcessor(AgentBaseFn):
                     headers = list(data[0].keys())
 
                 with open(file_path, "w", newline="", encoding="utf-8") as f:
+                    assert headers is not None
                     writer = csv.DictWriter(f, fieldnames=headers, delimiter=delimiter)
                     writer.writeheader()
                     writer.writerows(data)
@@ -291,17 +292,17 @@ class CSVProcessor(AgentBaseFn):
                 return {"error": "file_path required for analyze operation"}
             try:
                 with open(file_path, "r", newline="", encoding="utf-8") as f:
-                    reader = csv.reader(f, delimiter=delimiter)
-                    rows = list(reader)
+                    plain_reader = csv.reader(f, delimiter=delimiter)
+                    raw_rows = list(plain_reader)
 
-                result["total_rows"] = len(rows)
-                result["total_columns"] = len(rows[0]) if rows else 0
+                result["total_rows"] = len(raw_rows)
+                result["total_columns"] = len(raw_rows[0]) if raw_rows else 0
 
-                if rows:
-                    result["headers"] = rows[0]
-                    result["sample_data"] = rows[1 : min(6, len(rows))]
+                if raw_rows:
+                    result["headers"] = raw_rows[0]
+                    result["sample_data"] = raw_rows[1 : min(6, len(raw_rows))]
 
-                    result["empty_cells"] = sum(1 for row in rows[1:] for cell in row if not cell.strip())
+                    result["empty_cells"] = sum(1 for row in raw_rows[1:] for cell in row if not cell.strip())
 
             except Exception as e:
                 return {"error": f"Failed to analyze CSV: {e!s}"}
@@ -396,7 +397,7 @@ class TextProcessor(AgentBaseFn):
             >>> print(result["words"])
             2
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "stats":
             result["length"] = len(text)
@@ -404,14 +405,14 @@ class TextProcessor(AgentBaseFn):
             result["lines"] = len(text.splitlines())
             result["characters_no_spaces"] = len(text.replace(" ", "").replace("\n", "").replace("\t", ""))
 
-            char_freq = {}
+            char_freq: dict[str, int] = {}
             for char in text.lower():
                 if char.isalpha():
                     char_freq[char] = char_freq.get(char, 0) + 1
             result["most_common_chars"] = sorted(char_freq.items(), key=lambda x: x[1], reverse=True)[:5]
 
             words = re.findall(r"\b\w+\b", text.lower())
-            word_freq = {}
+            word_freq: dict[str, int] = {}
             for word in words:
                 word_freq[word] = word_freq.get(word, 0) + 1
             result["most_common_words"] = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
@@ -554,7 +555,7 @@ class DataConverter(AgentBaseFn):
             >>> print(result["success"])
             True
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         try:
             parsed_data = None
@@ -710,7 +711,7 @@ class DateTimeProcessor(AgentBaseFn):
             >>> print(result["components"]["weekday"])
             'Monday'
         """
-        result = {}
+        result: dict[str, Any] = {}
 
         if operation == "now":
             now = datetime.now()

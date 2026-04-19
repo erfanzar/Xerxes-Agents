@@ -288,7 +288,7 @@ class BaseLLM(ABC):
         pass
 
     @abstractmethod
-    async def astream_completion(
+    def astream_completion(
         self,
         response: Any,
         agent: Any | None = None,

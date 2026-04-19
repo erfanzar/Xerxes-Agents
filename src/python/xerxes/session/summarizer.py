@@ -258,6 +258,8 @@ class SessionSummarizer:
                 for t in session.turns[-3:]
             )
         )
+        if self.llm_client is None:
+            return ""
         out = self.llm_client(prompt)
         return out.strip() if isinstance(out, str) else ""
 

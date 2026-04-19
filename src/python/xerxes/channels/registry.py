@@ -128,7 +128,7 @@ class ChannelRegistry:
         try:
             eps = entry_points(group=group)
         except TypeError:
-            eps = entry_points().get(group, [])
+            eps = entry_points().get(group, tp.cast(tp.Any, []))
         for ep in eps:
             try:
                 factory = ep.load()

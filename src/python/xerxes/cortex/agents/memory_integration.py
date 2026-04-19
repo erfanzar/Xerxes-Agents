@@ -60,6 +60,7 @@ from ...memory import (
     ContextualMemory,
     EntityMemory,
     LongTermMemory,
+    MemoryItem,
     ShortTermMemory,
     SQLiteStorage,
     UserMemory,
@@ -374,8 +375,10 @@ class CortexMemory:
 
         if self.long_term:
             lt_items = self.long_term.retrieve(filters={"agent_id": agent_role}, limit=max(0, limit - len(history)))
-            if lt_items:
+            if isinstance(lt_items, list):
                 history.extend([item.content for item in lt_items])
+            elif isinstance(lt_items, MemoryItem):
+                history.append(lt_items.content)
 
         return history[:limit]
 

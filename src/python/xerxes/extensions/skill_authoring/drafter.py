@@ -210,6 +210,8 @@ class SkillDrafter:
 
     def _refine_with_llm(self, draft: str, candidate: SkillCandidate) -> str:
         """Best-effort LLM refinement; falls back to the raw draft on error."""
+        if self.llm_client is None:
+            return draft
         prompt = (
             "Rewrite the following auto-generated SKILL.md to be a clear, concise, "
             "Hermes-style agent skill. Preserve the YAML frontmatter, the section "

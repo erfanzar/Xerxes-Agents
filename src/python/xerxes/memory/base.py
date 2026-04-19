@@ -14,6 +14,7 @@
 """Base memory classes for Xerxes memory system."""
 
 from abc import ABC, abstractmethod
+from collections.abc import MutableSequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -120,7 +121,7 @@ class Memory(ABC):
         self.storage = storage
         self.max_items = max_items
         self.enable_embeddings = enable_embeddings
-        self._items: list[MemoryItem] = []
+        self._items: MutableSequence[MemoryItem] = []
         self._index: dict[str, MemoryItem] = {}
 
     @abstractmethod
@@ -243,7 +244,7 @@ class Memory(ABC):
             Dictionary with keys: total_items, max_items, memory_types (counts
             per type), unique_agents, unique_users, and unique_conversations.
         """
-        stats = {
+        stats: dict[str, Any] = {
             "total_items": len(self._items),
             "max_items": self.max_items,
             "memory_types": {},

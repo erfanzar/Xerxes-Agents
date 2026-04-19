@@ -167,7 +167,7 @@ class DynamicTaskBuilder:
             >>> len(tasks)
             3
         """
-        tasks = []
+        tasks: list[CortexTask] = []
 
         for i, prompt in enumerate(prompts):
             agent = None
@@ -281,7 +281,7 @@ class DynamicCortex(Cortex):
             enable_xerxes_memory=enable_xerxes_memory,
             cortex_name=cortex_name,
         )
-        self.task_creator = None
+        self.task_creator: TaskCreator | None = None
 
     def create_tasks_from_prompt(
         self,
@@ -337,6 +337,7 @@ class DynamicCortex(Cortex):
 
         if isinstance(result, tuple):
             plan, cortex_tasks = result
+            assert cortex_tasks is not None
             self.tasks = cortex_tasks
             return plan, cortex_tasks
         else:
@@ -382,12 +383,14 @@ class DynamicCortex(Cortex):
             - Temporarily overrides ``self.process`` if ``process`` is provided.
         """
 
-        _plan, cortex_tasks = self.create_tasks_from_prompt(
+        creation_result = self.create_tasks_from_prompt(
             prompt=prompt,
             background=background,
             auto_assign=True,
             stream=False,
         )
+        assert isinstance(creation_result, tuple)
+        _plan, cortex_tasks = creation_result
 
         self.tasks = cortex_tasks
 
@@ -469,14 +472,15 @@ class DynamicCortex(Cortex):
                 """Execute the target agent's task in a background thread, writing output to the streamer buffer."""
                 try:
                     if stream_callback:
-                        result = target_agent.execute_stream(task_description=prompt, callback=stream_callback)
+                        _stream_result = target_agent.execute_stream(task_description=prompt, callback=stream_callback)
                     else:
-                        result = target_agent.execute(
+                        _exec_result = target_agent.execute(
                             task_description=prompt, streamer_buffer=streamer_buffer, use_thread=False
                         )
+                        _stream_result = _exec_result if isinstance(_exec_result, str) else _exec_result[0].get_result(1.0) if _exec_result[0].get_result is not None else str(_exec_result[0])
 
                     if hasattr(streamer_buffer, "result_holder"):
-                        streamer_buffer.result_holder = [result]
+                        streamer_buffer.result_holder = [_stream_result]
                 finally:
                     if buffer_was_none:
                         streamer_buffer.close()
@@ -487,6 +491,7 @@ class DynamicCortex(Cortex):
             return streamer_buffer, thread
         else:
             result = self.kickoff()
+            assert not isinstance(result, tuple)
             return result.raw_output
 
     def execute_prompts(
@@ -557,7 +562,9 @@ class DynamicCortex(Cortex):
             if streamer_buffer is None:
                 streamer_buffer = StreamerBuffer()
 
-            buffer, thread = self.kickoff(use_streaming=True, stream_callback=stream_callback)
+            kickoff_result = self.kickoff(use_streaming=True, stream_callback=stream_callback)
+            assert isinstance(kickoff_result, tuple)
+            buffer, thread = kickoff_result
 
             if process:
                 self.process = original_process
@@ -565,6 +572,7 @@ class DynamicCortex(Cortex):
             return buffer, thread
         else:
             result = self.kickoff(use_streaming=False)
+            assert not isinstance(result, tuple)
 
             if process:
                 self.process = original_process

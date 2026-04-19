@@ -44,7 +44,6 @@ from enum import Enum
 
 if tp.TYPE_CHECKING:
     from google.generativeai.types.generation_types import GenerateContentResponse
-    from openai.types.chat.chat_completion import ChatCompletion
     from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 
 
@@ -326,6 +325,8 @@ class StreamChunk:
         Returns:
             The text content from the Gemini response, or None if unavailable.
         """
+        if self.chunk is None:
+            return None
         if hasattr(self.chunk, "_result") and self.chunk._result:
             if hasattr(self.chunk._result, "text"):
                 return self.chunk._result.text
@@ -333,6 +334,7 @@ class StreamChunk:
                 return self.content or ""
         elif self.content:
             return self.content
+        return None
 
     @property
     def is_thinking(self) -> bool:
@@ -514,10 +516,10 @@ class ResponseResult:
     """
 
     content: str
-    response: ChatCompletion
-    completion: Completion
+    response: tp.Any = None
+    completion: Completion | None = None
     reasoning_content: str = ""
-    function_calls: list[RequestFunctionCall] = field(default_factory=list)
+    function_calls: list[tp.Any] = field(default_factory=list)
     agent_id: str = ""
     execution_history: list[tp.Any] = field(default_factory=list)
     reinvoked: bool = False

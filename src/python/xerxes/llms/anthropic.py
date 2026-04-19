@@ -79,6 +79,7 @@ ANTHROPIC_CONTEXT_LENGTHS = {
     "claude-sonnet-4": 200000,
 }
 
+httpx: Any
 try:
     import httpx
 
@@ -168,7 +169,7 @@ class AnthropicLLM(BaseLLM):
             )
 
         self.version = version
-        self.client = None
+        self.client: httpx.AsyncClient | None = None
         super().__init__(config)
 
     def _initialize_client(self) -> None:
@@ -193,7 +194,7 @@ class AnthropicLLM(BaseLLM):
             raise ValueError("Anthropic API key not provided")
 
         self.client = httpx.AsyncClient(
-            base_url=self.config.base_url,
+            base_url=self.config.base_url or "",
             headers={
                 "anthropic-version": self.version,
                 "x-api-key": api_key,
@@ -304,6 +305,7 @@ class AnthropicLLM(BaseLLM):
             if use_stream:
                 return self._stream_completion(payload)
             else:
+                assert self.client is not None
                 response = await self.client.post("/v1/messages", json=payload)
                 response.raise_for_status()
                 return response.json()
@@ -344,6 +346,7 @@ class AnthropicLLM(BaseLLM):
             instead of calling this directly.
         """
         payload["stream"] = True
+        assert self.client is not None
 
         async with self.client.stream("POST", "/v1/messages", json=payload) as response:
             response.raise_for_status()
@@ -552,7 +555,7 @@ class AnthropicLLM(BaseLLM):
                         print(f"Function: {call['name']}")
         """
         buffered_content = ""
-        function_calls = []
+        function_calls: list[dict[str, Any]] = []
 
         for event in response:
             chunk_data = {
@@ -590,7 +593,7 @@ class AnthropicLLM(BaseLLM):
 
             yield chunk_data
 
-    async def astream_completion(
+    def astream_completion(
         self,
         response: Any,
         agent: Any | None = None,
@@ -642,44 +645,47 @@ class AnthropicLLM(BaseLLM):
                 if chunk["is_final"] and chunk["function_calls"]:
                     print("\\nFunction calls detected!")
         """
-        buffered_content = ""
-        function_calls = []
+        async def _gen() -> AsyncIterator[dict[str, Any]]:
+            buffered_content = ""
+            function_calls: list[dict[str, Any]] = []
 
-        async for event in response:
-            chunk_data = {
-                "content": None,
-                "buffered_content": buffered_content,
-                "function_calls": [],
-                "tool_calls": None,
-                "raw_chunk": event,
-                "is_final": False,
-            }
+            async for event in response:
+                chunk_data = {
+                    "content": None,
+                    "buffered_content": buffered_content,
+                    "function_calls": [],
+                    "tool_calls": None,
+                    "raw_chunk": event,
+                    "is_final": False,
+                }
 
-            event_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+                event_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
 
-            if event_type == "content_block_delta":
-                delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
-                text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
-                if text:
-                    buffered_content += text
-                    chunk_data["content"] = text
-                    chunk_data["buffered_content"] = buffered_content
-            elif event_type == "message_stop":
-                chunk_data["is_final"] = True
-                chunk_data["function_calls"] = function_calls
-            elif event_type == "tool_use":
-                name = event.get("name") if isinstance(event, dict) else getattr(event, "name", None)
-                input_data = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
-                if name:
-                    function_calls.append(
-                        {
-                            "id": event.get("id") if isinstance(event, dict) else getattr(event, "id", None),
-                            "name": name,
-                            "arguments": json.dumps(input_data) if input_data else "",
-                        }
-                    )
+                if event_type == "content_block_delta":
+                    delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
+                    text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
+                    if text:
+                        buffered_content += text
+                        chunk_data["content"] = text
+                        chunk_data["buffered_content"] = buffered_content
+                elif event_type == "message_stop":
+                    chunk_data["is_final"] = True
+                    chunk_data["function_calls"] = function_calls
+                elif event_type == "tool_use":
+                    name = event.get("name") if isinstance(event, dict) else getattr(event, "name", None)
+                    input_data = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
+                    if name:
+                        function_calls.append(
+                            {
+                                "id": event.get("id") if isinstance(event, dict) else getattr(event, "id", None),
+                                "name": name,
+                                "arguments": json.dumps(input_data) if input_data else "",
+                            }
+                        )
 
-            yield chunk_data
+                yield chunk_data
+
+        return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
         """Parse tool/function calls from an Anthropic API response.

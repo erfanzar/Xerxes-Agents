@@ -21,7 +21,7 @@ format, merging response chunks, and debug printing with timestamps.
 import asyncio
 import inspect
 import re
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import datetime
 from types import UnionType
 from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
@@ -211,7 +211,7 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
     return total
 
 
-def get_callable_public_name(func: callable) -> str:
+def get_callable_public_name(func: Callable[..., Any]) -> str:
     """Return the public tool name exposed to the model/runtime.
 
     Xerxes tools may carry a ``__xerxes_schema__`` dict whose ``name`` key
@@ -241,7 +241,7 @@ def get_callable_public_name(func: callable) -> str:
     return getattr(func, "__name__", str(func))
 
 
-def function_to_json(func: callable) -> dict:
+def function_to_json(func: Callable[..., Any]) -> dict:
     """Convert a Python function into a JSON-serializable dictionary.
 
     Extracts the function's signature, including its name, description
@@ -335,7 +335,7 @@ def function_to_json(func: callable) -> dict:
     for param in signature.parameters.values():
         if param.name == "context_variables" or param.kind == inspect.Parameter.VAR_KEYWORD:
             continue
-        param_info = {"type": "string"}
+        param_info: dict[str, Any] = {"type": "string"}
 
         annotation = resolved_hints.get(param.name, param.annotation)
         if annotation != inspect.Parameter.empty:

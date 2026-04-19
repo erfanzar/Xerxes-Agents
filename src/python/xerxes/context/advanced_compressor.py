@@ -348,6 +348,8 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
 
     def _call_llm(self, prompt: str) -> str | None:
         """Call the LLM client synchronously."""
+        if self.llm_client is None:
+            return None
         try:
             import asyncio
 
