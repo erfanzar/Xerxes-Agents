@@ -270,7 +270,9 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
 
         pruned = _prune_tool_results(compactable_msgs)
         tools_pruned = sum(
-            1 for orig, new in zip(compactable_msgs, pruned, strict=False) if orig.get("content", "") != new.get("content", "")
+            1
+            for orig, new in zip(compactable_msgs, pruned, strict=False)
+            if orig.get("content", "") != new.get("content", "")
         )
         stats["tools_pruned"] = tools_pruned
 
