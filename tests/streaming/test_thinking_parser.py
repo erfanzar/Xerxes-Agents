@@ -13,9 +13,8 @@
 # limitations under the License.
 """Tests for thinking-tag parsing in the streaming loop."""
 
-import pytest
-from xerxes.streaming.loop import _ThinkingParser, _parse_thinking_tags
 from xerxes.streaming.events import TextChunk, ThinkingChunk
+from xerxes.streaming.loop import _parse_thinking_tags, _ThinkingParser
 
 
 class TestThinkingParser:

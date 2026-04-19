@@ -53,7 +53,6 @@ class TestEventTypeImmutability:
     """Verify that event_type is always set by the class, not the caller."""
 
     def test_subclass_event_type_cannot_be_overridden_by_init(self):
-
         ev = TurnStartEvent()
         assert ev.event_type == "turn_start"
 

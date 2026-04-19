@@ -97,7 +97,6 @@ class TestMemory:
                 importance_score=0.5,
             )
 
-
         assert len(memory_store.memories[MemoryType.SHORT_TERM]) <= memory_store.max_short_term
 
     def test_memory_limits_working(self, memory_store):
@@ -109,7 +108,6 @@ class TestMemory:
                 memory_type=MemoryType.WORKING,
                 agent_id="test_agent",
             )
-
 
         assert len(memory_store.memories[MemoryType.WORKING]) <= memory_store.max_working
 
@@ -181,11 +179,9 @@ class TestMemory:
         memory_store.add_memory("Memory 2", MemoryType.LONG_TERM, "agent1")
         memory_store.add_memory("Memory 3", MemoryType.SHORT_TERM, "agent2")
 
-
         memory_store.clear_memories(memory_type=MemoryType.SHORT_TERM)
         assert len(memory_store.memories[MemoryType.SHORT_TERM]) == 0
         assert len(memory_store.memories[MemoryType.LONG_TERM]) == 1
-
 
         memory_store.clear_memories()
         for memory_type in MemoryType:
@@ -216,9 +212,7 @@ class TestMemory:
                 importance_score=0.9,
             )
 
-
         memory_store.consolidate_memories(threshold=0.8)
-
 
         long_term = memory_store.retrieve_memories(memory_type=MemoryType.LONG_TERM)
         assert len(long_term) > 0

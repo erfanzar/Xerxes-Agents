@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -442,7 +440,6 @@ class SpawnAgents(AgentBaseFn):
         """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import get_inheritable
-
 
         if isinstance(agents, str):
             try:
@@ -945,7 +942,7 @@ class MCPTool(AgentBaseFn):
             Tool result or error.
         """
         try:
-            from ..mcp import MCPManager
+            from ..mcp import MCPManager  # noqa: F401
 
             return (
                 f"[MCP] server={server_name} tool={tool_name}\n"

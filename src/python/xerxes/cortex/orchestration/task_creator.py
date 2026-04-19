@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -475,17 +473,23 @@ Respond ONLY with the XML plan, no additional text.
                     expected_output=task_elem.find("expected_output").text or "",
                     agent_role=task_elem.find("agent_role").text if task_elem.find("agent_role") is not None else None,
                     dependencies=dependencies,
-                    context_needed=task_elem.find("context_needed").text == "true"
-                    if task_elem.find("context_needed") is not None
-                    else False,
+                    context_needed=(
+                        task_elem.find("context_needed").text == "true"
+                        if task_elem.find("context_needed") is not None
+                        else False
+                    ),
                     tools_needed=tools_needed,
                     importance=importance,
-                    validation_required=task_elem.find("validation_required").text == "true"
-                    if task_elem.find("validation_required") is not None
-                    else False,
-                    human_feedback=task_elem.find("human_feedback").text == "true"
-                    if task_elem.find("human_feedback") is not None
-                    else False,
+                    validation_required=(
+                        task_elem.find("validation_required").text == "true"
+                        if task_elem.find("validation_required") is not None
+                        else False
+                    ),
+                    human_feedback=(
+                        task_elem.find("human_feedback").text == "true"
+                        if task_elem.find("human_feedback") is not None
+                        else False
+                    ),
                 )
 
                 plan.add_task(task_def)

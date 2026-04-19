@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """JSON-RPC bridge server for the TypeScript/Ink CLI frontend.
 
@@ -53,14 +52,13 @@ import queue
 import sys
 import threading
 import uuid
-from datetime import datetime, timezone, UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry
-from ..tools.agent_meta_tools import set_skill_registry
 from ..llms.registry import calc_cost, detect_provider
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
@@ -77,6 +75,7 @@ from ..streaming.events import (
     TurnDone,
 )
 from ..streaming.loop import run as run_agent_loop
+from ..tools.agent_meta_tools import set_skill_registry
 from . import profiles
 
 
@@ -822,7 +821,6 @@ class BridgeServer:
                 )
             return
 
-
         from xerxes.extensions.skills import skill_matches_platform
 
         if not skill_matches_platform(skill):
@@ -832,14 +830,11 @@ class BridgeServer:
             )
             return
 
-
         from xerxes.extensions.skills import inject_skill_config
 
         prompt_section = skill.to_prompt_section()
         config_block = inject_skill_config(skill)
         skill_message = f"[Skill '{name}' activated]{config_block}\n\n{prompt_section}"
-
-
 
         self.state.messages.append(
             {
@@ -1145,7 +1140,6 @@ class BridgeServer:
             return [json.loads(line)]
         except json.JSONDecodeError:
             pass
-
 
         messages = []
         for token in line.split():

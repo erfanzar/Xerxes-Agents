@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """FTS5 full-text search index for session transcripts.
 
@@ -63,7 +62,6 @@ class SessionFTSIndex:
             cur.fetchall()
             conn.close()
 
-
             conn = sqlite3.connect(":memory:")
             conn.execute("CREATE VIRTUAL TABLE fts_test USING fts5(content)")
             conn.close()
@@ -75,14 +73,16 @@ class SessionFTSIndex:
     def _ensure_schema(self) -> None:
         """Create FTS5 virtual table if missing."""
         with sqlite3.connect(str(self._db_path)) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
                     session_id,
                     turn_id,
                     agent_id,
                     content
                 )
-            """)
+            """
+            )
             conn.commit()
 
     def index_session(self, session: SessionRecord) -> None:
@@ -97,7 +97,6 @@ class SessionFTSIndex:
             return
 
         with sqlite3.connect(str(self._db_path)) as conn:
-
             conn.execute(
                 "DELETE FROM session_fts WHERE session_id = ?",
                 (session.session_id,),

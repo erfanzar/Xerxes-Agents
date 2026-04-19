@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Operator runtime state and tool construction.
 
@@ -513,7 +512,7 @@ class OperatorState:
                 "Reopen a previously closed spawned-agent handle so it can receive more input or be waited on again."
             ),
         )
-        def resume_agent(id: str) -> dict[str, tp.Any]:
+        def resume_agent(id: str) -> dict[str, tp.Any]:  # noqa: A002
             """Resume a previously closed sub-agent handle.
 
             Args:
@@ -553,7 +552,7 @@ class OperatorState:
             target: str | None = None,
             message: str | None = None,
             interrupt: bool = False,
-            id: str | None = None,
+            id: str | None = None,  # noqa: A002
             handle_id: str | None = None,
             task_description: str | None = None,
         ) -> dict[str, tp.Any]:

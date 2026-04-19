@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Skill security scanner — quarantine, hash verification, trusted repos.
 
@@ -40,16 +39,11 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from xerxes.core.paths import xerxes_subdir
 from xerxes.security.prompt_scanner import scan_context_content
 
 logger = logging.getLogger(__name__)
-
-
-
-
 
 
 TRUSTED_REPOS: set[str] = {
@@ -79,11 +73,6 @@ def _save_trusted_hashes(data: dict[str, str]) -> None:
     _TRUSTED_HASHES_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-
-
-
-
-
 @dataclass
 class ScanResult:
     """Outcome of a skill security scan."""
@@ -99,11 +88,6 @@ class ScanResult:
         if self.is_safe:
             return "Safe"
         return "; ".join(self.reasons) if self.reasons else "Unsafe"
-
-
-
-
-
 
 
 def _hash_file(path: Path) -> str:
@@ -151,7 +135,6 @@ def scan_skill(
     hash_mismatch = False
     untrusted = False
 
-
     if skill_path.is_file() and skill_path.name == "SKILL.md":
         skill_dir = skill_path.parent
         skill_md = skill_path
@@ -159,13 +142,11 @@ def scan_skill(
         skill_dir = skill_path
         skill_md = skill_dir / "SKILL.md"
 
-
     if not skill_md.exists():
         return ScanResult(
             is_safe=False,
             reasons=["Missing SKILL.md"],
         )
-
 
     try:
         content = skill_md.read_text(encoding="utf-8")
@@ -177,7 +158,6 @@ def scan_skill(
         injection = True
         reasons.append("Prompt injection detected in SKILL.md")
 
-
     if trusted_hashes is not None:
         current_hash = _hash_file(skill_md)
         key = str(skill_md)
@@ -185,7 +165,6 @@ def scan_skill(
         if expected is not None and current_hash != expected:
             hash_mismatch = True
             reasons.append("Content hash mismatch")
-
 
     if source_repo is not None:
         if source_repo not in TRUSTED_REPOS:

@@ -11,9 +11,9 @@ import re
 from pathlib import Path
 
 import openai
-from xerxes_agent import Agent, Xerxes
-from xerxes_agent.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes import Agent, Xerxes
+from xerxes.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
+from xerxes.memory import MemoryStore, MemoryType
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -429,7 +429,7 @@ def main():
     print()
 
     # Analyze different aspects using the enhanced executor
-    from xerxes_agent.types import RequestFunctionCall
+    from xerxes.types import RequestFunctionCall
 
     # Create function calls for analysis
     analysis_calls = [
@@ -443,7 +443,7 @@ def main():
     print("🔎 Running analysis with Enhanced Executor...")
 
     # Execute all analyses in parallel using the enhanced executor
-    from xerxes_agent.types import FunctionCallStrategy
+    from xerxes.types import FunctionCallStrategy
 
     try:
         results = await executor.execute_function_calls(

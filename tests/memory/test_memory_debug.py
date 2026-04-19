@@ -7,7 +7,6 @@ import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
 from xerxes.memory import MemoryEntry, MemoryStore, MemoryType
 
 
@@ -16,7 +15,6 @@ def test_original_memory():
     print("\n🧪 Testing Original MemoryStore...")
     try:
         store = MemoryStore(max_short_term=5, max_working=3)
-
 
         for i in range(10):
             store.add_memory(
@@ -28,10 +26,8 @@ def test_original_memory():
             )
             print(f"  ✓ Added memory {i}")
 
-
         memories = store.retrieve_memories(memory_types=[MemoryType.SHORT_TERM], agent_id="test_agent", limit=5)
         print(f"  ✓ Retrieved {len(memories)} memories")
-
 
         summary = store.consolidate_memories("test_agent")
         print(f"  ✓ Consolidated memories: {len(summary)} chars")
@@ -51,7 +47,6 @@ def test_enhanced_memory():
     issues = []
 
     try:
-
         store = MemoryStore(max_short_term=10, max_working=5, enable_persistence=False, enable_vector_search=False)
         print("  ✓ Initialized MemoryStore")
 
@@ -59,7 +54,6 @@ def test_enhanced_memory():
         issues.append(f"Initialization failed: {e}")
         traceback.print_exc()
         return issues
-
 
     try:
         for i in range(5):
@@ -77,7 +71,6 @@ def test_enhanced_memory():
         issues.append(f"Adding memories failed: {e}")
         traceback.print_exc()
 
-
     try:
         memories = store.retrieve_memories(agent_id="test_agent", tags=["enhanced"], limit=3)
         print(f"  ✓ Retrieved {len(memories)} enhanced memories")
@@ -85,7 +78,6 @@ def test_enhanced_memory():
     except Exception as e:
         issues.append(f"Retrieval failed: {e}")
         traceback.print_exc()
-
 
     try:
         stats = store.get_statistics()
@@ -95,17 +87,14 @@ def test_enhanced_memory():
         issues.append(f"Statistics failed: {e}")
         traceback.print_exc()
 
-
     try:
         temp_path = Path("/tmp/test_memory.pkl")
         store.persistence_path = temp_path
         store.save()
         print(f"  ✓ Saved to {temp_path}")
 
-
         MemoryStore(enable_persistence=True, persistence_path=temp_path)
         print(f"  ✓ Loaded from {temp_path}")
-
 
         temp_path.unlink(missing_ok=True)
 
@@ -131,7 +120,6 @@ def test_memory_indexing():
     try:
         store = MemoryStore(max_short_term=20)
 
-
         memories_added = []
         for i in range(10):
             entry = store.add_memory(
@@ -144,7 +132,6 @@ def test_memory_indexing():
             memories_added.append(entry)
 
         print(f"  ✓ Added {len(memories_added)} memories")
-
 
         tests = [
             ("by agent", {"agent_id": "agent_0"}),
@@ -177,7 +164,6 @@ def test_memory_decay():
     print("\n🧪 Testing Memory Decay...")
 
     try:
-
         entry = MemoryEntry(
             id="test_decay",
             content="Test memory",
@@ -211,13 +197,11 @@ def test_edge_cases():
 
     store = MemoryStore(max_short_term=5)
 
-
     try:
         results = store.retrieve_memories(agent_id="nonexistent")
         print(f"  ✓ Empty retrieval: {len(results)} results")
     except Exception as e:
         issues.append(f"Empty retrieval failed: {e}")
-
 
     try:
         store.add_memory(
@@ -230,14 +214,12 @@ def test_edge_cases():
     except Exception as e:
         issues.append(f"Duplicate tags failed: {e}")
 
-
     try:
         long_content = "x" * 10000
         store.add_memory(content=long_content, memory_type=MemoryType.SHORT_TERM, agent_id="test")
         print(f"  ✓ Handled long content ({len(long_content)} chars)")
     except Exception as e:
         issues.append(f"Long content failed: {e}")
-
 
     try:
         special_content = "Test with special chars: 你好 🚀 \n\t\r"
@@ -246,17 +228,12 @@ def test_edge_cases():
     except Exception as e:
         issues.append(f"Special characters failed: {e}")
 
-
     try:
-
         store.retrieve_memories(agent_id="test", limit=2)
 
-
         store.retrieve_memories(agent_id="test", limit=2)
-
 
         store.add_memory(content="New memory", memory_type=MemoryType.SHORT_TERM, agent_id="test")
-
 
         store.retrieve_memories(agent_id="test", limit=2)
 
@@ -283,7 +260,6 @@ def main():
 
     all_issues = []
 
-
     test_original_memory()
 
     enhanced_issues = test_enhanced_memory()
@@ -296,7 +272,6 @@ def main():
 
     edge_issues = test_edge_cases()
     all_issues.extend(edge_issues)
-
 
     print("\n" + "=" * 60)
     print("📊 TEST SUMMARY")

@@ -12,9 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-from xerxes_agent import Agent, FunctionExecutionComplete, MessagesHistory, StreamChunk, UserMessage, Xerxes
-from xerxes_agent.memory import MemoryStore, MemoryType
-from xerxes_agent.tools import GoogleSearch, ReadFile, WriteFile
+from xerxes import Agent, FunctionExecutionComplete, MessagesHistory, StreamChunk, UserMessage, Xerxes
+from xerxes.memory import MemoryStore, MemoryType
+from xerxes.tools import GoogleSearch, ReadFile, WriteFile
 
 # Initialize OpenAI client
 client = openai.OpenAI(

@@ -40,7 +40,6 @@ class TestOTelCollector:
         em.emit_skill_used(skill_name="ci", outcome="success", duration_ms=42.0)
         em.emit_error(error_type="X", error_msg="boom")
 
-
     def test_fanout_with_inmemory(self):
         inmem = InMemoryCollector()
         otel = OTelCollector()

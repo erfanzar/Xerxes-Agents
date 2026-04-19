@@ -31,26 +31,26 @@ class TestSlidingWindowStrategy:
     def test_compact_preserves_system(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_system=True)
         msgs = make_messages(5)
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         system_msgs = [m for m in compacted if m.get("role") == "system"]
         assert len(system_msgs) >= 1
 
     def test_compact_preserves_recent(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_recent=2)
         msgs = make_messages(10)
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         assert len(compacted) >= 2
 
     def test_compact_with_tight_budget(self):
         strategy = SlidingWindowStrategy(target_tokens=50, model="gpt-4", preserve_recent=2)
         msgs = make_messages(20, content_len=200)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["compacted_count"] <= stats["original_count"]
 
     def test_compact_no_preserve_recent(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_recent=0)
         msgs = make_messages(5)
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         assert len(compacted) > 0
 
 
@@ -65,7 +65,7 @@ class TestTruncateStrategy:
     def test_compact_over_budget(self):
         strategy = TruncateStrategy(target_tokens=50, model="gpt-4", preserve_recent=2)
         msgs = make_messages(10, content_len=200)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["compacted_count"] <= stats["original_count"]
 
     def test_compact_long_messages_truncated(self):
@@ -74,7 +74,7 @@ class TestTruncateStrategy:
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "x" * 2000},
         ]
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         for m in compacted:
             if m["role"] == "user" and len(m["content"]) > 1100:
                 raise AssertionError("Should have been truncated")
@@ -84,19 +84,19 @@ class TestPriorityBasedStrategy:
     def test_compact_short(self):
         strategy = PriorityBasedStrategy(target_tokens=10000, model="gpt-4")
         msgs = make_messages(3)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["strategy"] == "priority_based"
 
     def test_compact_returns_messages(self):
         strategy = PriorityBasedStrategy(target_tokens=10000, model="gpt-4", preserve_recent=2)
         msgs = make_messages(10)
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         assert len(compacted) > 0
 
     def test_compact_no_compactable(self):
         strategy = PriorityBasedStrategy(target_tokens=10000, model="gpt-4", preserve_recent=10)
         msgs = make_messages(5)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["compacted_count"] == len(msgs)
 
     def test_default_scorer(self):
@@ -122,7 +122,7 @@ class TestPriorityBasedStrategy:
 
         strategy = PriorityBasedStrategy(target_tokens=10000, model="gpt-4", priority_scorer=custom)
         msgs = make_messages(5, content_len=20)
-        compacted, stats = strategy.compact(msgs)
+        compacted, _stats = strategy.compact(msgs)
         assert len(compacted) > 0
 
 
@@ -130,19 +130,19 @@ class TestSummarizationStrategy:
     def test_compact_no_llm(self):
         strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4")
         msgs = make_messages(3)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["strategy"] == "summarization"
 
     def test_compact_no_compactable_msgs(self):
         strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4", preserve_recent=10)
         msgs = make_messages(5)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["summary_created"] is False
 
     def test_compact_with_compactable(self):
         strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4", preserve_recent=2)
         msgs = make_messages(10)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["summary_created"] is True
 
     def test_format_conversation(self):
@@ -177,13 +177,13 @@ class TestSmartCompactionStrategy:
     def test_compact_heavy_compression(self):
         strategy = SmartCompactionStrategy(llm_client=None, target_tokens=10, model="gpt-4")
         msgs = make_messages(20, content_len=200)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert stats["substrategy"] in ("truncate", "summarization", "truncate_light")
 
     def test_compact_medium_compression(self):
         strategy = SmartCompactionStrategy(llm_client=None, target_tokens=500, model="gpt-4")
         msgs = make_messages(10, content_len=100)
-        compacted, stats = strategy.compact(msgs)
+        _compacted, stats = strategy.compact(msgs)
         assert "substrategy" in stats
 
 
@@ -221,12 +221,12 @@ class TestSeparateMessages:
     def test_no_system_message(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_system=False, preserve_recent=2)
         msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        sys_msgs, preserved, compactable = strategy._separate_messages(msgs)
+        sys_msgs, _preserved, _compactable = strategy._separate_messages(msgs)
         assert len(sys_msgs) == 0
 
     def test_few_messages(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_recent=5)
         msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        sys_msgs, preserved, compactable = strategy._separate_messages(msgs)
+        _sys_msgs, preserved, compactable = strategy._separate_messages(msgs)
         assert len(compactable) == 0
         assert len(preserved) == 2

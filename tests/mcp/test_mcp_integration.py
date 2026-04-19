@@ -136,10 +136,8 @@ class TestMCPManager:
         """Test adding a server with duplicate name."""
         manager = MCPManager()
 
-
         with patch.object(MCPClient, "connect", return_value=True):
             await manager.add_server(mock_mcp_config)
-
 
             result = await manager.add_server(mock_mcp_config)
 
@@ -149,7 +147,6 @@ class TestMCPManager:
     async def test_remove_server(self, mock_mcp_config):
         """Test removing a server."""
         manager = MCPManager()
-
 
         mock_client = MagicMock()
         mock_client.disconnect = AsyncMock()
@@ -164,7 +161,6 @@ class TestMCPManager:
     async def test_get_all_tools(self, mock_mcp_tool):
         """Test getting all tools from all servers."""
         manager = MCPManager()
-
 
         client1 = MagicMock()
         client1.tools = [mock_mcp_tool]
@@ -191,7 +187,6 @@ class TestMCPManager:
         """Test getting all resources from all servers."""
         manager = MCPManager()
 
-
         mock_client = MagicMock()
         mock_client.resources = [mock_mcp_resource]
         manager.servers["test"] = mock_client
@@ -206,7 +201,6 @@ class TestMCPManager:
         """Test getting all prompts from all servers."""
         manager = MCPManager()
 
-
         mock_client = MagicMock()
         mock_client.prompts = [mock_mcp_prompt]
         manager.servers["test"] = mock_client
@@ -220,7 +214,6 @@ class TestMCPManager:
     async def test_call_tool(self, mock_mcp_tool):
         """Test calling a tool through the manager."""
         manager = MCPManager()
-
 
         mock_client = MagicMock()
         mock_client.tools = [mock_mcp_tool]
@@ -237,7 +230,7 @@ class TestMCPManager:
         """Test calling a non-existent tool."""
         manager = MCPManager()
 
-        with pytest.raises(ValueError, match="Tool .* not found"):
+        with pytest.raises(ValueError, match=r"Tool .* not found"):
             await manager.call_tool("nonexistent", {})
 
     @pytest.mark.asyncio
@@ -258,7 +251,6 @@ class TestMCPManager:
     async def test_get_capabilities_summary(self, mock_mcp_tool, mock_mcp_resource):
         """Test getting capabilities summary."""
         manager = MCPManager()
-
 
         mock_client = MagicMock()
         mock_client.tools = [mock_mcp_tool]
@@ -293,11 +285,9 @@ class TestMCPIntegration:
         """Test adding MCP tools to an agent."""
         manager = MCPManager()
 
-
         mock_client = MagicMock()
         mock_client.tools = [mock_mcp_tool]
         manager.servers["test_server"] = mock_client
-
 
         agent = CortexAgent(
             role="Test Agent",
@@ -307,9 +297,7 @@ class TestMCPIntegration:
             llm=MagicMock(spec=OpenAILLM),
         )
 
-
         await add_mcp_tools_to_agent(agent, manager)
-
 
         assert agent.functions is not None
         assert len(agent.functions) > 0
@@ -318,7 +306,6 @@ class TestMCPIntegration:
     async def test_add_mcp_tools_filtered_by_server(self, mock_mcp_tool):
         """Test adding MCP tools filtered by server name."""
         manager = MCPManager()
-
 
         client1 = MagicMock()
         client1.tools = [mock_mcp_tool]
@@ -335,7 +322,6 @@ class TestMCPIntegration:
         ]
         manager.servers["other_server"] = client2
 
-
         agent = CortexAgent(
             role="Test Agent",
             goal="Test",
@@ -344,9 +330,7 @@ class TestMCPIntegration:
             llm=MagicMock(spec=OpenAILLM),
         )
 
-
         await add_mcp_tools_to_agent(agent, manager, server_names=["test_server"])
-
 
         assert agent.functions is not None
         assert len(agent.functions) == 1

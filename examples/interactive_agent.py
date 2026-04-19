@@ -12,13 +12,13 @@ from pathlib import Path
 from openai import OpenAI
 
 # Import core Xerxes
-from xerxes_agent import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
+from xerxes import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
 
 # Import all improvements
-from xerxes_agent.core.config import XerxesConfig, get_config, set_config
-from xerxes_agent.core.errors import XerxesTimeoutError
-from xerxes_agent.logging.structured import get_logger
-from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes.core.config import XerxesConfig, get_config, set_config
+from xerxes.core.errors import XerxesTimeoutError
+from xerxes.logging.structured import get_logger
+from xerxes.memory import MemoryStore, MemoryType
 
 
 def list_improvements() -> str:
@@ -527,7 +527,7 @@ class InteractiveXerxes:
                 if ".py" in part:
                     return analyze_code_file(part)
             # Default to analyzing xerxes.py
-            return analyze_code_file("xerxes_agent/xerxes.py")
+            return analyze_code_file("xerxes/xerxes.py")
 
         elif "system" in input_lower or "info" in input_lower:
             return get_system_info()
@@ -562,7 +562,7 @@ class InteractiveXerxes:
 
 🔍 **Code Analysis:**
 - "analyze [filepath]" - Analyze Python file
-- "analyze xerxes_agent/xerxes.py" - Analyze main file
+- "analyze xerxes/xerxes.py" - Analyze main file
 
 Type 'quit' to exit."""
 
@@ -575,7 +575,7 @@ I can help you test these Xerxes improvements:
 2. Configuration (try: "show config")
 3. Error handling (try: "test timeout")
 4. Logging (try: "test logging")
-5. Code analysis (try: "analyze xerxes_agent/xerxes.py")
+5. Code analysis (try: "analyze xerxes/xerxes.py")
 
 Type 'help' for all commands."""
 

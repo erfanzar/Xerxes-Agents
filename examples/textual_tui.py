@@ -1,11 +1,11 @@
 """Launch the Xerxes Textual terminal UI."""
 
-from xerxes_agent import Agent, OpenAILLM, RuntimeFeaturesConfig, Xerxes
+from xerxes import Agent, OpenAILLM, RuntimeFeaturesConfig, Xerxes
 
 
 def main() -> None:
     llm = OpenAILLM(model="gpt-4o-mini")
-    Xerxes(
+    xerxes = Xerxes(
         llm=llm,
         runtime_features=RuntimeFeaturesConfig(enabled=True),
     )

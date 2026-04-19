@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -645,9 +643,7 @@ def get_compaction_strategy(
     if strategy == CompactionStrategy.HERMES:
         from .advanced_compressor import HermesCompressionStrategy
 
-        return HermesCompressionStrategy(
-            llm_client=llm_client, target_tokens=target_tokens, model=model, **kwargs
-        )
+        return HermesCompressionStrategy(llm_client=llm_client, target_tokens=target_tokens, model=model, **kwargs)
 
     strategy_class = strategy_map.get(strategy, SummarizationStrategy)
 

@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Core daemon server — persistent background agent.
 
@@ -58,12 +57,10 @@ class DaemonServer:
         self._pool = ThreadPoolExecutor(max_workers=config.max_concurrent_tasks)
         self._shutdown = False
 
-
         self._runtime_config: dict[str, Any] = {}
         self._system_prompt = ""
         self._tool_executor: Any = None
         self._tool_schemas: list[dict[str, Any]] = []
-
 
         self._gateway = WebSocketGateway(config.ws_host, config.ws_port, auth_token=config.auth_token or None)
         self._socket = SocketChannel(config.socket_path)
@@ -72,13 +69,11 @@ class DaemonServer:
         """Initialize the agent runtime — same pattern as BridgeServer.handle_init()."""
         self.logger.info("Bootstrapping agent runtime")
 
-
         profile = profiles.get_active_profile()
         if profile:
             base_url = profile.get("base_url", "")
             api_key = profile.get("api_key", "")
             saved_model = profile.get("model", "")
-
 
             model = saved_model
             if base_url:
@@ -87,7 +82,6 @@ class DaemonServer:
                     if saved_model and saved_model in available:
                         self.logger.info("Model verified", model=saved_model)
                     else:
-
                         model = available[0]
                         self.logger.info(
                             "Saved model not available, auto-selected",
@@ -130,9 +124,7 @@ class DaemonServer:
             self.logger.error("No profile configured. Run `xerxes` and use /provider first.")
             sys.exit(1)
 
-
         set_global_config(self._runtime_config)
-
 
         boot = bootstrap(model=self._runtime_config.get("model", ""))
         self._system_prompt = boot.system_prompt
@@ -152,11 +144,9 @@ class DaemonServer:
         self._bootstrap()
         self._write_pid()
 
-
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
-
 
         await self._gateway.start(
             submit_fn=self._submit_ws,
@@ -173,7 +163,6 @@ class DaemonServer:
         model = self._runtime_config.get("model", "(none)")
         self.logger.info(f"Daemon running — ws://{self.config.ws_host}:{self.config.ws_port} — model: {model}")
 
-
         while not self._shutdown:
             await asyncio.sleep(1)
 
@@ -186,7 +175,6 @@ class DaemonServer:
         self._shutdown = True
         self.logger.info("Shutting down...")
 
-
         for task in self.tasks.values():
             if task.status == "running":
                 task.cancel()
@@ -196,7 +184,6 @@ class DaemonServer:
         self._pool.shutdown(wait=False)
         self._remove_pid()
         self.logger.close()
-
 
     async def _submit_ws(
         self,
@@ -208,7 +195,6 @@ class DaemonServer:
         task = create_task(prompt, source)
         self.tasks[task.id] = task
         self.logger.info("Task submitted", task_id=task.id, source=source, prompt=prompt[:100])
-
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
@@ -275,7 +261,6 @@ class DaemonServer:
             "total_tasks": len(self.tasks),
             "ws": f"ws://{self.config.ws_host}:{self.config.ws_port}",
         }
-
 
     def _write_pid(self) -> None:
         pid_path = Path(self.config.pid_file).expanduser()

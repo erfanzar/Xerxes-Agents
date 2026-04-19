@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Runtime feature integration for Xerxes.
 
@@ -34,8 +33,9 @@ from ..audit import AuditCollector, AuditEmitter
 from ..core.utils import get_callable_public_name
 from ..extensions.hooks import HOOK_POINTS, HookRunner
 from ..extensions.plugins import PluginRegistry
+from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
+from ..extensions.skill_authoring.telemetry import SkillTelemetry
 from ..extensions.skills import Skill, SkillRegistry
-from ..memory.embedders import get_default_embedder
 from ..operators import HIGH_POWER_OPERATOR_TOOLS, OperatorRuntimeConfig, OperatorState
 from ..security.policy import PolicyEngine, ToolPolicy
 from ..security.sandbox import SandboxBackend, SandboxConfig, SandboxRouter
@@ -166,8 +166,8 @@ class RuntimeFeaturesState:
     hook_runner: HookRunner = field(default_factory=HookRunner)
     sandbox_backend: SandboxBackend | None = None
     operator_state: OperatorState | None = None
-    authoring_pipeline: "SkillAuthoringPipeline | None" = None
-    authoring_telemetry: "SkillTelemetry | None" = None
+    authoring_pipeline: SkillAuthoringPipeline | None = None
+    authoring_telemetry: SkillTelemetry | None = None
 
     def __post_init__(self) -> None:
         """Initialise derived state from the provided configuration.

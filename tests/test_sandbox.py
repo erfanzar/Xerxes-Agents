@@ -14,8 +14,8 @@
 """Tests for xerxes.sandbox -- sandbox routing, config, and backend integration."""
 
 from __future__ import annotations
-import json
 
+import json
 import logging
 from unittest import mock
 
@@ -167,7 +167,6 @@ class TestDockerSandboxBackendMocked:
 
     def test_execute_success(self):
         import base64
-        import pickle
 
         backend = self._make_backend()
         result_payload = json.dumps({"ok": True, "value": 42}).encode("utf-8")
@@ -190,7 +189,7 @@ class TestDockerSandboxBackendMocked:
                 stdout="",
                 stderr="container error",
             )
-            with pytest.raises(RuntimeError, match="failed.*exit 1"):
+            with pytest.raises(RuntimeError, match=r"failed.*exit 1"):
                 backend.execute("test_tool", _add, {})
 
     def test_execute_timeout(self):

@@ -17,7 +17,6 @@
 from pathlib import Path
 
 import pytest
-
 from xerxes.extensions.skills_hub import (
     LocalSkillSource,
     OfficialSkillSource,
@@ -69,15 +68,9 @@ class TestSkillsHub:
 
     def test_install_local_skill(self, tmp_path: Path, monkeypatch):
         # Monkeypatch skills dir to tmp_path
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json"
-        )
+        monkeypatch.setattr("xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json")
         monkeypatch.setattr(
             "xerxes.extensions.skills_guard._TRUSTED_HASHES_PATH",
             tmp_path / "skills" / ".hub" / "trusted_hashes.json",
@@ -85,9 +78,7 @@ class TestSkillsHub:
 
         skill_dir = tmp_path / "source_skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text(
-            "---\nname: test_skill\n---\nTest instructions.", encoding="utf-8"
-        )
+        (skill_dir / "SKILL.md").write_text("---\nname: test_skill\n---\nTest instructions.", encoding="utf-8")
 
         hub = SkillsHub()
         result = hub.install(f"local:{skill_dir}")
@@ -99,15 +90,9 @@ class TestSkillsHub:
         assert "test_skill" in lock
 
     def test_uninstall_skill(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json"
-        )
+        monkeypatch.setattr("xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json")
 
         hub = SkillsHub()
         # Pre-install
@@ -120,23 +105,15 @@ class TestSkillsHub:
         assert "Uninstalled" in result
 
     def test_uninstall_missing(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills"
-        )
+        monkeypatch.setattr("xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills")
         hub = SkillsHub()
         result = hub.uninstall("nonexistent")
         assert "[Error]" in result
 
     def test_list_installed(self, tmp_path: Path, monkeypatch):
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub"
-        )
-        monkeypatch.setattr(
-            "xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json"
-        )
+        monkeypatch.setattr("xerxes.extensions.skills_hub.SKILLS_DIR", tmp_path / "skills")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.HUB_DIR", tmp_path / "skills" / ".hub")
+        monkeypatch.setattr("xerxes.extensions.skills_hub.LOCK_FILE", tmp_path / "skills" / ".hub" / "lock.json")
 
         hub = SkillsHub()
         skill_dir = tmp_path / "listed"

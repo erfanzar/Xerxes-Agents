@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Prompt injection and context-file security scanner.
 
@@ -38,15 +37,10 @@ from typing import Final
 logger = logging.getLogger(__name__)
 
 
-
-
-
 _CONTEXT_THREAT_PATTERNS: Final[list[tuple[str, str]]] = [
-
     (r"ignore\s+(all\s+)?(previous|above|prior)\s+instructions", "prompt_injection"),
     (r"do\s+not\s+tell\s+the\s+user", "deception_hide"),
     (r"system\s+prompt\s+override", "sys_prompt_override"),
-
     (r"disregard\s+(your\s+)?(all\s+)?(any\s+)?(instructions|rules|guidelines)", "disregard_rules"),
     (
         r"act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(any\s+)?(restrictions|limits|rules)",
@@ -77,9 +71,6 @@ _COMPILED_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
 ]
 
 
-
-
-
 _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
     "\u200b",
     "\u200c",
@@ -92,11 +83,6 @@ _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
     "\u202d",
     "\u202e",
 }
-
-
-
-
-
 
 
 def scan_context_content(content: str, filename: str = "unknown") -> str:
@@ -115,11 +101,9 @@ def scan_context_content(content: str, filename: str = "unknown") -> str:
     """
     findings: list[str] = []
 
-
     for char in _CONTEXT_INVISIBLE_CHARS:
         if char in content:
             findings.append(f"invisible_unicode_U+{ord(char):04X}")
-
 
     for compiled, pid in _COMPILED_PATTERNS:
         if compiled.search(content):
@@ -128,13 +112,8 @@ def scan_context_content(content: str, filename: str = "unknown") -> str:
     if not findings:
         return content
 
-    logger.warning(
-        "Context file %s blocked: %s", filename, ", ".join(findings)
-    )
-    return (
-        f"[BLOCKED: {filename} contained potential prompt injection "
-        f"({', '.join(findings)}). Content not loaded.]"
-    )
+    logger.warning("Context file %s blocked: %s", filename, ", ".join(findings))
+    return f"[BLOCKED: {filename} contained potential prompt injection ({', '.join(findings)}). Content not loaded.]"
 
 
 def scan_context_file(path: str | object, filename: str | None = None) -> str:

@@ -30,7 +30,7 @@ Run with:
 import tempfile
 from pathlib import Path
 
-from xerxes_agent.extensions.plugins import PluginMeta, PluginRegistry, PluginType
+from xerxes.extensions.plugins import PluginMeta, PluginRegistry, PluginType
 
 print("=" * 60)
 print("1. PLUGIN REGISTRATION")
@@ -56,7 +56,7 @@ registry.register_tool("web_search", web_search, meta=meta)
 print(f"Registered plugins: {registry.plugin_names}")
 print(f"Available tools: {list(registry.get_all_tools().keys())}")
 
-from xerxes_agent.extensions.skills import SkillRegistry
+from xerxes.extensions.skills import SkillRegistry  # noqa: E402
 
 print("\n" + "=" * 60)
 print("2. SKILL DISCOVERY")
@@ -92,7 +92,7 @@ When asked to research a topic:
     if skill:
         print(f"\nSkill prompt section:\n{skill.to_prompt_section()[:200]}...")
 
-from xerxes_agent.security.policy import PolicyEngine, ToolPolicy, ToolPolicyViolation
+from xerxes.security.policy import PolicyEngine, ToolPolicy, ToolPolicyViolation  # noqa: E402
 
 print("\n" + "=" * 60)
 print("3. TOOL POLICY (Allow/Deny)")
@@ -119,7 +119,7 @@ try:
 except ToolPolicyViolation as e:
     print(f"Policy violation: {e}")
 
-from xerxes_agent.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopSeverity
+from xerxes.runtime.loop_detection import LoopDetectionConfig, LoopDetector, LoopSeverity  # noqa: E402
 
 print("\n" + "=" * 60)
 print("4. LOOP DETECTION")
@@ -136,7 +136,7 @@ for i in range(6):
 
 print(f"\nTotal calls tracked: {detector.call_count}")
 
-from xerxes_agent.extensions.hooks import HookRunner
+from xerxes.extensions.hooks import HookRunner  # noqa: E402
 
 print("\n" + "=" * 60)
 print("5. HOOK SYSTEM")
@@ -180,8 +180,8 @@ print(f"  Sanitized result: {result}")
 bootstrap = runner.run("bootstrap_files", agent_id="test_agent")
 print(f"  Bootstrap content: {bootstrap}")
 
-from xerxes_agent.runtime.context import PromptContextBuilder
-from xerxes_agent.security.sandbox import SandboxConfig, SandboxMode
+from xerxes.runtime.context import PromptContextBuilder  # noqa: E402
+from xerxes.security.sandbox import SandboxConfig, SandboxMode  # noqa: E402
 
 print("\n" + "=" * 60)
 print("6. ENRICHED SYSTEM PROMPT")
@@ -199,7 +199,7 @@ prefix = builder.assemble_system_prompt_prefix(
 )
 print(prefix)
 
-from xerxes_agent.security.sandbox import SandboxRouter
+from xerxes.security.sandbox import SandboxRouter  # noqa: E402
 
 print("=" * 60)
 print("7. SANDBOX ROUTING")

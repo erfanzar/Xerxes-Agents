@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -472,17 +470,21 @@ class SQLiteStorage(MemoryStorage):
         efficient ordering.
         """
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS memory (
                     key TEXT PRIMARY KEY,
                     data BLOB,
                     created_at TIMESTAMP,
                     updated_at TIMESTAMP
                 )
-            """)
-            conn.execute("""
+            """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_created_at ON memory(created_at)
-            """)
+            """
+            )
             conn.commit()
 
     def save(self, key: str, data: Any) -> bool:

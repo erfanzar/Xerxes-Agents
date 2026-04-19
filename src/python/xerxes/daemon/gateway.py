@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """WebSocket gateway — central control plane for external clients.
 
@@ -89,7 +88,6 @@ class WebSocketGateway:
         )
 
     async def stop(self) -> None:
-
         for writer in list(self._clients):
             try:
                 writer.close()
@@ -113,7 +111,6 @@ class WebSocketGateway:
         for w in dead:
             self._clients.discard(w)
 
-
     async def _handle_connection(
         self,
         reader: asyncio.StreamReader,
@@ -121,7 +118,6 @@ class WebSocketGateway:
     ) -> None:
         """Handle a raw TCP connection — do WS handshake, then message loop."""
         try:
-
             request = b""
             while True:
                 line = await asyncio.wait_for(reader.readline(), timeout=10)
@@ -145,7 +141,6 @@ class WebSocketGateway:
                 writer.close()
                 return
 
-
             accept = self._ws_accept_key(ws_key)
             response = (
                 "HTTP/1.1 101 Switching Protocols\r\n"
@@ -158,7 +153,6 @@ class WebSocketGateway:
             await writer.drain()
 
             self._clients.add(writer)
-
 
             while True:
                 msg = await self._read_ws_frame(reader)
@@ -192,7 +186,7 @@ class WebSocketGateway:
                 self._send_ws(writer, {"type": "error", "id": msg_id, "error": "Empty prompt"})
                 return
 
-            asyncio.create_task(self._handle_submit(prompt, msg_id, writer))
+            asyncio.create_task(self._handle_submit(prompt, msg_id, writer))  # noqa: RUF006
 
         elif msg_type == "task.cancel":
             task_id = msg.get("task_id", "")
@@ -231,7 +225,6 @@ class WebSocketGateway:
         result = await self._submit_fn(prompt, f"ws:{msg_id}", on_event)
 
         self._send_ws(writer, {"type": "task.submit.ack", "id": msg_id, "result": result[:500]})
-
 
     def _send_ws(self, writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
         try:

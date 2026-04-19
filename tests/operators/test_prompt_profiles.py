@@ -241,7 +241,6 @@ class TestCompactProfile:
             profile=PromptProfile.COMPACT,
         )
 
-
         assert "..." in prefix
 
         assert "A" * 2000 not in prefix

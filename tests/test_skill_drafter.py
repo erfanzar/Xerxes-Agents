@@ -103,7 +103,7 @@ class TestSkillDrafter:
                 return "---\nname: refined\nversion: 0.1.0\n---\n# When to use\nbetter\n"
 
         d = SkillDrafter(tmp_path, llm_client=FakeLLM())
-        text, path = d.draft(_candidate(), write=False)
+        text, _path = d.draft(_candidate(), write=False)
         assert "name: refined" in text
 
     def test_llm_failure_falls_back(self, tmp_path):

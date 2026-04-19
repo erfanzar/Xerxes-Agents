@@ -382,7 +382,6 @@ class TestSessionManager:
         mgr.record_turn(sid, _make_turn(turn_id="t2", agent_id="a2"))
         mgr.end_session(sid)
 
-
         store2 = FileSessionStore(tmp_path)
         mgr2 = SessionManager(store2)
         loaded = mgr2.get_session(sid)

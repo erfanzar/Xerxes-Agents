@@ -70,7 +70,6 @@ class TestLoopDetector:
             d.record_call("tool_a", {"x": 1})
             d.record_call("tool_b", {"x": 2})
 
-
         assert d.call_count == 6
 
     def test_disabled_detector(self):

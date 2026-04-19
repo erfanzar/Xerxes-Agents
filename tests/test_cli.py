@@ -93,9 +93,7 @@ def test_main_launches_tui(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "xerxes.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
-    monkeypatch.setattr(
-        "xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
-    )
+    monkeypatch.setattr("xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json"))
 
     exit_code = main(["tui", "--provider", "ollama", "--model", "llama3", "--no-tools"])
     assert exit_code == 0
@@ -154,9 +152,7 @@ def test_main_saves_profile(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "xerxes.tui.cli.launch_tui", lambda executor, agent, profile=None, config_store=None: _Launcher()
     )
-    monkeypatch.setattr(
-        "xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json")
-    )
+    monkeypatch.setattr("xerxes.tui.cli.TerminalConfigStore", lambda: TerminalConfigStore(tmp_path / "profiles.json"))
 
     exit_code = main(
         [

@@ -237,7 +237,7 @@ class TestMCPManager:
         """Test calling a non-existent tool."""
         manager = MCPManager()
 
-        with pytest.raises(ValueError, match="Tool .* not found"):
+        with pytest.raises(ValueError, match=r"Tool .* not found"):
             await manager.call_tool("nonexistent", {})
 
     @pytest.mark.asyncio

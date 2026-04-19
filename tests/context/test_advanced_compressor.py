@@ -14,11 +14,9 @@
 
 """Tests for xerxes.context.advanced_compressor."""
 
-import pytest
-
 from xerxes.context.advanced_compressor import (
-    HermesCompressionStrategy,
     SUMMARY_PREFIX,
+    HermesCompressionStrategy,
     _prune_tool_results,
     _summarize_tool_result,
 )
@@ -28,31 +26,23 @@ class TestSummarizeToolResult:
     """Tests for _summarize_tool_result."""
 
     def test_terminal_tool(self):
-        result = _summarize_tool_result(
-            "terminal", '{"command": "npm test"}', '{"exit_code": 0, "output": "..."}'
-        )
+        result = _summarize_tool_result("terminal", '{"command": "npm test"}', '{"exit_code": 0, "output": "..."}')
         assert "terminal" in result
         assert "npm test" in result
         assert "exit 0" in result
 
     def test_read_file_tool(self):
-        result = _summarize_tool_result(
-            "read_file", '{"path": "config.py", "offset": 1}', "content here"
-        )
+        result = _summarize_tool_result("read_file", '{"path": "config.py", "offset": 1}', "content here")
         assert "read_file" in result
         assert "config.py" in result
 
     def test_write_file_tool(self):
-        result = _summarize_tool_result(
-            "write_file", '{"path": "out.txt", "content": "hello\\nworld"}', "done"
-        )
+        result = _summarize_tool_result("write_file", '{"path": "out.txt", "content": "hello\\nworld"}', "done")
         assert "write_file" in result
         assert "out.txt" in result
 
     def test_generic_tool(self):
-        result = _summarize_tool_result(
-            "custom_tool", '{"foo": "bar"}', "some output"
-        )
+        result = _summarize_tool_result("custom_tool", '{"foo": "bar"}', "some output")
         assert "custom_tool" in result
         assert "foo=bar" in result
 
@@ -95,7 +85,7 @@ class TestHermesCompressionStrategy:
             {"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "Hello!"},
         ]
-        compacted, stats = strategy.compact(messages)
+        _compacted, stats = strategy.compact(messages)
         assert stats["summary_created"] is False
         assert stats["original_count"] == 3
 
@@ -104,7 +94,11 @@ class TestHermesCompressionStrategy:
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Run tests"},
-            {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "terminal", "arguments": '{"command": "npm test"}'}}]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"function": {"name": "terminal", "arguments": '{"command": "npm test"}'}}],
+            },
             {"role": "tool", "name": "terminal", "content": "x" * 2000, "args": {"command": "npm test"}},
             {"role": "assistant", "content": "Tests passed!"},
             {"role": "user", "content": "Great"},
@@ -112,7 +106,7 @@ class TestHermesCompressionStrategy:
         compacted, stats = strategy.compact(messages)
         assert stats["tools_pruned"] >= 1
         # Verify the pruned tool appears in output with a summary line
-        tool_msg = [m for m in compacted if m.get("role") == "tool"][0]
+        tool_msg = next(m for m in compacted if m.get("role") == "tool")
         assert "terminal" in tool_msg["content"]
         assert "x" * 10 not in tool_msg["content"]  # Original content was pruned
 
@@ -129,7 +123,7 @@ class TestHermesCompressionStrategy:
             {"role": "user", "content": "Question 4"},
             {"role": "assistant", "content": "Answer 4"},
         ]
-        compacted, stats = strategy.compact(messages)
+        compacted, _stats = strategy.compact(messages)
         summary_msg = compacted[1]  # After system msg
         assert "handoff" in summary_msg["content"].lower()
         assert SUMMARY_PREFIX in summary_msg["content"]
@@ -152,13 +146,15 @@ class TestHermesCompressionStrategy:
 
         # Add more messages and compact again
         messages2 = list(compacted1)
-        messages2.extend([
-            {"role": "user", "content": "Q5"},
-            {"role": "assistant", "content": "A5"},
-            {"role": "user", "content": "Q6"},
-            {"role": "assistant", "content": "A6"},
-        ])
-        compacted2, stats2 = strategy.compact(messages2)
+        messages2.extend(
+            [
+                {"role": "user", "content": "Q5"},
+                {"role": "assistant", "content": "A5"},
+                {"role": "user", "content": "Q6"},
+                {"role": "assistant", "content": "A6"},
+            ]
+        )
+        _compacted2, stats2 = strategy.compact(messages2)
         assert stats2["compaction_count"] == 2
 
     def test_tail_protection(self):
@@ -172,14 +168,12 @@ class TestHermesCompressionStrategy:
             {"role": "user", "content": "Recent message 1"},
             {"role": "assistant", "content": "Recent response 1"},
         ]
-        compacted, stats = strategy.compact(messages)
+        _compacted, stats = strategy.compact(messages)
         assert stats["tail_messages"] >= 1
 
     def test_from_enum(self):
         from xerxes.context import get_compaction_strategy
         from xerxes.types.function_execution_types import CompactionStrategy
 
-        strategy = get_compaction_strategy(
-            CompactionStrategy.HERMES, target_tokens=4000
-        )
+        strategy = get_compaction_strategy(CompactionStrategy.HERMES, target_tokens=4000)
         assert isinstance(strategy, HermesCompressionStrategy)

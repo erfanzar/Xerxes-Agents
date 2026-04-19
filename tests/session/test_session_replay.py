@@ -235,10 +235,8 @@ class TestRoundTrip:
         store = FileSessionStore(tmp_path)
         mgr = SessionManager(store)
 
-
         session = mgr.start_session(workspace_id="ws", agent_id="a1")
         sid = session.session_id
-
 
         t1 = _turn(
             "t1",
@@ -254,27 +252,22 @@ class TestRoundTrip:
 
         mgr.end_session(sid)
 
-
         store2 = FileSessionStore(tmp_path)
         loaded = store2.load_session(sid)
         assert loaded is not None
-
 
         view = SessionReplay.load(loaded)
         assert len(view.turns) == 2
         assert len(view.get_tool_calls()) == 2
         assert len(view.get_agent_transitions()) == 1
 
-
         timeline = view.get_timeline()
         timestamps = [e.timestamp for e in timeline]
         assert timestamps == sorted(timestamps)
 
-
         a1_view = view.filter_by_agent("a1")
         assert len(a1_view.turns) == 1
         assert a1_view.turns[0].turn_id == "t1"
-
 
         md = view.to_markdown()
         assert sid in md

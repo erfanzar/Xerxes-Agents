@@ -3,28 +3,20 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import queue
 import threading
-import typing as tp
-from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 from xerxes import Agent, Xerxes
-from xerxes.core.prompt_template import PromptTemplate, PromptSection
+from xerxes.core.prompt_template import PromptSection, PromptTemplate
 from xerxes.core.streamer_buffer import StreamerBuffer
 from xerxes.llms.base import BaseLLM, LLMConfig
 from xerxes.memory import MemoryStore
 from xerxes.runtime.features import RuntimeFeaturesConfig
-from xerxes.runtime.loop_detection import LoopDetector
 from xerxes.types import (
     AgentSwitch,
     Completion,
-    ExecutionResult,
     ExecutionStatus,
-    FunctionCallInfo,
     FunctionCallsExtracted,
     FunctionDetection,
     FunctionExecutionComplete,
@@ -33,9 +25,7 @@ from xerxes.types import (
     RequestFunctionCall,
     ResponseResult,
     StreamChunk,
-    SwitchContext,
     ToolCall,
-    ToolCallStreamChunk,
 )
 from xerxes.types.messages import (
     AssistantMessage,
@@ -187,6 +177,7 @@ class TestXerxesInit:
 
     def test_init_runtime_features_operator_no_workdir(self):
         from xerxes.operators import OperatorRuntimeConfig
+
         rf = RuntimeFeaturesConfig(
             enabled=True,
             operator=OperatorRuntimeConfig(enabled=True, shell_default_workdir=None, power_tools_enabled=True),
@@ -291,6 +282,7 @@ class TestXerxesMessageManagement:
 
     def test_manage_messages_with_memory(self):
         from xerxes.memory import MemoryType
+
         xerxes = Xerxes(enable_memory=True)
         agent = Agent(id="a1", model="fake", instructions="Be helpful.")
         xerxes.register_agent(agent)
@@ -394,7 +386,7 @@ class TestXerxesFunctionExtraction:
         assert result == {"key": "value"}
 
     def test_extract_from_markdown_found_string(self):
-        content = '```python\nprint(1)\n```'
+        content = "```python\nprint(1)\n```"
         result = Xerxes.extract_from_markdown("python", content)
         assert result == "print(1)"
 
@@ -421,7 +413,7 @@ class TestXerxesFunctionExtraction:
         xerxes = Xerxes()
         tool = _make_tool_fn("my_tool")
         agent = Agent(id="a1", model="fake", functions=[tool])
-        content = "<my_tool><arguments>{\"x\":1}</arguments></my_tool>"
+        content = '<my_tool><arguments>{"x":1}</arguments></my_tool>'
         assert xerxes._detect_function_calls(content, agent) is True
 
     def test_detect_function_calls_tagged(self):
@@ -441,7 +433,7 @@ class TestXerxesFunctionExtraction:
         xerxes = Xerxes()
         tool = _make_tool_fn("my_tool")
         agent = Agent(id="a1", model="fake", functions=[tool])
-        content = "<my_tool><arguments>{\"x\":1}</arguments></my_tool>"
+        content = '<my_tool><arguments>{"x":1}</arguments></my_tool>'
         assert xerxes._detect_function_calls_regex(content, agent) is True
 
     def test_detect_function_calls_regex_tagged(self):
@@ -455,7 +447,7 @@ class TestXerxesFunctionExtraction:
         xerxes = Xerxes()
         tool = _make_tool_fn("my_tool")
         agent = Agent(id="a1", model="fake", functions=[tool])
-        content = "<my_tool><arguments>{\"query\":\"hello\"}</arguments></my_tool>"
+        content = '<my_tool><arguments>{"query":"hello"}</arguments></my_tool>'
         calls = xerxes._extract_function_calls_from_xml(content, agent)
         assert len(calls) == 1
         assert calls[0].name == "my_tool"
@@ -465,7 +457,7 @@ class TestXerxesFunctionExtraction:
         xerxes = Xerxes()
         tool = _make_tool_fn("my_tool")
         agent = Agent(id="a1", model="fake", functions=[tool])
-        content = "<unknown><arguments>{\"x\":1}</arguments></unknown>"
+        content = '<unknown><arguments>{"x":1}</arguments></unknown>'
         calls = xerxes._extract_function_calls_from_xml(content, agent)
         assert len(calls) == 0
 
@@ -711,6 +703,7 @@ class TestXerxesStreamingNoFunctions:
         async def async_gen(resp, agent):
             for chunk in resp:
                 yield chunk
+
         llm.astream_completion = async_gen
         chunks = []
         resp = await llm.generate_completion("")
@@ -758,7 +751,7 @@ class TestXerxesStreamingWithFunctions:
         ):
             chunks.append(c)
         assert any(isinstance(c, Completion) for c in chunks)
-        completion = [c for c in chunks if isinstance(c, Completion)][0]
+        completion = next(c for c in chunks if isinstance(c, Completion))
         assert completion.final_content == "plain"
 
     @pytest.mark.asyncio
@@ -827,9 +820,7 @@ class TestXerxesStreamingWithFunctions:
         xerxes.register_agent(a1)
         xerxes.register_agent(a2)
 
-        xerxes.orchestrator.register_switch_trigger(
-            type("Trigger", (), {}), lambda ctx, agents, current: "a2"
-        )
+        xerxes.orchestrator.register_switch_trigger(type("Trigger", (), {}), lambda ctx, agents, current: "a2")
         messages = MessagesHistory(messages=[])
         chunks = []
         async for c in xerxes._handle_streaming_with_functions(
@@ -875,7 +866,7 @@ class TestXerxesStreamingWithFunctions:
             responses=[
                 [
                     _chunk(
-                        content="<echo><arguments>{\"text\":\"hi\"}</arguments></echo>",
+                        content='<echo><arguments>{"text":"hi"}</arguments></echo>',
                         is_final=True,
                     )
                 ],
@@ -978,9 +969,7 @@ class TestXerxesCreateResponse:
         xerxes = Xerxes(llm=llm)
         agent = Agent(id="a1", model="fake")
         xerxes.register_agent(agent)
-        result = await xerxes.create_response(
-            prompt="hello", agent_id=agent, stream=False, use_instructed_prompt=True
-        )
+        result = await xerxes.create_response(prompt="hello", agent_id=agent, stream=False, use_instructed_prompt=True)
         assert result.content == "hi"
 
         assert isinstance(llm.calls[0]["prompt"], str)
@@ -1024,9 +1013,7 @@ class TestXerxesCreateResponse:
         xerxes = Xerxes(llm=llm)
         agent = Agent(id="a1", model="fake")
         xerxes.register_agent(agent)
-        result = await xerxes.create_response(
-            prompt="hello", agent_id=agent, stream=False, reinvoked_runtime=True
-        )
+        result = await xerxes.create_response(prompt="hello", agent_id=agent, stream=False, reinvoked_runtime=True)
         assert result.content == "hi"
 
 
@@ -1159,7 +1146,7 @@ class TestXerxesThreadRun:
         xerxes = Xerxes(llm=llm)
         agent = Agent(id="a1", model="fake")
         xerxes.register_agent(agent)
-        buf, task = await xerxes.athread_run(prompt="hello", agent_id=agent)
+        buf, _task = await xerxes.athread_run(prompt="hello", agent_id=agent)
         with pytest.raises(RuntimeError, match="boom"):
             await buf.aget_result()
 
@@ -1194,7 +1181,9 @@ class TestXerxesReinvoke:
         xerxes = Xerxes()
         msgs = [
             UserMessage(content="hello"),
-            AssistantMessage(content="hi", tool_calls=[ToolCall(id="t1", function=FunctionCall(name="f", arguments="{}"))]),
+            AssistantMessage(
+                content="hi", tool_calls=[ToolCall(id="t1", function=FunctionCall(name="f", arguments="{}"))]
+            ),
             ToolMessage(content="result", tool_call_id="t1"),
             UserMessage(content=xerxes.REINVOKE_FOLLOWUP_INSTRUCTION),
         ]
@@ -1204,7 +1193,7 @@ class TestXerxesReinvoke:
 
     def test_compact_reinvoke_history_with_operator_attachment(self):
         xerxes = Xerxes()
-        from xerxes.types.messages import TextChunk
+
         chunk = TextChunk(text="[TOOL IMAGE RESULT] something")
         msgs = [
             UserMessage(content="hello"),
@@ -1226,7 +1215,6 @@ class TestXerxesReinvoke:
         assert Xerxes._is_reinvoke_followup_message(msg) is False
 
     def test_is_operator_reinvoke_attachment_true(self):
-        from xerxes.types.messages import TextChunk
         chunk = TextChunk(text="[TOOL IMAGE RESULT] img")
         msg = UserMessage(content=[chunk])
         assert Xerxes._is_operator_reinvoke_attachment(msg) is True
@@ -1418,7 +1406,7 @@ class TestXerxesEdgeCases:
         assert remaining == []
 
     def test_extract_from_markdown_bad_json(self):
-        result = Xerxes.extract_from_markdown("json", '```json\nnot json\n```')
+        result = Xerxes.extract_from_markdown("json", "```json\nnot json\n```")
         assert result == "not json"
 
     def test_extract_function_calls_tool_calls_exception(self):
@@ -1431,11 +1419,8 @@ class TestXerxesEdgeCases:
     def test_create_response_no_agent_raises(self):
         xerxes = Xerxes()
 
-
-        with pytest.raises(Exception):
-            asyncio.get_event_loop().run_until_complete(
-                xerxes.create_response(prompt="hello", stream=False)
-            )
+        with pytest.raises(Exception):  # noqa: B017
+            asyncio.get_event_loop().run_until_complete(xerxes.create_response(prompt="hello", stream=False))
 
     def test_run_stream_empty_response(self):
         llm = _FakeLLM(responses=[[_chunk(content="", is_final=True)]])
@@ -1455,11 +1440,13 @@ class TestXerxesEdgeCases:
         agent = Agent(id="a1", model="fake", functions=[])
         xerxes.register_agent(agent)
         chunks = []
+
         async def collect():
             async for c in xerxes._handle_streaming_with_functions(
                 llm.responses[0], agent, {}, MessagesHistory(messages=[]), True, False, False, None
             ):
                 chunks.append(c)
+
         asyncio.get_event_loop().run_until_complete(collect())
 
         assert any(isinstance(c, Completion) for c in chunks)
@@ -1467,14 +1454,12 @@ class TestXerxesEdgeCases:
 
 class TestXerxesAdditionalCoverage:
     def test_system_message_to_text_with_list_content(self):
-        from xerxes.types.messages import TextChunk
         msg = SystemMessage(content=[TextChunk(text="  part1  "), TextChunk(text="  "), TextChunk(text="part2")])
         result = Xerxes._system_message_to_text(msg)
         assert "part1" in result
         assert "part2" in result
 
     def test_system_message_to_text_all_empty_parts(self):
-        from xerxes.types.messages import TextChunk
         msg = SystemMessage(content=[TextChunk(text="  ")])
         assert Xerxes._system_message_to_text(msg) is None
 
@@ -1798,6 +1783,7 @@ class TestXerxesAdditionalCoverage:
 
         def free_tool():
             pass
+
         free_tool.__name__ = "free_tool"
         free_tool.__doc__ = "No args."
         agent = Agent(id="a1", model="fake", functions=[free_tool])
@@ -1810,8 +1796,28 @@ class TestXerxesAdditionalCoverage:
         llm = _FakeLLM(
             responses=[
                 [
-                    {"content": "r1", "buffered_content": "r1", "reasoning_content": "think", "buffered_reasoning_content": "think", "is_final": False, "function_calls": [], "tool_calls": None, "streaming_tool_calls": None, "raw_chunk": None},
-                    {"content": "r2", "buffered_content": "r1r2", "reasoning_content": None, "buffered_reasoning_content": "think", "is_final": True, "function_calls": [], "tool_calls": None, "streaming_tool_calls": None, "raw_chunk": None},
+                    {
+                        "content": "r1",
+                        "buffered_content": "r1",
+                        "reasoning_content": "think",
+                        "buffered_reasoning_content": "think",
+                        "is_final": False,
+                        "function_calls": [],
+                        "tool_calls": None,
+                        "streaming_tool_calls": None,
+                        "raw_chunk": None,
+                    },
+                    {
+                        "content": "r2",
+                        "buffered_content": "r1r2",
+                        "reasoning_content": None,
+                        "buffered_reasoning_content": "think",
+                        "is_final": True,
+                        "function_calls": [],
+                        "tool_calls": None,
+                        "streaming_tool_calls": None,
+                        "raw_chunk": None,
+                    },
                 ]
             ]
         )

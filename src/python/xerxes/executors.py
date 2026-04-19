@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -66,9 +64,7 @@ logger = logging.getLogger(__name__)
 
 __CTX_VARS_NAME__ = "context_variables"
 SEP = "  "
-add_depth = (  # noqa
-    lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")
-)
+add_depth = lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")  # noqa
 
 
 class FunctionRegistry:
@@ -333,9 +329,11 @@ class FunctionExecutionHistory:
                     "name": call.name,
                     "id": call.id,
                     "status": call.status.value,
-                    "result_summary": str(call.result)[:100] + "..."
-                    if call.result and len(str(call.result)) > 100
-                    else str(call.result),
+                    "result_summary": (
+                        str(call.result)[:100] + "..."
+                        if call.result and len(str(call.result)) > 100
+                        else str(call.result)
+                    ),
                 }
                 for call in self.executions
             ],
@@ -547,9 +545,7 @@ class FunctionExecutor:
             agent_id = agent.id if agent is not None else None
             _audit = runtime_features_state.audit_emitter if runtime_features_state is not None else None
             try:
-                func, agent_id = self._resolve_function_and_agent(
-                    call, agent, _audit, audit_turn_id
-                )
+                func, agent_id = self._resolve_function_and_agent(call, agent, _audit, audit_turn_id)
                 args = self._normalize_call_arguments(call)
                 args = self._resolve_argument_templates(args)
 
@@ -720,7 +716,11 @@ class FunctionExecutor:
                     )
 
                 _skill_meta_tools = {"skill_view", "skills_list", "skill_manage", "set_skill_registry"}
-                if call.name in _skill_meta_tools and runtime_features_state is not None and runtime_features_state.audit_emitter is not None:
+                if (
+                    call.name in _skill_meta_tools
+                    and runtime_features_state is not None
+                    and runtime_features_state.audit_emitter is not None
+                ):
                     skill_name = ""
                     if isinstance(result, dict):
                         skill_name = result.get("skill_name", result.get("name", ""))
@@ -788,8 +788,11 @@ class FunctionExecutor:
         return call
 
     def _resolve_function_and_agent(
-        self, call: RequestFunctionCall, agent: Agent | None,
-        _audit, audit_turn_id,
+        self,
+        call: RequestFunctionCall,
+        agent: Agent | None,
+        _audit,
+        audit_turn_id,
     ) -> tuple[tp.Callable, str | None]:
         """Resolve the callable and owning agent ID for a function call.
 

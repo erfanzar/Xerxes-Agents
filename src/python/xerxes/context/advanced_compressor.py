@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Advanced context compression inspired by Hermes Agent's ContextCompressor.
 
@@ -41,12 +40,8 @@ import re
 from typing import Any
 
 from .compaction_strategies import BaseCompactionStrategy
-from .token_counter import SmartTokenCounter
 
 logger = logging.getLogger(__name__)
-
-
-
 
 
 SUMMARY_PREFIX = (
@@ -66,11 +61,6 @@ _CHARS_PER_TOKEN = 4
 
 
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
-
-
-
-
-
 
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
@@ -136,7 +126,6 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
             code_preview += "..."
         return f"[{tool_name}] `{code_preview}` ({line_count} lines output)"
 
-
     first_arg = ""
     for k, v in list(args.items())[:2]:
         sv = str(v)[:40]
@@ -164,10 +153,6 @@ def _prune_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             result.append(msg)
     return result
-
-
-
-
 
 
 _SUMMARIZER_PREAMBLE = (
@@ -210,19 +195,16 @@ def _build_summary_prompt(
             lines.append(f"{role.capitalize()}: {content[:1000]}")
 
     if previous_summary:
-        lines.extend([
-            "",
-            "PREVIOUS SUMMARY (update this, don't repeat):",
-            previous_summary,
-        ])
+        lines.extend(
+            [
+                "",
+                "PREVIOUS SUMMARY (update this, don't repeat):",
+                previous_summary,
+            ]
+        )
 
     lines.extend(["", "STRUCTURED SUMMARY:"])
     return "\n".join(lines)
-
-
-
-
-
 
 
 class HermesCompressionStrategy(BaseCompactionStrategy):
@@ -276,9 +258,6 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
             "strategy": "hermes_compression",
         }
 
-
-
-
         system_msgs = [m for m in messages if m.get("role") == "system"]
         non_system = [m for m in messages if m.get("role") != "system"]
 
@@ -289,14 +268,11 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
 
         compactable_msgs = non_system
 
-
         pruned = _prune_tool_results(compactable_msgs)
         tools_pruned = sum(
-            1 for orig, new in zip(compactable_msgs, pruned)
-            if orig.get("content", "") != new.get("content", "")
+            1 for orig, new in zip(compactable_msgs, pruned, strict=False) if orig.get("content", "") != new.get("content", "")
         )
         stats["tools_pruned"] = tools_pruned
-
 
         tail_budget = self.tail_token_budget
         tail_msgs: list[dict[str, Any]] = []
@@ -318,12 +294,10 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
         stats["middle_messages"] = len(middle_msgs)
 
         if not middle_msgs:
-
             result = [*system_msgs, *tail_msgs]
             stats["compacted_count"] = len(result)
             stats["summary_created"] = False
             return result, stats
-
 
         summary = self._summarize(middle_msgs, self._previous_summary)
         self._previous_summary = summary
@@ -333,7 +307,6 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
             "role": "system",
             "content": f"{SUMMARY_PREFIX}\n\n{summary}",
         }
-
 
         result = [*system_msgs, summary_msg, *tail_msgs]
 
@@ -362,7 +335,6 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
                     return summary
             except Exception as exc:
                 logger.warning("LLM summarization failed: %s", exc)
-
 
         lines = ["[FALLBACK SUMMARY] Key points from earlier conversation:"]
         for msg in messages:
@@ -397,9 +369,7 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 response = loop.run_until_complete(
-                    self.llm_client.generate_completion(
-                        prompt=prompt, temperature=0.3, max_tokens=4096, stream=False
-                    )
+                    self.llm_client.generate_completion(prompt=prompt, temperature=0.3, max_tokens=4096, stream=False)
                 )
 
             if hasattr(self.llm_client, "extract_content"):

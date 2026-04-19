@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -70,9 +68,9 @@ import threading
 import typing as tp
 import uuid
 from collections.abc import AsyncIterator, Generator
-from typing import Any
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, UTC
+from datetime import UTC, datetime
+from typing import Any
 
 from xerxes.types.function_execution_types import ReinvokeSignal
 from xerxes.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
@@ -80,7 +78,7 @@ from xerxes.types.messages import ChatMessage, MessagesHistory, SystemMessage, U
 from .core.prompt_template import SEP, PromptSection, PromptTemplate
 from .core.streamer_buffer import StreamerBuffer
 from .core.utils import debug_print, function_to_json, get_callable_public_name
-from .executors import AgentOrchestrator, EnhancedAgentOrchestrator, EnhancedFunctionExecutor, FunctionExecutor
+from .executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
 from .llms import BaseLLM
 from .memory import MemoryStore, MemoryType
 from .operators import OperatorRuntimeConfig
@@ -1477,7 +1475,7 @@ class Xerxes:
         return function_calls
 
     @staticmethod
-    def extract_from_markdown(format: str, string: str) -> str | None | dict:
+    def extract_from_markdown(format: str, string: str) -> str | None | dict:  # noqa: A002
         """Extract content from a markdown code block with specific format.
 
         Searches for a markdown code block with the specified format identifier

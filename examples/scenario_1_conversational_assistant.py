@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 
 import openai
-from xerxes_agent import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
-from xerxes_agent.core.config import XerxesConfig, set_config
-from xerxes_agent.memory import MemoryStore, MemoryType
+from xerxes import Agent, AssistantMessage, MessagesHistory, UserMessage, Xerxes
+from xerxes.core.config import XerxesConfig, set_config
+from xerxes.memory import MemoryStore, MemoryType
 
 # Configure the system
 config = XerxesConfig(

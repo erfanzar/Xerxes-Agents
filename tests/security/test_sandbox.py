@@ -189,7 +189,7 @@ class TestDockerSandboxBackendMocked:
                 stdout="",
                 stderr="container error",
             )
-            with pytest.raises(RuntimeError, match="failed.*exit 1"):
+            with pytest.raises(RuntimeError, match=r"failed.*exit 1"):
                 backend.execute("test_tool", _add, {})
 
     def test_execute_timeout(self):

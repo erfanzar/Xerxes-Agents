@@ -12,7 +12,6 @@ import sys
 from collections.abc import AsyncIterator
 from typing import Any
 
-
 sys.path.insert(0, "src/python")
 
 from xerxes import Xerxes
@@ -195,13 +194,11 @@ async def test_agent_orchestrator():
     orch.register_agent(a2)
     assert orch.current_agent_id == "agent1"
 
-
     try:
         orch.register_agent(a1)
         log("ORCHESTRATOR", "Duplicate registration did NOT raise", error=True)
     except ValueError:
         log("ORCHESTRATOR", "Duplicate registration correctly rejected")
-
 
     try:
         for i in range(10):
@@ -210,15 +207,12 @@ async def test_agent_orchestrator():
     except ValueError:
         log("ORCHESTRATOR", "Max agents correctly enforced")
 
-
     orch.switch_agent("agent2", "test")
     assert orch.current_agent_id == "agent2"
 
-
-    func, agent_id = orch.function_registry.get_function("greeter", current_agent_id="agent2")
+    _func, agent_id = orch.function_registry.get_function("greeter", current_agent_id="agent2")
     assert agent_id == "agent2"
     log("ORCHESTRATOR", "Function lookup prefers current agent")
-
 
     orch.switch_agent("agent1")
     a1.switch_triggers.append(AgentSwitchTrigger.CAPABILITY_BASED)
@@ -238,7 +232,6 @@ async def test_function_executor():
     orch.register_agent(agent)
     executor = EnhancedFunctionExecutor(orch)
 
-
     calls = [
         RequestFunctionCall(name="calculator", arguments={"expression": "2 + 3"}),
         RequestFunctionCall(name="async_multiplier", arguments={"x": 4, "y": 5}),
@@ -249,7 +242,6 @@ async def test_function_executor():
     assert results[1].result == 20
     log("EXECUTOR", "Sequential execution OK")
 
-
     calls = [
         RequestFunctionCall(name="async_multiplier", arguments={"x": 2, "y": 3}),
         RequestFunctionCall(name="async_multiplier", arguments={"x": 5, "y": 6}),
@@ -257,7 +249,6 @@ async def test_function_executor():
     results = await executor.execute_function_calls(calls, strategy=FunctionCallStrategy.PARALLEL)
     assert all(r.status == ExecutionStatus.SUCCESS for r in results)
     log("EXECUTOR", "Parallel execution OK")
-
 
     orch2 = EnhancedAgentOrchestrator()
     orch2.register_agent(Agent(id="handoff_agent", model="mock", functions=[greeter]))
@@ -288,11 +279,9 @@ async def test_xerxes_core():
     )
     xerxes.register_agent(agent)
 
-
     result = xerxes.run(prompt="Hi", stream=False)
     assert hasattr(result, "content")
     log("XERXES", "Basic run OK")
-
 
     llm2 = MockLLM(['<calculator><arguments>{"expression": "7*8"}</arguments></calculator>'])
     xerxes2 = Xerxes(llm=llm2, enable_memory=True)
@@ -300,7 +289,6 @@ async def test_xerxes_core():
     result2 = xerxes2.run(prompt="Calculate 7*8", stream=False)
     assert result2 is not None
     log("XERXES", "Tool execution run OK")
-
 
     xerxes.memory_store.add_memory("Test memory", MemoryType.SHORT_TERM, agent_id="core_agent")
     mem = xerxes.memory_store.retrieve_memories(agent_id="core_agent")
@@ -319,7 +307,6 @@ async def test_cortex():
     task1 = CortexTask(description="Write intro", expected_output="Intro text", agent=writer)
     task2 = CortexTask(description="Edit intro", expected_output="Edited text", agent=editor, context=True)
 
-
     cortex_seq = Cortex(
         agents=[writer, editor], tasks=[task1, task2], llm=llm, process=ProcessType.SEQUENTIAL, verbose=False
     )
@@ -329,7 +316,6 @@ async def test_cortex():
         log("CORTEX", "SEQUENTIAL process OK")
     except Exception as e:
         log("CORTEX", f"SEQUENTIAL failed: {e}", error=True)
-
 
     task_p1 = CortexTask(description="Task A", expected_output="A", agent=writer)
     task_p2 = CortexTask(description="Task B", expected_output="B", agent=editor)
@@ -343,9 +329,7 @@ async def test_cortex():
     except Exception as e:
         log("CORTEX", f"PARALLEL failed: {e}", error=True)
 
-
     log("CORTEX", "HIERARCHICAL skipped (MockLLM cannot produce JSON plans)")
-
 
     cortex_con = Cortex(agents=[writer, editor], tasks=[task1], llm=llm, process=ProcessType.CONSENSUS, verbose=False)
     try:
@@ -354,7 +338,6 @@ async def test_cortex():
         log("CORTEX", "CONSENSUS process OK")
     except Exception as e:
         log("CORTEX", f"CONSENSUS failed: {e}", error=True)
-
 
     cortex_plan = Cortex(
         agents=[writer, editor], tasks=[task1, task2], llm=llm, process=ProcessType.PLANNED, verbose=False
@@ -365,7 +348,6 @@ async def test_cortex():
         log("CORTEX", "PLANNED process OK")
     except Exception as e:
         log("CORTEX", f"PLANNED failed: {e}", error=True)
-
 
     try:
         t1_fc = CortexTask(description="T1", expected_output="O1", agent=writer)
@@ -386,7 +368,6 @@ async def test_subagent_manager():
     mgr = SubAgentManager(max_concurrent=3, max_depth=2)
     mgr.set_runner(mock_runner)
 
-
     reviewer_def = AgentDefinition(name="reviewer", tools=["Read", "ReadFile"])
     task = mgr.spawn(
         prompt="Review this code",
@@ -398,14 +379,12 @@ async def test_subagent_manager():
     assert task.name == "code-review"
     assert task.agent_def_name == "reviewer"
 
-
     mgr.wait(task.id, timeout=5)
     assert task.status in ("completed", "failed")
     if task.status == "completed":
         log("SUBAGENT", "Spawn + wait OK")
     else:
         log("SUBAGENT", f"Task failed: {task.error}", error=True)
-
 
     task2 = mgr.spawn(
         prompt="Initial",

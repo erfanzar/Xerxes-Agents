@@ -16,8 +16,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from xerxes.security.prompt_scanner import (
     _COMPILED_PATTERNS,
     _CONTEXT_INVISIBLE_CHARS,
@@ -95,7 +93,7 @@ class TestScanContextContent:
         assert "read_secrets" in result
 
     def test_invisible_unicode_blocked(self):
-        text = f"Hello\u200bworld"
+        text = "Hello\u200bworld"
         result = scan_context_content(text, filename="bad.md")
         assert result.startswith("[BLOCKED:")
         assert "invisible_unicode" in result

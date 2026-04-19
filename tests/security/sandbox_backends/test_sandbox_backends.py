@@ -145,7 +145,7 @@ class TestDockerExecuteEdgeCases:
 
         with mock.patch("xerxes.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
-            with pytest.raises(RuntimeError, match="ZeroDivisionError.*division by zero"):
+            with pytest.raises(RuntimeError, match=r"ZeroDivisionError.*division by zero"):
                 backend.execute("t", _identity, {})
 
 
@@ -181,7 +181,6 @@ class TestSubprocessBackendExecution:
     def test_timeout_very_short(self):
         """A function that takes too long should raise RuntimeError."""
         backend = self._make_backend(sandbox_timeout=0.001)
-
 
         with mock.patch(
             "xerxes.security.sandbox_backends.subprocess_backend.subprocess.run",

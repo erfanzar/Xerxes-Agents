@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -19,6 +17,7 @@ Inspired by the nano-claude-code agent loop, this module implements a
 multi-turn agent loop as a Python generator. The loop:
 
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -54,7 +53,6 @@ class _ThinkingParser:
         events: list[object] = []
         self._buffer += chunk_text
 
-
         if not chunk_text and self._in_thinking:
             if self._thinking_buf:
                 events.append(ThinkingChunk(self._thinking_buf))
@@ -73,7 +71,7 @@ class _ThinkingParser:
                     break
                 if idx > 0:
                     events.append(TextChunk(self._buffer[:idx]))
-                self._buffer = self._buffer[idx + len(self._open_tag):]
+                self._buffer = self._buffer[idx + len(self._open_tag) :]
                 self._in_thinking = True
                 self._thinking_buf = ""
 
@@ -85,7 +83,7 @@ class _ThinkingParser:
                     break
                 if idx > 0:
                     self._thinking_buf += self._buffer[:idx]
-                self._buffer = self._buffer[idx + len(self._close_tag):]
+                self._buffer = self._buffer[idx + len(self._close_tag) :]
                 self._in_thinking = False
                 if self._thinking_buf:
                     events.append(ThinkingChunk(self._thinking_buf))
@@ -132,20 +130,18 @@ def _stream_llm(
     """
     from xerxes.llms.registry import detect_provider, get_provider_config
 
-    state.messages.append({"role": "user", "content": user_message})
-    state.metadata["model"] = config.get("model", "")
-
-    perm_mode = PermissionMode(config.get("permission_mode", "auto"))
+    PermissionMode(config.get("permission_mode", "auto"))
     model = config.get("model", "")
     provider_name = detect_provider(model)
 
     try:
-        provider_cfg = get_provider_config(provider_name)
+        get_provider_config(provider_name)
     except KeyError:
         provider_name = "openai"
-        provider_cfg = get_provider_config("openai")
+        get_provider_config("openai")
 
-from .events import (
+
+from .events import (  # noqa: E402
     AgentState,
     PermissionRequest,
     SkillSuggestion,
@@ -156,8 +152,8 @@ from .events import (
     ToolStart,
     TurnDone,
 )
-from .messages import messages_to_anthropic, messages_to_openai
-from .permissions import (
+from .messages import messages_to_anthropic, messages_to_openai  # noqa: E402
+from .permissions import (  # noqa: E402
     PermissionMode,
     check_permission,
     format_permission_description,
@@ -265,7 +261,6 @@ def run(
             yield TextChunk(f"\n[Error: {e}]")
             return
 
-
         remaining = thinking_parser.process("")
         for sub in remaining:
             if isinstance(sub, ThinkingChunk):
@@ -294,7 +289,6 @@ def run(
             tool_calls_count=len(tool_calls),
             model=model,
         )
-
 
         if runtime_features_state is not None and runtime_features_state.authoring_pipeline is not None:
             result = runtime_features_state.authoring_pipeline.on_turn_end(final_response=text)
@@ -468,8 +462,6 @@ def _stream_anthropic(
     api_key = get_api_key(provider_name, config)
     client = anthropic.Anthropic(api_key=api_key)
 
-
-
     system_parts = [system] if system else []
     conversation_messages: list[dict[str, Any]] = []
     for m in messages:
@@ -573,8 +565,6 @@ def _stream_openai_compat(
 
     oai_messages = messages_to_openai(messages, system=system)
 
-
-
     if provider_name == "minimax":
         normalized: list[dict[str, Any]] = []
         for msg in oai_messages:
@@ -582,7 +572,6 @@ def _stream_openai_compat(
             content = msg.get("content") or ""
             if role == "system":
                 role = "user"
-
 
             can_merge = (
                 normalized
@@ -597,9 +586,6 @@ def _stream_openai_compat(
                 normalized[-1]["content"] += "\n\n" + content
             else:
                 normalized_msg: dict[str, Any] = {"role": role}
-
-
-
 
                 if "tool_calls" in msg:
                     normalized_msg["tool_calls"] = msg["tool_calls"]
@@ -659,8 +645,6 @@ def _stream_openai_compat(
     text = ""
     tool_buf: dict[int, dict[str, Any]] = {}
     in_tok = out_tok = 0
-
-
 
     if provider_name not in {"minimax"}:
         kwargs["stream_options"] = {"include_usage": True}

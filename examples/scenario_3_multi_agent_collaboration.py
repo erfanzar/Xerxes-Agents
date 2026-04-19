@@ -11,10 +11,10 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-from xerxes_agent import Agent, Xerxes
-from xerxes_agent.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
-from xerxes_agent.memory import MemoryStore, MemoryType
-from xerxes_agent.types import AgentSwitchTrigger
+from xerxes import Agent, Xerxes
+from xerxes.executors import EnhancedAgentOrchestrator, EnhancedFunctionExecutor
+from xerxes.memory import MemoryStore, MemoryType
+from xerxes.types import AgentSwitchTrigger
 
 # Initialize OpenAI client
 client = openai.OpenAI(
@@ -399,7 +399,7 @@ async def main():
     # Step 1: Coordinator breaks down the task using enhanced executor
     print("Step 1: Coordinator analyzes the task...")
 
-    from xerxes_agent.types import FunctionCallStrategy, RequestFunctionCall
+    from xerxes.types import FunctionCallStrategy, RequestFunctionCall
 
     # Create function call for coordination
     coordination_call = RequestFunctionCall(

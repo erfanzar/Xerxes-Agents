@@ -30,9 +30,9 @@ from datetime import datetime
 from pathlib import Path
 
 import openai
-from xerxes_agent import Agent, MessagesHistory, UserMessage, Xerxes
-from xerxes_agent.memory import MemoryStore, MemoryType
-from xerxes_agent.tools import (
+from xerxes import Agent, MessagesHistory, UserMessage, Xerxes
+from xerxes.memory import MemoryStore, MemoryType
+from xerxes.tools import (
     DataConverter,
     EntityExtractor,
     GoogleSearch,

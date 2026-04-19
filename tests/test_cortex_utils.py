@@ -106,7 +106,7 @@ class TestValidateInputsForTemplate:
         assert any("name" in e for e in errors)
 
     def test_extra_allowed(self):
-        valid, errors = validate_inputs_for_template("{a}", {"a": "1", "b": "2"}, allow_extra=True)
+        valid, _errors = validate_inputs_for_template("{a}", {"a": "1", "b": "2"}, allow_extra=True)
         assert valid is True
 
     def test_extra_not_allowed(self):

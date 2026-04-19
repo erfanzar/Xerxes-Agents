@@ -51,7 +51,6 @@ class TestAgentTypes:
 
         agent = Agent(model="gpt-4", instructions=get_instructions)
 
-
         instructions = agent.instructions() if callable(agent.instructions) else agent.instructions
         assert instructions == "Dynamic instructions"
 
@@ -62,7 +61,6 @@ class TestAgentTypes:
             return ["Rule 1", "Rule 2"]
 
         agent = Agent(model="gpt-4", rules=get_rules)
-
 
         rules = agent.rules() if callable(agent.rules) else agent.rules
         assert rules == ["Rule 1", "Rule 2"]

@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 
 """Skills Hub — install, manage, and discover skills from multiple sources.
 
@@ -32,7 +31,6 @@ Usage::
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import shutil
@@ -48,18 +46,11 @@ from xerxes.core.paths import xerxes_subdir
 logger = logging.getLogger(__name__)
 
 
-
-
-
 SKILLS_DIR = xerxes_subdir("skills")
 HUB_DIR = SKILLS_DIR / ".hub"
 LOCK_FILE = HUB_DIR / "lock.json"
 QUARANTINE_DIR = HUB_DIR / "quarantine"
 AUDIT_LOG = HUB_DIR / "audit.log"
-
-
-
-
 
 
 @dataclass
@@ -72,11 +63,6 @@ class SkillHubEntry:
     installed_at: float
     path: Path
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-
-
-
 
 
 class SkillSource(ABC):
@@ -134,11 +120,13 @@ class LocalSkillSource(SkillSource):
                 try:
                     text = skill_md.read_text(encoding="utf-8")
                     if query.lower() in text.lower():
-                        results.append({
-                            "name": skill_md.parent.name,
-                            "source": "local",
-                            "identifier": str(skill_md.parent),
-                        })
+                        results.append(
+                            {
+                                "name": skill_md.parent.name,
+                                "source": "local",
+                                "identifier": str(skill_md.parent),
+                            }
+                        )
                         if len(results) >= limit:
                             break
                 except Exception:
@@ -164,7 +152,9 @@ class GitHubSkillSource(SkillSource):
         try:
             result = subprocess.run(
                 ["gh", "auth", "token"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -211,9 +201,8 @@ class GitHubSkillSource(SkillSource):
         }
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-
-        import urllib.request
         import urllib.parse
+        import urllib.request
 
         q = urllib.parse.quote(f"{query} filename:SKILL.md")
         url = f"https://api.github.com/search/code?q={q}&per_page={limit}"
@@ -274,21 +263,18 @@ class OfficialSkillSource(SkillSource):
             try:
                 text = skill_md.read_text(encoding="utf-8")
                 if query.lower() in text.lower():
-                    results.append({
-                        "name": skill_md.parent.name,
-                        "source": "official",
-                        "identifier": skill_md.parent.name,
-                    })
+                    results.append(
+                        {
+                            "name": skill_md.parent.name,
+                            "source": "official",
+                            "identifier": skill_md.parent.name,
+                        }
+                    )
                     if len(results) >= limit:
                         break
             except Exception:
                 pass
         return results
-
-
-
-
-
 
 
 def _ensure_hub_dirs() -> None:
@@ -316,11 +302,6 @@ def _audit(event: str, detail: str) -> None:
     line = f"{timestamp}  {event:12s}  {detail}\n"
     with AUDIT_LOG.open("a", encoding="utf-8") as f:
         f.write(line)
-
-
-
-
-
 
 
 class SkillsHub:
@@ -376,10 +357,8 @@ class SkillsHub:
         if target_dir.exists() and not force:
             return f"[Error] Skill '{skill_name}' already installed. Use force=True to overwrite."
 
-
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / "SKILL.md").write_text(bundle["content"], encoding="utf-8")
-
 
         lock = _load_lock()
         lock[skill_name] = {
@@ -419,12 +398,14 @@ class SkillsHub:
         lock = _load_lock()
         results = []
         for skill_name, entry in lock.items():
-            results.append({
-                "name": skill_name,
-                "source": entry.get("source", "unknown"),
-                "identifier": entry.get("identifier", ""),
-                "installed_at": entry.get("installed_at", 0),
-            })
+            results.append(
+                {
+                    "name": skill_name,
+                    "source": entry.get("source", "unknown"),
+                    "identifier": entry.get("identifier", ""),
+                    "installed_at": entry.get("installed_at", 0),
+                }
+            )
         return results
 
     def search(self, query: str = "", limit: int = 10) -> list[dict[str, Any]]:

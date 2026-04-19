@@ -17,8 +17,6 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 from xerxes.extensions.skills import (
     Skill,
     SkillMetadata,

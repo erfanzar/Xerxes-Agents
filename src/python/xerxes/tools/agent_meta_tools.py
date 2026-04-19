@@ -1,16 +1,15 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """Agent meta-tools — multi-LLM routing, skill ops, and session search.
 
 Tools:
@@ -29,8 +28,8 @@ import threading
 import typing as tp
 from dataclasses import dataclass
 
-from ..extensions.skills import SkillRegistry
 from ..extensions.skill_authoring import SkillMatcher
+from ..extensions.skills import SkillRegistry
 from ..memory.embedders import get_default_embedder
 from ..types import AgentBaseFn
 
@@ -287,7 +286,6 @@ class skill_view(AgentBaseFn):
             return {"error": "no skill registry configured", "name": name}
         skill = reg.get(name)
         if skill is None:
-
             matcher = _get_skill_matcher()
             hits = matcher.match(name, k=1)
             if hits:

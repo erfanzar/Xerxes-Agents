@@ -14,10 +14,9 @@
 """Detailed tests for sandbox backend implementations."""
 
 from __future__ import annotations
-import json
 
 import base64
-import pickle
+import json
 import subprocess
 from unittest import mock
 
@@ -141,12 +140,14 @@ class TestDockerExecuteEdgeCases:
 
     def test_execute_tool_error_inside_container(self):
         backend = self._make_backend()
-        result_payload = json.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"}).encode("utf-8")
+        result_payload = json.dumps({"ok": False, "error": "division by zero", "type": "ZeroDivisionError"}).encode(
+            "utf-8"
+        )
         encoded = base64.b64encode(result_payload).decode()
 
         with mock.patch("xerxes.security.sandbox_backends.docker_backend.subprocess.run") as mock_run:
             mock_run.return_value = mock.Mock(returncode=0, stdout=encoded, stderr="")
-            with pytest.raises(RuntimeError, match="ZeroDivisionError.*division by zero"):
+            with pytest.raises(RuntimeError, match=r"ZeroDivisionError.*division by zero"):
                 backend.execute("t", _identity, {})
 
 

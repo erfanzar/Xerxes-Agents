@@ -149,7 +149,6 @@ class TestPluginRegistry:
         assert registry.get_hooks("nonexistent") == []
 
     def test_discover_from_directory(self, tmp_path):
-
         plugin_code = """
 from xerxes.extensions.plugins import PluginMeta, PluginType
 

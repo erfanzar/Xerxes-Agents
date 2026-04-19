@@ -1,14 +1,12 @@
 # Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-
+#
 #     https://www.apache.org/licenses/LICENSE-2.0
-
-
+#
 # distributed under the License is distributed on an "AS IS" BASIS,
-
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -413,11 +411,6 @@ class SkillRegistry:
         return "\n".join(lines)
 
 
-
-
-
-
-
 def skill_matches_platform(skill: Skill, current_platform: str | None = None) -> bool:
     """Return True when *skill* is compatible with the current OS.
 
@@ -443,11 +436,6 @@ def skill_matches_platform(skill: Skill, current_platform: str | None = None) ->
         if current.startswith(mapped):
             return True
     return False
-
-
-
-
-
 
 
 def _load_skill_config() -> dict[str, dict[str, tp.Any]]:

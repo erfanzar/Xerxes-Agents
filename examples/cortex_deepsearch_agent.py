@@ -23,9 +23,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from xerxes_agent import Cortex, CortexAgent, CortexOutput, CortexTask, ProcessType, create_llm
-from xerxes_agent.logging.console import stream_callback
-from xerxes_agent.tools import GoogleSearch, WebScraper
+from xerxes import Cortex, CortexAgent, CortexOutput, CortexTask, ProcessType, create_llm  # noqa: E402
+from xerxes.logging.console import stream_callback  # noqa: E402
+from xerxes.tools import GoogleSearch, WebScraper  # noqa: E402
 
 # Keep the same LLM connection settings that are already used in env.py.
 ENV_PY_LLM_CONFIG = {
@@ -386,11 +386,12 @@ def build_synthesis_cortex(
     for index, output in enumerate(research_outputs, start=1):
         research_briefs.append(f"Track {index} Brief:\n{truncate_for_prompt(output, 3500)}")
 
+    joined_briefs = "\n\n".join(research_briefs)
     synthesis_prompt_context = (
         "Search Plan:\n"
         f"{truncate_for_prompt(plan_output, 4000)}\n\n"
         "Parallel Research Briefs:\n"
-        f"{'\n\n'.join(research_briefs)}"
+        f"{joined_briefs}"
     )
 
     analysis_task = CortexTask(
