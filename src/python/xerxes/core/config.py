@@ -32,9 +32,10 @@ Example:
 
 import json
 import os
-from .compat import StrEnum
 from pathlib import Path
 from typing import Any
+
+from enum import StrEnum
 
 try:
     import yaml

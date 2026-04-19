@@ -27,7 +27,7 @@ This is a Python web application using FastAPI...
 
 ## Install
 
-Requires Python 3.10+ and Node.js 20+ (for the CLI).
+Requires Python 3.11+ and Node.js 20+ (for the CLI).
 
 ```bash
 # One-line install (uv + bun auto-installed if missing)
@@ -328,7 +328,7 @@ black src/python/xerxes/ tests/
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Node.js 20+ (for CLI runtime)
 - Bun (for building the CLI bundle)
 - An LLM provider (cloud API key or local Ollama/LM Studio)

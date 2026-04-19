@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from ..core.compat import StrEnum
 from typing import Any
 
+from enum import StrEnum
 from .base import MemoryItem
 from .contextual_memory import ContextualMemory
 from .storage import SQLiteStorage

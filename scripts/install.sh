@@ -186,7 +186,7 @@ install_xerxes() {
 
     info "installing $spec via uv tool"
     # --force lets re-runs upgrade in place; uv tool sandboxes into ~/.local/share/uv/tools.
-    if ! uv tool install --force --python ">=3.10,<3.14" "$spec"; then
+    if ! uv tool install --force --python ">=3.11,<3.14" "$spec"; then
         die "uv tool install failed"
     fi
     ok "xerxes installed"

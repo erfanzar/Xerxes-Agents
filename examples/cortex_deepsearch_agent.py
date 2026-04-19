@@ -388,10 +388,7 @@ def build_synthesis_cortex(
 
     joined_briefs = "\n\n".join(research_briefs)
     synthesis_prompt_context = (
-        "Search Plan:\n"
-        f"{truncate_for_prompt(plan_output, 4000)}\n\n"
-        "Parallel Research Briefs:\n"
-        f"{joined_briefs}"
+        f"Search Plan:\n{truncate_for_prompt(plan_output, 4000)}\n\nParallel Research Briefs:\n{joined_briefs}"
     )
 
     analysis_task = CortexTask(

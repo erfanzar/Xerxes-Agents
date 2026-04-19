@@ -5,7 +5,7 @@ Conventions followed across [src/python/xerxes/](../src/python/xerxes/) and [src
 ## Formatting
 
 - **Python line length:** 121 (ruff + black both agree — see [pyproject.toml:133-140](../pyproject.toml)).
-- **Python target:** 3.11 for tool config; supported range `>=3.10,<3.14`.
+- **Python target:** 3.11 for tool config; supported range `>=3.11,<3.14`.
 - **Formatter:** `black --preview` + `ruff format` + `isort --profile=black`.
 - **Linter:** ruff with rules `A, B, E, F, I, NPY, RUF, UP, W`; ignores `F722, B008, UP015, A005, E501`.
 - **Rust:** standard `cargo fmt` defaults.
