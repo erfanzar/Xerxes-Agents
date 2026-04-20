@@ -98,7 +98,77 @@ def _call_tool_handler(
             for key, value in context.items():
                 call_kwargs.setdefault(key, value)
 
+        # Coerce string arguments to the types expected by the handler signature.
+        # JSON parsing from LLM tool calls often leaves numeric values as strings.
+        call_kwargs = _coerce_argument_types(call_kwargs, signature)
+
     return handler(**call_kwargs)
+
+
+def _coerce_argument_types(
+    arguments: dict[str, Any],
+    signature: inspect.Signature,
+) -> dict[str, Any]:
+    """Coerce string argument values to the types indicated by *signature*.
+
+    Mirrors the logic in :class:`FunctionExecutor` so that tools executed
+    through the bridge get the same automatic string→int/float/bool/list/dict
+    conversion.
+    """
+    import json
+    import types as _types
+    import typing
+
+    coerced = dict(arguments)
+    for param_name, param in signature.parameters.items():
+        if param_name not in coerced:
+            continue
+        value = coerced[param_name]
+        if not isinstance(value, str):
+            continue
+        ann = param.annotation
+        if ann is inspect.Parameter.empty:
+            continue
+
+        origin = getattr(ann, "__origin__", None)
+        args_tuple = getattr(ann, "__args__", ())
+        is_union = origin is typing.Union or type(ann).__name__ == "UnionType"
+        if is_union and any(a is type(None) for a in args_tuple):
+            ann = next(a for a in args_tuple if a is not type(None))
+            origin = getattr(ann, "__origin__", None)
+            args_tuple = getattr(ann, "__args__", ())
+
+        if origin is list and len(args_tuple) == 1:
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    coerced[param_name] = parsed
+            except Exception:
+                pass
+            continue
+        if origin is dict and len(args_tuple) == 2:
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    coerced[param_name] = parsed
+            except Exception:
+                pass
+            continue
+
+        if ann is int:
+            try:
+                coerced[param_name] = int(value)
+            except ValueError:
+                pass
+        elif ann is float:
+            try:
+                coerced[param_name] = float(value)
+            except ValueError:
+                pass
+        elif ann is bool:
+            coerced[param_name] = value.lower() in ("true", "1", "yes", "on")
+
+    return coerced
 
 
 def populate_registry(
