@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { MarkdownText } from "./Markdown.js";
+import { useSpinner } from "../hooks/useSpinner.js";
 import type { Cell } from "../state/cells.js";
 
 const UserCell: React.FC<{ text: string }> = ({ text }) => (
@@ -48,14 +49,15 @@ const ToolCell: React.FC<{
   durationMs?: number;
   permitted?: boolean;
 }> = ({ name, args, result, durationMs, permitted }) => {
-  const status =
-    result === undefined
-      ? "◦ "
-      : permitted === false
-        ? "✗ "
-        : "✓ ";
+  const pending = result === undefined;
+  const spinnerFrame = useSpinner(pending);
+  const status = pending
+    ? `${spinnerFrame} `
+    : permitted === false
+      ? "✗ "
+      : "✓ ";
   const statusColor =
-    result === undefined ? "yellow" : permitted === false ? "red" : "green";
+    pending ? "yellow" : permitted === false ? "red" : "green";
   const argPreview = formatArgs(args);
   const resultLines = result ? result.split("\n").slice(0, 5) : [];
   const truncated = result ? result.split("\n").length > 5 : false;
