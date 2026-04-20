@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { SlashMenu, matchCommands } from "./SlashMenu.js";
 
@@ -10,6 +10,40 @@ interface ComposerProps {
   onInterrupt?: () => void;
 }
 
+interface ComposerState {
+  value: string;
+  cursor: number;
+  slashIndex: number;
+}
+
+const initialComposerState = (): ComposerState => ({
+  value: "",
+  cursor: 0,
+  slashIndex: 0,
+});
+
+const findPreviousWordStart = (value: string, cursor: number): number => {
+  let index = cursor;
+  while (index > 0 && /\s/.test(value[index - 1] ?? "")) {
+    index -= 1;
+  }
+  while (index > 0 && !/\s/.test(value[index - 1] ?? "")) {
+    index -= 1;
+  }
+  return index;
+};
+
+const findNextWordEnd = (value: string, cursor: number): number => {
+  let index = cursor;
+  while (index < value.length && /\s/.test(value[index] ?? "")) {
+    index += 1;
+  }
+  while (index < value.length && !/\s/.test(value[index] ?? "")) {
+    index += 1;
+  }
+  return index;
+};
+
 export const Composer: React.FC<ComposerProps> = ({
   disabled,
   placeholder = "Type a message, / for commands, Ctrl+C to exit",
@@ -17,11 +51,12 @@ export const Composer: React.FC<ComposerProps> = ({
   onSubmit,
   onInterrupt,
 }) => {
-  const [value, setValue] = useState("");
-  const [cursor, setCursor] = useState(0);
-  const [slashIndex, setSlashIndex] = useState(0);
+  const [state, setState] = useState<ComposerState>(() => initialComposerState());
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   // When the buffer starts with `/` and has no spaces, show the slash menu.
+  const { value, cursor, slashIndex } = state;
   const showSlash =
     !disabled && value.startsWith("/") && !value.includes(" ");
   const slashQuery = showSlash ? value.slice(1) : "";
@@ -36,112 +71,155 @@ export const Composer: React.FC<ComposerProps> = ({
         return;
       }
 
+      const current = stateRef.current;
+      const showSlashNow =
+        current.value.startsWith("/") && !current.value.includes(" ");
+      const slashMatchesNow = showSlashNow
+        ? matchCommands(current.value.slice(1), skills)
+        : [];
+
       // Slash menu navigation takes priority.
-      if (showSlash && slashMatches.length > 0) {
+      if (showSlashNow && slashMatchesNow.length > 0) {
         if (key.upArrow) {
-          setSlashIndex((i) => Math.max(0, i - 1));
+          setState((prev) => ({
+            ...prev,
+            slashIndex: Math.max(0, prev.slashIndex - 1),
+          }));
           return;
         }
         if (key.downArrow) {
-          setSlashIndex((i) => Math.min(slashMatches.length - 1, i + 1));
+          setState((prev) => ({
+            ...prev,
+            slashIndex: Math.min(slashMatchesNow.length - 1, prev.slashIndex + 1),
+          }));
           return;
         }
         if (key.tab) {
           // Complete to the currently-selected command.
-          const pick = slashMatches[slashIndex];
+          const pick = slashMatchesNow[current.slashIndex];
           if (pick) {
-            setValue("/" + pick.name);
-            setCursor(("/" + pick.name).length);
-            setSlashIndex(0);
+            const nextValue = "/" + pick.name;
+            setState({
+              value: nextValue,
+              cursor: nextValue.length,
+              slashIndex: 0,
+            });
           }
           return;
         }
         if (key.return) {
-          const pick = slashMatches[slashIndex];
+          const pick = slashMatchesNow[current.slashIndex];
           if (pick) {
             onSubmit("/" + pick.name);
-            setValue("");
-            setCursor(0);
-            setSlashIndex(0);
+            setState(initialComposerState());
           }
           return;
         }
         if (key.escape) {
-          setValue("");
-          setCursor(0);
-          setSlashIndex(0);
+          setState(initialComposerState());
           return;
         }
       }
 
       if (key.return) {
-        if (value.trim().length > 0) {
-          onSubmit(value);
-          setValue("");
-          setCursor(0);
-          setSlashIndex(0);
+        if (current.value.trim().length > 0) {
+          onSubmit(current.value);
+          setState(initialComposerState());
         }
         return;
       }
-      if (key.backspace || key.delete) {
-        if (cursor > 0) {
-          const next = value.slice(0, cursor - 1) + value.slice(cursor);
-          setValue(next);
-          setCursor(cursor - 1);
-          setSlashIndex(0);
-        }
-        // At cursor 0: nothing to delete; explicitly ignore rather than silently return.
+      if (key.backspace) {
+        const deleteWord = key.ctrl || key.meta;
+        setState((prev) => {
+          if (prev.cursor === 0) return prev;
+          const nextCursor = deleteWord
+            ? findPreviousWordStart(prev.value, prev.cursor)
+            : prev.cursor - 1;
+          return {
+            value: prev.value.slice(0, nextCursor) + prev.value.slice(prev.cursor),
+            cursor: nextCursor,
+            slashIndex: 0,
+          };
+        });
+        return;
+      }
+      if (key.delete) {
+        const deleteWord = key.ctrl || key.meta;
+        setState((prev) => {
+          const nextCursor = deleteWord
+            ? findNextWordEnd(prev.value, prev.cursor)
+            : Math.min(prev.value.length, prev.cursor + 1);
+          if (nextCursor === prev.cursor) return prev;
+          return {
+            value: prev.value.slice(0, prev.cursor) + prev.value.slice(nextCursor),
+            cursor: prev.cursor,
+            slashIndex: 0,
+          };
+        });
         return;
       }
       if (key.leftArrow) {
-        setCursor(Math.max(0, cursor - 1));
+        setState((prev) => ({
+          ...prev,
+          cursor: Math.max(0, prev.cursor - 1),
+        }));
         return;
       }
       if (key.rightArrow) {
-        setCursor(Math.min(value.length, cursor + 1));
+        setState((prev) => ({
+          ...prev,
+          cursor: Math.min(prev.value.length, prev.cursor + 1),
+        }));
         return;
       }
       if (key.ctrl && input === "a") {
-        setCursor(0);
+        setState((prev) => ({ ...prev, cursor: 0 }));
         return;
       }
       if (key.ctrl && input === "e") {
-        setCursor(value.length);
+        setState((prev) => ({ ...prev, cursor: prev.value.length }));
         return;
       }
       if (key.ctrl && input === "u") {
-        setValue(value.slice(cursor));
-        setCursor(0);
-        setSlashIndex(0);
+        setState((prev) => ({
+          value: prev.value.slice(prev.cursor),
+          cursor: 0,
+          slashIndex: 0,
+        }));
         return;
       }
       if (key.ctrl && input === "k") {
-        setValue(value.slice(0, cursor));
+        setState((prev) => ({
+          ...prev,
+          value: prev.value.slice(0, prev.cursor),
+        }));
         return;
       }
       if (key.ctrl && input === "w") {
-        const before = value.slice(0, cursor);
-        const stripped = before.replace(/\s*\S+\s*$/, "");
-        setValue(stripped + value.slice(cursor));
-        setCursor(stripped.length);
-        setSlashIndex(0);
+        setState((prev) => {
+          const nextCursor = findPreviousWordStart(prev.value, prev.cursor);
+          return {
+            value: prev.value.slice(0, nextCursor) + prev.value.slice(prev.cursor),
+            cursor: nextCursor,
+            slashIndex: 0,
+          };
+        });
         return;
       }
       if (key.ctrl && input === "c") {
         if (onInterrupt) {
           onInterrupt();
         }
-        setValue("");
-        setCursor(0);
-        setSlashIndex(0);
+        setState(initialComposerState());
         return;
       }
       // Regular input
       if (input && !key.ctrl && !key.meta) {
-        const next = value.slice(0, cursor) + input + value.slice(cursor);
-        setValue(next);
-        setCursor(cursor + input.length);
-        setSlashIndex(0);
+        setState((prev) => ({
+          value: prev.value.slice(0, prev.cursor) + input + prev.value.slice(prev.cursor),
+          cursor: prev.cursor + input.length,
+          slashIndex: 0,
+        }));
       }
     },
     { isActive: true },
