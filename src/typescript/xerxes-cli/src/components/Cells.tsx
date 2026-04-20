@@ -13,14 +13,14 @@ const UserCell: React.FC<{ text: string }> = ({ text }) => (
 );
 
 function normalizeText(text: string): string {
-  // Trim trailing whitespace, collapse 3+ consecutive newlines to 2,
-  // trim each line's trailing spaces, and strip leading empty lines.
+  // Trim trailing whitespace, collapse 2+ consecutive newlines to 1,
+  // trim each line's trailing spaces, and strip leading/trailing empty lines.
   return text
     .split("\n")
     .map((line) => line.trimEnd())
     .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd()
+    .replace(/\n{2,}/g, "\n")
+    .trim()
     .replace(/^\n+/, "");
 }
 
