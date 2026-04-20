@@ -788,10 +788,13 @@ class BridgeServer:
     def _handle_skills_list(self) -> str:
         """List all discovered skills."""
 
-        self._skill_registry.discover(
-            str(self._skills_dir),
-            str(Path.cwd() / "skills"),
-        )
+        import xerxes as _xerxes_pkg
+
+        _bundled = Path(_xerxes_pkg.__file__).parent / "skills"
+        discover_dirs = [str(self._skills_dir), str(Path.cwd() / "skills")]
+        if _bundled.is_dir():
+            discover_dirs.insert(0, str(_bundled))
+        self._skill_registry.discover(*discover_dirs)
         skills = self._skill_registry.get_all()
         if not skills:
             return f"No skills found.\n  Skills directory: {self._skills_dir}\n  Create one with /skill-create"

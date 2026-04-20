@@ -829,7 +829,14 @@ class SkillTool(AgentBaseFn):
             registry = SkillRegistry()
             skills_dir = xerxes_subdir("skills")
             project_skills = Path.cwd() / "skills"
-            registry.discover(str(skills_dir), str(project_skills))
+
+            import xerxes as _xerxes_pkg
+
+            _bundled = Path(_xerxes_pkg.__file__).parent / "skills"
+            discover_dirs = [str(skills_dir), str(project_skills)]
+            if _bundled.is_dir():
+                discover_dirs.insert(0, str(_bundled))
+            registry.discover(*discover_dirs)
 
             skill = registry.get(skill_name)
             if skill is None:
