@@ -4,7 +4,7 @@ import { MarkdownText } from "./Markdown.js";
 import type { Cell } from "../state/cells.js";
 
 const UserCell: React.FC<{ text: string }> = ({ text }) => (
-  <Box marginTop={1}>
+  <Box>
     <Text bold dimColor>
       {"› "}
     </Text>
@@ -29,15 +29,15 @@ const AssistantCell: React.FC<{ text: string; streaming: boolean }> = ({
   streaming,
 }) => {
   return (
-    <Box marginTop={1} flexDirection="column">
+    <Box flexDirection="column">
       <MarkdownText text={normalizeText(text)} streaming={streaming} />
     </Box>
   );
 };
 
 const ThinkingCell: React.FC<{ text: string }> = ({ text }) => (
-  <Box marginTop={1} flexDirection="column">
-    <Text dimColor italic>{text}</Text>
+  <Box flexDirection="column">
+    <Text dimColor italic>{normalizeText(text)}</Text>
   </Box>
 );
 
@@ -64,7 +64,7 @@ const ToolCell: React.FC<{
   const showPermissionHint = result === undefined && permitted === false;
   
   return (
-    <Box marginTop={1} flexDirection="column">
+    <Box flexDirection="column">
       <Box>
         <Text color={statusColor} bold>
           {status}
@@ -99,13 +99,13 @@ const ToolCell: React.FC<{
 };
 
 const SystemCell: React.FC<{ text: string }> = ({ text }) => (
-  <Box marginTop={1}>
+  <Box>
     <Text dimColor>{text}</Text>
   </Box>
 );
 
 const ErrorCell: React.FC<{ text: string }> = ({ text }) => (
-  <Box marginTop={1}>
+  <Box>
     <Text color="red" bold>
       ✗{" "}
     </Text>
@@ -125,7 +125,7 @@ const SubAgentCell: React.FC<{
     status === "running" ? "yellow" : status === "failed" ? "red" : status === "cancelled" ? "gray" : "green";
   const lines = normalizeText(text).split("\n").filter((l) => l.trim());
   return (
-    <Box marginTop={1} flexDirection="column">
+    <Box flexDirection="column">
       <Box>
         <Text color={statusColor} bold>
           {statusIcon}{" "}
@@ -169,40 +169,60 @@ function shortValue(v: unknown): string {
 
 export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => (
   <Box flexDirection="column">
-    {cells.map((c) => {
+    {cells.map((c, index) => {
       switch (c.kind) {
         case "user":
-          return <UserCell key={c.id} text={c.text} />;
+          return (
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <UserCell text={c.text} />
+            </Box>
+          );
         case "assistant":
           return (
-            <AssistantCell key={c.id} text={c.text} streaming={c.streaming} />
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <AssistantCell text={c.text} streaming={c.streaming} />
+            </Box>
           );
         case "thinking":
-          return <ThinkingCell key={c.id} text={c.text} />;
+          return (
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <ThinkingCell text={c.text} />
+            </Box>
+          );
         case "tool":
           return (
-            <ToolCell
-              key={c.id}
-              name={c.name}
-              args={c.args}
-              result={c.result}
-              durationMs={c.durationMs}
-              permitted={c.permitted}
-            />
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <ToolCell
+                name={c.name}
+                args={c.args}
+                result={c.result}
+                durationMs={c.durationMs}
+                permitted={c.permitted}
+              />
+            </Box>
           );
         case "system":
-          return <SystemCell key={c.id} text={c.text} />;
+          return (
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <SystemCell text={c.text} />
+            </Box>
+          );
         case "error":
-          return <ErrorCell key={c.id} text={c.text} />;
+          return (
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <ErrorCell text={c.text} />
+            </Box>
+          );
         case "subagent":
           return (
-            <SubAgentCell
-              key={c.id}
-              name={c.name}
-              text={c.text}
-              streaming={c.streaming}
-              status={c.status}
-            />
+            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
+              <SubAgentCell
+                name={c.name}
+                text={c.text}
+                streaming={c.streaming}
+                status={c.status}
+              />
+            </Box>
           );
       }
     })}
