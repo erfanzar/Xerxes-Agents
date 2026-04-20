@@ -207,7 +207,7 @@ ensure_on_branch() {
 ### Complete Integration Example
 
 ```
-$autoresearch
+/autoresearch
 Goal: Improve ML model accuracy from 85% to 95%
 Scope: model.py, config.yaml
 Verify: python train.py --eval 2>&1 | grep 'accuracy' | awk '{print $2}'
@@ -313,7 +313,7 @@ fi
 Configure how strictly the agent enforces the one-change-per-iteration rule:
 
 ```
-$autoresearch
+/autoresearch
 Goal: Optimize API response time
 Scope: src/api/**/*.ts
 Verify: wrk -t2 -c10 -d10s http://localhost:3000 | grep 'Avg Lat' | awk '{print $2}'
@@ -512,7 +512,7 @@ done | sort -n | sed -n '2p'  # median of 3 runs
 
 Configure via inline config:
 ```
-$autoresearch
+/autoresearch
 Verify: npm run benchmark 2>&1 | grep 'avg' | awk '{print $2}'
 Noise: high           # triggers 3-run median automatically
 Noise-Runs: 5         # custom: 5 runs instead of default 3
@@ -807,7 +807,7 @@ PRINT "  Best: {best_metric} (iteration #{best_iteration})"
 PRINT "  Current: {current_metric}"
 PRINT "  Last {plateau_patience} iterations: {keeps} keeps, {discards} discards — no net gain"
 
-direct prompting:
+AskUserQuestion:
   question: "The metric has plateaued. How do you want to proceed?"
   header: "Plateau Detected"
   options:
@@ -822,7 +822,7 @@ direct prompting:
 **Configuration:**
 
 ```
-$autoresearch
+/autoresearch
 Goal: Reduce bundle size below 200KB
 Verify: npx esbuild src/index.ts --bundle --minify | wc -c
 Plateau-Patience: 20    # check after 20 iterations without improvement (default: 15)

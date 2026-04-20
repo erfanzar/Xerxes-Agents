@@ -1,4 +1,4 @@
-# Scenario Workflow — $autoresearch scenario
+# Scenario Workflow — /autoresearch:scenario
 
 Scenario-driven use case generator that autonomously explores situations, edge cases, failure modes, and derivative scenarios from a seed scenario. Doesn't stop at obvious paths — iteratively discovers what could go wrong, what's missing, and what nobody thought of.
 
@@ -6,7 +6,7 @@ Scenario-driven use case generator that autonomously explores situations, edge c
 
 ## Trigger
 
-- User invokes `$autoresearch scenario`
+- User invokes `/autoresearch:scenario`
 - User says "explore scenarios", "generate use cases", "what could go wrong", "stress test this feature", "edge cases for", "what are all the ways this could fail"
 - User wants to enumerate situations for a feature, workflow, or system
 
@@ -14,14 +14,14 @@ Scenario-driven use case generator that autonomously explores situations, edge c
 
 ```
 # Unlimited — keep generating scenarios until interrupted
-$autoresearch scenario
+/autoresearch:scenario
 
 # Bounded — exactly N exploration iterations
-$autoresearch scenario
+/autoresearch:scenario
 Iterations: 25
 
 # Focused scope
-$autoresearch scenario
+/autoresearch:scenario
 Scenario: User attempts to checkout with multiple payment methods
 Domain: software
 Depth: deep
@@ -29,9 +29,9 @@ Depth: deep
 
 ## PREREQUISITE: Interactive Setup (when invoked without scenario)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch scenario` is invoked without a scenario description, you MUST use direct prompting to gather context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:scenario` is invoked without a scenario description, you MUST use `AskUserQuestion` to gather context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
 
-**TOOL AVAILABILITY:** direct prompting may be a deferred tool. If calling it fails or the schema is not available, you MUST use `ToolSearch` to fetch the direct prompting schema first, then retry. NEVER skip interactive setup because of a tool fetch issue — resolve the tool availability, then ask the questions.
+**TOOL AVAILABILITY:** `AskUserQuestion` may be a deferred tool. If calling it fails or the schema is not available, you MUST use `ToolSearch` to fetch the `AskUserQuestion` schema first, then retry. NEVER skip interactive setup because of a tool fetch issue — resolve the tool availability, then ask the questions.
 
 The question count adapts (4-8) based on what context is already provided:
 
@@ -47,7 +47,7 @@ The question count adapts (4-8) based on what context is already provided:
 - "User resets password" → **clear** (actor=User, action=resets, object=password)
 - "Admin deploys to production with rollback" → **clear + domain=software** (skip to 4 questions)
 
-You MUST call direct prompting with the selected questions in ONE batched call:
+You MUST call `AskUserQuestion` with the selected questions in ONE batched call:
 
 | # | Header | Question | When to Ask | Options |
 |---|--------|----------|-------------|---------|
@@ -60,12 +60,12 @@ You MUST call direct prompting with the selected questions in ONE batched call:
 | 7 | `Output` | "What output format is most useful?" | If domain doesn't make it obvious | "Use cases (Given/When/Then format)", "User stories (As a... I want... So that...)", "Test scenarios (input → expected → actual)", "Threat scenarios (attacker goal → vector → impact)", "Mixed — all applicable formats" |
 | 8 | `Focus` | "Any specific area to stress test first?" | If scenario is broad | Suggested areas from scenario analysis + "Happy path first, then edge cases", "Jump straight to failure modes", "Explore everything equally" |
 
-**IMPORTANT:** You MUST batch ALL selected questions into a SINGLE direct prompting call. NEVER ask questions one at a time — users need full context to make informed decisions together. If direct prompting only supports one question per call, include all questions in a single call with numbered headers.
+**IMPORTANT:** You MUST batch ALL selected questions into a SINGLE `AskUserQuestion` call. NEVER ask questions one at a time — users need full context to make informed decisions together. If `AskUserQuestion` only supports one question per call, include all questions in a single call with numbered headers.
 
 ## Architecture
 
 ```
-$autoresearch scenario
+/autoresearch:scenario
   ├── Phase 1: Seed — Capture, parse, and analyze the scenario
   ├── Phase 2: Decompose — Break into exploration dimensions
   ├── Phase 3: Generate — Create ONE new situation
@@ -89,13 +89,13 @@ When the user provides arguments inline, parse them in this order (flags take pr
 
 ## Cancel & Interruption Handling
 
-- If user selects "Cancel" in any direct prompting response → exit cleanly with message: "Scenario exploration cancelled. Run `$autoresearch scenario` again when ready."
+- If user selects "Cancel" in any `AskUserQuestion` response → exit cleanly with message: "Scenario exploration cancelled. Run `/autoresearch:scenario` again when ready."
 - If user answers only some questions and stops responding → treat answered questions as config, ask remaining questions in a follow-up call
 - If Ctrl+C during setup → no state persisted, clean restart on re-invocation
 
 ## Phase 1: Seed — Capture & Analyze Scenario
 
-**STOP: Have you completed the Interactive Setup above?** If invoked without scenario/flags, you MUST complete the direct prompting call above BEFORE entering this phase.
+**STOP: Have you completed the Interactive Setup above?** If invoked without scenario/flags, you MUST complete the `AskUserQuestion` call above BEFORE entering this phase.
 
 Parse the scenario and build a structured understanding.
 
@@ -322,20 +322,20 @@ When a domain is specified (or detected), load domain-specific dimension priorit
 
 ```bash
 # Explore scenarios, then hunt for bugs in those areas
-$autoresearch scenario
+/autoresearch:scenario
 Iterations: 25
 
-$autoresearch debug --scope src/checkout/**
+/autoresearch:debug --scope src/checkout/**
 Symptom: edge cases from scenario exploration
 
 # Explore, then security audit the weak spots
-$autoresearch scenario --domain security
+/autoresearch:scenario --domain security
 Iterations: 15
 
-$autoresearch security --scope src/auth/**
+/autoresearch:security --scope src/auth/**
 
 # Generate test scenarios, then use them to write tests
-$autoresearch scenario --format test-scenarios --domain software
+/autoresearch:scenario --format test-scenarios --domain software
 Iterations: 20
 
 # Output can feed into test generation workflows

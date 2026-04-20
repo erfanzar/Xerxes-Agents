@@ -1,4 +1,4 @@
-# Ship Workflow — $autoresearch ship
+# Ship Workflow — /autoresearch:ship
 
 Universal shipping workflow that applies autoresearch loop principles to the last mile — taking anything from "done" to "deployed/published/delivered." Works for code, content, marketing, sales, research, design, or any artifact that needs to reach its audience.
 
@@ -6,7 +6,7 @@ Universal shipping workflow that applies autoresearch loop principles to the las
 
 ## Trigger
 
-- User invokes `$autoresearch ship`
+- User invokes `/autoresearch:ship`
 - User says "ship it", "deploy this", "publish this", "launch this", "release this"
 - User says "get this out the door", "push to prod", "send this out", "go live"
 
@@ -16,25 +16,25 @@ Works with bounded mode for iterative pre-ship preparation:
 
 ```
 # Ship with automatic preparation loop
-$autoresearch ship
+/autoresearch:ship
 
 # Bounded preparation — iterate N times before shipping
-$autoresearch ship
+/autoresearch:ship
 Iterations: 10
 
 # Ship specific artifact
-$autoresearch ship
+/autoresearch:ship
 Target: src/features/auth/**
 Destination: production
 ```
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch ship` is invoked without `--type` or target, you MUST scan for staged changes, open PRs, and recent commits, then use direct prompting to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:ship` is invoked without `--type` or target, you MUST scan for staged changes, open PRs, and recent commits, then use `AskUserQuestion` to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step.
 
 **Single batched call — all 3 questions at once:**
 
-You MUST call direct prompting with all 3 questions in ONE call:
+You MUST call `AskUserQuestion` with all 3 questions in ONE call:
 
 | # | Header | Question | Options (from context scan) |
 |---|--------|----------|----------------------------|
@@ -49,7 +49,7 @@ If `--type`, `--dry-run`, `--auto`, or `--checklist-only` flags are provided, sk
 ## Architecture
 
 ```
-$autoresearch ship
+/autoresearch:ship
   ├── Phase 1: Identify (what are we shipping?)
   ├── Phase 2: Inventory (what's the current state?)
   ├── Phase 3: Checklist (domain-specific pre-ship gates)

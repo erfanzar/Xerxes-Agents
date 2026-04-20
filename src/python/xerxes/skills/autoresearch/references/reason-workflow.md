@@ -1,4 +1,4 @@
-# Reason Workflow — $autoresearch reason
+# Reason Workflow — /autoresearch:reason
 
 Isolated multi-agent adversarial refinement for subjective domains. Generates, critiques, synthesizes, and judges outputs through repeated rounds until convergence — producing a lineage of evolving candidates with documented decision rationale.
 
@@ -6,7 +6,7 @@ Isolated multi-agent adversarial refinement for subjective domains. Generates, c
 
 ## Trigger
 
-- User invokes `$autoresearch reason`
+- User invokes `/autoresearch:reason`
 - User says "reason through this", "adversarial refinement", "debate and converge", "iterative argument", "multi-agent critique", "blind judging"
 - User wants subjective quality improvement with documented rationale (architecture proposals, argument quality, content polish, design decisions, research hypotheses)
 - Chained from another autoresearch tool via `--chain reason`
@@ -15,23 +15,23 @@ Isolated multi-agent adversarial refinement for subjective domains. Generates, c
 
 ```
 # Unlimited — keep refining until convergence or interrupted
-$autoresearch reason
+/autoresearch:reason
 
 # Bounded — exactly N refinement rounds
-$autoresearch reason
+/autoresearch:reason
 Iterations: 10
 
 # With task
-$autoresearch reason
+/autoresearch:reason
 Task: Should we use event sourcing for our order management system?
 Domain: software
 ```
 
 ## PREREQUISITE: Interactive Setup (when invoked without full context)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch reason` is invoked without task, domain, and mode all provided, you MUST use direct prompting to gather context BEFORE proceeding to Phase 1. DO NOT skip this step.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:reason` is invoked without task, domain, and mode all provided, you MUST use `AskUserQuestion` to gather context BEFORE proceeding to Phase 1. DO NOT skip this step.
 
-**TOOL AVAILABILITY:** direct prompting may be a deferred tool. If calling it fails, use `ToolSearch` to fetch the schema first, then retry.
+**TOOL AVAILABILITY:** `AskUserQuestion` may be a deferred tool. If calling it fails, use `ToolSearch` to fetch the schema first, then retry.
 
 **Adaptive question selection rules:**
 - No input at all → ask all 5 questions
@@ -39,7 +39,7 @@ Domain: software
 - Task + domain provided but no convergence/mode → ask questions 3, 4, 5
 - Task + domain + mode + convergence all provided → skip setup entirely
 
-Batch ALL selected questions into a SINGLE direct prompting call:
+Batch ALL selected questions into a SINGLE `AskUserQuestion` call:
 
 | # | Header | Question | When to Ask | Options |
 |---|--------|----------|-------------|---------|
@@ -62,7 +62,7 @@ Parse in this order (flags take precedence):
 ## Architecture
 
 ```
-$autoresearch reason
+/autoresearch:reason
   ├── Phase 1: Setup — Interactive gate + config validation
   ├── Phase 2: Generate-A — Author-A produces first candidate
   ├── Phase 3: Critic — Adversarial attack on A (forced weaknesses)
@@ -75,7 +75,7 @@ $autoresearch reason
 
 ## Phase 1: Setup — Configuration
 
-**STOP: Have you completed the Interactive Setup above?** Complete direct prompting before entering this phase.
+**STOP: Have you completed the Interactive Setup above?** Complete `AskUserQuestion` before entering this phase.
 
 Parse and validate:
 - `--iterations N`: bounded mode — run exactly N rounds then stop (overrides convergence)
@@ -458,7 +458,7 @@ Append one record per round (newline-delimited JSON):
 The converged candidate (if technical: architecture, design, algorithm) becomes a hypothesis context for the debug loop. Critique themes become suspect areas.
 
 ```
-$autoresearch debug
+/autoresearch:debug
 Scope: {files relevant to task domain}
 Symptom: Implementing {task} — authoritative design from reason loop
 Context: {converged_candidate_text truncated to 500 chars}
@@ -472,7 +472,7 @@ Hypotheses:
 The converged candidate becomes the basis for an autoresearch:plan configuration.
 
 ```
-$autoresearch plan
+/autoresearch:plan
 Goal: {task_as_goal}
 Context: Reasoned design from {N} rounds of adversarial refinement:
 {converged_candidate_text}
@@ -483,7 +483,7 @@ Context: Reasoned design from {N} rounds of adversarial refinement:
 If task involves existing code or errors, converged candidate becomes the authoritative fix target description.
 
 ```
-$autoresearch fix
+/autoresearch:fix
 Target: {task_description}
 Scope: {task-relevant file globs}
 Fix-Rationale: {converged_candidate_text — the authoritative approach after N rounds}
@@ -494,7 +494,7 @@ Fix-Rationale: {converged_candidate_text — the authoritative approach after N 
 Critique themes that overlap with security concerns (threat modeling, auth, data handling) seed the security audit focus.
 
 ```
-$autoresearch security
+/autoresearch:security
 Scope: {files relevant to task domain}
 Focus: Security aspects surfaced by adversarial reason loop:
   {security-relevant critique themes}
@@ -505,7 +505,7 @@ Focus: Security aspects surfaced by adversarial reason loop:
 The converged candidate becomes the seed scenario. Critique themes become explicit dimensions to explore.
 
 ```
-$autoresearch scenario
+/autoresearch:scenario
 Scenario: {converged_candidate_text — the converged approach}
 Domain: {domain}
 Focus: {primary critique theme — e.g., "failure modes", "concurrency"}
@@ -517,7 +517,7 @@ Depth: standard
 The converged candidate and lineage critique themes become the goal for multi-persona swarm analysis.
 
 ```
-$autoresearch predict
+/autoresearch:predict
 Scope: {task-relevant file globs}
 Goal: Validate and stress-test this design: {converged_candidate_text truncated to 300 chars}
 Depth: standard
@@ -528,7 +528,7 @@ Depth: standard
 Converged candidate feeds directly to ship workflow as the artifact to ship.
 
 ```
-$autoresearch ship
+/autoresearch:ship
 Target: {converged_candidate as content artifact or implementation spec}
 Type: {auto-detect from domain}
 ```
@@ -538,7 +538,7 @@ Type: {auto-detect from domain}
 The full reason lineage (all rounds, critique themes, candidate evolution) feeds to learn as documentation source.
 
 ```
-$autoresearch learn
+/autoresearch:learn
 Mode: update
 Context: Reason lineage from {N} rounds — {task_description}
 Source: reason/{slug}/reason-lineage.jsonl

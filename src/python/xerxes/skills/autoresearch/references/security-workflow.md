@@ -1,4 +1,4 @@
-# Security Workflow — $autoresearch security
+# Security Workflow — /autoresearch:security
 
 Autonomous security auditing that uses the autoresearch loop to iteratively discover, validate, and report vulnerabilities. Combines STRIDE threat modeling, OWASP Top 10 sweeps, and red-team adversarial analysis into a single autonomous loop.
 
@@ -6,7 +6,7 @@ Autonomous security auditing that uses the autoresearch loop to iteratively disc
 
 ## Trigger
 
-- User invokes `$autoresearch security`
+- User invokes `/autoresearch:security`
 - User says "security audit", "run a security sweep", "threat model this codebase", "find vulnerabilities"
 - User says "red-team this app", "OWASP audit", "STRIDE analysis"
 
@@ -16,25 +16,25 @@ Works with both unbounded and bounded modes:
 
 ```
 # Unlimited — keep finding vulnerabilities until interrupted
-$autoresearch security
+/autoresearch:security
 
 # Bounded — run exactly N security sweep iterations
-$autoresearch security
+/autoresearch:security
 Iterations: 10
 
 # With target scope
-$autoresearch security
+/autoresearch:security
 Scope: src/api/**/*.ts, src/middleware/**/*.ts
 Focus: authentication and authorization flows
 ```
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch security` is invoked without `--diff`, scope, or focus, you MUST scan the codebase first, then use direct prompting to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:security` is invoked without `--diff`, scope, or focus, you MUST scan the codebase first, then use `AskUserQuestion` to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step.
 
 **Single batched call — all 3 questions at once:**
 
-You MUST call direct prompting with all 3 questions in ONE call:
+You MUST call `AskUserQuestion` with all 3 questions in ONE call:
 
 | # | Header | Question | Options (from codebase scan) |
 |---|--------|----------|------------------------------|
@@ -524,7 +524,7 @@ This incentivizes the loop to cover ALL categories before going deep on any one.
 Only audit files changed since the last audit. Reads the most recent `security/` subfolder to establish what was already tested.
 
 ```
-$autoresearch security --diff
+/autoresearch:security --diff
 ```
 
 **How it works:**
@@ -561,9 +561,9 @@ If no previous audit folder exists, `--diff` falls back to full audit with a war
 Exit with non-zero code if findings meet or exceed a severity threshold. Designed for CI/CD blocking.
 
 ```
-$autoresearch security --fail-on critical
-$autoresearch security --fail-on high
-$autoresearch security --fail-on medium
+/autoresearch:security --fail-on critical
+/autoresearch:security --fail-on high
+/autoresearch:security --fail-on medium
 ```
 
 | Flag Value | Blocks on |
@@ -581,7 +581,7 @@ $autoresearch security --fail-on medium
 **CI/CD usage:**
 ```bash
 # In GitHub Actions or CI scripts
-claude -p "$autoresearch security --fail-on critical --iterations 10"
+claude -p "/autoresearch:security --fail-on critical --iterations 10"
 # Exit code 1 if any Critical findings → blocks the pipeline
 ```
 
@@ -590,9 +590,9 @@ claude -p "$autoresearch security --fail-on critical --iterations 10"
 After completing the audit, switches to standard autoresearch modify→verify loop to fix confirmed findings. Uses the security audit report as its goal.
 
 ```
-$autoresearch security --fix
+/autoresearch:security --fix
 
-$autoresearch security --fix
+/autoresearch:security --fix
 Iterations: 10
 ```
 
@@ -600,7 +600,7 @@ Iterations: 10
 
 1. Run the full security audit (setup + loop + report)
 2. Filter findings: only **Confirmed** severity **Critical** and **High**
-3. Switch to `$autoresearch fix` with findings context:
+3. Switch to `/autoresearch:fix` with findings context:
    - **Target:** Re-run the security checks that found each vulnerability
    - **Scope:** Files referenced in findings (file:line locations)
    - Pass the filtered findings list as context so fix knows WHAT to fix
@@ -634,11 +634,11 @@ Flags can be combined:
 
 ```
 # Delta audit + auto-fix critical/high + block on remaining criticals
-$autoresearch security --diff --fix --fail-on critical
+/autoresearch:security --diff --fix --fail-on critical
 Iterations: 15
 
 # Quick delta check in CI
-$autoresearch security --diff --fail-on high
+/autoresearch:security --diff --fail-on high
 Iterations: 5
 ```
 
@@ -650,10 +650,10 @@ Iterations: 5
 
 ### CI/CD GitHub Action Template
 
-When `$autoresearch security` detects a `.github/workflows/` directory, it offers to generate a security workflow:
+When `/autoresearch:security` detects a `.github/workflows/` directory, it offers to generate a security workflow:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "I see you use GitHub Actions. Want me to generate a security audit workflow?"
   header: "CI/CD"
   options:
@@ -693,7 +693,7 @@ jobs:
       - name: Install Autoresearch Skill
         run: |
           git clone https://github.com/uditgoenka/autoresearch.git /tmp/autoresearch
-          cp -r /tmp/autoresearch/skills/autoresearch .agents/skills/autoresearch
+          cp -r /tmp/autoresearch/skills/autoresearch .claude/skills/autoresearch
           cp -r /tmp/autoresearch/commands/autoresearch .claude/commands/autoresearch
           cp /tmp/autoresearch/commands/autoresearch.md .claude/commands/autoresearch.md
 
@@ -703,9 +703,9 @@ jobs:
         run: |
           # Delta mode on PRs, full audit on schedule
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            claude -p "$autoresearch security --diff --fail-on critical --iterations 5"
+            claude -p "/autoresearch:security --diff --fail-on critical --iterations 5"
           else
-            claude -p "$autoresearch security --fail-on high --iterations 15"
+            claude -p "/autoresearch:security --fail-on high --iterations 15"
           fi
 
       - name: Upload Security Report
@@ -814,7 +814,7 @@ Each finding gets a `History` tag:
 
 ## Report Output — Structured Folder
 
-Every `$autoresearch security` run creates a dedicated folder inside a `security/` directory at the project root (similar to how `/plan --hard` creates plan directories).
+Every `/autoresearch:security` run creates a dedicated folder inside a `security/` directory at the project root (similar to how `/plan --hard` creates plan directories).
 
 ### Folder Structure
 
@@ -964,7 +964,7 @@ jwt.verify(token, secret, { algorithms: ['HS256'] });
 
 ### Creation Protocol
 
-1. At the **start** of `$autoresearch security`, create the folder:
+1. At the **start** of `/autoresearch:security`, create the folder:
    ```
    mkdir -p security/{YYMMDD}-{HHMM}-{slug}
    ```

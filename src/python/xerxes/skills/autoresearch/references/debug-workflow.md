@@ -1,4 +1,4 @@
-# Debug Workflow — $autoresearch debug
+# Debug Workflow — /autoresearch:debug
 
 Autonomous bug-hunting loop that applies the scientific method iteratively. Doesn't stop at one bug — keeps investigating until the codebase is clean or you interrupt.
 
@@ -6,7 +6,7 @@ Autonomous bug-hunting loop that applies the scientific method iteratively. Does
 
 ## Trigger
 
-- User invokes `$autoresearch debug`
+- User invokes `/autoresearch:debug`
 - User says "find all bugs", "debug this", "why is this failing", "hunt bugs", "investigate"
 - User reports a specific error and wants root cause analysis
 
@@ -14,34 +14,34 @@ Autonomous bug-hunting loop that applies the scientific method iteratively. Does
 
 ```
 # Unlimited — keep hunting bugs until interrupted
-$autoresearch debug
+/autoresearch:debug
 
 # Bounded — exactly N investigation iterations
-$autoresearch debug
+/autoresearch:debug
 Iterations: 20
 
 # Focused scope
-$autoresearch debug
+/autoresearch:debug
 Scope: src/api/**/*.ts
 Symptom: API returns 500 on POST /users
 ```
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch debug` is invoked without `--scope` or `--symptom`, you MUST use direct prompting to gather full context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:debug` is invoked without `--scope` or `--symptom`, you MUST use `AskUserQuestion` to gather full context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
 
 Scan the codebase first (run tests, lint, typecheck) to detect existing failures and provide smart defaults.
 
 **Single batched call — all 4 questions at once:**
 
-You MUST call direct prompting with all 4 questions in ONE call:
+You MUST call `AskUserQuestion` with all 4 questions in ONE call:
 
 | # | Header | Question | Options (from codebase scan) |
 |---|--------|----------|------------------------------|
 | 1 | `Issue` | "What's the problem?" | "Hunt all bugs (scan entire codebase)", "Specific error (I'll describe it)", "Failing tests", "CI/CD failure", "Performance issue" |
 | 2 | `Scope` | "Which files should I investigate?" | Suggested globs from project structure + "Entire codebase" |
 | 3 | `Depth` | "How deep should I investigate?" | "Quick scan (5 iterations)", "Standard (15 iterations)", "Deep investigation (30+)", "Unlimited" |
-| 4 | `After` | "When bugs are found, should I also fix them?" | "Find bugs only (report)", "Find and fix (chain to $autoresearch fix)", "Ask me after each finding" |
+| 4 | `After` | "When bugs are found, should I also fix them?" | "Find bugs only (report)", "Find and fix (chain to /autoresearch:fix)", "Ask me after each finding" |
 
 **IMPORTANT:** Always ask all 4 questions in a single call — never one at a time. Users need full context to make informed decisions.
 
@@ -50,7 +50,7 @@ If `--scope`, `--symptom`, or `--fix` flags are provided, skip the interactive s
 ## Architecture
 
 ```
-$autoresearch debug
+/autoresearch:debug
   ├── Phase 1: Gather (symptoms + context)
   ├── Phase 2: Reconnaissance (scan codebase, map error surface)
   ├── Phase 3: Hypothesize (form falsifiable hypothesis)
@@ -62,7 +62,7 @@ $autoresearch debug
 
 ## Phase 1: Gather — Symptoms & Context
 
-**STOP: Have you completed the Interactive Setup above?** If invoked without `--scope`/`--symptom` flags, you MUST complete the direct prompting call above BEFORE entering this phase.
+**STOP: Have you completed the Interactive Setup above?** If invoked without `--scope`/`--symptom` flags, you MUST complete the `AskUserQuestion` call above BEFORE entering this phase.
 
 Collect everything known about the problem before investigating.
 
@@ -452,18 +452,18 @@ Creates `debug/{YYMMDD}-{HHMM}-{debug-slug}/` with:
 - `debug-results.tsv` — iteration log
 - `summary.md` — executive summary with recommendations
 
-## Chaining with $autoresearch fix
+## Chaining with /autoresearch:fix
 
 ```
 # Find bugs, then fix them
-$autoresearch debug --fix
+/autoresearch:debug --fix
 
 # Or manually chain
-$autoresearch debug
+/autoresearch:debug
 Iterations: 15
 
-$autoresearch fix
+/autoresearch:fix
 Iterations: 20
 ```
 
-When `--fix` is specified, after the debug loop completes, automatically switches to `$autoresearch fix --from-debug` targeting the discovered issues. The `--from-debug` flag tells fix to read findings from the latest debug session.
+When `--fix` is specified, after the debug loop completes, automatically switches to `/autoresearch:fix --from-debug` targeting the discovered issues. The `--from-debug` flag tells fix to read findings from the latest debug session.

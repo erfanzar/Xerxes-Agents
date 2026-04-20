@@ -1,22 +1,22 @@
-# Plan Workflow — $autoresearch plan
+# Plan Workflow — /autoresearch:plan
 
 Convert a textual goal into a validated, ready-to-execute autoresearch configuration.
 
-**Output:** A complete `$autoresearch` invocation with Scope, Metric, Direction, and Verify — all validated before launch.
+**Output:** A complete `/autoresearch` invocation with Scope, Metric, Direction, and Verify — all validated before launch.
 
 ## Trigger
 
-- User invokes `$autoresearch plan`
+- User invokes `/autoresearch:plan`
 - User says "help me set up autoresearch", "plan an autoresearch run", "what should my metric be"
 
 ## Workflow
 
 ### Phase 1: Capture Goal
 
-**CRITICAL — BLOCKING PREREQUISITE:** If no goal is provided inline, you MUST use direct prompting to capture it. DO NOT skip this step or proceed to Phase 2 without a goal.
+**CRITICAL — BLOCKING PREREQUISITE:** If no goal is provided inline, you MUST use `AskUserQuestion` to capture it. DO NOT skip this step or proceed to Phase 2 without a goal.
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "What do you want to improve? Describe your goal in plain language."
   header: "Goal"
   options:
@@ -44,7 +44,7 @@ If user provides goal text directly, skip to Phase 2.
 Present scope options based on codebase analysis:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "Which files should autoresearch be allowed to modify?"
   header: "Scope"
   options:
@@ -68,7 +68,7 @@ This is the critical step. The metric must be **mechanical** — extractable fro
 Present metric options based on goal + tooling:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "What number tells you if things got better? Pick the mechanical metric."
   header: "Metric"
   options:
@@ -96,7 +96,7 @@ If metric fails validation, explain why and suggest alternatives. **Do not proce
 Ask if the user wants a guard command to prevent regressions:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "Do you want a guard command? This is a safety net that prevents breaking existing behavior while optimizing."
   header: "Guard"
   options:
@@ -127,7 +127,7 @@ direct prompting:
 
 **If metric-valued guard chosen:** Collect direction and threshold in one follow-up question:
 ```
-direct prompting:
+AskUserQuestion:
   question: "Configure the guard-metric threshold:"
   header: "Guard threshold"
   options:
@@ -148,7 +148,7 @@ Dry-run the guard command to validate it outputs a number. Record the guard-metr
 ### Phase 5: Define Direction
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "Is a higher or lower number better for your metric?"
   header: "Direction"
   options:
@@ -168,7 +168,7 @@ Construct the verification command that:
 Present the constructed command:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "This is the verify command I'll run each iteration. Does this look right?"
   header: "Verify"
   options:
@@ -226,7 +226,7 @@ Present the complete configuration:
 
 ### Ready-to-use command:
 
-$autoresearch
+/autoresearch
 Goal: {goal}
 Scope: {scope}
 Metric: {metric} ({direction})
@@ -239,20 +239,20 @@ If no guard was set, omit the Guard line from the output.
 Then ask:
 
 ```
-direct prompting:
+AskUserQuestion:
   question: "Configuration validated. How do you want to run it?"
   header: "Launch"
   options:
     - label: "Launch now — unlimited (Recommended)"
-      description: "Start $autoresearch immediately, loop until interrupted"
+      description: "Start /autoresearch immediately, loop until interrupted"
     - label: "Launch now — bounded"
       description: "Run a fixed number of iterations (I'll ask how many)"
     - label: "Copy config only"
       description: "Just show me the command, I'll run it myself later"
 ```
 
-If "Launch now — unlimited": invoke `$autoresearch` with the configuration.
-If "Launch now — bounded": ask for iteration count, then invoke `$autoresearch` with `Iterations: N` in the inline config.
+If "Launch now — unlimited": invoke `/autoresearch` with the configuration.
+If "Launch now — bounded": ask for iteration count, then invoke `/autoresearch` with `Iterations: N` in the inline config.
 If "Copy config only": output the ready-to-paste command block and stop.
 
 ## Metric Suggestion Database

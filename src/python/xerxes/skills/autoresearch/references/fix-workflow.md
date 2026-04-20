@@ -1,4 +1,4 @@
-# Fix Workflow — $autoresearch fix
+# Fix Workflow — /autoresearch:fix
 
 Autonomous fix loop that takes a broken state and iteratively repairs it until everything passes. One fix per iteration. Atomic, committed, verified, auto-reverted on failure.
 
@@ -6,22 +6,22 @@ Autonomous fix loop that takes a broken state and iteratively repairs it until e
 
 ## Trigger
 
-- User invokes `$autoresearch fix`
+- User invokes `/autoresearch:fix`
 - User says "fix all errors", "make tests pass", "fix the build", "clean up all warnings"
-- User has output from `$autoresearch debug` and wants to fix the findings
+- User has output from `/autoresearch:debug` and wants to fix the findings
 
 ## Loop Support
 
 ```
 # Unlimited — keep fixing until everything passes
-$autoresearch fix
+/autoresearch:fix
 
 # Bounded — exactly N fix iterations
-$autoresearch fix
+/autoresearch:fix
 Iterations: 30
 
 # With explicit target
-$autoresearch fix
+/autoresearch:fix
 Target: make all tests pass
 Scope: src/**/*.ts
 Guard: npm run typecheck
@@ -29,13 +29,13 @@ Guard: npm run typecheck
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch fix` is invoked without explicit `--target`, `--guard`, or `--scope`, you MUST first auto-detect all failures, then use direct prompting to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:fix` is invoked without explicit `--target`, `--guard`, or `--scope`, you MUST first auto-detect all failures, then use `AskUserQuestion` to gather user input BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
 
 **Pre-scan:** Run test suite, type checker, linter, and build to detect failures. Present summary in the first question.
 
 **Single batched call — all 4 questions at once:**
 
-You MUST call direct prompting with all 4 questions in ONE call:
+You MUST call `AskUserQuestion` with all 4 questions in ONE call:
 
 | # | Header | Question | Options (from auto-detection) |
 |---|--------|----------|-------------------------------|
@@ -51,7 +51,7 @@ If the user provides `--target`, `--guard`, `--scope`, or `--from-debug` flags, 
 ## Architecture
 
 ```
-$autoresearch fix
+/autoresearch:fix
   ├── Phase 1: Detect (what's broken?)
   ├── Phase 2: Prioritize (fix order)
   ├── Phase 3: Fix ONE thing (atomic change)
@@ -64,7 +64,7 @@ $autoresearch fix
 
 ## Phase 1: Detect — What's Broken?
 
-**STOP: Have you completed the Interactive Setup above?** If invoked without `--target`/`--guard`/`--scope` flags, you MUST complete the direct prompting call above BEFORE entering this phase.
+**STOP: Have you completed the Interactive Setup above?** If invoked without `--target`/`--guard`/`--scope` flags, you MUST complete the `AskUserQuestion` call above BEFORE entering this phase.
 
 Auto-detect the failure domain from context, or accept explicit target.
 
@@ -310,7 +310,7 @@ DECIDING:
 DONE:
   → Generate summary.md
   → Print fix_score
-  → Suggest $autoresearch debug for blocked items
+  → Suggest /autoresearch:debug for blocked items
 ```
 
 ## What NOT to Do — Anti-Patterns
@@ -514,7 +514,7 @@ Attempt 3: FAIL → Escalate:
   2. ISOLATE: Create minimal reproduction case
   3. SKIP: Move this error to "blocked" list, continue with others
   4. FLAG: Note in summary.md — "Error X requires investigation"
-  5. SUGGEST: $autoresearch debug on the specific error for root cause analysis
+  5. SUGGEST: /autoresearch:debug on the specific error for root cause analysis
 ```
 
 **Never loop on the same failing approach.** Each attempt must use a materially different strategy.
@@ -586,25 +586,25 @@ When errors appear only in CI (not locally):
 
 ```bash
 # Debug first, then fix what was found
-$autoresearch debug
+/autoresearch:debug
 Iterations: 15
 
-$autoresearch fix --from-debug
+/autoresearch:fix --from-debug
 Iterations: 30
 
 # Fix with guard
-$autoresearch fix
+/autoresearch:fix
 Target: npm run typecheck
 Guard: npm test
 
 # Fix only tests, guard with types
-$autoresearch fix --category test --guard "tsc --noEmit"
+/autoresearch:fix --category test --guard "tsc --noEmit"
 
 # Fix everything — iterate until clean
-$autoresearch fix
+/autoresearch:fix
 
 # Bounded sprint — fix as many as you can in 20 iterations
-$autoresearch fix
+/autoresearch:fix
 Iterations: 20
 ```
 
@@ -620,31 +620,31 @@ Creates `fix/{YYMMDD}-{HHMM}-{fix-slug}/` with:
 
 ```bash
 # Full pipeline: debug → fix → ship
-$autoresearch debug
+/autoresearch:debug
 Iterations: 15
 
-$autoresearch fix --from-debug --guard "npm test"
+/autoresearch:fix --from-debug --guard "npm test"
 Iterations: 30
 
-$autoresearch ship
+/autoresearch:ship
 
 # Fix only critical issues, then verify clean
-$autoresearch fix --category build
-$autoresearch fix --category type --guard "npm run build"
-$autoresearch fix --category test --guard "tsc --noEmit"
+/autoresearch:fix --category build
+/autoresearch:fix --category type --guard "npm run build"
+/autoresearch:fix --category test --guard "tsc --noEmit"
 
 # Scoped fix with parallel agents
-$autoresearch fix --scope "src/api/**" --category type
-$autoresearch fix --scope "src/auth/**" --category test
+/autoresearch:fix --scope "src/api/**" --category type
+/autoresearch:fix --scope "src/auth/**" --category test
 
 # Fix with warning suppression disabled
-$autoresearch fix --category warning --skip-lint
+/autoresearch:fix --category warning --skip-lint
 
 # CI-specific fix: re-run on CI failure
-$autoresearch fix --target "npm run ci" --guard "npm test"
+/autoresearch:fix --target "npm run ci" --guard "npm test"
 
 # After dependency upgrade: fix cascade
-npm upgrade && $autoresearch fix --category type --category test
+npm upgrade && /autoresearch:fix --category type --category test
 ```
 
 ## Summary Report Format
@@ -674,7 +674,7 @@ fix_score: 97/100
 
 ## Blocked (requires investigation)
 - auth/token-refresh.ts — circular dependency blocks type resolution
-  → Suggested: $autoresearch debug --scope auth/token-refresh.ts
+  → Suggested: /autoresearch:debug --scope auth/token-refresh.ts
 
 ## Remaining
 - user.test.ts:88 — flaky timing test (not a code bug)

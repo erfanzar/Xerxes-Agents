@@ -1,13 +1,17 @@
 ---
 name: autoresearch
-description: 'Use when user types /autoresearch, $autoresearch plan, $autoresearch debug, $autoresearch fix, $autoresearch security, $autoresearch ship, $autoresearch scenario, $autoresearch predict, $autoresearch learn, or $autoresearch reason, or mentions "autoresearch" with a goal/metric. Autonomous Goal-directed Iteration — apply Karpathy''s autoresearch principles to ANY task: modify, verify, keep/discard, repeat. Supports bounded mode via Iterations: N inline config.'
-metadata:
-  source: claude-port
-  version: 1.9.12
-  short-description: Autonomous goal-directed iteration engine
+description: >-
+  Use when user types /autoresearch, /autoresearch:plan, /autoresearch:debug,
+  /autoresearch:fix, /autoresearch:security, /autoresearch:ship,
+  /autoresearch:scenario, /autoresearch:predict, /autoresearch:learn,
+  or /autoresearch:reason, or mentions "autoresearch" with a goal/metric.
+  Autonomous Goal-directed Iteration — apply Karpathy's autoresearch
+  principles to ANY task: modify, verify, keep/discard, repeat.
+  Supports bounded mode via Iterations: N inline config.
+version: 1.9.12
 ---
 
-# Codex Autoresearch — Autonomous Goal-directed Iteration
+# Claude Autoresearch — Autonomous Goal-directed Iteration
 
 Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch). Applies constraint-driven autonomous iteration to ANY work — not just ML research.
 
@@ -17,24 +21,24 @@ Inspired by [Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
 **CRITICAL — READ THIS FIRST BEFORE ANY ACTION:**
 
-For ALL commands (`$autoresearch`, `$autoresearch plan`, `$autoresearch debug`, `$autoresearch fix`, `$autoresearch security`, `$autoresearch ship`, `$autoresearch scenario`, `$autoresearch predict`, `$autoresearch learn`, `$autoresearch reason`):
+For ALL commands (`/autoresearch`, `/autoresearch:plan`, `/autoresearch:debug`, `/autoresearch:fix`, `/autoresearch:security`, `/autoresearch:ship`, `/autoresearch:scenario`, `/autoresearch:predict`, `/autoresearch:learn`, `/autoresearch:reason`):
 
 1. **Check if the user provided ALL required context inline** (Goal, Scope, Metric, flags, etc.)
-2. **If ANY required context is missing → you MUST use direct prompting to collect it BEFORE proceeding to any execution phase.** DO NOT skip this step. DO NOT proceed without user input.
+2. **If ANY required context is missing → you MUST use `AskUserQuestion` to collect it BEFORE proceeding to any execution phase.** DO NOT skip this step. DO NOT proceed without user input.
 3. Each subcommand's reference file has an "Interactive Setup" section — follow it exactly when context is missing.
 
 | Command | Required Context | If Missing → Ask |
 |---------|-----------------|-----------------|
-| `$autoresearch` | Goal, Scope, Metric, Direction, Verify | Batch 1 (4 questions) + Batch 2 (3 questions) from Setup Phase below |
-| `$autoresearch plan` | Goal | Ask via direct prompting per `references/plan-workflow.md` |
-| `$autoresearch debug` | Issue/Symptom, Scope | 4 batched questions per `references/debug-workflow.md` |
-| `$autoresearch fix` | Target, Scope | 4 batched questions per `references/fix-workflow.md` |
-| `$autoresearch security` | Scope, Depth | 3 batched questions per `references/security-workflow.md` |
-| `$autoresearch ship` | What/Type, Mode | 3 batched questions per `references/ship-workflow.md` |
-| `$autoresearch scenario` | Scenario, Domain | 4-8 adaptive questions per `references/scenario-workflow.md` |
-| `$autoresearch predict` | Scope, Goal | 3-4 batched questions per `references/predict-workflow.md` |
-| `$autoresearch learn` | Mode, Scope | 4 batched questions per `references/learn-workflow.md` |
-| `$autoresearch reason` | Task, Domain | 3-5 adaptive questions per `references/reason-workflow.md` |
+| `/autoresearch` | Goal, Scope, Metric, Direction, Verify | Batch 1 (4 questions) + Batch 2 (3 questions) from Setup Phase below |
+| `/autoresearch:plan` | Goal | Ask via `AskUserQuestion` per `references/plan-workflow.md` |
+| `/autoresearch:debug` | Issue/Symptom, Scope | 4 batched questions per `references/debug-workflow.md` |
+| `/autoresearch:fix` | Target, Scope | 4 batched questions per `references/fix-workflow.md` |
+| `/autoresearch:security` | Scope, Depth | 3 batched questions per `references/security-workflow.md` |
+| `/autoresearch:ship` | What/Type, Mode | 3 batched questions per `references/ship-workflow.md` |
+| `/autoresearch:scenario` | Scenario, Domain | 4-8 adaptive questions per `references/scenario-workflow.md` |
+| `/autoresearch:predict` | Scope, Goal | 3-4 batched questions per `references/predict-workflow.md` |
+| `/autoresearch:learn` | Mode, Scope | 4 batched questions per `references/learn-workflow.md` |
+| `/autoresearch:reason` | Task, Domain | 3-5 adaptive questions per `references/reason-workflow.md` |
 
 **YOU MUST NOT start any loop, phase, or execution without completing interactive setup when context is missing. This is a BLOCKING prerequisite.**
 
@@ -42,18 +46,18 @@ For ALL commands (`$autoresearch`, `$autoresearch plan`, `$autoresearch debug`, 
 
 | Subcommand | Purpose |
 |------------|---------|
-| `$autoresearch` | Run the autonomous loop (default) |
-| `$autoresearch plan` | Interactive wizard to build Scope, Metric, Direction & Verify from a Goal |
-| `$autoresearch security` | Autonomous security audit: STRIDE threat model + OWASP Top 10 + red-team (4 adversarial personas) |
-| `$autoresearch ship` | Universal shipping workflow: ship code, content, marketing, sales, research, or anything |
-| `$autoresearch debug` | Autonomous bug-hunting loop: scientific method + iterative investigation until codebase is clean |
-| `$autoresearch fix` | Autonomous fix loop: iteratively repair errors (tests, types, lint, build) until zero remain |
-| `$autoresearch scenario` | Scenario-driven use case generator: explore situations, edge cases, and derivative scenarios |
-| `$autoresearch predict` | Multi-persona swarm prediction: pre-analyze code from multiple expert perspectives before acting |
-| `$autoresearch learn` | Autonomous codebase documentation engine: scout, learn, generate/update docs with validation-fix loop |
-| `$autoresearch reason` | Adversarial refinement for subjective domains: isolated multi-agent generate→critique→synthesize→blind judge loop until convergence |
+| `/autoresearch` | Run the autonomous loop (default) |
+| `/autoresearch:plan` | Interactive wizard to build Scope, Metric, Direction & Verify from a Goal |
+| `/autoresearch:security` | Autonomous security audit: STRIDE threat model + OWASP Top 10 + red-team (4 adversarial personas) |
+| `/autoresearch:ship` | Universal shipping workflow: ship code, content, marketing, sales, research, or anything |
+| `/autoresearch:debug` | Autonomous bug-hunting loop: scientific method + iterative investigation until codebase is clean |
+| `/autoresearch:fix` | Autonomous fix loop: iteratively repair errors (tests, types, lint, build) until zero remain |
+| `/autoresearch:scenario` | Scenario-driven use case generator: explore situations, edge cases, and derivative scenarios |
+| `/autoresearch:predict` | Multi-persona swarm prediction: pre-analyze code from multiple expert perspectives before acting |
+| `/autoresearch:learn` | Autonomous codebase documentation engine: scout, learn, generate/update docs with validation-fix loop |
+| `/autoresearch:reason` | Adversarial refinement for subjective domains: isolated multi-agent generate→critique→synthesize→blind judge loop until convergence |
 
-### $autoresearch security — Autonomous Security Audit
+### /autoresearch:security — Autonomous Security Audit
 
 Runs a comprehensive security audit using the autoresearch loop pattern. Generates a full STRIDE threat model, maps attack surfaces, then iteratively tests each vulnerability vector — logging findings with severity, OWASP category, and code evidence.
 
@@ -88,30 +92,30 @@ Load: `references/security-workflow.md` for full protocol.
 **Usage:**
 ```
 # Unlimited — keep finding vulnerabilities until interrupted
-$autoresearch security
+/autoresearch:security
 
 # Bounded — exactly 10 security sweep iterations
-$autoresearch security
+/autoresearch:security
 Iterations: 10
 
 # With focused scope
-$autoresearch security
+/autoresearch:security
 Scope: src/api/**/*.ts, src/middleware/**/*.ts
 Focus: authentication and authorization flows
 
 # Delta mode — only audit changed files since last audit
-$autoresearch security --diff
+/autoresearch:security --diff
 
 # Auto-fix confirmed Critical/High findings after audit
-$autoresearch security --fix
+/autoresearch:security --fix
 Iterations: 15
 
 # CI/CD gate — fail pipeline if any Critical findings
-$autoresearch security --fail-on critical
+/autoresearch:security --fail-on critical
 Iterations: 10
 
 # Combined — delta audit + fix + gate
-$autoresearch security --diff --fix --fail-on critical
+/autoresearch:security --diff --fix --fail-on critical
 Iterations: 15
 ```
 
@@ -121,7 +125,7 @@ Iterations: 15
 - OWASP Top 10 (2021) — industry-standard vulnerability taxonomy
 - STRIDE — Microsoft's threat modeling framework
 
-### $autoresearch ship — Universal Shipping Workflow
+### /autoresearch:ship — Universal Shipping Workflow
 
 Ship anything — code, content, marketing, sales, research, or design — through a structured 8-phase workflow that applies autoresearch loop principles to the last mile.
 
@@ -167,35 +171,35 @@ Load: `references/ship-workflow.md` for full protocol.
 **Usage:**
 ```
 # Auto-detect and ship (interactive)
-$autoresearch ship
+/autoresearch:ship
 
 # Ship code PR with auto-approve
-$autoresearch ship --auto
+/autoresearch:ship --auto
 
 # Dry-run a deployment before going live
-$autoresearch ship --type deployment --dry-run
+/autoresearch:ship --type deployment --dry-run
 
 # Ship with post-deployment monitoring
-$autoresearch ship --monitor 10
+/autoresearch:ship --monitor 10
 
 # Prepare iteratively then ship
-$autoresearch ship
+/autoresearch:ship
 Iterations: 5
 
 # Just check if something is ready to ship
-$autoresearch ship --checklist-only
+/autoresearch:ship --checklist-only
 
 # Ship a blog post
-$autoresearch ship
+/autoresearch:ship
 Target: content/blog/my-new-post.md
 Type: content
 
 # Ship a sales deck
-$autoresearch ship --type sales
+/autoresearch:ship --type sales
 Target: decks/q1-proposal.pdf
 
 # Rollback a bad deployment
-$autoresearch ship --rollback
+/autoresearch:ship --rollback
 ```
 
 **Composite metric (for bounded loops):**
@@ -208,7 +212,7 @@ Score of 100 = fully ready. Below 80 = not shippable.
 
 **Output directory:** Creates `ship/{YYMMDD}-{HHMM}-{ship-slug}/` with `checklist.md`, `ship-log.tsv`, `summary.md`.
 
-### $autoresearch scenario — Scenario-Driven Use Case Generator
+### /autoresearch:scenario — Scenario-Driven Use Case Generator
 
 Autonomous scenario exploration engine that generates, expands, and stress-tests use cases from a seed scenario. Discovers edge cases, failure modes, and derivative scenarios that manual analysis misses.
 
@@ -245,30 +249,30 @@ Load: `references/scenario-workflow.md` for full protocol.
 **Usage:**
 ```
 # Unlimited — keep exploring until interrupted
-$autoresearch scenario
+/autoresearch:scenario
 
 # Bounded with context
-$autoresearch scenario
+/autoresearch:scenario
 Scenario: User attempts checkout with multiple payment methods
 Domain: software
 Depth: standard
 Iterations: 25
 
 # Quick edge case scan
-$autoresearch scenario --depth shallow --focus edge-cases
+/autoresearch:scenario --depth shallow --focus edge-cases
 Scenario: File upload feature for profile pictures
 
 # Security-focused
-$autoresearch scenario --domain security
+/autoresearch:scenario --domain security
 Scenario: OAuth2 login flow with third-party providers
 Iterations: 30
 
 # Generate test scenarios
-$autoresearch scenario --format test-scenarios --domain software
+/autoresearch:scenario --format test-scenarios --domain software
 Scenario: REST API pagination with filtering and sorting
 ```
 
-### $autoresearch predict — Multi-Persona Swarm Prediction
+### /autoresearch:predict — Multi-Persona Swarm Prediction
 
 Multi-perspective code analysis using swarm intelligence principles. Simulates 3-5 expert personas (Architect, Security Analyst, Performance Engineer, Reliability Engineer, Devil's Advocate) that independently analyze code, debate findings, and reach consensus — all within Claude's native context. Zero external dependencies.
 
@@ -310,35 +314,35 @@ Load: `references/predict-workflow.md` for full protocol.
 **Usage:**
 ```
 # Standard analysis
-$autoresearch predict
+/autoresearch:predict
 Scope: src/**/*.ts
 Goal: Find reliability issues
 
 # Quick security scan
-$autoresearch predict --depth shallow --chain security
+/autoresearch:predict --depth shallow --chain security
 Scope: src/api/**
 
 # Deep analysis with adversarial debate
-$autoresearch predict --depth deep --adversarial
+/autoresearch:predict --depth deep --adversarial
 Goal: Pre-deployment quality audit
 
 # CI/CD gate
-$autoresearch predict --fail-on critical --budget 20
+/autoresearch:predict --fail-on critical --budget 20
 Scope: src/**
 Iterations: 1
 
 # Chain to debug for hypothesis-driven investigation
-$autoresearch predict --chain debug
+/autoresearch:predict --chain debug
 Scope: src/auth/**
 Goal: Investigate intermittent 500 errors
 
 # Multi-chain: predict → scenario → debug → fix (sequential pipeline)
-$autoresearch predict --chain scenario,debug,fix
+/autoresearch:predict --chain scenario,debug,fix
 Scope: src/**
 Goal: Full quality pipeline for new feature
 ```
 
-### $autoresearch learn — Autonomous Codebase Documentation Engine
+### /autoresearch:learn — Autonomous Codebase Documentation Engine
 
 Scouts codebase structure, learns patterns and architecture, generates/updates comprehensive documentation — then validates and iteratively improves until docs match codebase reality.
 
@@ -389,30 +393,30 @@ Load: `references/learn-workflow.md` for full protocol.
 **Usage:**
 ```
 # Auto-detect mode and learn
-$autoresearch learn
+/autoresearch:learn
 
 # Initialize docs for new project
-$autoresearch learn --mode init --depth deep
+/autoresearch:learn --mode init --depth deep
 
 # Update docs after changes
-$autoresearch learn --mode update
+/autoresearch:learn --mode update
 Iterations: 3
 
 # Read-only health check
-$autoresearch learn --mode check
+/autoresearch:learn --mode check
 
 # Quick summary
-$autoresearch learn --mode summarize --scan
+/autoresearch:learn --mode summarize --scan
 
 # Selective update of one doc
-$autoresearch learn --mode update --file system-architecture.md
+/autoresearch:learn --mode update --file system-architecture.md
 
 # Scoped learning
-$autoresearch learn --scope src/api/**
+/autoresearch:learn --scope src/api/**
 Iterations: 5
 ```
 
-### $autoresearch reason — Adversarial Refinement for Subjective Domains
+### /autoresearch:reason — Adversarial Refinement for Subjective Domains
 
 Isolated multi-agent adversarial refinement loop. Generates, critiques, synthesizes, and blind-judges outputs through repeated rounds until convergence. Extends autoresearch to subjective domains where no objective metric (val_bpb) exists — the blind judge panel IS the fitness function.
 
@@ -453,39 +457,39 @@ Load: `references/reason-workflow.md` for full protocol.
 **Usage:**
 ```
 # Standard convergent refinement
-$autoresearch reason
+/autoresearch:reason
 Task: Should we use event sourcing for our order management system?
 Domain: software
 
 # Bounded with custom judges
-$autoresearch reason --judges 5 --iterations 10
+/autoresearch:reason --judges 5 --iterations 10
 Task: Write a compelling pitch for our Series A
 Domain: business
 
 # Creative mode — explore alternatives, no convergence stop
-$autoresearch reason --mode creative --iterations 8
+/autoresearch:reason --mode creative --iterations 8
 Task: Design the authentication architecture for a multi-tenant SaaS platform
 Domain: software
 
 # Chain to downstream tools after convergence
-$autoresearch reason --chain scenario,debug,fix
+/autoresearch:reason --chain scenario,debug,fix
 Task: Propose a caching strategy for high-traffic API endpoints
 Domain: software
 Iterations: 6
 
 # Debate mode — A vs B, no synthesis
-$autoresearch reason --mode debate --judges 5
+/autoresearch:reason --mode debate --judges 5
 Task: Is microservices the right architecture for our 5-person startup?
 Domain: software
 
 # Multi-chain pipeline: reason → plan → fix
-$autoresearch reason --chain plan,fix
+/autoresearch:reason --chain plan,fix
 Task: Design the database schema for our order management system
 Domain: software
 Iterations: 5
 ```
 
-### $autoresearch plan — Goal → Configuration Wizard
+### /autoresearch:plan — Goal → Configuration Wizard
 
 Converts a plain-language goal into a validated, ready-to-execute autoresearch configuration.
 
@@ -508,53 +512,53 @@ Load: `references/plan-workflow.md` for full protocol.
 
 **Usage:**
 ```
-$autoresearch plan
+/autoresearch:plan
 Goal: Make the API respond faster
 
-$autoresearch plan Increase test coverage to 95%
+/autoresearch:plan Increase test coverage to 95%
 
-$autoresearch plan Reduce bundle size below 200KB
+/autoresearch:plan Reduce bundle size below 200KB
 ```
 
-After the wizard completes, the user gets a ready-to-paste `$autoresearch` invocation — or can launch it directly.
+After the wizard completes, the user gets a ready-to-paste `/autoresearch` invocation — or can launch it directly.
 
 ## When to Activate
 
-- User invokes `$autoresearch` → run the loop
-- User invokes `$autoresearch plan` → run the planning wizard
-- User invokes `$autoresearch security` → run the security audit
+- User invokes `/autoresearch` → run the loop
+- User invokes `/autoresearch:plan` → run the planning wizard
+- User invokes `/autoresearch:security` → run the security audit
 - User says "help me set up autoresearch", "plan an autoresearch run" → run the planning wizard
 - User says "security audit", "threat model", "OWASP", "STRIDE", "find vulnerabilities", "red-team" → run the security audit
-- User invokes `$autoresearch ship` → run the ship workflow
+- User invokes `/autoresearch:ship` → run the ship workflow
 - User says "ship it", "deploy this", "publish this", "launch this", "get this out the door" → run the ship workflow
-- User invokes `$autoresearch debug` → run the debug loop
+- User invokes `/autoresearch:debug` → run the debug loop
 - User says "find all bugs", "hunt bugs", "debug this", "why is this failing", "investigate" → run the debug loop
-- User invokes `$autoresearch fix` → run the fix loop
+- User invokes `/autoresearch:fix` → run the fix loop
 - User says "fix all errors", "make tests pass", "fix the build", "clean up errors" → run the fix loop
-- User invokes `$autoresearch scenario` → run the scenario loop
+- User invokes `/autoresearch:scenario` → run the scenario loop
 - User says "explore scenarios", "generate use cases", "what could go wrong", "stress test this feature", "edge cases for" → run the scenario loop
-- User invokes `$autoresearch learn` → run the learn workflow
+- User invokes `/autoresearch:learn` → run the learn workflow
 - User says "learn this codebase", "generate docs", "document this project", "create documentation", "update docs", "check docs", "docs health" → run the learn workflow
-- User invokes `$autoresearch predict` → run the predict workflow
+- User invokes `/autoresearch:predict` → run the predict workflow
 - User says "predict", "multi-perspective", "swarm analysis", "what do multiple experts think", "analyze from different angles" → run the predict workflow
-- User invokes `$autoresearch reason` → run the reason loop
+- User invokes `/autoresearch:reason` → run the reason loop
 - User says "reason through this", "adversarial refinement", "debate and converge", "iterative argument", "blind judging", "multi-agent critique" → run the reason loop
 - User says "work autonomously", "iterate until done", "keep improving", "run overnight" → run the loop
 - Any task requiring repeated iteration cycles with measurable outcomes → run the loop
 
 ## Bounded Iterations
 
-By default, autoresearch loops until the metric plateaus (no improvement to the best metric for 15 consecutive measured iterations), then asks the user whether to stop, continue, or change strategy. To run exactly N iterations instead, add `Iterations: N` to your inline config.
+By default, autoresearch loops until the metric plateaus (no improvement to the best metric for 15 consecutive measured iterations), then asks the user whether to stop, continue, or change strategy. To run exactly N iterations instead, add `Iterations: N` to your inline config."
 
 **Unlimited (default):**
 ```
-$autoresearch
+/autoresearch
 Goal: Increase test coverage to 90%
 ```
 
 **Bounded (N iterations):**
 ```
-$autoresearch
+/autoresearch
 Goal: Increase test coverage to 90%
 Iterations: 25
 ```
@@ -577,7 +581,7 @@ After N iterations Claude stops and prints a final summary with baseline → cur
 In unlimited mode, autoresearch tracks whether the best metric is still improving. If 15 consecutive measured iterations pass without a new best, the loop pauses and asks the user to decide: stop, continue, or change strategy. Configure with `Plateau-Patience: N` (default 15), or disable with `Plateau-Patience: off`. Bounded mode ignores this setting.
 
 ```
-$autoresearch
+/autoresearch
 Goal: Reduce bundle size below 200KB
 Verify: npx esbuild src/index.ts --bundle --minify | wc -c
 Plateau-Patience: 20
@@ -588,7 +592,7 @@ Plateau-Patience: 20
 By default, guards are pass/fail (exit code 0 = pass). For guards that measure a number (bundle size, response time, coverage), you can set a regression threshold instead:
 
 ```
-$autoresearch
+/autoresearch
 Goal: Increase test coverage to 95%
 Verify: npx jest --coverage 2>&1 | grep 'All files' | awk '{print $4}'
 Guard: npx esbuild src/index.ts --bundle --minify | wc -c
@@ -610,15 +614,15 @@ Without `Guard-Direction` and `Guard-Threshold`, the guard operates in pass/fail
 
 **If the user provides Goal, Scope, Metric, and Verify inline** → extract them and proceed to step 5.
 
-**CRITICAL: If ANY critical field is missing (Goal, Scope, Metric, Direction, or Verify), you MUST use direct prompting to collect them interactively. DO NOT proceed to The Loop or any execution phase without completing this setup. This is a BLOCKING prerequisite.**
+**CRITICAL: If ANY critical field is missing (Goal, Scope, Metric, Direction, or Verify), you MUST use `AskUserQuestion` to collect them interactively. DO NOT proceed to The Loop or any execution phase without completing this setup. This is a BLOCKING prerequisite.**
 
 ### Interactive Setup (when invoked without full config)
 
-Scan the codebase first for smart defaults, then ask ALL questions in batched direct prompting calls (max 4 per call). This gives users full clarity upfront.
+Scan the codebase first for smart defaults, then ask ALL questions in batched `AskUserQuestion` calls (max 4 per call). This gives users full clarity upfront.
 
 **Batch 1 — Core config (4 questions in one call):**
 
-Use a SINGLE direct prompting call with these 4 questions:
+Use a SINGLE `AskUserQuestion` call with these 4 questions:
 
 | # | Header | Question | Options (smart defaults from codebase scan) |
 |---|--------|----------|----------------------------------------------|
@@ -637,7 +641,7 @@ Use a SINGLE direct prompting call with these 4 questions:
 
 **After Batch 2:** Dry-run the verify command. If it fails, ask user to fix or choose a different command. If it passes, proceed with launch choice.
 
-**IMPORTANT:** You MUST call direct prompting with batched questions — never ask one at a time, and never skip this step. Users should see all config choices together for full context. DO NOT proceed to Setup Steps or The Loop without completing interactive setup.
+**IMPORTANT:** You MUST call `AskUserQuestion` with batched questions — never ask one at a time, and never skip this step. Users should see all config choices together for full context. DO NOT proceed to Setup Steps or The Loop without completing interactive setup.
 
 ### Setup Steps (after config is complete)
 
@@ -700,15 +704,15 @@ See `references/core-principles.md` for the 7 generalizable principles from auto
 | Blog/content | Word count + readability | `content/*.md` | Custom script | — |
 | Performance | Benchmark time (ms) | Target files | `npm run bench` | `npm test` |
 | Refactoring | Tests pass + LOC reduced | Target module | `npm test && wc -l` | `npm run typecheck` |
-| Security | OWASP + STRIDE coverage + findings | API/auth/middleware | `$autoresearch security` | — |
-| Shipping | Checklist pass rate (%) | Any artifact | `$autoresearch ship` | Domain-specific |
-| Debugging | Bugs found + coverage | Target files | `$autoresearch debug` | — |
-| Fixing | Error count (lower) | Target files | `$autoresearch fix` | `npm test` |
-| Scenario analysis | Scenario coverage score (higher) | Feature/domain files | `$autoresearch scenario` | — |
-| Scenarios | Use cases + edge cases + dimension coverage | Target feature/files | `$autoresearch scenario` | — |
-| Prediction | Findings + hypotheses (higher) | Target files | `$autoresearch predict` | — |
-| Documentation | Validation pass rate (higher) | `docs/*.md` | `$autoresearch learn` | `npm test` |
-| Subjective refinement | Judge consensus + convergence (higher) | Any subjective content | `$autoresearch reason` | — |
+| Security | OWASP + STRIDE coverage + findings | API/auth/middleware | `/autoresearch:security` | — |
+| Shipping | Checklist pass rate (%) | Any artifact | `/autoresearch:ship` | Domain-specific |
+| Debugging | Bugs found + coverage | Target files | `/autoresearch:debug` | — |
+| Fixing | Error count (lower) | Target files | `/autoresearch:fix` | `npm test` |
+| Scenario analysis | Scenario coverage score (higher) | Feature/domain files | `/autoresearch:scenario` | — |
+| Scenarios | Use cases + edge cases + dimension coverage | Target feature/files | `/autoresearch:scenario` | — |
+| Prediction | Findings + hypotheses (higher) | Target files | `/autoresearch:predict` | — |
+| Documentation | Validation pass rate (higher) | `docs/*.md` | `/autoresearch:learn` | `npm test` |
+| Subjective refinement | Judge consensus + convergence (higher) | Any subjective content | `/autoresearch:reason` | — |
 
 Adapt the loop to your domain. The PRINCIPLES are universal; the METRICS are domain-specific.
 

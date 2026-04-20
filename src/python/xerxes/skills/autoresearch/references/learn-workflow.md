@@ -1,4 +1,4 @@
-# Learn Workflow — $autoresearch learn
+# Learn Workflow — /autoresearch:learn
 
 Autonomous codebase documentation engine. Scouts codebase structure, learns patterns and architecture, generates/updates comprehensive documentation — then validates and iteratively improves until docs are accurate.
 
@@ -6,7 +6,7 @@ Autonomous codebase documentation engine. Scouts codebase structure, learns patt
 
 ## Trigger
 
-- User invokes `$autoresearch learn`
+- User invokes `/autoresearch:learn`
 - User says "learn this codebase", "generate docs", "document this project", "create documentation", "update docs", "check docs health", "docs status"
 - User wants to understand or document an unfamiliar codebase
 
@@ -14,27 +14,27 @@ Autonomous codebase documentation engine. Scouts codebase structure, learns patt
 
 ```
 # Default — auto-detect mode and learn
-$autoresearch learn
+/autoresearch:learn
 
 # Specific mode
-$autoresearch learn --mode update
+/autoresearch:learn --mode update
 
 # Bounded iterations for validation-fix loop
-$autoresearch learn
+/autoresearch:learn
 Iterations: 5
 
 # Scoped learning
-$autoresearch learn --scope src/api/**
+/autoresearch:learn --scope src/api/**
 
 # Selective single-doc update
-$autoresearch learn --mode update --file system-architecture.md
+/autoresearch:learn --mode update --file system-architecture.md
 ```
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If invoked without `--mode` or sufficient inline context, you MUST use direct prompting to gather config BEFORE proceeding to Phase 1.
+**CRITICAL — BLOCKING PREREQUISITE:** If invoked without `--mode` or sufficient inline context, you MUST use `AskUserQuestion` to gather config BEFORE proceeding to Phase 1.
 
-**TOOL AVAILABILITY:** direct prompting may be a deferred tool. If calling it fails, use `ToolSearch` to fetch the schema first, then retry. NEVER skip setup because of tool issues.
+**TOOL AVAILABILITY:** `AskUserQuestion` may be a deferred tool. If calling it fails, use `ToolSearch` to fetch the schema first, then retry. NEVER skip setup because of tool issues.
 
 ### Pre-scan (before asking questions)
 
@@ -44,7 +44,7 @@ Detect project state for smart defaults:
 3. Staleness: `git log -1 --format='%ci' -- docs/ 2>/dev/null` vs `git log -1 --format='%ci' 2>/dev/null`
 4. Scale: `find . -type f -not -path './.git/*' -not -path '*/node_modules/*' | wc -l`
 
-### Questions (single direct prompting call — 4 questions)
+### Questions (single AskUserQuestion call — 4 questions)
 
 | # | Header | Question | Options (from pre-scan) |
 |---|--------|----------|------------------------|
@@ -61,12 +61,12 @@ Detect project state for smart defaults:
 - User says "check" / "health" → Mode = Check
 - User says "summarize" / "summary" → Mode = Summarize
 
-**Cancel handling:** If user selects "Cancel" → exit: "Learning cancelled. Run `$autoresearch learn` when ready."
+**Cancel handling:** If user selects "Cancel" → exit: "Learning cancelled. Run `/autoresearch:learn` when ready."
 
 ## Architecture
 
 ```
-$autoresearch learn
+/autoresearch:learn
   ├── Phase 1: Scout — Parallel codebase reconnaissance
   ├── Phase 2: Analyze — Structure detection + project type classification
   ├── Phase 3: Map — Dynamic doc discovery + gap analysis
@@ -158,7 +158,7 @@ Output: `✓ Phase 2: Analyzed — [type] project, [N] existing docs, staleness:
 2. **Filter:** `*.md` files only — skip binary files (.pdf, .png, .drawio)
 3. Count + LOC: `wc -l docs/*.md 2>/dev/null | sort -rn`
 4. **Strategy by count:**
-   - **0 files:** Warn via direct prompting: "No docs found. Switch to init mode? [yes/cancel]". If yes → restart as init. If cancel → STOP.
+   - **0 files:** Warn via AskUserQuestion: "No docs found. Switch to init mode? [yes/cancel]". If yes → restart as init. If cancel → STOP.
    - **1-3 files:** Skip parallel reading, docs-manager reads directly
    - **4-6 files:** Spawn 2-3 `Explore` agents
    - **7+ files:** Spawn 4-5 `Explore` agents (max 5)
@@ -456,25 +456,25 @@ learn/{YYMMDD}-{HHMM}-{slug}/
 
 ```bash
 # Learn codebase, then security audit
-$autoresearch learn --mode init
-$autoresearch security
+/autoresearch:learn --mode init
+/autoresearch:security
 
 # Learn changes, then predict issues
-$autoresearch learn --mode update
-$autoresearch predict --scope src/**
+/autoresearch:learn --mode update
+/autoresearch:predict --scope src/**
 
 # Check health, update if stale
-$autoresearch learn --mode check
+/autoresearch:learn --mode check
 # If report says "Stale" →
-$autoresearch learn --mode update
+/autoresearch:learn --mode update
 
 # Learn then ship docs as PR
-$autoresearch learn --mode update
-$autoresearch ship --type code-pr
+/autoresearch:learn --mode update
+/autoresearch:ship --type code-pr
 
 # Full quality pipeline
-$autoresearch learn --mode init
-$autoresearch scenario --domain software
-$autoresearch security
-$autoresearch ship
+/autoresearch:learn --mode init
+/autoresearch:scenario --domain software
+/autoresearch:security
+/autoresearch:ship
 ```

@@ -48,7 +48,7 @@ If you can't verify with a command, you can't iterate autonomously.
 ### ML Accuracy Metric — Complete Configuration
 
 ```
-$autoresearch
+/autoresearch
 Goal: Improve model accuracy from 85% to 95%
 Scope: model.py, config.yaml, data/preprocessing.py
 Metric: validation accuracy (higher is better)
@@ -124,7 +124,7 @@ if __name__ == "__main__":
 
 ```
 # Use in autoresearch:
-$autoresearch
+/autoresearch
 Verify: python verify_metric.py "python train.py --eval" "accuracy"
 ```
 
@@ -162,7 +162,7 @@ Every successful change is committed. This enables:
 
 **Configuration:**
 ```
-$autoresearch
+/autoresearch
 Git-Memory: enabled     # default — always on, reads git history every iteration
 Memory-Depth: 20        # number of past commits to review (default: 20)
 ```

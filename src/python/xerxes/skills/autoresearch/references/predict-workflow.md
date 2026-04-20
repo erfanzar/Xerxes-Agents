@@ -1,4 +1,4 @@
-# Predict Workflow — $autoresearch predict
+# Predict Workflow — /autoresearch:predict
 
 Multi-persona swarm prediction that pre-analyzes code from multiple expert perspectives. Simulates 3-5 personas that independently analyze, debate, and reach consensus — producing ranked findings and hypotheses. All within Claude's native context. Zero external dependencies.
 
@@ -6,7 +6,7 @@ Multi-persona swarm prediction that pre-analyzes code from multiple expert persp
 
 ## Trigger
 
-- User invokes `$autoresearch predict`
+- User invokes `/autoresearch:predict`
 - User says "predict", "multi-perspective analysis", "swarm analysis", "what do experts think", "analyze from different angles"
 - User wants pre-analysis before debugging, security audit, or shipping
 
@@ -14,14 +14,14 @@ Multi-persona swarm prediction that pre-analyzes code from multiple expert persp
 
 ```
 # Unlimited — keep refining predictions until interrupted
-$autoresearch predict
+/autoresearch:predict
 
 # Bounded — exactly N persona debate rounds
-$autoresearch predict
+/autoresearch:predict
 Iterations: 3
 
 # Focused scope with goal
-$autoresearch predict
+/autoresearch:predict
 Scope: src/api/**/*.ts, src/auth/**/*.ts
 Goal: Security vulnerabilities and reliability gaps
 Depth: standard
@@ -29,9 +29,9 @@ Depth: standard
 
 ## PREREQUISITE: Interactive Setup (when invoked without flags)
 
-**CRITICAL — BLOCKING PREREQUISITE:** If `$autoresearch predict` is invoked without scope, goal, and depth all provided, you MUST use direct prompting to gather context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
+**CRITICAL — BLOCKING PREREQUISITE:** If `/autoresearch:predict` is invoked without scope, goal, and depth all provided, you MUST use `AskUserQuestion` to gather context BEFORE proceeding to ANY phase. DO NOT skip this step. DO NOT jump to Phase 1 without completing interactive setup.
 
-**TOOL AVAILABILITY:** direct prompting may be a deferred tool. If calling it fails or the schema is not available, you MUST use `ToolSearch` to fetch the direct prompting schema first, then retry. NEVER skip interactive setup because of a tool fetch issue — resolve tool availability, then ask the questions.
+**TOOL AVAILABILITY:** `AskUserQuestion` may be a deferred tool. If calling it fails or the schema is not available, you MUST use `ToolSearch` to fetch the `AskUserQuestion` schema first, then retry. NEVER skip interactive setup because of a tool fetch issue — resolve tool availability, then ask the questions.
 
 **Adaptive question selection rules:**
 - No input at all → ask all 4 questions
@@ -39,7 +39,7 @@ Depth: standard
 - Scope + goal provided but no depth → ask questions 3, 4
 - Scope + goal + depth all provided → skip setup entirely
 
-You MUST call direct prompting with the selected questions in ONE batched call:
+You MUST call `AskUserQuestion` with the selected questions in ONE batched call:
 
 | # | Header | Question | When to Ask | Options |
 |---|--------|----------|-------------|---------|
@@ -48,7 +48,7 @@ You MUST call direct prompting with the selected questions in ONE batched call:
 | 3 | `Depth` | "How deep should I analyze?" | Always | "Shallow (3 personas, 1 round)", "Standard (5 personas, 2 rounds) — recommended", "Deep (8 personas, 3 rounds)", "Custom" |
 | 4 | `Chain` | "After analysis, chain to another tool?" | If no `--chain` provided | "Debug (test hypotheses)", "Security (validate vectors)", "Fix (prioritized queue)", "Ship (pre-deploy check)", "Scenario (explore edge cases)", "No chain — report only" |
 
-**IMPORTANT:** Batch ALL selected questions into a SINGLE direct prompting call. NEVER ask one at a time — users need full context to make informed decisions together.
+**IMPORTANT:** Batch ALL selected questions into a SINGLE `AskUserQuestion` call. NEVER ask one at a time — users need full context to make informed decisions together.
 
 **Skip setup entirely when:** `Scope` + `Goal` + `Depth` all provided inline or via flags. Proceed directly to Phase 1.
 
@@ -66,7 +66,7 @@ Parse inline arguments in this order (flags take precedence over positional text
 ## Architecture
 
 ```
-$autoresearch predict
+/autoresearch:predict
   ├── Phase 1: Setup — Interactive setup gate + config validation
   ├── Phase 2: Reconnaissance — Scan codebase, build knowledge files
   ├── Phase 3: Persona Generation — Create expert personas from context
@@ -79,7 +79,7 @@ $autoresearch predict
 
 ## Phase 1: Setup — Configuration
 
-**STOP: Have you completed the Interactive Setup above?** If invoked without scope/goal/depth, you MUST complete the direct prompting call BEFORE entering this phase.
+**STOP: Have you completed the Interactive Setup above?** If invoked without scope/goal/depth, you MUST complete the `AskUserQuestion` call BEFORE entering this phase.
 
 Parse and validate configuration:
 - Resolve `--scope` globs to actual file list. If no files match, ask user to refine scope.
@@ -552,7 +552,7 @@ round	persona	findings_produced	findings_revised	challenges_issued	flip_count	st
 Map each confirmed/probable finding to a hypothesis for the debug loop:
 
 ```
-$autoresearch debug
+/autoresearch:debug
 Scope: {unique file paths from findings}
 Symptom: Swarm-predicted issues — {N} hypotheses queued
 Hypotheses:
@@ -565,7 +565,7 @@ Hypotheses:
 Filter findings where `type == "security"`. Map to STRIDE categories:
 
 ```
-$autoresearch security
+/autoresearch:security
 Scope: {files from security findings}
 Focus: Swarm-identified vectors: {comma-separated finding titles}
 ```
@@ -575,7 +575,7 @@ Focus: Swarm-identified vectors: {comma-separated finding titles}
 Sort by `severity * consensus_ratio`. Add cascade hints from dependency-map.md:
 
 ```
-$autoresearch fix
+/autoresearch:fix
 Target: {top finding title}
 Scope: {file:line from top finding}
 Cascade: {dependent files from dependency-map.md}
@@ -592,7 +592,7 @@ Convert findings to gate classifications:
 | LOW or minority | INFO — log for backlog |
 
 ```
-$autoresearch ship
+/autoresearch:ship
 Blockers: {count} from swarm analysis
 Gate: {PASS if 0 blockers, FAIL otherwise}
 ```
@@ -602,7 +602,7 @@ Gate: {PASS if 0 blockers, FAIL otherwise}
 Each confirmed finding becomes a scenario seed:
 
 ```
-$autoresearch scenario
+/autoresearch:scenario
 Scenario: {finding title} — {description}
 Domain: software
 Depth: standard
@@ -668,7 +668,7 @@ If hashes differ:
 ```
 ⚠️ Staleness Warning: Knowledge files were built from {cached_hash} but HEAD is now {current_hash}.
    Changed files: {git diff --name-only output}
-   Re-run $autoresearch predict to rebuild from current state, or use --incremental to update only changed files.
+   Re-run /autoresearch:predict to rebuild from current state, or use --incremental to update only changed files.
 ```
 
 Reports older than 30 days also receive: `⚠️ Age Warning: This report is {N} days old.`
@@ -721,19 +721,19 @@ Creates `predict/{YYMMDD}-{HHMM}-{predict-slug}/` with:
 
 ```bash
 # Predict → Debug: swarm identifies hypotheses, debug loop validates them empirically
-$autoresearch predict --scope src/api/**/*.ts --goal "reliability gaps" --chain debug
+/autoresearch:predict --scope src/api/**/*.ts --goal "reliability gaps" --chain debug
 
 # Predict → Security: swarm pre-identifies vectors, security loop runs targeted OWASP checks
-$autoresearch predict --scope src/auth/**/*.ts --goal "security vulnerabilities" --chain security
+/autoresearch:predict --scope src/auth/**/*.ts --goal "security vulnerabilities" --chain security
 Iterations: 2
 
 # Predict → Fix → Ship: full pre-deploy analysis pipeline
-$autoresearch predict --scope src/**/*.ts --depth standard --chain fix
+/autoresearch:predict --scope src/**/*.ts --depth standard --chain fix
 # Then after fix completes:
-$autoresearch ship
+/autoresearch:ship
 
 # Predict → Scenario: swarm findings seed edge case exploration
-$autoresearch predict --scope src/checkout/**/*.ts --chain scenario
+/autoresearch:predict --scope src/checkout/**/*.ts --chain scenario
 Depth: shallow
 ```
 

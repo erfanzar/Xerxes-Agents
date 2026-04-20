@@ -79,7 +79,7 @@ Phase 8 (Repeat):   → Back to Phase 1 (reads updated log)
 Complete end-to-end example:
 
 ```
-$autoresearch
+/autoresearch
 Goal: Increase test coverage from 72% to 90%
 Scope: src/**/*.ts
 Verify: npx jest --coverage 2>&1 | grep 'All files' | awk '{print $4}'
