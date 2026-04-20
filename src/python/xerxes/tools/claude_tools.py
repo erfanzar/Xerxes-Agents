@@ -638,6 +638,20 @@ class TodoWriteTool(AgentBaseFn):
         return "\n".join(lines)
 
 
+# Module-level callback for interactive question handling.
+# Set by the bridge server when a UI is available.
+_ask_user_question_callback: tp.Callable[[str], str] | None = None
+
+
+def set_ask_user_question_callback(cb: tp.Callable[[str], str] | None) -> None:
+    """Set the callback used by :class:`AskUserQuestionTool` to prompt the user.
+
+    When *cb* is ``None`` the tool falls back to its non-interactive stub.
+    """
+    global _ask_user_question_callback
+    _ask_user_question_callback = cb
+
+
 class AskUserQuestionTool(AgentBaseFn):
     """Prompt the user for input."""
 
@@ -658,6 +672,9 @@ class AskUserQuestionTool(AgentBaseFn):
         Returns:
             The user's response text.
         """
+        global _ask_user_question_callback
+        if _ask_user_question_callback is not None:
+            return _ask_user_question_callback(question)
         return f"[AskUserQuestion] {question}\n(Waiting for user response — in non-interactive mode, this returns the question itself.)"
 
 

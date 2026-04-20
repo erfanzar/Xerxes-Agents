@@ -6,6 +6,7 @@ import { Cells } from "./components/Cells.js";
 import { Composer } from "./components/Composer.js";
 import { Footer } from "./components/Footer.js";
 import { PermissionPrompt } from "./components/PermissionPrompt.js";
+import { QuestionPrompt } from "./components/QuestionPrompt.js";
 import {
   ProviderDialog,
   type ProviderStep,
@@ -56,6 +57,7 @@ export const App: React.FC<AppProps> = ({ args }) => {
   const [streaming, setStreaming] = useState(false);
   const [ready, setReady] = useState<ReadyInfo | null>(null);
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [question, setQuestion] = useState<string | null>(null);
   const [skills, setSkills] = useState<string[]>([]);
   const [stats, setStats] = useState<Stats>({
     turnCount: 0,
@@ -120,6 +122,9 @@ export const App: React.FC<AppProps> = ({ args }) => {
           toolName: event.data.tool_name,
           description: event.data.description,
         });
+        break;
+      case "question_request":
+        setQuestion(event.data.question);
         break;
       case "turn_done":
         dispatch({ type: "finalize_assistant" });
@@ -355,7 +360,15 @@ export const App: React.FC<AppProps> = ({ args }) => {
         />
       )}
       <Cells cells={cells} />
-      {permission ? (
+      {question ? (
+        <QuestionPrompt
+          question={question}
+          onResolve={(answer) => {
+            send({ method: "question_response", params: { answer } });
+            setQuestion(null);
+          }}
+        />
+      ) : permission ? (
         <PermissionPrompt
           toolName={permission.toolName}
           description={permission.description}

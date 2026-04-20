@@ -13,6 +13,7 @@ export type Request =
     }
   | { method: "query"; params: { text: string } }
   | { method: "permission_response"; params: { granted: boolean } }
+  | { method: "question_response"; params: { answer: string } }
   | { method: "slash"; params: { command: string } }
   | { method: "cancel"; params?: Record<string, never> }
   | { method: "shutdown"; params?: Record<string, never> }
@@ -59,6 +60,10 @@ export type Event =
   | {
       event: "permission_request";
       data: { tool_name: string; description: string; arguments?: unknown };
+    }
+  | {
+      event: "question_request";
+      data: { question: string };
     }
   | {
       event: "turn_done";

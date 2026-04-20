@@ -76,6 +76,7 @@ from ..streaming.events import (
 )
 from ..streaming.loop import run as run_agent_loop
 from ..tools.agent_meta_tools import set_skill_registry
+from ..tools.claude_tools import set_ask_user_question_callback
 from . import profiles
 
 
@@ -120,6 +121,10 @@ class BridgeServer:
         self._pending_skill_name: str = ""
         self._query_thread: threading.Thread | None = None
         self._permission_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._question_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+        # Wire up AskUserQuestionTool so it can block and wait for CLI input.
+        set_ask_user_question_callback(self._ask_question)
 
         self._authoring_pipeline = SkillAuthoringPipeline(
             skills_dir=self._skills_dir,
@@ -466,6 +471,34 @@ class BridgeServer:
                 return msg.get("params", {}).get("granted", False)
             except queue.Empty:
                 continue
+
+    def _ask_question(self, question: str) -> str:
+        """Emit a question_request event and block until the CLI responds.
+
+        Called by :class:`AskUserQuestionTool` when it needs interactive
+        user input.
+        """
+        self._emit("question_request", {"question": question})
+        return self._wait_for_question_response()
+
+    def _wait_for_question_response(self) -> str:
+        """Poll the question queue for a response from the CLI.
+
+        Returns the user's answer text, or a cancellation marker if the
+        query is cancelled.
+        """
+        while True:
+            if self._cancel:
+                return "[cancelled]"
+            try:
+                msg = self._question_queue.get(timeout=0.1)
+                return msg.get("params", {}).get("answer", "")
+            except queue.Empty:
+                continue
+
+    def handle_question_response(self, params: dict[str, Any]) -> None:
+        """Enqueue a question answer from the CLI."""
+        self._question_queue.put({"params": params})
 
     def handle_cancel(self) -> None:
         self._cancel = True
@@ -1182,6 +1215,8 @@ class BridgeServer:
                             self._query_thread.start()
                     elif method == "permission_response":
                         self._permission_queue.put(msg)
+                    elif method == "question_response":
+                        self.handle_question_response(params)
                     elif method == "cancel":
                         self.handle_cancel()
                     elif method == "slash":
