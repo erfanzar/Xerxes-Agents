@@ -4,6 +4,23 @@ import { MarkdownText } from "./Markdown.js";
 import { useSpinner } from "../hooks/useSpinner.js";
 import type { Cell } from "../state/cells.js";
 
+let _lastDebug = "";
+function _debugCells(cells: Cell[]) {
+  const payload = cells.map((c) => ({
+    kind: c.kind,
+    text: (c as any).text?.slice?.(0, 80) ?? "",
+    len: (c as any).text?.length ?? 0,
+    streaming: (c as any).streaming ?? false,
+  }));
+  const json = JSON.stringify(payload, null, 2);
+  if (json === _lastDebug) return;
+  _lastDebug = json;
+  try {
+    const fs = require("fs");
+    fs.writeFileSync("/tmp/xerxes-cells-debug.json", json);
+  } catch {}
+}
+
 const UserCell: React.FC<{ text: string }> = ({ text }) => (
   <Box>
     <Text bold dimColor>
@@ -171,9 +188,11 @@ function shortValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
-export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => (
-  <Box flexDirection="column">
-    {cells.map((c) => {
+export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => {
+  _debugCells(cells);
+  return (
+    <Box flexDirection="column">
+      {cells.map((c) => {
       switch (c.kind) {
         case "user":
           return <UserCell key={c.id} text={c.text} />;
@@ -210,5 +229,6 @@ export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => (
           );
       }
     })}
-  </Box>
-);
+    </Box>
+  );
+};
