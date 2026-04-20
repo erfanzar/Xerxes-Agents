@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 interface QuestionPromptProps {
@@ -14,9 +14,17 @@ export const QuestionPrompt: React.FC<QuestionPromptProps> = ({
   const [cursor, setCursor] = useState(0);
   const [submitted, setSubmitted] = useState(false);
 
+  const valueRef = useRef(value);
+  const cursorRef = useRef(cursor);
+  valueRef.current = value;
+  cursorRef.current = cursor;
+
   useInput(
     (input, key) => {
       if (submitted) return;
+
+      const curVal = valueRef.current;
+      const curCursor = cursorRef.current;
 
       if (key.escape) {
         setSubmitted(true);
@@ -26,27 +34,36 @@ export const QuestionPrompt: React.FC<QuestionPromptProps> = ({
 
       if (key.return) {
         setSubmitted(true);
-        onResolve(value);
+        onResolve(curVal);
         return;
       }
 
-      if (key.backspace || key.delete) {
-        if (cursor > 0) {
-          const before = value.slice(0, cursor - 1);
-          const after = value.slice(cursor);
-          setValue(before + after);
-          setCursor(cursor - 1);
+      if (key.backspace) {
+        if (curCursor > 0) {
+          const nextVal =
+            curVal.slice(0, curCursor - 1) + curVal.slice(curCursor);
+          setValue(nextVal);
+          setCursor(curCursor - 1);
+        }
+        return;
+      }
+
+      if (key.delete) {
+        const nextEnd = Math.min(curVal.length, curCursor + 1);
+        if (nextEnd > curCursor) {
+          const nextVal = curVal.slice(0, curCursor) + curVal.slice(nextEnd);
+          setValue(nextVal);
         }
         return;
       }
 
       if (key.leftArrow) {
-        setCursor(Math.max(0, cursor - 1));
+        setCursor(Math.max(0, curCursor - 1));
         return;
       }
 
       if (key.rightArrow) {
-        setCursor(Math.min(value.length, cursor + 1));
+        setCursor(Math.min(curVal.length, curCursor + 1));
         return;
       }
 
@@ -56,18 +73,18 @@ export const QuestionPrompt: React.FC<QuestionPromptProps> = ({
       }
 
       if (key.end) {
-        setCursor(value.length);
+        setCursor(curVal.length);
         return;
       }
 
       if (input && !key.ctrl && !key.meta) {
-        const before = value.slice(0, cursor);
-        const after = value.slice(cursor);
-        setValue(before + input + after);
-        setCursor(cursor + input.length);
+        const nextVal =
+          curVal.slice(0, curCursor) + input + curVal.slice(curCursor);
+        setValue(nextVal);
+        setCursor(curCursor + input.length);
       }
     },
-    { isActive: !submitted }
+    { isActive: !submitted },
   );
 
   if (submitted) {
