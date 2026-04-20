@@ -59,7 +59,8 @@ from typing import Any
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry
-from ..llms.registry import calc_cost, detect_provider
+from ..context.compaction_strategies import CompactionStrategy, get_compaction_strategy
+from ..llms.registry import calc_cost, detect_provider, get_context_limit
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
 from ..runtime.config_context import set_config as set_global_config
@@ -144,6 +145,10 @@ class BridgeServer:
         self._emit("error", {"message": message})
 
     def _emit_state(self) -> None:
+        model = self.config.get("model", "")
+        context_limit = get_context_limit(model)
+        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
+        remaining = max(0, context_limit - total_tokens)
         self._emit(
             "state",
             {
@@ -152,8 +157,10 @@ class BridgeServer:
                 "total_output_tokens": self.state.total_output_tokens,
                 "message_count": len(self.state.messages),
                 "tool_execution_count": len(self.state.tool_executions),
+                "context_limit": context_limit,
+                "remaining_context": remaining,
                 "cost_usd": calc_cost(
-                    self.config.get("model", ""),
+                    model,
                     self.state.total_input_tokens,
                     self.state.total_output_tokens,
                 ),
@@ -355,6 +362,9 @@ class BridgeServer:
         self._suppress_buf.clear()
         self._pending_tool_inputs = None
 
+        # Auto-compact conversation history when near context limit.
+        self._maybe_compact_context()
+
         self._authoring_pipeline.begin_turn(
             agent_id="default",
             user_prompt=text,
@@ -462,6 +472,46 @@ class BridgeServer:
 
         self._emit("query_done", {})
         self._emit_state()
+
+    def _maybe_compact_context(self) -> None:
+        """Compact conversation history when approaching the context limit.
+
+        Uses a sliding-window strategy to drop oldest messages (except system
+        and the most recent 6) when total tokens exceed 75 % of the model's
+        context window.
+        """
+        model = self.config.get("model", "")
+        if not model:
+            return
+        context_limit = get_context_limit(model)
+        if context_limit <= 0:
+            return
+        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
+        threshold = int(context_limit * 0.75)
+        if total_tokens < threshold:
+            return
+        try:
+            target = int(context_limit * 0.4)
+            strategy = get_compaction_strategy(
+                CompactionStrategy.SLIDING_WINDOW,
+                target_tokens=target,
+                model=model,
+            )
+            original_count = len(self.state.messages)
+            self.state.messages = strategy.compact(self.state.messages)
+            compacted_count = len(self.state.messages)
+            if compacted_count < original_count:
+                self._emit(
+                    "slash_result",
+                    {
+                        "output": (
+                            f"[Auto-compact] Context at {total_tokens:,}/{context_limit:,} tokens. "
+                            f"Trimmed history from {original_count} → {compacted_count} messages."
+                        ),
+                    },
+                )
+        except Exception:
+            logger.warning("Auto-compaction failed", exc_info=True)
 
     def _wait_for_permission(self) -> bool:
         """Wait for a permission_response from the main stdin loop.

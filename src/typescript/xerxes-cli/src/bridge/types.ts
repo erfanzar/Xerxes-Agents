@@ -77,6 +77,8 @@ export type Event =
         turn_count: number;
         total_input_tokens: number;
         total_output_tokens: number;
+        context_limit?: number;
+        remaining_context?: number;
         cost_usd?: number;
       };
     }
