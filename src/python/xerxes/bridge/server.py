@@ -556,7 +556,7 @@ class BridgeServer:
                         "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
                     },
                 ],
-                max_tokens=1024,
+                max_tokens=8192,
                 temperature=0.2,
             )
 
@@ -878,7 +878,7 @@ class BridgeServer:
                         "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
                     },
                 ],
-                max_tokens=1024,
+                max_tokens=8192,
                 temperature=0.2,
             )
 
