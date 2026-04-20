@@ -152,14 +152,12 @@ export const Composer: React.FC<ComposerProps> = ({
           if (nextCursor === prev.cursor) {
             // Some terminals send key.delete for Backspace. When the cursor
             // is at the end of the text, forward-delete is a no-op — fall
-            // back to backspace behaviour in that case.
-            if (prev.cursor === 0) return prev;
-            const backCursor = deleteWord
-              ? findPreviousWordStart(prev.value, prev.cursor)
-              : prev.cursor - 1;
+            // back to backspace behaviour, but only for plain Delete (not
+            // Ctrl+Delete which should simply no-op at end-of-line).
+            if (prev.cursor === 0 || deleteWord) return prev;
             return {
-              value: prev.value.slice(0, backCursor) + prev.value.slice(prev.cursor),
-              cursor: backCursor,
+              value: prev.value.slice(0, prev.cursor - 1) + prev.value.slice(prev.cursor),
+              cursor: prev.cursor - 1,
               slashIndex: 0,
             };
           }
