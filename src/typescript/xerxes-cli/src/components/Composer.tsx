@@ -146,15 +146,24 @@ export const Composer: React.FC<ComposerProps> = ({
       if (key.delete) {
         const deleteWord = key.ctrl || key.meta;
         setState((prev) => {
-          const nextCursor = deleteWord
-            ? findNextWordEnd(prev.value, prev.cursor)
-            : Math.min(prev.value.length, prev.cursor + 1);
+          if (deleteWord) {
+            // On macOS (and some terminals) the physical Backspace key sends
+            // \x7f, which Ink reports as key.delete. When modifiers are held
+            // the user expects backward word deletion — same as key.backspace.
+            if (prev.cursor === 0) return prev;
+            const nextCursor = findPreviousWordStart(prev.value, prev.cursor);
+            return {
+              value: prev.value.slice(0, nextCursor) + prev.value.slice(prev.cursor),
+              cursor: nextCursor,
+              slashIndex: 0,
+            };
+          }
+          const nextCursor = Math.min(prev.value.length, prev.cursor + 1);
           if (nextCursor === prev.cursor) {
             // Some terminals send key.delete for Backspace. When the cursor
             // is at the end of the text, forward-delete is a no-op — fall
-            // back to backspace behaviour, but only for plain Delete (not
-            // Ctrl+Delete which should simply no-op at end-of-line).
-            if (prev.cursor === 0 || deleteWord) return prev;
+            // back to backspace behaviour.
+            if (prev.cursor === 0) return prev;
             return {
               value: prev.value.slice(0, prev.cursor - 1) + prev.value.slice(prev.cursor),
               cursor: prev.cursor - 1,
