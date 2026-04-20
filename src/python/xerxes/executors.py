@@ -547,6 +547,7 @@ class FunctionExecutor:
             try:
                 func, agent_id = self._resolve_function_and_agent(call, agent, _audit, audit_turn_id)
                 args = self._normalize_call_arguments(call)
+                args = self._coerce_argument_types(args, func)
                 args = self._resolve_argument_templates(args)
 
                 try:
@@ -851,6 +852,80 @@ class FunctionExecutor:
                 except json.JSONDecodeError:
                     return {}
         return {}
+
+    @staticmethod
+    def _coerce_argument_types(args: dict, func: tp.Callable) -> dict:
+        """Coerce string argument values to the types expected by the function signature.
+
+        JSON parsing from LLM tool calls often leaves numeric values as strings.
+        This method inspects the function signature and casts ``str`` values to
+        ``int``, ``float``, or ``bool`` when the parameter annotation indicates
+        the target type.
+
+        Args:
+            args: Parsed argument dictionary (may contain string values).
+            func: The callable whose signature should be used for coercion.
+
+        Returns:
+            A new dictionary with coerced values where possible.
+        """
+        import typing
+
+        coerced = dict(args)
+        try:
+            sig = inspect.signature(func)
+        except (ValueError, TypeError):
+            return coerced
+
+        for param_name, param in sig.parameters.items():
+            if param_name not in coerced:
+                continue
+            value = coerced[param_name]
+            if not isinstance(value, str):
+                continue
+            ann = param.annotation
+            if ann is inspect.Parameter.empty:
+                continue
+            # Unwrap Optional[X] and Union types (typing.Union and types.UnionType)
+            origin = getattr(ann, "__origin__", None)
+            args_tuple = getattr(ann, "__args__", ())
+            is_union = origin is typing.Union or type(ann).__name__ == "UnionType"
+            if is_union and any(a is type(None) for a in args_tuple):
+                ann = next(a for a in args_tuple if a is not type(None))
+                origin = getattr(ann, "__origin__", None)
+                args_tuple = getattr(ann, "__args__", ())
+            # Handle list[X] → try json.loads first
+            if origin is list and len(args_tuple) == 1:
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        coerced[param_name] = parsed
+                except Exception:
+                    pass
+                continue
+            # Handle dict[X, Y] → try json.loads
+            if origin is dict and len(args_tuple) == 2:
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, dict):
+                        coerced[param_name] = parsed
+                except Exception:
+                    pass
+                continue
+            # Simple type coercion
+            if ann is int:
+                try:
+                    coerced[param_name] = int(value)
+                except ValueError:
+                    pass
+            elif ann is float:
+                try:
+                    coerced[param_name] = float(value)
+                except ValueError:
+                    pass
+            elif ann is bool:
+                coerced[param_name] = value.lower() in ("true", "1", "yes", "on")
+        return coerced
 
     def _resolve_argument_templates(self, arguments: dict) -> dict:
         """Resolve template references like ``{call_id.attr}`` within argument values.
