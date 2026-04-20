@@ -97,7 +97,7 @@ export const SlashMenu: React.FC<Props> = ({
         const actualIndex = start + i;
         const selected = actualIndex === selectedIndex;
         return (
-          <Box key={cmd.name}>
+          <Box key={`${actualIndex}-${cmd.name}`}>
             <Text color={selected ? "magenta" : undefined} bold={selected}>
               {selected ? "› " : "  "}/{cmd.name}
             </Text>
