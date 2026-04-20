@@ -284,20 +284,9 @@ class BridgeServer:
                 for k, v in profile.get("sampling", {}).items():
                     self.config[k] = v
 
-                if base_url and model:
-                    try:
-                        available = profiles.fetch_models(base_url, api_key)
-                    except Exception:
-                        available = []
-                    if available and model not in available:
-                        model = available[0]
-                        profiles.save_profile(
-                            name=profile["name"],
-                            base_url=base_url,
-                            api_key=api_key,
-                            model=model,
-                            provider=profile.get("provider", ""),
-                        )
+                # Skip model list validation during init to avoid blocking on
+                # slow/unreachable providers (SSL handshake can take 3-10s).
+                # Trust the user-configured model; validation happens on query.
 
         has_profile = bool(model)
         self.config["model"] = model if model else ""

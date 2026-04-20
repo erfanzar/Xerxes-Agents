@@ -187,7 +187,7 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
-        resp = httpx.get(url, headers=headers, timeout=10.0)
+        resp = httpx.get(url, headers=headers, timeout=3.0)
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404 and _guess_provider(base_url) in _PROVIDERS_WITHOUT_MODELS:
