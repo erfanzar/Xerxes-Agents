@@ -59,7 +59,6 @@ from typing import Any
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry
-from ..context.compaction_strategies import CompactionStrategy, get_compaction_strategy
 from ..llms.registry import calc_cost, detect_provider, get_context_limit
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
@@ -476,9 +475,10 @@ class BridgeServer:
     def _maybe_compact_context(self) -> None:
         """Compact conversation history when approaching the context limit.
 
-        Uses a sliding-window strategy to drop oldest messages (except system
-        and the most recent 6) when total tokens exceed 75 % of the model's
-        context window.
+        Uses LLM-based summarization (same as /compact) to intelligently
+        summarize older messages while preserving the most recent 2 turns.
+        This keeps critical information (decisions, files, code, errors)
+        instead of blindly dropping messages.
         """
         model = self.config.get("model", "")
         if not model:
@@ -490,28 +490,103 @@ class BridgeServer:
         threshold = int(context_limit * 0.75)
         if total_tokens < threshold:
             return
+
+        messages = self.state.messages
+        if len(messages) < 4:
+            return
+
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        conv_msgs = [m for m in messages if m.get("role") != "system"]
+        if len(conv_msgs) < 3:
+            return
+
+        preserve_recent = 2
+        older = conv_msgs[:-preserve_recent]
+        recent = conv_msgs[-preserve_recent:]
+
+        conv_text = []
+        for msg in older:
+            role = msg.get("role", "unknown").upper()
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict):
+                        parts.append(p.get("text", str(p)))
+                    else:
+                        parts.append(str(p))
+                content = "\n".join(parts)
+            if len(content) > 800:
+                content = content[:800] + "..."
+            conv_text.append(f"[{role}]: {content}")
+
+        conversation = "\n\n".join(conv_text)
+
         try:
-            target = int(context_limit * 0.4)
-            strategy = get_compaction_strategy(
-                CompactionStrategy.SLIDING_WINDOW,
-                target_tokens=target,
-                model=model,
+            from openai import OpenAI
+
+            from ..llms.registry import PROVIDERS, get_api_key
+
+            provider_name = detect_provider(model)
+            api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
+            prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
+            base_url = (
+                self.config.get("base_url")
+                or self.config.get("custom_base_url")
+                or (prov.base_url if prov else None)
+                or "https://api.openai.com/v1"
             )
-            original_count = len(self.state.messages)
-            self.state.messages = strategy.compact(self.state.messages)
-            compacted_count = len(self.state.messages)
-            if compacted_count < original_count:
-                self._emit(
-                    "slash_result",
+            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
                     {
-                        "output": (
-                            f"[Auto-compact] Context at {total_tokens:,}/{context_limit:,} tokens. "
-                            f"Trimmed history from {original_count} → {compacted_count} messages."
+                        "role": "system",
+                        "content": (
+                            "You are a conversation summarizer. Summarize the following conversation "
+                            "into a concise summary that preserves all key information: decisions made, "
+                            "files discussed, code changes, tool results, errors encountered and their "
+                            "solutions, and any important context. Be factual and specific. "
+                            "Output only the summary, no preamble."
                         ),
                     },
-                )
+                    {
+                        "role": "user",
+                        "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
+                    },
+                ],
+                max_tokens=1024,
+                temperature=0.2,
+            )
+
+            summary = response.choices[0].message.content or ""
+            if not summary.strip():
+                return
+
         except Exception:
-            logger.warning("Auto-compaction failed", exc_info=True)
+            logger.warning("Auto-compaction LLM call failed", exc_info=True)
+            return
+
+        original_count = len(self.state.messages)
+        self.state.messages = [
+            *system_msgs,
+            {
+                "role": "user",
+                "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}",
+            },
+            *recent,
+        ]
+        new_count = len(self.state.messages)
+        self._emit(
+            "slash_result",
+            {
+                "output": (
+                    f"[Auto-compact] Context at {total_tokens:,}/{context_limit:,} tokens. "
+                    f"Summarized {len(older)} messages → kept {new_count} messages."
+                ),
+            },
+        )
 
     def _wait_for_permission(self) -> bool:
         """Wait for a permission_response from the main stdin loop.
