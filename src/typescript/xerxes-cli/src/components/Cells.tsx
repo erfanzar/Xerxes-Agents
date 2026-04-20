@@ -14,15 +14,17 @@ const UserCell: React.FC<{ text: string }> = ({ text }) => (
 );
 
 function normalizeText(text: string): string {
-  // Trim trailing whitespace, collapse 2+ consecutive newlines to 1,
+  // Trim trailing whitespace, fully collapse consecutive newlines to 1,
   // trim each line's trailing spaces, and strip leading/trailing empty lines.
-  return text
+  let result = text
     .split("\n")
     .map((line) => line.trimEnd())
-    .join("\n")
-    .replace(/\n{2,}/g, "\n")
-    .trim()
-    .replace(/^\n+/, "");
+    .join("\n");
+  // Iteratively collapse so \n\n\n → \n (regex /g alone leaves overlaps).
+  while (result.includes("\n\n")) {
+    result = result.replaceAll("\n\n", "\n");
+  }
+  return result.trim().replace(/^\n+/, "");
 }
 
 const AssistantCell: React.FC<{ text: string; streaming: boolean }> = ({
