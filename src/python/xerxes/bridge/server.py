@@ -303,6 +303,12 @@ class BridgeServer:
         boot = bootstrap(model=self.config["model"])
         self.system_prompt = boot.system_prompt
 
+        # Auto-inject the xerxes-agent skill into the system prompt so the model
+        # always knows it can (and should) spawn parallel sub-agents.
+        agent_skill = self._skill_registry.get("xerxes-agent")
+        if agent_skill is not None:
+            self.system_prompt += "\n\n" + agent_skill.to_prompt_section()
+
         registry = populate_registry()
         self.tool_executor = build_tool_executor(registry=registry)
         self.tool_schemas = registry.tool_schemas()
