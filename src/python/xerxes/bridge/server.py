@@ -105,10 +105,16 @@ class BridgeServer:
         self._skill_registry = SkillRegistry()
         self._skills_dir = xerxes_subdir("skills")
         self._skills_dir.mkdir(parents=True, exist_ok=True)
-        self._skill_registry.discover(
-            str(self._skills_dir),
-            str(Path.cwd() / "skills"),
-        )
+
+        # Discover bundled (built-in) skills shipped with the package
+        import xerxes as _xerxes_pkg
+
+        _bundled_skills_dir = Path(_xerxes_pkg.__file__).parent / "skills"
+        discover_dirs = [str(self._skills_dir), str(Path.cwd() / "skills")]
+        if _bundled_skills_dir.is_dir():
+            discover_dirs.insert(0, str(_bundled_skills_dir))
+
+        self._skill_registry.discover(*discover_dirs)
         set_skill_registry(self._skill_registry)
 
         self._pending_skill_name: str = ""
