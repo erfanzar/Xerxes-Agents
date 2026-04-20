@@ -1,0 +1,30 @@
+---
+name: go-to-documents-projects-spectrax
+description: "go to Documents Projects Spectrax"
+version: 0.1.0
+tags: [ListDir, ReadFile]
+required_tools: [ListDir, ReadFile]
+author: hermes-skill-authoring
+---
+# When to use
+
+Apply this skill for tasks similar to: *go to Documents Projects Spectrax*
+
+# Procedure
+
+1. **ListDir** — directory_path=/Users/erfan/Documents/Proj...
+2. **ReadFile** — file_path=/Users/erfan/Documents/Proj...
+3. **ListDir** — directory_path=/Users/erfan/Documents/Proj...
+4. **ReadFile** — file_path=/Users/erfan/Documents/Proj...
+5. **ListDir** — directory_path=/Users/erfan/Documents/Proj...
+6. **ListDir** — directory_path=/Users/erfan/Documents/Proj...
+7. **ListDir** — directory_path=/Users/erfan/Documents/Proj...
+8. **ReadFile** — file_path=/Users/erfan/Documents/Proj...
+9. **ReadFile** — file_path=/Users/erfan/Documents/Proj..., max_chars=3000
+10. **ReadFile** — file_path=/Users/erfan/Documents/Proj...
+
+# Verification
+
+After running the procedure, the agent should have invoked these tools in order: `ListDir>ReadFile>ListDir>ReadFile>ListDir>ListDir>ListDir>ReadFile>ReadFile>ReadFile`.
+Total successful calls expected: **10**.
+Reference final response (truncated): *## 📂 Spectrax — Project Overview  **A JAX-only neural network library** sitting at an interesting intersection: PyTorch ergonomics + Flax-NNX graph semantics.  *

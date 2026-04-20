@@ -7,8 +7,7 @@ license: MIT
 metadata:
   tags: [xerxes, multi-agent, delegation, spawning, subagent, cortex, parallel]
   homepage: https://github.com/erfanzar/Xerxes-Agents
-  related_skills: []
-  builtin: true
+  related_skills: [claude-code, codex, deepscan]
 ---
 
 # Xerxes Multi-Agent Delegation
