@@ -173,60 +173,40 @@ function shortValue(v: unknown): string {
 
 export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => (
   <Box flexDirection="column">
-    {cells.map((c, index) => {
+    {cells.map((c) => {
       switch (c.kind) {
         case "user":
-          return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <UserCell text={c.text} />
-            </Box>
-          );
+          return <UserCell key={c.id} text={c.text} />;
         case "assistant":
           return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <AssistantCell text={c.text} streaming={c.streaming} />
-            </Box>
+            <AssistantCell key={c.id} text={c.text} streaming={c.streaming} />
           );
         case "thinking":
-          return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <ThinkingCell text={c.text} />
-            </Box>
-          );
+          return <ThinkingCell key={c.id} text={c.text} />;
         case "tool":
           return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <ToolCell
-                name={c.name}
-                args={c.args}
-                result={c.result}
-                durationMs={c.durationMs}
-                permitted={c.permitted}
-              />
-            </Box>
+            <ToolCell
+              key={c.id}
+              name={c.name}
+              args={c.args}
+              result={c.result}
+              durationMs={c.durationMs}
+              permitted={c.permitted}
+            />
           );
         case "system":
-          return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <SystemCell text={c.text} />
-            </Box>
-          );
+          return <SystemCell key={c.id} text={c.text} />;
         case "error":
-          return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <ErrorCell text={c.text} />
-            </Box>
-          );
+          return <ErrorCell key={c.id} text={c.text} />;
         case "subagent":
           return (
-            <Box key={c.id} marginTop={index > 0 ? 1 : 0}>
-              <SubAgentCell
-                name={c.name}
-                text={c.text}
-                streaming={c.streaming}
-                status={c.status}
-              />
-            </Box>
+            <SubAgentCell
+              key={c.id}
+              name={c.name}
+              text={c.text}
+              streaming={c.streaming}
+              status={c.status}
+            />
           );
       }
     })}
