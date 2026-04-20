@@ -4,23 +4,6 @@ import { MarkdownText } from "./Markdown.js";
 import { useSpinner } from "../hooks/useSpinner.js";
 import type { Cell } from "../state/cells.js";
 
-let _lastDebug = "";
-function _debugCells(cells: Cell[]) {
-  const payload = cells.map((c) => ({
-    kind: c.kind,
-    text: (c as any).text?.slice?.(0, 80) ?? "",
-    len: (c as any).text?.length ?? 0,
-    streaming: (c as any).streaming ?? false,
-  }));
-  const json = JSON.stringify(payload, null, 2);
-  if (json === _lastDebug) return;
-  _lastDebug = json;
-  try {
-    const fs = require("fs");
-    fs.writeFileSync("/tmp/xerxes-cells-debug.json", json);
-  } catch {}
-}
-
 const UserCell: React.FC<{ text: string }> = ({ text }) => (
   <Box>
     <Text bold dimColor>
@@ -80,10 +63,9 @@ const ToolCell: React.FC<{
   const argPreview = formatArgs(args);
   const resultLines = result ? result.split("\n").slice(0, 5) : [];
   const truncated = result ? result.split("\n").length > 5 : false;
-  
-  // Show permission hint when tool is pending and will be denied
+
   const showPermissionHint = result === undefined && permitted === false;
-  
+
   return (
     <Box flexDirection="column">
       <Box>
@@ -188,47 +170,53 @@ function shortValue(v: unknown): string {
   return JSON.stringify(v);
 }
 
-export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => {
-  _debugCells(cells);
-  return (
-    <Box flexDirection="column">
-      {cells.map((c) => {
-      switch (c.kind) {
-        case "user":
-          return <UserCell key={c.id} text={c.text} />;
-        case "assistant":
-          return (
-            <AssistantCell key={c.id} text={c.text} streaming={c.streaming} />
-          );
-        case "thinking":
-          return <ThinkingCell key={c.id} text={c.text} />;
-        case "tool":
-          return (
-            <ToolCell
-              key={c.id}
-              name={c.name}
-              args={c.args}
-              result={c.result}
-              durationMs={c.durationMs}
-              permitted={c.permitted}
-            />
-          );
-        case "system":
-          return <SystemCell key={c.id} text={c.text} />;
-        case "error":
-          return <ErrorCell key={c.id} text={c.text} />;
-        case "subagent":
-          return (
-            <SubAgentCell
-              key={c.id}
-              name={c.name}
-              text={c.text}
-              streaming={c.streaming}
-              status={c.status}
-            />
-          );
-      }
+/** Return true for cell kinds that should have a blank line before them. */
+function needsSpacing(kind: Cell["kind"]): boolean {
+  return kind !== "tool" && kind !== "subagent";
+}
+
+export const Cells: React.FC<{ cells: Cell[] }> = ({ cells }) => (
+  <Box flexDirection="column">
+    {cells.map((c, index) => {
+      const spacing = index > 0 && needsSpacing(c.kind) ? 1 : 0;
+      const inner = (() => {
+        switch (c.kind) {
+          case "user":
+            return <UserCell text={c.text} />;
+          case "assistant":
+            return <AssistantCell text={c.text} streaming={c.streaming} />;
+          case "thinking":
+            return <ThinkingCell text={c.text} />;
+          case "tool":
+            return (
+              <ToolCell
+                name={c.name}
+                args={c.args}
+                result={c.result}
+                durationMs={c.durationMs}
+                permitted={c.permitted}
+              />
+            );
+          case "system":
+            return <SystemCell text={c.text} />;
+          case "error":
+            return <ErrorCell text={c.text} />;
+          case "subagent":
+            return (
+              <SubAgentCell
+                name={c.name}
+                text={c.text}
+                streaming={c.streaming}
+                status={c.status}
+              />
+            );
+        }
+      })();
+      return (
+        <Box key={c.id} marginTop={spacing}>
+          {inner}
+        </Box>
+      );
     })}
-    </Box>
-  );
-};
+  </Box>
+);
