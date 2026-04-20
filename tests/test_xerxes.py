@@ -532,10 +532,9 @@ class TestXerxesFunctionExtraction:
         xerxes = Xerxes()
         tool = _make_tool_fn("my_tool")
         agent = Agent(id="a1", model="fake", functions=[tool])
-        tc = ToolCall(
-            id="t1",
-            function=FunctionCall(name="my_tool", arguments='{"broken"'),
-        )
+        # Bypass Pydantic validation to simulate malformed JSON from a provider
+        fc = FunctionCall.model_construct(name="my_tool", arguments='{"broken"')
+        tc = ToolCall.model_construct(id="t1", function=fc)
         calls = xerxes._extract_function_calls("", agent, tool_calls=[tc])
 
         assert len(calls) == 1
