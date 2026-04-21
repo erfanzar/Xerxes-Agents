@@ -254,7 +254,7 @@ export const Composer: React.FC<ComposerProps> = ({
     <Box marginTop={1} flexDirection="column">
       <Box>
         <Text bold color={disabled ? "yellow" : "magenta"}>
-          {disabled ? "… " : "› "}
+          {disabled ? "… " : "> "}
         </Text>
         {showPlaceholder ? (
           <Text dimColor>{placeholder}</Text>
