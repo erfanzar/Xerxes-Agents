@@ -285,3 +285,20 @@ class ConfigurationError(XerxesError):
         """
         super().__init__(f"Configuration {config_key}: {message}", details)
         self.config_key = config_key
+
+
+class AgentSpecError(XerxesError):
+    """Agent specification errors.
+
+    Raised when an agent definition file (YAML or Markdown) is invalid,
+    missing required fields, or cannot be parsed.
+    """
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        """Initialize AgentSpecError.
+
+        Args:
+            message: The error message.
+            details: Optional dictionary with additional error details.
+        """
+        super().__init__(message, details)

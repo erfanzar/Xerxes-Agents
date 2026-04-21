@@ -502,9 +502,26 @@ class Xerxes:
             output_parts = []
             eff_tool_executor = tool_executor
             eff_tool_schemas = registry.tool_schemas()
+
+            # Build effective allowed set from whitelist / allowed_tools / exclude_tools
+            all_names = {s.get("name") for s in eff_tool_schemas}
+            allowed: set[str] = set()
+
             whitelist = config.get("_tools_whitelist")
+            allowed_tools = config.get("_tools_allowed")
+            excluded_tools = config.get("_tools_excluded") or []
+
             if whitelist:
                 allowed = set(whitelist)
+            elif allowed_tools:
+                allowed = set(allowed_tools)
+            else:
+                allowed = all_names.copy()
+
+            if excluded_tools:
+                allowed -= set(excluded_tools)
+
+            if allowed != all_names:
                 eff_tool_schemas = [s for s in eff_tool_schemas if s.get("name") in allowed]
 
                 def _filtered_executor(tool_name: str, tool_input: dict[str, Any]) -> str:

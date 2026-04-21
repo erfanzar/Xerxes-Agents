@@ -283,6 +283,9 @@ class SubAgentManager:
                 eff_system = agent_def.system_prompt.rstrip() + "\n\n" + system_prompt
             if not isolation and agent_def.isolation:
                 isolation = agent_def.isolation
+            # Tool filtering: compute effective allow / exclude list
+            eff_config["_tools_allowed"] = agent_def.allowed_tools
+            eff_config["_tools_excluded"] = agent_def.exclude_tools
             if agent_def.tools:
                 eff_config["_tools_whitelist"] = agent_def.tools
 

@@ -1,0 +1,33 @@
+version: 1
+agent:
+  name: default
+  system_prompt_path: ./system.md
+  system_prompt_args:
+    ROLE_ADDITIONAL: ""
+  tools:
+    - ReadFile
+    - WriteFile
+    - StrReplaceFile
+    - Glob
+    - Grep
+    - Shell
+    - GoogleSearch
+    - DuckDuckGoSearch
+    - AgentTool
+    - SpawnAgents
+    - TaskListTool
+    - TaskStopTool
+    - AskUserQuestionTool
+    - SkillTool
+    - TodoWriteTool
+    - ToolSearchTool
+  subagents:
+    coder:
+      path: ./coder.yaml
+      description: "Good at general software engineering tasks."
+    researcher:
+      path: ./researcher.yaml
+      description: "Fast codebase exploration with prompt-enforced read-only behavior."
+    planner:
+      path: ./planner.yaml
+      description: "Read-only implementation planning and architecture design."

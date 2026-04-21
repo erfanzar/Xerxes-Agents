@@ -21,6 +21,7 @@ provides:
 - **File-based definitions**: Load agent definitions from ``.md`` files
   with YAML frontmatter, supporting user-level (``~/.xerxes/agents/``)
   and project-level (``.xerxes/agents/``) overrides.
+- **YAML agent specs**: ``agent.yaml`` files with inheritance (Kimi-style).
 - **Registry**: A unified lookup for all agent definitions.
 
 File format::
@@ -32,6 +33,17 @@ File format::
     ---
 
     System prompt body goes here...
+
+Or as a YAML spec (``agent.yaml``)::
+
+    version: 1
+    agent:
+      name: coder
+      extend: default
+      system_prompt_path: ./system.md
+      allowed_tools:
+        - ReadFile
+        - WriteFile
 
 Usage::
 
@@ -50,9 +62,12 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -65,7 +80,9 @@ class AgentDefinition:
         system_prompt: Extra instructions prepended to the base system prompt.
         model: Model override. Empty string means inherit from parent.
         tools: Tool name whitelist. Empty list means all tools allowed.
-        source: Origin — ``"built-in"``, ``"user"``, or ``"project"``.
+        allowed_tools: Like ``tools`` but intended for additive filtering.
+        exclude_tools: Tool names to explicitly remove from the available set.
+        source: Origin — ``"built-in"``, ``"user"``, ``"project"``, or ``"yaml"``.
         max_depth: Maximum nesting depth for sub-agent spawning.
         isolation: Default isolation mode (``""`` or ``"worktree"``).
     """
@@ -75,12 +92,52 @@ class AgentDefinition:
     system_prompt: str = ""
     model: str = ""
     tools: list[str] = field(default_factory=list)
+    allowed_tools: list[str] | None = None
+    exclude_tools: list[str] = field(default_factory=list)
     source: str = "built-in"
     max_depth: int = 5
     isolation: str = ""
 
 
-BUILTIN_AGENTS: dict[str, AgentDefinition] = {
+# Directory where built-in YAML agent specs live.
+BUILTIN_AGENTS_DIR = Path(__file__).parent / "default"
+
+
+def _load_builtin_agents() -> dict[str, AgentDefinition]:
+    """Load built-in agents from YAML specs if available, else fall back to hard-coded."""
+    defs: dict[str, AgentDefinition] = {}
+    if BUILTIN_AGENTS_DIR.is_dir():
+        for yaml_path in sorted(BUILTIN_AGENTS_DIR.glob("*.yaml")):
+            try:
+                from .agentspec import load_agent_spec
+
+                spec = load_agent_spec(yaml_path)
+                defs[spec.name] = AgentDefinition(
+                    name=spec.name,
+                    description=spec.when_to_use,
+                    system_prompt=spec.system_prompt,
+                    model=spec.model or "",
+                    tools=spec.tools,
+                    allowed_tools=spec.allowed_tools,
+                    exclude_tools=spec.exclude_tools,
+                    source="built-in",
+                    max_depth=spec.max_depth,
+                    isolation=spec.isolation,
+                )
+            except Exception as exc:
+                logger.debug("Failed to load built-in agent spec %s: %s", yaml_path, exc)
+
+    # Fallback hard-coded definitions if YAML loading fails or dir is missing
+    if not defs:
+        defs = _HARDCODED_BUILTIN_AGENTS
+    return defs
+
+
+# Module-level constant: populated once at import time.
+BUILTIN_AGENTS: dict[str, AgentDefinition] = {}
+
+# Hard-coded fallback definitions (used when YAML specs are not present).
+_HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
     "general-purpose": AgentDefinition(
         name="general-purpose",
         description=(
@@ -113,7 +170,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Code quality and maintainability\n"
             "Be concise and specific. Categorize findings as: Critical | Warning | Suggestion.\n"
         ),
-        tools=["Read", "ReadFile", "Glob", "Grep", "ListDir"],
+        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir"],
         source="built-in",
     ),
     "researcher": AgentDefinition(
@@ -126,7 +183,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Cite specific file paths and line numbers\n"
             "- Be concise and focused\n"
         ),
-        tools=["Read", "ReadFile", "Glob", "Grep", "ListDir", "GoogleSearch"],
+        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir", "GoogleSearch"],
         source="built-in",
     ),
     "tester": AgentDefinition(
@@ -151,7 +208,7 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Consider trade-offs and alternatives\n"
             "- Produce structured plans, not code\n"
         ),
-        tools=["Read", "ReadFile", "Glob", "Grep", "ListDir"],
+        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir"],
         source="built-in",
     ),
     "data-analyst": AgentDefinition(
@@ -167,6 +224,9 @@ BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         source="built-in",
     ),
 }
+
+# Populate built-in agents from YAML specs (falls back to hard-coded above).
+BUILTIN_AGENTS = _load_builtin_agents()
 
 
 def _parse_agent_md(path: Path, source: str = "user") -> AgentDefinition:
@@ -256,8 +316,8 @@ def load_agent_definitions(
     Search paths:
 
     - Built-in definitions (always loaded first).
-    - ``~/.xerxes/agents/*.md`` (user-level, overrides built-ins).
-    - ``.xerxes/agents/*.md`` (project-level, overrides user).
+    - ``~/.xerxes/agents/*.yaml`` and ``*.md`` (user-level, overrides built-ins).
+    - ``.xerxes/agents/*.yaml`` and ``*.md`` (project-level, overrides user).
 
     Args:
         user_dir: Override user-level directory.
@@ -275,6 +335,13 @@ def load_agent_definitions(
     else:
         udir = user_dir
     if udir.is_dir():
+        for p in sorted(udir.glob("*.yaml")):
+            try:
+                d = _parse_agent_yaml(p, source="user")
+                if d:
+                    defs[d.name] = d
+            except Exception:
+                pass
         for p in sorted(udir.glob("*.md")):
             try:
                 d = _parse_agent_md(p, source="user")
@@ -284,6 +351,13 @@ def load_agent_definitions(
 
     pdir = project_dir or Path.cwd() / ".xerxes" / "agents"
     if pdir.is_dir():
+        for p in sorted(pdir.glob("*.yaml")):
+            try:
+                d = _parse_agent_yaml(p, source="project")
+                if d:
+                    defs[d.name] = d
+            except Exception:
+                pass
         for p in sorted(pdir.glob("*.md")):
             try:
                 d = _parse_agent_md(p, source="project")
@@ -292,6 +366,25 @@ def load_agent_definitions(
                 pass
 
     return defs
+
+
+def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | None:
+    """Parse an ``agent.yaml`` file into an :class:`AgentDefinition`."""
+    from .agentspec import load_agent_spec
+
+    spec = load_agent_spec(path)
+    return AgentDefinition(
+        name=spec.name,
+        description=spec.when_to_use,
+        system_prompt=spec.system_prompt,
+        model=spec.model or "",
+        tools=spec.tools,
+        allowed_tools=spec.allowed_tools,
+        exclude_tools=spec.exclude_tools,
+        source=source,
+        max_depth=spec.max_depth,
+        isolation=spec.isolation,
+    )
 
 
 def get_agent_definition(name: str) -> AgentDefinition | None:
