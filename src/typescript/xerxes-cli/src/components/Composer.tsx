@@ -129,7 +129,7 @@ export const Composer: React.FC<ComposerProps> = ({
         return;
       }
       if (key.backspace) {
-        const deleteWord = key.ctrl || key.meta;
+        const deleteWord = key.ctrl || key.meta || key.shift;
         setState((prev) => {
           if (prev.cursor === 0) return prev;
           const nextCursor = deleteWord
@@ -144,7 +144,7 @@ export const Composer: React.FC<ComposerProps> = ({
         return;
       }
       if (key.delete) {
-        const deleteWord = key.ctrl || key.meta;
+        const deleteWord = key.ctrl || key.meta || key.shift;
         setState((prev) => {
           if (deleteWord) {
             // On macOS (and some terminals) the physical Backspace key sends
