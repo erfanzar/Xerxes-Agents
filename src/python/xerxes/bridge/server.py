@@ -1285,7 +1285,8 @@ class BridgeServer:
 
         skill = self._skill_registry.get(cmd)
         if skill:
-            self._handle_skill_invoke(cmd)
+            full_args = f"{cmd}:{args}" if args else cmd
+            self._handle_skill_invoke(full_args)
             return ""
         return f"Unknown command: /{cmd} (type /help)"
 
