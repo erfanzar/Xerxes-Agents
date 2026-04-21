@@ -4,6 +4,8 @@ import { App } from "./App.js";
 import { parseArgs } from "./utils/args.js";
 
 function main() {
+  // eslint-disable-next-line no-console
+  console.error("[xerxes-build] 2026-04-21T14:20Z");
   const args = parseArgs(process.argv.slice(2));
   if (!args) process.exit(2);
 
