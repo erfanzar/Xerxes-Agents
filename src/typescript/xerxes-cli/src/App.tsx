@@ -349,6 +349,11 @@ export const App: React.FC<AppProps> = ({ args }) => {
     }
   };
 
+  const interruptAll = () => {
+    send({ method: "cancel_all" });
+    setStreaming(false);
+  };
+
   // Global Ctrl+D exits.
   useInput((input, key) => {
     if (key.ctrl && input === "d" && !streaming) exit();
@@ -435,6 +440,7 @@ export const App: React.FC<AppProps> = ({ args }) => {
           skills={skills}
           onSubmit={submit}
           onInterrupt={interrupt}
+          onInterruptAll={interruptAll}
         />
       )}
       <Footer

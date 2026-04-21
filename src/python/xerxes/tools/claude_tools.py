@@ -268,6 +268,32 @@ def _has_ripgrep() -> bool:
 _agent_manager = None
 
 
+def _build_subagent_system_prompt(base: str = "You are a helpful AI assistant.") -> str:
+    """Prepend currently activated skills to the sub-agent system prompt.
+
+    When the user has activated skills (e.g. via ``/skill autoresearch``),
+    those skill instructions are injected into every spawned sub-agent so
+    that child agents inherit the parent's skill context.
+    """
+    from ..extensions.skills import get_active_skills
+    from ..tools.agent_meta_tools import _skill_registry
+
+    active = get_active_skills()
+    if not active or _skill_registry is None:
+        return base
+
+    sections: list[str] = []
+    for name in active:
+        skill = _skill_registry.get(name)
+        if skill is not None:
+            sections.append(skill.to_prompt_section())
+
+    if not sections:
+        return base
+
+    return "\n\n".join(sections) + "\n\n" + base
+
+
 def _get_agent_manager():
     """Get or create the global SubAgentManager."""
     global _agent_manager
@@ -328,7 +354,7 @@ class AgentTool(AgentBaseFn):
         task = mgr.spawn(
             prompt=prompt,
             config=config,
-            system_prompt="You are a helpful AI assistant.",
+            system_prompt=_build_subagent_system_prompt(),
             agent_def=agent_def,
             isolation=isolation,
             name=name,
@@ -464,7 +490,7 @@ class SpawnAgents(AgentBaseFn):
             task = mgr.spawn(
                 prompt=spec["prompt"],
                 config=eff_config,
-                system_prompt="You are a helpful AI assistant.",
+                system_prompt=_build_subagent_system_prompt(),
                 agent_def=agent_def,
                 name=spec.get("name", ""),
             )

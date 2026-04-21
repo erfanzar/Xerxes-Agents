@@ -498,6 +498,19 @@ class SubAgentManager:
             return True
         return False
 
+    def cancel_all(self) -> int:
+        """Request cancellation of *all* running or pending tasks.
+
+        Returns:
+            The number of tasks whose cancel flag was set.
+        """
+        n = 0
+        for task in self.tasks.values():
+            if task.status in ("running", "pending"):
+                task._cancel_flag = True
+                n += 1
+        return n
+
     def list_tasks(self) -> list[SubAgentTask]:
         """Return all tracked tasks."""
         return list(self.tasks.values())

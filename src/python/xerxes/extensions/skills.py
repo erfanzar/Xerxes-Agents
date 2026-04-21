@@ -56,6 +56,34 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Process-wide list of skills that have been explicitly activated (e.g. via
+# /skill <name>).  Used so that spawned sub-agents inherit the same skill
+# context as their parent.
+_active_skills: list[str] = []
+
+
+def activate_skill(name: str) -> None:
+    """Mark a skill as active for the current session.
+
+    Activated skills are inherited by sub-agents spawned via AgentTool or
+    SpawnAgents.  Duplicate activations are ignored.
+    """
+    global _active_skills
+    if name not in _active_skills:
+        _active_skills.append(name)
+
+
+def get_active_skills() -> list[str]:
+    """Return the list of currently activated skill names."""
+    return list(_active_skills)
+
+
+def clear_active_skills() -> None:
+    """Clear the active skill list (e.g. on session reset)."""
+    global _active_skills
+    _active_skills.clear()
+
+
 _PLATFORM_MAP = {
     "macos": "darwin",
     "linux": "linux",

@@ -59,7 +59,7 @@ from typing import Any
 
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
-from ..extensions.skills import SkillRegistry
+from ..extensions.skills import SkillRegistry, activate_skill
 from ..llms.registry import calc_cost, detect_provider, get_context_limit
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
@@ -638,6 +638,19 @@ class BridgeServer:
     def handle_cancel(self) -> None:
         self._cancel = True
 
+    def handle_cancel_all(self) -> None:
+        """Cancel the main query and all running sub-agents."""
+        self._cancel = True
+        try:
+            from ..tools.claude_tools import _get_agent_manager
+
+            mgr = _get_agent_manager()
+            n = mgr.cancel_all()
+            if n:
+                self._emit("slash_result", {"output": f"Cancelled {n} running sub-agent(s)."})
+        except Exception as exc:
+            logger.warning("Failed to cancel sub-agents: %s", exc)
+
     def handle_provider_list(self) -> None:
         """List saved provider profiles."""
         plist = profiles.list_profiles()
@@ -974,6 +987,8 @@ class BridgeServer:
             name, skill_args = name.split(":", 1)
             name = name.strip()
             skill_args = skill_args.strip()
+
+        activate_skill(name)
 
         skill = self._skill_registry.get(name)
         if not skill:
@@ -1355,6 +1370,8 @@ class BridgeServer:
                         self.handle_question_response(params)
                     elif method == "cancel":
                         self.handle_cancel()
+                    elif method == "cancel_all":
+                        self.handle_cancel_all()
                     elif method == "slash":
                         if self._query_thread is not None and self._query_thread.is_alive():
                             self._emit_error("A query is already running. Wait or send cancel.")

@@ -8,6 +8,7 @@ interface ComposerProps {
   skills?: string[];
   onSubmit: (text: string) => void;
   onInterrupt?: () => void;
+  onInterruptAll?: () => void;
 }
 
 interface ComposerState {
@@ -50,10 +51,13 @@ export const Composer: React.FC<ComposerProps> = ({
   skills = [],
   onSubmit,
   onInterrupt,
+  onInterruptAll,
 }) => {
   const [state, setState] = useState<ComposerState>(() => initialComposerState());
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const lastEscapeRef = useRef<number>(0);
 
   // When the buffer starts with `/` and has no spaces, show the slash menu.
   const { value, cursor, slashIndex } = state;
@@ -116,7 +120,14 @@ export const Composer: React.FC<ComposerProps> = ({
           return;
         }
         if (key.escape) {
-          setState(initialComposerState());
+          const now = Date.now();
+          if (now - lastEscapeRef.current < 500 && onInterruptAll) {
+            onInterruptAll();
+            lastEscapeRef.current = 0;
+          } else {
+            lastEscapeRef.current = now;
+            setState(initialComposerState());
+          }
           return;
         }
       }
