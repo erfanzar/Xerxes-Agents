@@ -393,7 +393,9 @@ Respond ONLY with the XML plan, no additional text.
                 raw_response = self.creator_agent.execute(task_description=creation_prompt)
 
             if isinstance(raw_response, tuple):
-                response = raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+                response = (
+                    raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+                )
             else:
                 response = raw_response
 
@@ -449,8 +451,13 @@ Respond ONLY with the XML plan, no additional text.
                 plan_id=f"plan_{hash(objective) % 10000}",
                 objective=(_objective.text if _objective is not None else None) or objective,
                 approach=(_approach.text if _approach is not None else None) or "Standard approach",
-                estimated_complexity=cast(Literal["simple", "medium", "complex"], (_complexity.text if _complexity is not None else None) or "medium"),
-                sequential=(_sequential.text if _sequential is not None else None) == "true" if _sequential is not None else True,
+                estimated_complexity=cast(
+                    Literal["simple", "medium", "complex"],
+                    (_complexity.text if _complexity is not None else None) or "medium",
+                ),
+                sequential=(_sequential.text if _sequential is not None else None) == "true"
+                if _sequential is not None
+                else True,
             )
 
             for task_elem in root.findall("task"):
@@ -498,14 +505,10 @@ Respond ONLY with the XML plan, no additional text.
                     tools_needed=tools_needed,
                     importance=importance,
                     validation_required=(
-                        (_val_req.text if _val_req is not None else None) == "true"
-                        if _val_req is not None
-                        else False
+                        (_val_req.text if _val_req is not None else None) == "true" if _val_req is not None else False
                     ),
                     human_feedback=(
-                        (_hum_fb.text if _hum_fb is not None else None) == "true"
-                        if _hum_fb is not None
-                        else False
+                        (_hum_fb.text if _hum_fb is not None else None) == "true" if _hum_fb is not None else False
                     ),
                 )
 

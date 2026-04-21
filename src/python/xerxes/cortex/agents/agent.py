@@ -1310,7 +1310,9 @@ Ensure your response is valid JSON that can be parsed directly.
             )
 
             if isinstance(response_generator, ResponseResult):
-                selected_role = response_generator.content if hasattr(response_generator, "content") else str(response_generator)
+                selected_role = (
+                    response_generator.content if hasattr(response_generator, "content") else str(response_generator)
+                )
             else:
                 response_content = []
                 for chunk in response_generator:
@@ -1430,7 +1432,13 @@ Ensure your response is valid JSON that can be parsed directly.
 
         delegate._delegation_count = self._delegation_count
         _delegated = delegate.execute(task_description, delegation_context)
-        result = _delegated if isinstance(_delegated, str) else _delegated[0].get_result(1.0) if (_delegated[0].get_result is not None) else str(_delegated[0])
+        result = (
+            _delegated
+            if isinstance(_delegated, str)
+            else _delegated[0].get_result(1.0)
+            if (_delegated[0].get_result is not None)
+            else str(_delegated[0])
+        )
 
         if self.verbose:
             if self._logger:
@@ -1477,7 +1485,11 @@ Ensure your response is valid JSON that can be parsed directly.
 
         initial_result = self.execute(task_description, context)
         if not isinstance(initial_result, str):
-            initial_result = initial_result[0].get_result(1.0) if (initial_result[0].get_result is not None) else str(initial_result[0])
+            initial_result = (
+                initial_result[0].get_result(1.0)
+                if (initial_result[0].get_result is not None)
+                else str(initial_result[0])
+            )
 
         needs_delegation, reason = self._check_delegation_needed(task_description, initial_result)
 
@@ -1508,7 +1520,9 @@ Ensure your response is valid JSON that can be parsed directly.
                 )
 
                 if isinstance(response_generator, ResponseResult):
-                    return response_generator.content if hasattr(response_generator, "content") else str(response_generator)
+                    return (
+                        response_generator.content if hasattr(response_generator, "content") else str(response_generator)
+                    )
 
                 response_content = []
                 for chunk in response_generator:

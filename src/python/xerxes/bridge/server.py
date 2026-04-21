@@ -47,6 +47,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import sys
@@ -78,6 +79,8 @@ from ..streaming.loop import run as run_agent_loop
 from ..tools.agent_meta_tools import set_skill_registry
 from ..tools.claude_tools import set_ask_user_question_callback
 from . import profiles
+
+logger = logging.getLogger(__name__)
 
 
 class BridgeServer:
@@ -569,7 +572,7 @@ class BridgeServer:
             logger.warning("Auto-compaction LLM call failed", exc_info=True)
             return
 
-        original_count = len(self.state.messages)
+        len(self.state.messages)
         self.state.messages = [
             *system_msgs,
             {

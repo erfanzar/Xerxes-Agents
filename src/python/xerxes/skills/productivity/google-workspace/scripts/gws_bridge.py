@@ -3,11 +3,12 @@
 
 Refreshes the token if expired, then executes gws with the valid access token.
 """
+
 import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -25,12 +26,14 @@ def refresh_token(token_data: dict) -> dict:
     import urllib.parse
     import urllib.request
 
-    params = urllib.parse.urlencode({
-        "client_id": token_data["client_id"],
-        "client_secret": token_data["client_secret"],
-        "refresh_token": token_data["refresh_token"],
-        "grant_type": "refresh_token",
-    }).encode()
+    params = urllib.parse.urlencode(
+        {
+            "client_id": token_data["client_id"],
+            "client_secret": token_data["client_secret"],
+            "refresh_token": token_data["refresh_token"],
+            "grant_type": "refresh_token",
+        }
+    ).encode()
 
     req = urllib.request.Request(token_data["token_uri"], data=params)
     try:
@@ -44,8 +47,8 @@ def refresh_token(token_data: dict) -> dict:
 
     token_data["token"] = result["access_token"]
     token_data["expiry"] = datetime.fromtimestamp(
-        datetime.now(timezone.utc).timestamp() + result["expires_in"],
-        tz=timezone.utc,
+        datetime.now(UTC).timestamp() + result["expires_in"],
+        tz=UTC,
     ).isoformat()
 
     get_token_path().write_text(json.dumps(token_data, indent=2))
@@ -64,7 +67,7 @@ def get_valid_token() -> str:
     expiry = token_data.get("expiry", "")
     if expiry:
         exp_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if now >= exp_dt:
             token_data = refresh_token(token_data)
 
@@ -81,7 +84,7 @@ def main():
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_TOKEN"] = access_token
 
-    result = subprocess.run(["gws"] + sys.argv[1:], env=env)
+    result = subprocess.run(["gws", *sys.argv[1:]], env=env)
     sys.exit(result.returncode)
 
 

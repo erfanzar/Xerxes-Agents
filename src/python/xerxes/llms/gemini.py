@@ -537,6 +537,7 @@ class GeminiLLM(BaseLLM):
                 if chunk["content"]:
                     print(chunk["content"], end="", flush=True)
         """
+
         async def _gen() -> AsyncIterator[dict[str, Any]]:
             buffered_content = ""
 

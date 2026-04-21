@@ -87,8 +87,9 @@ def _format_missing_scopes(missing_scopes: list[str]) -> str:
 def install_deps():
     """Install Google API packages if missing. Returns True on success."""
     try:
-        import googleapiclient  # noqa: F401
         import google_auth_oauthlib  # noqa: F401
+        import googleapiclient  # noqa: F401
+
         print("Dependencies already installed.")
         return True
     except ImportError:
@@ -97,7 +98,7 @@ def install_deps():
     print("Installing Google API dependencies...")
     try:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "--quiet"] + REQUIRED_PACKAGES,
+            [sys.executable, "-m", "pip", "install", "--quiet", *REQUIRED_PACKAGES],
             stdout=subprocess.DEVNULL,
         )
         print("Dependencies installed.")
@@ -111,8 +112,8 @@ def install_deps():
 def _ensure_deps():
     """Check deps are available, install if not, exit on failure."""
     try:
-        import googleapiclient  # noqa: F401
         import google_auth_oauthlib  # noqa: F401
+        import googleapiclient  # noqa: F401
     except ImportError:
         if not install_deps():
             sys.exit(1)
@@ -125,8 +126,8 @@ def check_auth():
         return False
 
     _ensure_deps()
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     try:
         # Don't pass scopes — user may have authorized only a subset.
@@ -278,11 +279,14 @@ def exchange_auth_code(code: str):
         sys.exit(1)
 
     _ensure_deps()
-    from google_auth_oauthlib.flow import Flow
     from urllib.parse import parse_qs, urlparse
 
+    from google_auth_oauthlib.flow import Flow
+
     # Extract granted scopes from the callback URL if present
-    if returned_state and "scope" in parse_qs(urlparse(code).query if isinstance(code, str) and code.startswith("http") else {}):
+    if returned_state and "scope" in parse_qs(
+        urlparse(code).query if isinstance(code, str) and code.startswith("http") else {}
+    ):
         granted_scopes = parse_qs(urlparse(code).query)["scope"][0].split()
     else:
         # Try to extract from code_or_url parameter
@@ -318,7 +322,9 @@ def exchange_auth_code(code: str):
     # Store only the scopes actually granted by the user, not what was requested.
     # creds.to_json() writes the requested scopes, which causes refresh to fail
     # with invalid_scope if the user only authorized a subset.
-    actually_granted = list(creds.granted_scopes or []) if hasattr(creds, "granted_scopes") and creds.granted_scopes else []
+    actually_granted = (
+        list(creds.granted_scopes or []) if hasattr(creds, "granted_scopes") and creds.granted_scopes else []
+    )
     if actually_granted:
         token_payload["scopes"] = actually_granted
     elif granted_scopes != SCOPES:
@@ -343,8 +349,8 @@ def revoke():
         return
 
     _ensure_deps()
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     try:
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
@@ -352,6 +358,7 @@ def revoke():
             creds.refresh(Request())
 
         import urllib.request
+
         urllib.request.urlopen(
             urllib.request.Request(
                 f"https://oauth2.googleapis.com/revoke?token={creds.token}",

@@ -320,7 +320,9 @@ class CortexPlanner:
                 stream_callback=stream_callback,
             )
             if isinstance(raw_response, tuple):
-                plan_response = raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+                plan_response = (
+                    raw_response[0].get_result(1.0) if raw_response[0].get_result is not None else str(raw_response[0])
+                )
             else:
                 plan_response = raw_response
 
@@ -558,7 +560,9 @@ Respond ONLY with the XML plan, no additional text.
             plan = ExecutionPlan(
                 plan_id=f"plan_{hash(objective) % 10000}",
                 objective=(_objective.text if _objective is not None else None) or objective,
-                complexity=cast(Literal["low", "medium", "high"], (_complexity.text if _complexity is not None else None) or "medium"),
+                complexity=cast(
+                    Literal["low", "medium", "high"], (_complexity.text if _complexity is not None else None) or "medium"
+                ),
                 estimated_time=float((_estimated_time.text if _estimated_time is not None else None) or 10),
             )
 

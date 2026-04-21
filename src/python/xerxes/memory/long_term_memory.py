@@ -384,7 +384,7 @@ class LongTermMemory(Memory):
                     x.metadata.get("importance", 0.5) * 0.3
                     + (x.access_count / 100) * 0.3
                     + (1 - (datetime.now() - x.timestamp).days / self.retention_days) * 0.4
-                )
+                ),
             )
             to_remove = list(self._items[: int(len(self._items) * 0.2)])
 

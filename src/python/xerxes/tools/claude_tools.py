@@ -53,6 +53,7 @@ import os
 import subprocess
 import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -640,10 +641,10 @@ class TodoWriteTool(AgentBaseFn):
 
 # Module-level callback for interactive question handling.
 # Set by the bridge server when a UI is available.
-_ask_user_question_callback: tp.Callable[[str], str] | None = None
+_ask_user_question_callback: Callable[[str], str] | None = None
 
 
-def set_ask_user_question_callback(cb: tp.Callable[[str], str] | None) -> None:
+def set_ask_user_question_callback(cb: Callable[[str], str] | None) -> None:
     """Set the callback used by :class:`AskUserQuestionTool` to prompt the user.
 
     When *cb* is ``None`` the tool falls back to its non-interactive stub.

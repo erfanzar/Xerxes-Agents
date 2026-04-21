@@ -13,13 +13,15 @@ Usage:
     python extract_marker.py document.pdf --json        # Structured output
     python extract_marker.py document.pdf --use_llm     # LLM-boosted accuracy
 """
-import sys
+
 import os
+import sys
+
 
 def convert(path, output_dir=None, output_format="markdown", use_llm=False):
+    from marker.config.parser import ConfigParser
     from marker.converters.pdf import PdfConverter
     from marker.models import create_model_dict
-    from marker.config.parser import ConfigParser
 
     config_dict = {}
     if use_llm:
@@ -32,16 +34,24 @@ def convert(path, output_dir=None, output_format="markdown", use_llm=False):
 
     if output_format == "json":
         import json
-        print(json.dumps({
-            "markdown": rendered.markdown,
-            "metadata": rendered.metadata if hasattr(rendered, "metadata") else {},
-        }, indent=2, ensure_ascii=False))
+
+        print(
+            json.dumps(
+                {
+                    "markdown": rendered.markdown,
+                    "metadata": rendered.metadata if hasattr(rendered, "metadata") else {},
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     else:
         print(rendered.markdown)
 
     # Save images if output_dir specified
     if output_dir and hasattr(rendered, "images") and rendered.images:
         from pathlib import Path
+
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         for name, img_data in rendered.images.items():
             img_path = os.path.join(output_dir, name)
@@ -53,6 +63,7 @@ def convert(path, output_dir=None, output_format="markdown", use_llm=False):
 def check_requirements():
     """Check disk space before installing."""
     import shutil
+
     free_gb = shutil.disk_usage("/").free / (1024**3)
     if free_gb < 5:
         print(f"⚠️  Only {free_gb:.1f}GB free. marker-pdf needs ~5GB for PyTorch + models.")

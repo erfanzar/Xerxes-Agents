@@ -27,7 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -164,8 +164,8 @@ def get_credentials():
     """Load and refresh credentials from token file."""
     _ensure_authenticated()
 
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
 
     creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), _stored_token_scopes())
     if creds.expired and creds.refresh_token:
@@ -223,9 +223,7 @@ def gmail_search(args):
         return
 
     service = build_service("gmail", "v1")
-    results = service.users().messages().list(
-        userId="me", q=args.query, maxResults=args.max
-    ).execute()
+    results = service.users().messages().list(userId="me", q=args.query, maxResults=args.max).execute()
     messages = results.get("messages", [])
     if not messages:
         print("No messages found.")
@@ -233,23 +231,31 @@ def gmail_search(args):
 
     output = []
     for msg_meta in messages:
-        msg = service.users().messages().get(
-            userId="me", id=msg_meta["id"], format="metadata",
-            metadataHeaders=["From", "To", "Subject", "Date"],
-        ).execute()
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=msg_meta["id"],
+                format="metadata",
+                metadataHeaders=["From", "To", "Subject", "Date"],
+            )
+            .execute()
+        )
         headers = _headers_dict(msg)
-        output.append({
-            "id": msg["id"],
-            "threadId": msg["threadId"],
-            "from": headers.get("From", ""),
-            "to": headers.get("To", ""),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
-            "snippet": msg.get("snippet", ""),
-            "labels": msg.get("labelIds", []),
-        })
+        output.append(
+            {
+                "id": msg["id"],
+                "threadId": msg["threadId"],
+                "from": headers.get("From", ""),
+                "to": headers.get("To", ""),
+                "subject": headers.get("Subject", ""),
+                "date": headers.get("Date", ""),
+                "snippet": msg.get("snippet", ""),
+                "labels": msg.get("labelIds", []),
+            }
+        )
     print(json.dumps(output, indent=2, ensure_ascii=False))
-
 
 
 def gmail_get(args):
@@ -273,9 +279,7 @@ def gmail_get(args):
         return
 
     service = build_service("gmail", "v1")
-    msg = service.users().messages().get(
-        userId="me", id=args.message_id, format="full"
-    ).execute()
+    msg = service.users().messages().get(userId="me", id=args.message_id, format="full").execute()
 
     headers = _headers_dict(msg)
     result = {
@@ -289,7 +293,6 @@ def gmail_get(args):
         "body": _extract_message_body(msg),
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
-
 
 
 def gmail_send(args):
@@ -334,7 +337,6 @@ def gmail_send(args):
     print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
 
 
-
 def gmail_reply(args):
     if _gws_binary():
         original = _run_gws(
@@ -371,10 +373,17 @@ def gmail_reply(args):
         return
 
     service = build_service("gmail", "v1")
-    original = service.users().messages().get(
-        userId="me", id=args.message_id, format="metadata",
-        metadataHeaders=["From", "Subject", "Message-ID"],
-    ).execute()
+    original = (
+        service.users()
+        .messages()
+        .get(
+            userId="me",
+            id=args.message_id,
+            format="metadata",
+            metadataHeaders=["From", "Subject", "Message-ID"],
+        )
+        .execute()
+    )
     headers = _headers_dict(original)
 
     subject = headers.get("Subject", "")
@@ -397,19 +406,22 @@ def gmail_reply(args):
     print(json.dumps({"status": "sent", "id": result["id"], "threadId": result.get("threadId", "")}, indent=2))
 
 
-
 def gmail_labels(args):
     if _gws_binary():
         results = _run_gws(["gmail", "users", "labels", "list"], params={"userId": "me"})
-        labels = [{"id": l["id"], "name": l["name"], "type": l.get("type", "")} for l in results.get("labels", [])]
+        labels = [
+            {"id": label["id"], "name": label["name"], "type": label.get("type", "")}
+            for label in results.get("labels", [])
+        ]
         print(json.dumps(labels, indent=2))
         return
 
     service = build_service("gmail", "v1")
     results = service.users().labels().list(userId="me").execute()
-    labels = [{"id": l["id"], "name": l["name"], "type": l.get("type", "")} for l in results.get("labels", [])]
+    labels = [
+        {"id": label["id"], "name": label["name"], "type": label.get("type", "")} for label in results.get("labels", [])
+    ]
     print(json.dumps(labels, indent=2))
-
 
 
 def gmail_modify(args):
@@ -439,7 +451,7 @@ def gmail_modify(args):
 
 
 def calendar_list(args):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
 
@@ -457,7 +469,39 @@ def calendar_list(args):
         )
         events = []
         for e in results.get("items", []):
-            events.append({
+            events.append(
+                {
+                    "id": e["id"],
+                    "summary": e.get("summary", "(no title)"),
+                    "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
+                    "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
+                    "location": e.get("location", ""),
+                    "description": e.get("description", ""),
+                    "status": e.get("status", ""),
+                    "htmlLink": e.get("htmlLink", ""),
+                }
+            )
+        print(json.dumps(events, indent=2, ensure_ascii=False))
+        return
+
+    service = build_service("calendar", "v3")
+    results = (
+        service.events()
+        .list(
+            calendarId=args.calendar,
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=args.max,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+
+    events = []
+    for e in results.get("items", []):
+        events.append(
+            {
                 "id": e["id"],
                 "summary": e.get("summary", "(no title)"),
                 "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
@@ -466,30 +510,9 @@ def calendar_list(args):
                 "description": e.get("description", ""),
                 "status": e.get("status", ""),
                 "htmlLink": e.get("htmlLink", ""),
-            })
-        print(json.dumps(events, indent=2, ensure_ascii=False))
-        return
-
-    service = build_service("calendar", "v3")
-    results = service.events().list(
-        calendarId=args.calendar, timeMin=time_min, timeMax=time_max,
-        maxResults=args.max, singleEvents=True, orderBy="startTime",
-    ).execute()
-
-    events = []
-    for e in results.get("items", []):
-        events.append({
-            "id": e["id"],
-            "summary": e.get("summary", "(no title)"),
-            "start": e.get("start", {}).get("dateTime", e.get("start", {}).get("date", "")),
-            "end": e.get("end", {}).get("dateTime", e.get("end", {}).get("date", "")),
-            "location": e.get("location", ""),
-            "description": e.get("description", ""),
-            "status": e.get("status", ""),
-            "htmlLink": e.get("htmlLink", ""),
-        })
+            }
+        )
     print(json.dumps(events, indent=2, ensure_ascii=False))
-
 
 
 def calendar_create(args):
@@ -511,23 +534,32 @@ def calendar_create(args):
             params={"calendarId": args.calendar},
             body=event,
         )
-        print(json.dumps({
-            "status": "created",
-            "id": result["id"],
-            "summary": result.get("summary", ""),
-            "htmlLink": result.get("htmlLink", ""),
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "created",
+                    "id": result["id"],
+                    "summary": result.get("summary", ""),
+                    "htmlLink": result.get("htmlLink", ""),
+                },
+                indent=2,
+            )
+        )
         return
 
     service = build_service("calendar", "v3")
     result = service.events().insert(calendarId=args.calendar, body=event).execute()
-    print(json.dumps({
-        "status": "created",
-        "id": result["id"],
-        "summary": result.get("summary", ""),
-        "htmlLink": result.get("htmlLink", ""),
-    }, indent=2))
-
+    print(
+        json.dumps(
+            {
+                "status": "created",
+                "id": result["id"],
+                "summary": result.get("summary", ""),
+                "htmlLink": result.get("htmlLink", ""),
+            },
+            indent=2,
+        )
+    )
 
 
 def calendar_delete(args):
@@ -561,9 +593,15 @@ def drive_search(args):
         return
 
     service = build_service("drive", "v3")
-    results = service.files().list(
-        q=query, pageSize=args.max, fields="files(id, name, mimeType, modifiedTime, webViewLink)",
-    ).execute()
+    results = (
+        service.files()
+        .list(
+            q=query,
+            pageSize=args.max,
+            fields="files(id, name, mimeType, modifiedTime, webViewLink)",
+        )
+        .execute()
+    )
     files = results.get("files", [])
     print(json.dumps(files, indent=2, ensure_ascii=False))
 
@@ -588,30 +626,39 @@ def contacts_list(args):
             names = person.get("names", [{}])
             emails = person.get("emailAddresses", [])
             phones = person.get("phoneNumbers", [])
-            contacts.append({
-                "name": names[0].get("displayName", "") if names else "",
-                "emails": [e.get("value", "") for e in emails],
-                "phones": [p.get("value", "") for p in phones],
-            })
+            contacts.append(
+                {
+                    "name": names[0].get("displayName", "") if names else "",
+                    "emails": [e.get("value", "") for e in emails],
+                    "phones": [p.get("value", "") for p in phones],
+                }
+            )
         print(json.dumps(contacts, indent=2, ensure_ascii=False))
         return
 
     service = build_service("people", "v1")
-    results = service.people().connections().list(
-        resourceName="people/me",
-        pageSize=args.max,
-        personFields="names,emailAddresses,phoneNumbers",
-    ).execute()
+    results = (
+        service.people()
+        .connections()
+        .list(
+            resourceName="people/me",
+            pageSize=args.max,
+            personFields="names,emailAddresses,phoneNumbers",
+        )
+        .execute()
+    )
     contacts = []
     for person in results.get("connections", []):
         names = person.get("names", [{}])
         emails = person.get("emailAddresses", [])
         phones = person.get("phoneNumbers", [])
-        contacts.append({
-            "name": names[0].get("displayName", "") if names else "",
-            "emails": [e.get("value", "") for e in emails],
-            "phones": [p.get("value", "") for p in phones],
-        })
+        contacts.append(
+            {
+                "name": names[0].get("displayName", "") if names else "",
+                "emails": [e.get("value", "") for e in emails],
+                "phones": [p.get("value", "") for p in phones],
+            }
+        )
     print(json.dumps(contacts, indent=2, ensure_ascii=False))
 
 
@@ -630,11 +677,16 @@ def sheets_get(args):
         return
 
     service = build_service("sheets", "v4")
-    result = service.spreadsheets().values().get(
-        spreadsheetId=args.sheet_id, range=args.range,
-    ).execute()
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+        )
+        .execute()
+    )
     print(json.dumps(result.get("values", []), indent=2, ensure_ascii=False))
-
 
 
 def sheets_update(args):
@@ -651,16 +703,30 @@ def sheets_update(args):
             },
             body=body,
         )
-        print(json.dumps({"updatedCells": result.get("updatedCells", 0), "updatedRange": result.get("updatedRange", "")}, indent=2))
+        print(
+            json.dumps(
+                {"updatedCells": result.get("updatedCells", 0), "updatedRange": result.get("updatedRange", "")}, indent=2
+            )
+        )
         return
 
     service = build_service("sheets", "v4")
-    result = service.spreadsheets().values().update(
-        spreadsheetId=args.sheet_id, range=args.range,
-        valueInputOption="USER_ENTERED", body=body,
-    ).execute()
-    print(json.dumps({"updatedCells": result.get("updatedCells", 0), "updatedRange": result.get("updatedRange", "")}, indent=2))
-
+    result = (
+        service.spreadsheets()
+        .values()
+        .update(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+            valueInputOption="USER_ENTERED",
+            body=body,
+        )
+        .execute()
+    )
+    print(
+        json.dumps(
+            {"updatedCells": result.get("updatedCells", 0), "updatedRange": result.get("updatedRange", "")}, indent=2
+        )
+    )
 
 
 def sheets_append(args):
@@ -682,10 +748,18 @@ def sheets_append(args):
         return
 
     service = build_service("sheets", "v4")
-    result = service.spreadsheets().values().append(
-        spreadsheetId=args.sheet_id, range=args.range,
-        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body=body,
-    ).execute()
+    result = (
+        service.spreadsheets()
+        .values()
+        .append(
+            spreadsheetId=args.sheet_id,
+            range=args.range,
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body=body,
+        )
+        .execute()
+    )
     print(json.dumps({"updatedCells": result.get("updates", {}).get("updatedCells", 0)}, indent=2))
 
 
@@ -742,7 +816,9 @@ def main():
     p.add_argument("--subject", required=True)
     p.add_argument("--body", required=True)
     p.add_argument("--cc", default="")
-    p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
+    p.add_argument(
+        "--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')"
+    )
     p.add_argument("--html", action="store_true", help="Send body as HTML")
     p.add_argument("--thread-id", default="", help="Thread ID for threading")
     p.set_defaults(func=gmail_send)
@@ -750,7 +826,9 @@ def main():
     p = gmail_sub.add_parser("reply")
     p.add_argument("message_id", help="Message ID to reply to")
     p.add_argument("--body", required=True)
-    p.add_argument("--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')")
+    p.add_argument(
+        "--from", dest="from_header", default="", help="Custom From header (e.g. '\"Agent Name\" <user@example.com>')"
+    )
     p.set_defaults(func=gmail_reply)
 
     p = gmail_sub.add_parser("labels")

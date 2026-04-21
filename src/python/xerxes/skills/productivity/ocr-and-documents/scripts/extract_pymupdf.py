@@ -9,36 +9,46 @@ Usage:
     python extract_pymupdf.py document.pdf --tables
     python extract_pymupdf.py document.pdf --metadata
 """
-import sys
+
 import json
+import sys
+
 
 def extract_text(path, pages=None):
     import pymupdf
+
     doc = pymupdf.open(path)
     page_range = range(len(doc)) if pages is None else pages
     for i in page_range:
         if i < len(doc):
-            print(f"\n--- Page {i+1}/{len(doc)} ---\n")
+            print(f"\n--- Page {i + 1}/{len(doc)} ---\n")
             print(doc[i].get_text())
+
 
 def extract_markdown(path, pages=None):
     import pymupdf4llm
+
     md = pymupdf4llm.to_markdown(path, pages=pages)
     print(md)
 
+
 def extract_tables(path):
     import pymupdf
+
     doc = pymupdf.open(path)
     for i, page in enumerate(doc):
         tables = page.find_tables()
         for j, table in enumerate(tables.tables):
-            print(f"\n--- Page {i+1}, Table {j+1} ---\n")
+            print(f"\n--- Page {i + 1}, Table {j + 1} ---\n")
             df = table.to_pandas()
             print(df.to_markdown(index=False))
 
+
 def extract_images(path, output_dir):
-    import pymupdf
     from pathlib import Path
+
+    import pymupdf
+
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     doc = pymupdf.open(path)
     count = 0
@@ -48,23 +58,31 @@ def extract_images(path, output_dir):
             pix = pymupdf.Pixmap(doc, xref)
             if pix.n >= 5:
                 pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-            out_path = f"{output_dir}/page{i+1}_img{img_idx+1}.png"
+            out_path = f"{output_dir}/page{i + 1}_img{img_idx + 1}.png"
             pix.save(out_path)
             count += 1
     print(f"Extracted {count} images to {output_dir}/")
 
+
 def show_metadata(path):
     import pymupdf
+
     doc = pymupdf.open(path)
-    print(json.dumps({
-        "pages": len(doc),
-        "title": doc.metadata.get("title", ""),
-        "author": doc.metadata.get("author", ""),
-        "subject": doc.metadata.get("subject", ""),
-        "creator": doc.metadata.get("creator", ""),
-        "producer": doc.metadata.get("producer", ""),
-        "format": doc.metadata.get("format", ""),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "pages": len(doc),
+                "title": doc.metadata.get("title", ""),
+                "author": doc.metadata.get("author", ""),
+                "subject": doc.metadata.get("subject", ""),
+                "creator": doc.metadata.get("creator", ""),
+                "producer": doc.metadata.get("producer", ""),
+                "format": doc.metadata.get("format", ""),
+            },
+            indent=2,
+        )
+    )
+
 
 if __name__ == "__main__":
     args = sys.argv[1:]

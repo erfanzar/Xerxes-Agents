@@ -277,6 +277,7 @@ def _search_via_scrape(
     _BeautifulSoup: type | None = None
     try:
         from bs4 import BeautifulSoup, Tag
+
         _BeautifulSoup = BeautifulSoup
     except ImportError:
         pass

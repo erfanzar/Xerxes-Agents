@@ -14,9 +14,10 @@ Usage:
 
 import json
 import sys
-import urllib.request
-import urllib.parse
 import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import UTC
 
 GAMMA = "https://gamma-api.polymarket.com"
 CLOB = "https://clob.polymarket.com"
@@ -80,8 +81,7 @@ def _print_market(m: dict, indent: str = ""):
     if isinstance(prices, list) and len(prices) >= 2:
         outcome_labels = outcomes if isinstance(outcomes, list) else ["Yes", "No"]
         price_str = " / ".join(
-            f"{outcome_labels[i]}: {_fmt_pct(prices[i])}"
-            for i in range(min(len(prices), len(outcome_labels)))
+            f"{outcome_labels[i]}: {_fmt_pct(prices[i])}" for i in range(min(len(prices), len(outcome_labels)))
         )
         print(f"{indent}{question}{status}")
         print(f"{indent}  {price_str}  |  Volume: {vol}")
@@ -99,7 +99,7 @@ def cmd_search(query: str):
     data = _get(f"{GAMMA}/public-search?q={q}")
     events = data.get("events", [])
     total = data.get("pagination", {}).get("totalResults", len(events))
-    print(f"Found {total} results for \"{query}\":\n")
+    print(f'Found {total} results for "{query}":\n')
     for evt in events[:10]:
         print(f"=== {evt['title']} ===")
         print(f"  Volume: {_fmt_volume(evt.get('volume', 0))}  |  slug: {evt.get('slug', '')}")
@@ -203,15 +203,16 @@ def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
         print("No price history available for this market.")
         return
     print(f"Price history ({len(history)} points, interval={interval}):\n")
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     for pt in history:
-        ts = datetime.fromtimestamp(pt["t"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        ts = datetime.fromtimestamp(pt["t"], tz=UTC).strftime("%Y-%m-%d %H:%M")
         price = _fmt_pct(pt["p"])
         bar = "█" * int(float(pt["p"]) * 40)
         print(f"  {ts}  {price:>7}  {bar}")
 
 
-def cmd_trades(limit: int = 10, market: str = None):
+def cmd_trades(limit: int = 10, market: str | None = None):
     """Get recent trades."""
     url = f"{DATA}/trades?limit={limit}"
     if market:
@@ -227,7 +228,7 @@ def cmd_trades(limit: int = 10, market: str = None):
         size = t.get("size", "?")
         outcome = t.get("outcome", "?")
         title = t.get("title", "?")[:50]
-        ts = t.get("timestamp", "")
+        t.get("timestamp", "")
         print(f"  {side:4}  {price:>7}  x{float(size):>8.2f}  [{outcome}]  {title}")
 
 

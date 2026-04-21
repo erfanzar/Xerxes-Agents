@@ -645,6 +645,7 @@ class AnthropicLLM(BaseLLM):
                 if chunk["is_final"] and chunk["function_calls"]:
                     print("\\nFunction calls detected!")
         """
+
         async def _gen() -> AsyncIterator[dict[str, Any]]:
             buffered_content = ""
             function_calls: list[dict[str, Any]] = []

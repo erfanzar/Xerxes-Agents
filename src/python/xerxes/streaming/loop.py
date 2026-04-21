@@ -520,13 +520,16 @@ def _stream_anthropic(
         out_tok = getattr(final.usage, "output_tokens", 0) or 0
         if in_tok == 0 or out_tok == 0:
             from xerxes.core.utils import estimate_messages_tokens
+
             if in_tok == 0:
                 in_tok = estimate_messages_tokens(api_messages)
                 if combined_system:
                     from xerxes.core.utils import estimate_tokens
+
                     in_tok += estimate_tokens(combined_system)
             if out_tok == 0:
                 from xerxes.core.utils import estimate_tokens
+
                 out_tok = estimate_tokens(text)
         yield {
             "tool_calls": tool_calls,
@@ -714,10 +717,12 @@ def _stream_openai_compat(
 
     if in_tok == 0 or out_tok == 0:
         from xerxes.core.utils import estimate_messages_tokens
+
         if in_tok == 0:
             in_tok = estimate_messages_tokens(oai_messages)
         if out_tok == 0:
             from xerxes.core.utils import estimate_tokens
+
             out_tok = estimate_tokens(text)
     yield {
         "tool_calls": tool_calls,

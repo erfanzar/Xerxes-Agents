@@ -40,9 +40,7 @@ def _http_get(url: str) -> Any:
 
 
 def _http_post(url: str, data: str) -> Any:
-    req = urllib.request.Request(
-        url, data=data.encode(), headers={"User-Agent": USER_AGENT}
-    )
+    req = urllib.request.Request(url, data=data.encode(), headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read())
 
@@ -70,9 +68,7 @@ def geocode(query: str) -> tuple[float, float]:
 def find_nearby(lat: float, lon: float, types: list[str], radius: int = 1500, limit: int = 15) -> list[dict]:
     """Query Overpass for nearby amenities."""
     # Build Overpass QL query
-    type_filters = "".join(
-        f'nwr["amenity"="{t}"](around:{radius},{lat},{lon});' for t in types
-    )
+    type_filters = "".join(f'nwr["amenity"="{t}"](around:{radius},{lat},{lon});' for t in types)
     query = f"[out:json][timeout:{TIMEOUT}];({type_filters});out center tags;"
 
     # Try each Overpass server
@@ -140,7 +136,9 @@ def main():
     parser.add_argument("--lat", type=float, help="Latitude")
     parser.add_argument("--lon", type=float, help="Longitude")
     parser.add_argument("--near", type=str, help="Address, city, or zip code (geocoded automatically)")
-    parser.add_argument("--type", action="append", dest="types", default=[], help="Place type (restaurant, cafe, bar, pharmacy, etc.)")
+    parser.add_argument(
+        "--type", action="append", dest="types", default=[], help="Place type (restaurant, cafe, bar, pharmacy, etc.)"
+    )
     parser.add_argument("--radius", type=int, default=1500, help="Search radius in meters (default: 1500)")
     parser.add_argument("--limit", type=int, default=15, help="Max results (default: 15)")
     parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
@@ -168,7 +166,7 @@ def main():
             return
         print(f"Found {len(places)} places within {args.radius}m:\n")
         for i, p in enumerate(places, 1):
-            dist_str = f"{p['distance_m']}m" if p["distance_m"] < 1000 else f"{p['distance_m']/1000:.1f}km"
+            dist_str = f"{p['distance_m']}m" if p["distance_m"] < 1000 else f"{p['distance_m'] / 1000:.1f}km"
             print(f"  {i}. {p['name']} ({p['type']}) — {dist_str}")
             if p.get("cuisine"):
                 print(f"     Cuisine: {p['cuisine']}")

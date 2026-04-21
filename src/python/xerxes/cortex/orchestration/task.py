@@ -903,6 +903,7 @@ class CortexTask:
                     )
                     if isinstance(exec_result, str):
                         from xerxes.types import StreamChunk
+
                         buffer = StreamerBuffer()
                         thread = threading.Thread(target=lambda: None, daemon=True)
                         buffer.put(
@@ -934,11 +935,19 @@ class CortexTask:
                     return buffer, thread
 
                 if self.agent.allow_delegation:
-                    delegated = self.agent.execute_with_delegation(task_description=task_prompt, context=enhanced_context)
+                    delegated = self.agent.execute_with_delegation(
+                        task_description=task_prompt, context=enhanced_context
+                    )
                     result = delegated
                 else:
                     executed = self.agent.execute(task_description=task_prompt, context=enhanced_context)
-                    result = executed if isinstance(executed, str) else executed[0].get_result(1.0) if (executed[0].get_result is not None) else str(executed[0])
+                    result = (
+                        executed
+                        if isinstance(executed, str)
+                        else executed[0].get_result(1.0)
+                        if (executed[0].get_result is not None)
+                        else str(executed[0])
+                    )
 
                 final_delegations = getattr(self.agent, "_delegation_count", 0)
                 self._execution_stats["delegations"] = final_delegations - initial_delegations

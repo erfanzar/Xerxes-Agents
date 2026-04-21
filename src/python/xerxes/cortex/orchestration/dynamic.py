@@ -477,7 +477,13 @@ class DynamicCortex(Cortex):
                         _exec_result = target_agent.execute(
                             task_description=prompt, streamer_buffer=streamer_buffer, use_thread=False
                         )
-                        _stream_result = _exec_result if isinstance(_exec_result, str) else _exec_result[0].get_result(1.0) if _exec_result[0].get_result is not None else str(_exec_result[0])
+                        _stream_result = (
+                            _exec_result
+                            if isinstance(_exec_result, str)
+                            else _exec_result[0].get_result(1.0)
+                            if _exec_result[0].get_result is not None
+                            else str(_exec_result[0])
+                        )
 
                     if hasattr(streamer_buffer, "result_holder"):
                         streamer_buffer.result_holder = [_stream_result]

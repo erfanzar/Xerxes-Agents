@@ -116,7 +116,6 @@ def _coerce_argument_types(
     conversion.
     """
     import json
-    import types as _types
     import typing
 
     coerced = dict(arguments)

@@ -653,7 +653,9 @@ class Cortex:
             if isinstance(_exec_result, tuple):
                 task_output = CortexTaskOutput(
                     task=task,
-                    output=_exec_result[0].get_result(1.0) if _exec_result[0].get_result is not None else str(_exec_result[0]),
+                    output=_exec_result[0].get_result(1.0)
+                    if _exec_result[0].get_result is not None
+                    else str(_exec_result[0]),
                     agent=task.agent if task.agent is not None else self.agents[0],
                 )
             else:
@@ -828,7 +830,11 @@ class Cortex:
                     lambda: task.execute(context_outputs if task.context else None),
                 )
                 if isinstance(_task_output, tuple):
-                    _output = _task_output[0].get_result(1.0) if _task_output[0].get_result is not None else str(_task_output[0])
+                    _output = (
+                        _task_output[0].get_result(1.0)
+                        if _task_output[0].get_result is not None
+                        else str(_task_output[0])
+                    )
                     return CortexTaskOutput(
                         task=task,
                         output=_output,
@@ -891,7 +897,11 @@ class Cortex:
             context=None,
         )
         if isinstance(raw_plan_response, tuple):
-            plan_response = raw_plan_response[0].get_result(1.0) if raw_plan_response[0].get_result is not None else str(raw_plan_response[0])
+            plan_response = (
+                raw_plan_response[0].get_result(1.0)
+                if raw_plan_response[0].get_result is not None
+                else str(raw_plan_response[0])
+            )
         else:
             plan_response = raw_plan_response
 
@@ -994,7 +1004,13 @@ class Cortex:
                         task_description=improvement_prompt,
                         context=output,
                     )
-                    output = improved if isinstance(improved, str) else improved[0].get_result(1.0) if improved[0].get_result is not None else str(improved[0])
+                    output = (
+                        improved
+                        if isinstance(improved, str)
+                        else improved[0].get_result(1.0)
+                        if improved[0].get_result is not None
+                        else str(improved[0])
+                    )
                     completed_tasks[task_id + 1] = output
             except Exception as e:
                 self.logger.error(f"❌ Failed to parse manager review: {e}")
@@ -1063,7 +1079,13 @@ class Cortex:
                         task_description=task_description,
                         context=context,
                     )
-                    output = _agent_output if isinstance(_agent_output, str) else _agent_output[0].get_result(1.0) if _agent_output[0].get_result is not None else str(_agent_output[0])
+                    output = (
+                        _agent_output
+                        if isinstance(_agent_output, str)
+                        else _agent_output[0].get_result(1.0)
+                        if _agent_output[0].get_result is not None
+                        else str(_agent_output[0])
+                    )
 
                 agent_outputs[agent.role] = output
                 log_success(f"{agent.role} completed contribution")
@@ -1089,7 +1111,13 @@ class Cortex:
                     task_description=consensus_prompt,
                     context=None,
                 )
-                consensus = _consensus if isinstance(_consensus, str) else _consensus[0].get_result(1.0) if _consensus[0].get_result is not None else str(_consensus[0])
+                consensus = (
+                    _consensus
+                    if isinstance(_consensus, str)
+                    else _consensus[0].get_result(1.0)
+                    if _consensus[0].get_result is not None
+                    else str(_consensus[0])
+                )
 
             final_outputs.append(consensus)
 

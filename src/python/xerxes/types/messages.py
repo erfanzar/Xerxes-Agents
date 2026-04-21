@@ -815,9 +815,7 @@ class MessagesHistory(XerxesBase):
             if isinstance(system_msg.content, str):
                 prompt_parts.append(textwrap.indent(system_msg.content.strip(), ind1))
             else:
-                content_text = "".join(
-                    chunk.text for chunk in system_msg.content if isinstance(chunk, TextChunk)
-                )
+                content_text = "".join(chunk.text for chunk in system_msg.content if isinstance(chunk, TextChunk))
                 prompt_parts.append(textwrap.indent(content_text.strip(), ind1))
         else:
             prompt_parts.append(f"{ind1}(No system prompt provided)")

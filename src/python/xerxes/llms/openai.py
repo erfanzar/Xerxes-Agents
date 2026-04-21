@@ -975,6 +975,7 @@ class OpenAILLM(BaseLLM):
                 if chunk["is_final"]:
                     print()
         """
+
         async def _gen() -> AsyncIterator[dict[str, Any]]:
             buffered_content = ""
             buffered_reasoning_content = ""

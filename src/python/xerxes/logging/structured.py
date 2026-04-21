@@ -42,6 +42,7 @@ from typing import Any
 
 try:
     import structlog as _structlog_module
+
     structlog = _structlog_module
     HAS_STRUCTLOG = True
 except ImportError:
@@ -59,9 +60,11 @@ try:
 except ImportError:
     HAS_OTEL = False
 
+
 def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
     try:
         from prometheus_client import Counter, Gauge, Histogram, generate_latest
+
         return True, Counter, Gauge, Histogram, generate_latest
     except ImportError:
 
@@ -137,7 +140,13 @@ def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
             """
             return b""
 
-        return False, (lambda *a, **k: DummyMetric()), (lambda *a, **k: DummyMetric()), (lambda *a, **k: DummyMetric()), _generate_latest
+        return (
+            False,
+            (lambda *a, **k: DummyMetric()),
+            (lambda *a, **k: DummyMetric()),
+            (lambda *a, **k: DummyMetric()),
+            _generate_latest,
+        )
 
 
 HAS_PROMETHEUS, Counter, Gauge, Histogram, generate_latest = _get_prometheus()
