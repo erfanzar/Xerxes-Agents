@@ -97,22 +97,27 @@ ensure_build_prereqs() {
     esac
 }
 
-check_node() {
+check_runtime() {
     if [ "${XERXES_NO_NODE_CHECK:-0}" = "1" ]; then
-        info "skipping Node.js check (XERXES_NO_NODE_CHECK=1)"
+        info "skipping runtime check (XERXES_NO_NODE_CHECK=1)"
         return 0
     fi
     if command -v node >/dev/null 2>&1; then
         node_version=$(node --version 2>/dev/null | sed 's/^v//')
         major=$(echo "$node_version" | cut -d. -f1)
         if [ "$major" -ge 20 ] 2>/dev/null; then
-            ok "Node.js $node_version already present (≥20 required)"
+            ok "Node.js $node_version already present (>=20 required)"
             return 0
         fi
-        warn "Node.js $node_version found but ≥20 required"
+        warn "Node.js $node_version found but >=20 required"
     fi
-    warn "Node.js ≥20 not found. The Xerxes CLI requires Node.js at runtime."
-    warn "Install from https://nodejs.org or run: brew install node"
+    if command -v bun >/dev/null 2>&1; then
+        ok "Bun $(bun --version) already present (can run the CLI)"
+        return 0
+    fi
+    warn "Neither Node.js >=20 nor Bun found. The Xerxes CLI needs one of them at runtime."
+    warn "  Node.js -> https://nodejs.org  or  apt install nodejs"
+    warn "  Bun     -> https://bun.sh      or  let this installer set it up next"
 }
 
 install_bun() {
@@ -262,7 +267,7 @@ main() {
     detect_platform
     info "target: $PLATFORM"
     ensure_build_prereqs
-    check_node
+    check_runtime
     install_uv
     install_bun
     install_xerxes
