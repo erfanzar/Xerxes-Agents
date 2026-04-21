@@ -8,6 +8,7 @@ interface FooterProps {
   costUsd?: number;
   contextLimit?: number;
   remainingContext?: number;
+  usedContext?: number;
   streaming: boolean;
   spinnerFrame: string;
 }
@@ -19,12 +20,13 @@ export const Footer: React.FC<FooterProps> = ({
   costUsd,
   contextLimit,
   remainingContext,
+  usedContext,
   streaming,
   spinnerFrame,
 }) => {
   const ctxText =
-    contextLimit && remainingContext !== undefined
-      ? `${fmt(remainingContext)} / ${fmt(contextLimit)} ctx`
+    contextLimit && usedContext !== undefined
+      ? `${fmt(usedContext)} / ${fmt(contextLimit)} ctx`
       : "";
   const ctxColor =
     remainingContext !== undefined && remainingContext < 10_000

@@ -79,6 +79,7 @@ export type Event =
         total_output_tokens: number;
         context_limit?: number;
         remaining_context?: number;
+        used_context?: number;
         cost_usd?: number;
       };
     }

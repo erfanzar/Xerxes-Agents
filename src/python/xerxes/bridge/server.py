@@ -158,6 +158,7 @@ class BridgeServer:
                 "tool_execution_count": len(self.state.tool_executions),
                 "context_limit": context_limit,
                 "remaining_context": remaining,
+                "used_context": total_tokens,
                 "cost_usd": calc_cost(
                     model,
                     self.state.total_input_tokens,

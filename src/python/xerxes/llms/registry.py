@@ -419,6 +419,16 @@ def list_all_models() -> dict[str, list[str]]:
     return {name: list(prov.models) for name, prov in PROVIDERS.items() if prov.models}
 
 
+# Per-model context-limit overrides for models whose window differs
+# from their provider default.
+_MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    "MiniMax-M2.7-highspeed": 1_024_000,
+    "MiniMax-M2.7-flashspeed": 1_024_000,
+    "MiniMax-Text-01": 256_000,
+    "MiniMax-Text-01-MiniApp": 256_000,
+}
+
+
 def get_context_limit(model: str) -> int:
     """Return the context window size for a model.
 
@@ -428,6 +438,8 @@ def get_context_limit(model: str) -> int:
     Returns:
         Context limit in tokens.
     """
+    if model in _MODEL_CONTEXT_LIMITS:
+        return _MODEL_CONTEXT_LIMITS[model]
     provider_name = detect_provider(model)
     prov = PROVIDERS.get(provider_name)
     return prov.context_limit if prov else 128_000

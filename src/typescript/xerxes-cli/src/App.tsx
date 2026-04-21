@@ -27,6 +27,7 @@ interface Stats {
   costUsd?: number;
   contextLimit?: number;
   remainingContext?: number;
+  usedContext?: number;
 }
 
 interface ReadyInfo {
@@ -145,6 +146,7 @@ export const App: React.FC<AppProps> = ({ args }) => {
           totalOutputTokens: event.data.total_output_tokens,
           contextLimit: event.data.context_limit,
           remainingContext: event.data.remaining_context,
+          usedContext: event.data.used_context,
           costUsd: event.data.cost_usd,
         });
         break;
@@ -442,6 +444,7 @@ export const App: React.FC<AppProps> = ({ args }) => {
         costUsd={stats.costUsd}
         contextLimit={stats.contextLimit}
         remainingContext={stats.remainingContext}
+        usedContext={stats.usedContext}
         streaming={streaming}
         spinnerFrame={spinnerFrame}
       />
