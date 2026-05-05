@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,38 +6,20 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Execution registry module for Xerxes.
 
-
-"""Unified execution registry for commands and tools.
-
-Inspired by the claw-code ``ExecutionRegistry``, this module provides a
-single registry that:
-
-1. Registers all available commands (slash commands, built-in actions).
-2. Registers all available tools (agent functions, file ops, etc.).
-3. Routes incoming prompts to the best-matching command or tool.
-4. Executes matched entries and returns structured results.
-
-The registry supports fuzzy matching, permission filtering, and
-categorized listing.
-
-Usage::
-
-    from xerxes.runtime.execution_registry import ExecutionRegistry
-
-    registry = ExecutionRegistry()
-    registry.register_command("commit", handler=commit_handler, description="Create a git commit")
-    registry.register_tool("Read", handler=read_handler, description="Read a file", safe=True)
-
-
-    matches = registry.route("read the config file", limit=3)
-
-
-    result = registry.execute_tool("Read", {"file_path": "/etc/hosts"})
-"""
+Exports:
+    - logger
+    - EntryKind
+    - RegistryEntry
+    - ExecutionResult
+    - RouteMatch
+    - ExecutionRegistry"""
 
 from __future__ import annotations
 
@@ -52,7 +34,10 @@ logger = logging.getLogger(__name__)
 
 
 class EntryKind(Enum):
-    """Kind of registry entry."""
+    """Entry kind.
+
+    Inherits from: Enum
+    """
 
     COMMAND = "command"
     TOOL = "tool"
@@ -60,18 +45,17 @@ class EntryKind(Enum):
 
 @dataclass
 class RegistryEntry:
-    """A single registered command or tool.
+    """Registry entry.
 
     Attributes:
-        name: Canonical name (e.g. ``"Read"``, ``"commit"``).
-        kind: Whether this is a command or tool.
-        description: Human-readable description.
-        handler: Callable that executes this entry.
-        category: Optional category (e.g. ``"file_system"``, ``"git"``).
-        safe: Whether this entry is safe to auto-approve (read-only).
-        source_hint: Where this entry comes from (e.g. ``"xerxes.tools.standalone"``).
-        schema: Optional JSON schema for tool input parameters.
-    """
+        name (str): name.
+        kind (EntryKind): kind.
+        description (str): description.
+        handler (Callable[..., Any] | None): handler.
+        category (str): category.
+        safe (bool): safe.
+        source_hint (str): source hint.
+        schema (dict[str, Any] | None): schema."""
 
     name: str
     kind: EntryKind
@@ -85,16 +69,15 @@ class RegistryEntry:
 
 @dataclass
 class ExecutionResult:
-    """Result of executing a registry entry.
+    """Execution result.
 
     Attributes:
-        name: Entry name that was executed.
-        kind: Whether it was a command or tool.
-        handled: Whether the execution was successful.
-        result: The output/result string.
-        duration_ms: Execution duration in milliseconds.
-        error: Error message if execution failed.
-    """
+        name (str): name.
+        kind (EntryKind): kind.
+        handled (bool): handled.
+        result (str): result.
+        duration_ms (float): duration ms.
+        error (str): error."""
 
     name: str
     kind: EntryKind
@@ -106,15 +89,14 @@ class ExecutionResult:
 
 @dataclass
 class RouteMatch:
-    """A match from routing a prompt against the registry.
+    """Route match.
 
     Attributes:
-        name: Matched entry name.
-        kind: Command or tool.
-        score: Match score (higher is better).
-        source_hint: Where this entry comes from.
-        description: Entry description.
-    """
+        name (str): name.
+        kind (EntryKind): kind.
+        score (int): score.
+        source_hint (str): source hint.
+        description (str): description."""
 
     name: str
     kind: EntryKind
@@ -124,13 +106,13 @@ class RouteMatch:
 
 
 class ExecutionRegistry:
-    """Unified registry for commands and tools.
-
-    Provides registration, routing, execution, and listing for all
-    available commands and tools in the Xerxes runtime.
-    """
+    """Execution registry."""
 
     def __init__(self) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
         self._commands: dict[str, RegistryEntry] = {}
         self._tools: dict[str, RegistryEntry] = {}
 
@@ -142,7 +124,16 @@ class ExecutionRegistry:
         category: str = "",
         source_hint: str = "",
     ) -> None:
-        """Register a command (slash command or built-in action)."""
+        """Register command.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            handler (Callable[..., Any] | None, optional): IN: handler. Defaults to None. OUT: Consumed during execution.
+            description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
+            category (str, optional): IN: category. Defaults to ''. OUT: Consumed during execution.
+            source_hint (str, optional): IN: source hint. Defaults to ''. OUT: Consumed during execution."""
+
         self._commands[name.lower()] = RegistryEntry(
             name=name,
             kind=EntryKind.COMMAND,
@@ -162,7 +153,18 @@ class ExecutionRegistry:
         source_hint: str = "",
         schema: dict[str, Any] | None = None,
     ) -> None:
-        """Register a tool (agent function)."""
+        """Register tool.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            handler (Callable[..., Any] | None, optional): IN: handler. Defaults to None. OUT: Consumed during execution.
+            description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
+            category (str, optional): IN: category. Defaults to ''. OUT: Consumed during execution.
+            safe (bool, optional): IN: safe. Defaults to False. OUT: Consumed during execution.
+            source_hint (str, optional): IN: source hint. Defaults to ''. OUT: Consumed during execution.
+            schema (dict[str, Any] | None, optional): IN: schema. Defaults to None. OUT: Consumed during execution."""
+
         self._tools[name] = RegistryEntry(
             name=name,
             kind=EntryKind.TOOL,
@@ -175,11 +177,12 @@ class ExecutionRegistry:
         )
 
     def register_from_agent_functions(self, functions: list[Any]) -> None:
-        """Bulk-register tools from a list of AgentFunction objects.
+        """Register from agent functions.
 
-        Expects objects with ``name``, ``description``, and optionally
-        ``callable_func`` attributes.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            functions (list[Any]): IN: functions. OUT: Consumed during execution."""
+
         for func in functions:
             name = getattr(func, "name", str(func))
             desc = getattr(func, "description", "")
@@ -187,19 +190,15 @@ class ExecutionRegistry:
             self.register_tool(name=name, handler=handler, description=desc)
 
     def route(self, prompt: str, limit: int = 5) -> list[RouteMatch]:
-        """Route a prompt to the best-matching commands and tools.
-
-        Uses token overlap scoring: splits the prompt into tokens and
-        scores each entry by how many tokens match its name, description,
-        or category.
+        """Route.
 
         Args:
-            prompt: The user's input string.
-            limit: Maximum number of matches to return.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 5. OUT: Consumed during execution.
         Returns:
-            List of :class:`RouteMatch` sorted by score (descending).
-        """
+            list[RouteMatch]: OUT: Result of the operation."""
+
         tokens = {t.lower() for t in prompt.replace("/", " ").replace("-", " ").replace("_", " ").split() if len(t) > 1}
         if not tokens:
             return []
@@ -224,7 +223,14 @@ class ExecutionRegistry:
 
     @staticmethod
     def _score_entry(entry: RegistryEntry, tokens: set[str]) -> int:
-        """Score an entry against a set of query tokens."""
+        """Internal helper to score entry.
+
+        Args:
+            entry (RegistryEntry): IN: entry. OUT: Consumed during execution.
+            tokens (set[str]): IN: tokens. OUT: Consumed during execution.
+        Returns:
+            int: OUT: Result of the operation."""
+
         score = 0
         name_lower = entry.name.lower()
         desc_lower = entry.description.lower()
@@ -244,7 +250,15 @@ class ExecutionRegistry:
         return score
 
     def execute_command(self, name: str, **kwargs: Any) -> ExecutionResult:
-        """Execute a registered command by name."""
+        """Execute command.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            ExecutionResult: OUT: Result of the operation."""
+
         entry = self._commands.get(name.lower())
         if entry is None:
             return ExecutionResult(
@@ -256,7 +270,15 @@ class ExecutionRegistry:
         return self._execute(entry, **kwargs)
 
     def execute_tool(self, name: str, inputs: dict[str, Any] | None = None) -> ExecutionResult:
-        """Execute a registered tool by name."""
+        """Execute tool.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            inputs (dict[str, Any] | None, optional): IN: inputs. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            ExecutionResult: OUT: Result of the operation."""
+
         entry = self._tools.get(name)
         if entry is None:
             return ExecutionResult(
@@ -268,7 +290,15 @@ class ExecutionRegistry:
         return self._execute(entry, **(inputs or {}))
 
     def _execute(self, entry: RegistryEntry, **kwargs: Any) -> ExecutionResult:
-        """Execute a registry entry."""
+        """Internal helper to execute.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            entry (RegistryEntry): IN: entry. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            ExecutionResult: OUT: Result of the operation."""
+
         if entry.handler is None:
             return ExecutionResult(
                 name=entry.name,
@@ -301,22 +331,51 @@ class ExecutionRegistry:
             )
 
     def get_command(self, name: str) -> RegistryEntry | None:
-        """Look up a command by name."""
+        """Retrieve the command.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+        Returns:
+            RegistryEntry | None: OUT: Result of the operation."""
+
         return self._commands.get(name.lower())
 
     def get_tool(self, name: str) -> RegistryEntry | None:
-        """Look up a tool by name."""
+        """Retrieve the tool.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+        Returns:
+            RegistryEntry | None: OUT: Result of the operation."""
+
         return self._tools.get(name)
 
     def list_commands(self, category: str | None = None) -> list[RegistryEntry]:
-        """List all commands, optionally filtered by category."""
+        """List commands.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            category (str | None, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            list[RegistryEntry]: OUT: Result of the operation."""
+
         entries = list(self._commands.values())
         if category:
             entries = [e for e in entries if e.category == category]
         return sorted(entries, key=lambda e: e.name)
 
     def list_tools(self, category: str | None = None, safe_only: bool = False) -> list[RegistryEntry]:
-        """List all tools, optionally filtered."""
+        """List tools.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            category (str | None, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+            safe_only (bool, optional): IN: safe only. Defaults to False. OUT: Consumed during execution.
+        Returns:
+            list[RegistryEntry]: OUT: Result of the operation."""
+
         entries = list(self._tools.values())
         if category:
             entries = [e for e in entries if e.category == category]
@@ -325,7 +384,13 @@ class ExecutionRegistry:
         return sorted(entries, key=lambda e: e.name)
 
     def tool_schemas(self) -> list[dict[str, Any]]:
-        """Return all tool schemas in Anthropic tool format."""
+        """Tool schemas.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, Any]]: OUT: Result of the operation."""
+
         schemas = []
         for entry in self._tools.values():
             if entry.schema:
@@ -345,14 +410,32 @@ class ExecutionRegistry:
 
     @property
     def command_count(self) -> int:
+        """Return Command count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
         return len(self._commands)
 
     @property
     def tool_count(self) -> int:
+        """Return Tool count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
         return len(self._tools)
 
     def summary(self) -> str:
-        """Return a markdown summary of the registry."""
+        """Summary.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
             "# Execution Registry",
             "",

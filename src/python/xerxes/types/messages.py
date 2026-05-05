@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,29 +6,25 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Messages module for Xerxes.
 
-
-"""Message type definitions for Xerxes.
-
-This module provides a comprehensive message system for handling
-conversations with LLM models. It includes:
-- Content chunk types for text, images, and image URLs
-- Message types for different conversation roles (system, user, assistant, tool)
-- Message history management with OpenAI format conversion
-- Support for multimodal content including images and text
-
-The message system follows a type-safe design using Pydantic models
-with discriminated unions for proper serialization and validation.
-
-Example:
-    >>> from xerxes.types.messages import UserMessage, MessagesHistory
-    >>> user_msg = UserMessage(content="Hello, how can I help you?")
-    >>> history = MessagesHistory(messages=[user_msg])
-    >>> openai_format = history.to_openai()
-"""
+Exports:
+    - ChunkTypes
+    - BaseContentChunk
+    - ImageChunk
+    - ImageURL
+    - ImageURLChunk
+    - TextChunk
+    - ContentChunk
+    - Roles
+    - BaseMessage
+    - UserMessage
+    - ... and 10 more."""
 
 import re
 import textwrap
@@ -43,21 +39,9 @@ from .tool_calls import ToolCall
 
 
 class ChunkTypes(StrEnum):
-    """Enumeration of content chunk types supported in messages.
+    """Chunk types.
 
-    Defines the different types of content chunks that can be included
-    in multimodal messages sent to LLM models.
-
-    Attributes:
-        text: A plain text content chunk.
-        image: A binary image content chunk (PIL Image or base64-encoded).
-        image_url: An image referenced by URL or base64 data URI.
-
-    Example:
-        >>> from xerxes.types.messages import ChunkTypes
-        >>> chunk_type = ChunkTypes.text
-        >>> chunk_type.value
-        'text'
+    Inherits from: StrEnum
     """
 
     text = "text"
@@ -66,109 +50,73 @@ class ChunkTypes(StrEnum):
 
 
 class BaseContentChunk(XerxesBase):
-    """Abstract base class for all content chunks in multimodal messages.
+    """Base content chunk.
 
-    Content chunks represent individual pieces of content within a message,
-    such as text passages, images, or image URLs. Subclasses must implement
-    the ``to_openai`` and ``from_openai`` methods for format conversion.
+    Inherits from: XerxesBase
 
     Attributes:
-        type: The discriminator type of the chunk, one of 'text', 'image',
-            or 'image_url'.
-    """
+        type (Literal[ChunkTypes.text, ChunkTypes.image, ChunkTypes.image_url]): type."""
 
     type: Literal[ChunkTypes.text, ChunkTypes.image, ChunkTypes.image_url]
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        """Convert this content chunk to the OpenAI API format.
+        """To openai.
 
-        Must be implemented by subclasses to provide the appropriate
-        dictionary representation for the OpenAI messages API.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary in OpenAI content chunk format with a 'type' key
-            and type-specific content keys.
+            dict[str, str | dict[str, str]]: OUT: Result of the operation."""
 
-        Raises:
-            NotImplementedError: Always raised in the base class; subclasses
-                must override this method.
-        """
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "BaseContentChunk":
-        """Create a content chunk from an OpenAI-format dictionary.
-
-        Must be implemented by subclasses to parse the OpenAI content chunk
-        format into the appropriate Xerxes chunk type.
+        """From openai.
 
         Args:
-            openai_chunk: A dictionary in OpenAI content chunk format containing
-                at minimum a 'type' key.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_chunk (dict[str, str | dict[str, str]]): IN: openai chunk. OUT: Consumed during execution.
         Returns:
-            An instance of the appropriate BaseContentChunk subclass.
+            'BaseContentChunk': OUT: Result of the operation."""
 
-        Raises:
-            NotImplementedError: Always raised in the base class; subclasses
-                must override this method.
-        """
         raise NotImplementedError(f"from_openai method not implemented for {cls.__name__}")
 
 
 class ImageChunk(BaseContentChunk):
-    """Content chunk containing a binary image.
+    """Image chunk.
 
-    Wraps a PIL Image or base64-encoded image data for inclusion in
-    multimodal messages. When converted to OpenAI format, the image is
-    serialized as a base64 data URI within an ``image_url`` structure.
+    Inherits from: BaseContentChunk
 
     Attributes:
-        type: Chunk type discriminator, always ``ChunkTypes.image``.
-        image: The image data, either a PIL Image object or a base64 string,
-            wrapped in a SerializableImage for Pydantic compatibility.
-
-    Example:
-        >>> from PIL import Image
-        >>> image_chunk = ImageChunk(image=Image.new('RGB', (200, 200), color='blue'))
-    """
+        type (Literal[ChunkTypes.image]): type.
+        image (SerializableImage): image.
+        model_config (Any): model config."""
 
     type: Literal[ChunkTypes.image] = ChunkTypes.image
     image: SerializableImage
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        """Convert the image chunk to OpenAI API format.
+        """To openai.
 
-        Serializes the image to a base64 data URI and wraps it in the
-        OpenAI ``image_url`` content chunk format.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``type`` set to ``"image_url"`` and an
-            ``image_url`` sub-dictionary containing the base64 data URI.
-        """
+            dict[str, str | dict[str, str]]: OUT: Result of the operation."""
+
         base64_image = self.model_dump(include={"image"}, context={"add_format_prefix": True})["image"]
         return {"type": "image_url", "image_url": {"url": base64_image}}
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "ImageChunk":
-        """Create an ImageChunk from an OpenAI-format image_url dictionary.
-
-        Parses the base64 data URI from the OpenAI format, stripping the
-        ``data:image/...;base64,`` prefix if present, and creates an
-        ImageChunk with the raw base64 image data.
+        """From openai.
 
         Args:
-            openai_chunk: A dictionary with ``type`` set to ``"image_url"``
-                and an ``image_url`` sub-dictionary containing a ``url`` key.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_chunk (dict[str, str | dict[str, str]]): IN: openai chunk. OUT: Consumed during execution.
         Returns:
-            A new ImageChunk instance with the parsed image data.
+            'ImageChunk': OUT: Result of the operation."""
 
-        Raises:
-            AssertionError: If the chunk type is not ``"image_url"`` or the
-                ``image_url`` dictionary is malformed.
-        """
         assert openai_chunk.get("type") == "image_url", openai_chunk
 
         image_url_dict = openai_chunk["image_url"]
@@ -181,42 +129,27 @@ class ImageChunk(BaseContentChunk):
 
 
 class ImageURL(XerxesBase):
-    """Represents an image reference by URL or base64-encoded data URI.
+    """Image url.
 
-    Used within ``ImageURLChunk`` to specify the image source and optional
-    detail level for vision-capable models.
+    Inherits from: XerxesBase
 
     Attributes:
-        url: The URL of the image or a base64-encoded data URI string
-            (e.g., ``"data:image/png;base64,..."`` or ``"https://..."``).
-        detail: Optional detail level hint for the model (e.g., ``"low"``,
-            ``"high"``, ``"auto"``). Controls image processing resolution.
-
-    Example:
-        >>> image_url = ImageURL(url="https://example.com/image.png", detail="high")
-    """
+        url (str): url.
+        detail (str | None): detail."""
 
     url: str
     detail: str | None = None
 
 
 class ImageURLChunk(BaseContentChunk):
-    """Content chunk containing an image referenced by URL or data URI.
+    """Image urlchunk.
 
-    Supports both plain URL strings and structured ``ImageURL`` objects
-    with optional detail level hints for vision-capable models.
+    Inherits from: BaseContentChunk
 
     Attributes:
-        type: Chunk type discriminator, always ``ChunkTypes.image_url``.
-        image_url: The image reference, either an ``ImageURL`` object with
-            ``url`` and optional ``detail`` fields, or a plain URL string.
-
-    Example:
-        >>> chunk = ImageURLChunk(image_url="https://example.com/photo.jpg")
-        >>> chunk_with_detail = ImageURLChunk(
-        ...     image_url=ImageURL(url="https://example.com/photo.jpg", detail="high")
-        ... )
-    """
+        type (Literal[ChunkTypes.image_url]): type.
+        image_url (ImageURL | str): image url.
+        model_config (Any): model config."""
 
     type: Literal[ChunkTypes.image_url] = ChunkTypes.image_url
     image_url: ImageURL | str
@@ -224,30 +157,25 @@ class ImageURLChunk(BaseContentChunk):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def get_url(self) -> str:
-        """Extract the URL string from the image_url attribute.
+        """Retrieve the url.
 
-        Handles both ``ImageURL`` objects and plain string URLs, providing
-        a uniform way to access the underlying URL.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            The URL string for the image, regardless of whether ``image_url``
-            is an ``ImageURL`` instance or a plain string.
-        """
+            str: OUT: Result of the operation."""
+
         if isinstance(self.image_url, ImageURL):
             return self.image_url.url
         return self.image_url
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        """Convert the image URL chunk to OpenAI API format.
+        """To openai.
 
-        Creates an OpenAI-compatible content chunk dictionary with the image
-        URL and optional detail level.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``type`` set to ``"image_url"`` and an
-            ``image_url`` sub-dictionary containing the URL and optionally
-            a ``detail`` key.
-        """
+            dict[str, str | dict[str, str]]: OUT: Result of the operation."""
+
         image_url_dict = {"url": self.get_url()}
         if isinstance(self.image_url, ImageURL) and self.image_url.detail is not None:
             image_url_dict["detail"] = self.image_url.detail
@@ -260,58 +188,49 @@ class ImageURLChunk(BaseContentChunk):
 
     @classmethod
     def from_openai(cls, openai_chunk: dict[str, str | dict[str, str]]) -> "ImageURLChunk":
-        """Create an ImageURLChunk from an OpenAI-format content chunk dictionary.
+        """From openai.
 
         Args:
-            openai_chunk: A dictionary with an ``image_url`` key containing
-                either a URL string or a dictionary with ``url`` and optional
-                ``detail`` keys.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_chunk (dict[str, str | dict[str, str]]): IN: openai chunk. OUT: Consumed during execution.
         Returns:
-            A new ImageURLChunk instance parsed from the OpenAI format.
-        """
+            'ImageURLChunk': OUT: Result of the operation."""
+
         return cls.model_validate({"image_url": openai_chunk["image_url"]})
 
 
 class TextChunk(BaseContentChunk):
-    """Content chunk containing plain text.
+    """Text chunk.
 
-    The most common content chunk type, representing a segment of text
-    within a multimodal message.
+    Inherits from: BaseContentChunk
 
     Attributes:
-        type: Chunk type discriminator, always ``ChunkTypes.text``.
-        text: The text content string.
-
-    Example:
-        >>> text_chunk = TextChunk(text="Hello, how can I help you?")
-        >>> text_chunk.to_openai()
-        {'type': 'text', 'text': 'Hello, how can I help you?'}
-    """
+        type (Literal[ChunkTypes.text]): type.
+        text (str): text."""
 
     type: Literal[ChunkTypes.text] = ChunkTypes.text
     text: str
 
     def to_openai(self) -> dict[str, str | dict[str, str]]:
-        """Convert the text chunk to OpenAI API format.
+        """To openai.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``type`` set to ``"text"`` and a ``text`` key
-            containing the text content.
-        """
+            dict[str, str | dict[str, str]]: OUT: Result of the operation."""
+
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, messages: dict[str, str | dict[str, str]]) -> "TextChunk":
-        """Create a TextChunk from an OpenAI-format content chunk dictionary.
+        """From openai.
 
         Args:
-            messages: A dictionary with ``type`` set to ``"text"`` and a
-                ``text`` key containing the text content.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            messages (dict[str, str | dict[str, str]]): IN: messages. OUT: Consumed during execution.
         Returns:
-            A new TextChunk instance with the parsed text.
-        """
+            'TextChunk': OUT: Result of the operation."""
+
         return cls.model_validate(messages)
 
 
@@ -319,23 +238,13 @@ ContentChunk = Annotated[TextChunk | ImageChunk | ImageURLChunk, Field(discrimin
 
 
 def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[str, str]]) -> ContentChunk:
-    """Convert an OpenAI format content chunk to the appropriate Xerxes content chunk type.
-
-    This internal function handles the conversion of content chunks from the OpenAI
-    message format to their corresponding Xerxes ContentChunk types based on the
-    'type' field.
+    """Internal helper to convert openai content chunks.
 
     Args:
-        openai_content_chunks: A dictionary representing an OpenAI format content chunk.
-            Must contain a 'type' field indicating the chunk type.
-
+        openai_content_chunks (dict[str, str | dict[str, str]]): IN: openai content chunks. OUT: Consumed during execution.
     Returns:
-        The appropriate ContentChunk subclass instance (TextChunk, ImageURLChunk,
-        or ImageChunk) based on the chunk type.
+        ContentChunk: OUT: Result of the operation."""
 
-    Raises:
-        ValueError: If the content chunk has no 'type' field or an unknown type.
-    """
     content_type_str = openai_content_chunks.get("type")
 
     if content_type_str is None:
@@ -357,21 +266,9 @@ def _convert_openai_content_chunks(openai_content_chunks: dict[str, str | dict[s
 
 
 class Roles(StrEnum):
-    """Enumeration of message roles in a chat conversation.
+    """Roles.
 
-    Defines the four standard roles used in chat completion APIs to
-    distinguish between different participants in a conversation.
-
-    Attributes:
-        system: The system role, used for initial instructions and context.
-        user: The user role, representing the human participant.
-        assistant: The assistant role, representing the AI model's responses.
-        tool: The tool role, used for function/tool execution results.
-
-    Example:
-        >>> role = Roles.user
-        >>> role.value
-        'user'
+    Inherits from: StrEnum
     """
 
     system = "system"
@@ -381,85 +278,58 @@ class Roles(StrEnum):
 
 
 class BaseMessage(XerxesBase):
-    """Abstract base class for all chat message types.
+    """Base message.
 
-    Provides the common interface for message serialization to and from
-    OpenAI format. Subclasses implement role-specific content handling
-    and serialization logic.
+    Inherits from: XerxesBase
 
     Attributes:
-        role: The role of the message sender, one of ``system``, ``user``,
-            ``assistant``, or ``tool``.
-    """
+        role (Literal[Roles.system, Roles.user, Roles.assistant, Roles.tool]): role."""
 
     role: Literal[Roles.system, Roles.user, Roles.assistant, Roles.tool]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        """Convert this message to the OpenAI API format.
+        """To openai.
 
-        Must be implemented by subclasses to produce a dictionary compatible
-        with the OpenAI chat completion messages format.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with at minimum ``role`` and ``content`` keys,
-            formatted for the OpenAI API.
+            dict[str, str | list[dict[str, str | dict[str, Any]]]]: OUT: Result of the operation."""
 
-        Raises:
-            NotImplementedError: Always raised in the base class; subclasses
-                must override this method.
-        """
         raise NotImplementedError(f"to_openai method not implemented for {type(self).__name__}")
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "BaseMessage":
-        """Create a message instance from an OpenAI-format dictionary.
-
-        Must be implemented by subclasses to parse OpenAI-format message
-        dictionaries into the appropriate Xerxes message type.
+        """From openai.
 
         Args:
-            openai_message: A dictionary in OpenAI message format containing
-                at minimum a ``role`` key.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_message (dict[str, str | list[dict[str, str | dict[str, Any]]]]): IN: openai message. OUT: Consumed during execution.
         Returns:
-            An instance of the appropriate BaseMessage subclass.
+            'BaseMessage': OUT: Result of the operation."""
 
-        Raises:
-            NotImplementedError: Always raised in the base class; subclasses
-                must override this method.
-        """
         raise NotImplementedError(f"from_openai method not implemented for {cls.__name__}.")
 
 
 class UserMessage(BaseMessage):
-    """Message from the user in a chat conversation.
+    """User message.
 
-    Supports both plain text content and multimodal content consisting of
-    a list of content chunks (text, images, image URLs).
+    Inherits from: BaseMessage
 
     Attributes:
-        role: The message role, always ``Roles.user``.
-        content: The message content, either a plain text string or a list of
-            ``ContentChunk`` objects for multimodal messages.
-
-    Example:
-        >>> message = UserMessage(content="Can you help me to write a poem?")
-        >>> message.role
-        <Roles.user: 'user'>
-    """
+        role (Literal[Roles.user]): role.
+        content (str | list[ContentChunk]): content."""
 
     role: Literal[Roles.user] = Roles.user
     content: str | list[ContentChunk]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        """Convert the user message to OpenAI API format.
+        """To openai.
 
-        Handles both plain text content (returned as a string) and multimodal
-        content (returned as a list of content chunk dictionaries).
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``role`` and ``content`` keys in OpenAI format.
-        """
+            dict[str, str | list[dict[str, str | dict[str, Any]]]]: OUT: Result of the operation."""
+
         if isinstance(self.content, str):
             return {"role": self.role, "content": self.content}
         return {
@@ -469,19 +339,14 @@ class UserMessage(BaseMessage):
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "UserMessage":
-        """Create a UserMessage from an OpenAI-format message dictionary.
-
-        Handles both plain text content strings and lists of content chunk
-        dictionaries for multimodal messages.
+        """From openai.
 
         Args:
-            openai_message: A dictionary with ``role`` set to ``"user"`` and
-                a ``content`` key containing either a string or a list of
-                content chunk dictionaries.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_message (dict[str, str | list[dict[str, str | dict[str, Any]]]]): IN: openai message. OUT: Consumed during execution.
         Returns:
-            A new UserMessage instance with properly typed content.
-        """
+            'UserMessage': OUT: Result of the operation."""
+
         if isinstance(openai_message["content"], str):
             return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
@@ -493,48 +358,39 @@ class UserMessage(BaseMessage):
 
 
 class SystemMessage(BaseMessage):
-    """System-level instruction message for configuring model behavior.
+    """System message.
 
-    System messages set the context, personality, and constraints for
-    the AI assistant. They are typically placed at the beginning of a
-    conversation and support both plain text and multimodal content.
+    Inherits from: BaseMessage
 
     Attributes:
-        role: The message role, always ``Roles.system``.
-        content: The system instruction content, either a plain text string
-            or a list of ``ContentChunk`` objects.
-
-    Example:
-        >>> message = SystemMessage(content="You are a helpful assistant.")
-        >>> message.to_openai()
-        {'role': 'system', 'content': 'You are a helpful assistant.'}
-    """
+        role (Literal[Roles.system]): role.
+        content (str | list[ContentChunk]): content."""
 
     role: Literal[Roles.system] = Roles.system
     content: str | list[ContentChunk]
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        """Convert the system message to OpenAI API format.
+        """To openai.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``role`` and ``content`` keys in OpenAI format.
-        """
+            dict[str, str | list[dict[str, str | dict[str, Any]]]]: OUT: Result of the operation."""
+
         if isinstance(self.content, str):
             return {"role": self.role, "content": self.content}
         return {"role": self.role, "content": [chunk.to_openai() for chunk in self.content]}
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "SystemMessage":
-        """Create a SystemMessage from an OpenAI-format message dictionary.
+        """From openai.
 
         Args:
-            openai_message: A dictionary with ``role`` set to ``"system"`` and
-                a ``content`` key containing either a string or a list of
-                content chunk dictionaries.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_message (dict[str, str | list[dict[str, str | dict[str, Any]]]]): IN: openai message. OUT: Consumed during execution.
         Returns:
-            A new SystemMessage instance with properly typed content.
-        """
+            'SystemMessage': OUT: Result of the operation."""
+
         if isinstance(openai_message["content"], str):
             return cls.model_validate(dict(role=openai_message["role"], content=openai_message["content"]))
         return cls.model_validate(
@@ -546,27 +402,15 @@ class SystemMessage(BaseMessage):
 
 
 class AssistantMessage(BaseMessage):
-    """Message generated by the AI assistant.
+    """Assistant message.
 
-    Represents the model's response in a conversation. May contain text
-    content, tool/function calls, or both. The ``prefix`` flag indicates
-    whether this message should be treated as a prefix-fill for the next
-    generation (used by some model APIs).
+    Inherits from: BaseMessage
 
     Attributes:
-        role: The message role, always ``Roles.assistant``.
-        content: The text content of the assistant's response, or None if
-            the response consists only of tool calls.
-        tool_calls: Optional list of ``ToolCall`` objects representing
-            function/tool invocations requested by the model.
-        prefix: Whether this message serves as a prefix for continued
-            generation (default: False).
-
-    Example:
-        >>> message = AssistantMessage(content="Hello, how can I help you?")
-        >>> message.to_openai()
-        {'role': 'assistant', 'content': 'Hello, how can I help you?'}
-    """
+        role (Literal[Roles.assistant]): role.
+        content (str | None): content.
+        tool_calls (list[ToolCall] | None): tool calls.
+        prefix (bool): prefix."""
 
     role: Literal[Roles.assistant] = Roles.assistant
     content: str | None = None
@@ -574,15 +418,13 @@ class AssistantMessage(BaseMessage):
     prefix: bool = False
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        """Convert the assistant message to OpenAI API format.
+        """To openai.
 
-        Always includes ``content`` so OpenAI-compatible servers that require
-        the field for tool-call turns still accept the payload.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``role``, ``content``, and optionally
-            ``tool_calls`` keys in OpenAI format.
-        """
+            dict[str, str | list[dict[str, str | dict[str, Any]]]]: OUT: Result of the operation."""
+
         out_dict: dict[str, str | list[dict[str, str | dict[str, Any]]]] = {
             "role": self.role,
             "content": self.content if self.content is not None else "",
@@ -594,18 +436,14 @@ class AssistantMessage(BaseMessage):
 
     @classmethod
     def from_openai(cls, openai_message: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "AssistantMessage":
-        """Create an AssistantMessage from an OpenAI-format message dictionary.
-
-        Parses both the text content and any tool calls from the OpenAI
-        message format.
+        """From openai.
 
         Args:
-            openai_message: A dictionary with ``role`` set to ``"assistant"``,
-                optional ``content`` string, and optional ``tool_calls`` list.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_message (dict[str, str | list[dict[str, str | dict[str, Any]]]]): IN: openai message. OUT: Consumed during execution.
         Returns:
-            A new AssistantMessage instance with parsed content and tool calls.
-        """
+            'AssistantMessage': OUT: Result of the operation."""
+
         openai_tool_calls = openai_message.get("tool_calls")
         if isinstance(openai_tool_calls, list):
             tools_calls = [ToolCall.from_openai(openai_tool_call) for openai_tool_call in openai_tool_calls]
@@ -621,57 +459,40 @@ class AssistantMessage(BaseMessage):
 
 
 class ToolMessage(BaseMessage):
-    """Message containing the result of a tool/function call execution.
+    """Tool message.
 
-    Tool messages are sent after a function has been executed to provide
-    the result back to the model. Each tool message must reference the
-    specific tool call it responds to via ``tool_call_id``.
+    Inherits from: BaseMessage
 
     Attributes:
-        content: The string result of the tool execution.
-        role: The message role, always ``Roles.tool``.
-        tool_call_id: The unique identifier of the tool call this message
-            responds to. Must not be None when converting to OpenAI format.
-
-    Example:
-        >>> message = ToolMessage(
-        ...     content='{"temperature": 72, "unit": "fahrenheit"}',
-        ...     tool_call_id="call_abc123"
-        ... )
-    """
+        content (str): content.
+        role (Literal[Roles.tool]): role.
+        tool_call_id (str | None): tool call id."""
 
     content: str
     role: Literal[Roles.tool] = Roles.tool
     tool_call_id: str | None = None
 
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
-        """Convert the tool message to OpenAI API format.
+        """To openai.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``role``, ``content``, and ``tool_call_id`` keys.
+            dict[str, str | list[dict[str, str | dict[str, Any]]]]: OUT: Result of the operation."""
 
-        Raises:
-            AssertionError: If ``tool_call_id`` is None, as OpenAI requires
-                tool messages to reference a specific tool call.
-        """
         assert self.tool_call_id is not None, "tool_call_id must be provided for tool messages."
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, messages: dict[str, str | list[dict[str, str | dict[str, Any]]]]) -> "ToolMessage":
-        """Create a ToolMessage from an OpenAI-format message dictionary.
+        """From openai.
 
         Args:
-            messages: A dictionary with ``role`` set to ``"tool"``, a
-                ``content`` string, and a ``tool_call_id`` string.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            messages (dict[str, str | list[dict[str, str | dict[str, Any]]]]): IN: messages. OUT: Consumed during execution.
         Returns:
-            A new ToolMessage instance with the parsed content and tool call ID.
+            'ToolMessage': OUT: Result of the operation."""
 
-        Raises:
-            AssertionError: If ``tool_call_id`` is not present in the input,
-                as it is required for tool messages.
-        """
         tool_message = cls.model_validate(
             dict(
                 content=messages["content"],
@@ -699,24 +520,12 @@ _map_role_to_type = {
 
 
 class MessagesHistory(XerxesBase):
-    """Container for managing a sequence of chat messages.
+    """Messages history.
 
-    Provides a structured container for storing and manipulating chat
-    conversation history. Supports conversion to/from OpenAI format
-    and generation of instruction prompts for model input.
+    Inherits from: XerxesBase
 
     Attributes:
-        messages: List of chat messages in the conversation. Each message
-            is discriminated by its role (system, user, assistant, or tool).
-
-    Example:
-        >>> from xerxes.types.messages import UserMessage, AssistantMessage, MessagesHistory
-        >>> history = MessagesHistory(messages=[
-        ...     UserMessage(content="Hello!"),
-        ...     AssistantMessage(content="Hi there! How can I help you?"),
-        ... ])
-        >>> openai_format = history.to_openai()
-    """
+        messages (list[Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator='role')]]): messages."""
 
     messages: list[
         Annotated[
@@ -726,15 +535,13 @@ class MessagesHistory(XerxesBase):
     ]
 
     def to_openai(self) -> dict[str, list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]]:
-        """Convert all messages to OpenAI API format.
+        """To openai.
 
-        Iterates through all messages, converts each to OpenAI format,
-        and filters out system messages with empty content.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with a ``messages`` key containing a list of
-            OpenAI-format message dictionaries.
-        """
+            dict[str, list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]]: OUT: Result of the operation."""
+
         message = []
         for msg in self.messages:
             msg_dict = msg.to_openai()
@@ -749,26 +556,14 @@ class MessagesHistory(XerxesBase):
         cls,
         openai_messages: list[dict[str, str | list[dict[str, str | dict[str, Any]]]]],
     ) -> "MessagesHistory":
-        """Create a MessagesHistory from OpenAI format messages.
-
-        Converts a list of OpenAI format message dictionaries into a
-        MessagesHistory instance with properly typed message objects.
+        """From openai.
 
         Args:
-            openai_messages: List of message dictionaries in OpenAI format.
-                Each dictionary must contain a 'role' field to determine
-                the message type.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_messages (list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]): IN: openai messages. OUT: Consumed during execution.
         Returns:
-            A MessagesHistory instance containing the converted messages.
+            'MessagesHistory': OUT: Result of the operation."""
 
-        Example:
-            >>> openai_msgs = [
-            ...     {"role": "user", "content": "Hello!"},
-            ...     {"role": "assistant", "content": "Hi there!"},
-            ... ]
-            >>> history = MessagesHistory.from_openai(openai_msgs)
-        """
         messages: list[SystemMessage | UserMessage | AssistantMessage | ToolMessage] = []
         for message in openai_messages:
             role = message.get("role")
@@ -791,22 +586,15 @@ class MessagesHistory(XerxesBase):
         conversation_name_holder: str = "Messages",
         mention_last_turn: bool = True,
     ) -> str:
-        """Format the message history into a human-readable instruction prompt.
-
-        Converts the entire message history into a single, structured string
-        suitable for LLM input. Tool calls are rendered in canonical XML format
-        to encourage the LLM to follow the same pattern.
+        """Make instruction prompt.
 
         Args:
-            conversation_name_holder: The section header name for the conversation
-                history section (default: "Messages").
-            mention_last_turn: Whether to append a summary of the last message
-                at the end of the prompt (default: True).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
         Returns:
-            A formatted string containing the instruction prompt with all
-            messages properly structured and indented.
-        """
+            str: OUT: Result of the operation."""
+
         ind1 = "  "
         prompt_parts: list[str] = []
         system_msg: SystemMessage | None = next((m for m in self.messages if isinstance(m, SystemMessage)), None)
@@ -823,14 +611,13 @@ class MessagesHistory(XerxesBase):
         other_msgs = [m for m in self.messages if not isinstance(m, SystemMessage)]
 
         def _capitalize_role(role: str | Roles) -> str:
-            """Capitalize a role name for display purposes.
+            """Internal helper to capitalize role.
 
             Args:
-                role: A Roles enum member or plain string.
-
+                role (str | Roles): IN: role. OUT: Consumed during execution.
             Returns:
-                Capitalized string representation of the role.
-            """
+                str: OUT: Result of the operation."""
+
             if hasattr(role, "value"):
                 return role.value.capitalize()
             return role.capitalize()

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,39 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Query engine module for Xerxes.
 
-
-"""Multi-turn query engine with budget control and auto-compaction.
-
-Inspired by the claw-code ``QueryEnginePort``, this module provides a
-stateful query engine that manages multi-turn conversations with:
-
-- **Turn budgets**: Limit the number of conversation turns.
-- **Token budgets**: Limit total token usage.
-- **Auto-compaction**: Automatically compact the transcript when it
-  exceeds a configured threshold.
-- **Tool/command routing**: Route queries to registered tools.
-- **Session persistence**: Save/load session state.
-- **Cost tracking**: Track costs per turn.
-
-Usage::
-
-    from xerxes.runtime.query_engine import QueryEngine, QueryEngineConfig
-
-    engine = QueryEngine.create(model="gpt-4o")
-    result = engine.submit("List files in /tmp")
-    print(result.output)
-
-
-    result = engine.submit("Now read the first file")
-    print(result.output)
-
-
-    print(engine.cost_tracker.summary())
-"""
+Exports:
+    - logger
+    - QueryEngineConfig
+    - TurnResult
+    - QueryEngine"""
 
 from __future__ import annotations
 
@@ -58,20 +37,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QueryEngineConfig:
-    """Configuration for the query engine.
+    """Query engine config.
 
     Attributes:
-        max_turns: Maximum number of conversation turns before stopping.
-        max_budget_tokens: Maximum total tokens before stopping.
-        compact_after_turns: Auto-compact transcript after this many turns.
-        compact_keep_last: Number of recent messages to keep when compacting.
-        model: Default model to use.
-        system_prompt: System prompt for the LLM.
-        permission_mode: Permission mode for tool execution.
-        max_tokens: Max tokens per LLM turn.
-        thinking: Enable extended thinking.
-        thinking_budget: Token budget for thinking.
-    """
+        max_turns (int): max turns.
+        max_budget_tokens (int): max budget tokens.
+        compact_after_turns (int): compact after turns.
+        compact_keep_last (int): compact keep last.
+        model (str): model.
+        system_prompt (str): system prompt.
+        permission_mode (str): permission mode.
+        max_tokens (int): max tokens.
+        thinking (bool): thinking.
+        thinking_budget (int): thinking budget."""
 
     max_turns: int = 50
     max_budget_tokens: int = 500_000
@@ -87,16 +65,15 @@ class QueryEngineConfig:
 
 @dataclass
 class TurnResult:
-    """Result of a single query engine turn.
+    """Turn result.
 
     Attributes:
-        prompt: The user's input.
-        output: The assistant's response text.
-        tool_calls: Names of tools called during this turn.
-        in_tokens: Input tokens for this turn.
-        out_tokens: Output tokens for this turn.
-        stop_reason: Why the turn ended.
-    """
+        prompt (str): prompt.
+        output (str): output.
+        tool_calls (tuple[str, ...]): tool calls.
+        in_tokens (int): in tokens.
+        out_tokens (int): out tokens.
+        stop_reason (str): stop reason."""
 
     prompt: str
     output: str
@@ -107,11 +84,7 @@ class TurnResult:
 
 
 class QueryEngine:
-    """Stateful multi-turn query engine.
-
-    Manages a conversation session with automatic compaction,
-    cost tracking, history logging, and tool execution.
-    """
+    """Query engine."""
 
     def __init__(
         self,
@@ -119,6 +92,13 @@ class QueryEngine:
         registry: ExecutionRegistry | None = None,
         session_id: str | None = None,
     ) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (QueryEngineConfig): IN: config. OUT: Consumed during execution.
+            registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution."""
         self.config = config
         self.session_id = session_id or uuid4().hex
         self.registry = registry or ExecutionRegistry()
@@ -137,7 +117,17 @@ class QueryEngine:
         registry: ExecutionRegistry | None = None,
         **config_kwargs: Any,
     ) -> QueryEngine:
-        """Convenience factory."""
+        """Create.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            model (str, optional): IN: model. Defaults to 'gpt-4o'. OUT: Consumed during execution.
+            system_prompt (str, optional): IN: system prompt. Defaults to ''. OUT: Consumed during execution.
+            registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+            **config_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            QueryEngine: OUT: Result of the operation."""
+
         config = QueryEngineConfig(model=model, system_prompt=system_prompt, **config_kwargs)
         return cls(config=config, registry=registry)
 
@@ -147,19 +137,16 @@ class QueryEngine:
         tool_executor: Any = None,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> TurnResult:
-        """Submit a query and get a response.
-
-        This is the synchronous, non-streaming interface. For streaming,
-        use :meth:`submit_stream`.
+        """Submit.
 
         Args:
-            prompt: User input.
-            tool_executor: Optional callable(name, inputs) -> result.
-            tool_schemas: Optional tool schemas for the LLM.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            tool_executor (Any, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
+            tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
         Returns:
-            A :class:`TurnResult` with the response.
-        """
+            TurnResult: OUT: Result of the operation."""
+
         if self._turn_count >= self.config.max_turns:
             return TurnResult(
                 prompt=prompt,
@@ -247,17 +234,16 @@ class QueryEngine:
         tool_executor: Any = None,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> Generator[Any, None, TurnResult]:
-        """Submit a query with streaming events.
+        """Submit stream.
 
-        Yields streaming events and returns a TurnResult at the end.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            tool_executor (Any, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
+            tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Generator[Any, None, TurnResult]: OUT: Result of the operation."""
 
-        Usage::
-
-            gen = engine.submit_stream("Hello")
-            for event in gen:
-                handle(event)
-
-        """
         from xerxes.streaming.events import AgentState, TextChunk, ToolStart, TurnDone
         from xerxes.streaming.loop import run
 
@@ -322,14 +308,32 @@ class QueryEngine:
 
     @property
     def turn_count(self) -> int:
+        """Return Turn count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
         return self._turn_count
 
     @property
     def total_cost(self) -> float:
+        """Return Total cost.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
         return self.cost_tracker.total_cost_usd
 
     def as_markdown(self) -> str:
-        """Full session summary as markdown."""
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
             "# Query Engine Session",
             "",
@@ -348,7 +352,13 @@ class QueryEngine:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the session for persistence."""
+        """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, Any]: OUT: Result of the operation."""
+
         return {
             "session_id": self.session_id,
             "model": self.config.model,
@@ -362,7 +372,15 @@ class QueryEngine:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], **kwargs: Any) -> QueryEngine:
-        """Restore a session from serialized data."""
+        """From dict.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, Any]): IN: data. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            QueryEngine: OUT: Result of the operation."""
+
         config = QueryEngineConfig(model=data.get("model", "gpt-4o"), **kwargs)
         engine = cls(config=config, session_id=data.get("session_id"))
         engine._turn_count = data.get("turn_count", 0)

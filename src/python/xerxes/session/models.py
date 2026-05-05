@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,16 +6,20 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Models module for Xerxes.
 
-
-"""Data models for session persistence and replay.
-
-Provides serializable dataclasses for recording session turns,
-tool calls, agent transitions, and full session records.
-"""
+Exports:
+    - SessionId
+    - WorkspaceId
+    - ToolCallRecord
+    - TurnRecord
+    - AgentTransitionRecord
+    - SessionRecord"""
 
 from __future__ import annotations
 
@@ -23,26 +27,24 @@ import typing as tp
 from dataclasses import dataclass, field
 
 SessionId = tp.NewType("SessionId", str)
-"""A distinct string type representing a unique session identifier."""
 
 WorkspaceId = tp.NewType("WorkspaceId", str)
-"""A distinct string type representing a unique workspace identifier."""
 
 
 @dataclass
 class ToolCallRecord:
-    """Record of a single tool/function call within a turn.
+    """Tool call record.
 
     Attributes:
-        call_id: Unique identifier for this tool call.
-        tool_name: Name of the tool/function invoked.
-        arguments: Arguments passed to the tool.
-        result: Result returned by the tool.
-        status: Execution status (success, error, timeout, skipped).
-        error: Error message if the call failed.
-        duration_ms: Execution duration in milliseconds.
-        sandbox_context: Sandbox context identifier, if applicable.
-    """
+        call_id (str): call id.
+        tool_name (str): tool name.
+        arguments (dict[str, tp.Any]): arguments.
+        result (tp.Any): result.
+        status (str): status.
+        error (str | None): error.
+        duration_ms (float | None): duration ms.
+        sandbox_context (str | None): sandbox context.
+        metadata (dict[str, tp.Any]): metadata."""
 
     call_id: str
     tool_name: str
@@ -55,24 +57,13 @@ class ToolCallRecord:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the tool call record to a JSON-compatible dictionary.
+        """To dict.
 
-        Converts all fields of this record into a plain dictionary suitable
-        for JSON serialization. Mutable containers (e.g., ``metadata``) are
-        shallow-copied to prevent unintended mutation of the original record.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing all tool call record fields with
-            JSON-serializable values.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> record = ToolCallRecord(
-            ...     call_id="tc-1", tool_name="search", arguments={"q": "hello"}
-            ... )
-            >>> data = record.to_dict()
-            >>> data["tool_name"]
-            'search'
-        """
         return {
             "call_id": self.call_id,
             "tool_name": self.tool_name,
@@ -87,28 +78,14 @@ class ToolCallRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> ToolCallRecord:
-        """Deserialize a ToolCallRecord from a plain dictionary.
-
-        Reconstructs a ``ToolCallRecord`` instance from a dictionary previously
-        produced by :meth:`to_dict` or any compatible mapping. Missing optional
-        keys fall back to sensible defaults.
+        """From dict.
 
         Args:
-            data: A dictionary containing tool call record fields. Must include
-                ``call_id`` and ``tool_name`` at minimum.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
         Returns:
-            A new ``ToolCallRecord`` instance populated from *data*.
+            ToolCallRecord: OUT: Result of the operation."""
 
-        Raises:
-            KeyError: If required keys (``call_id``, ``tool_name``) are missing.
-
-        Example:
-            >>> data = {"call_id": "tc-1", "tool_name": "search", "arguments": {}}
-            >>> record = ToolCallRecord.from_dict(data)
-            >>> record.tool_name
-            'search'
-        """
         return cls(
             call_id=data["call_id"],
             tool_name=data["tool_name"],
@@ -124,21 +101,20 @@ class ToolCallRecord:
 
 @dataclass
 class TurnRecord:
-    """Record of a single conversational turn.
+    """Turn record.
 
     Attributes:
-        turn_id: Unique identifier for this turn.
-        agent_id: Identifier of the agent handling the turn.
-        prompt: The user prompt for this turn.
-        response_content: The agent's text response content.
-        tool_calls: List of tool calls made during this turn.
-        started_at: ISO 8601 timestamp when the turn started.
-        ended_at: ISO 8601 timestamp when the turn ended.
-        status: Turn outcome (success, error, cancelled).
-        error: Error message if the turn failed.
-        audit_event_ids: References to audit/logging events.
-        metadata: Arbitrary metadata for extensibility.
-    """
+        turn_id (str): turn id.
+        agent_id (str | None): agent id.
+        prompt (str): prompt.
+        response_content (str | None): response content.
+        tool_calls (list[ToolCallRecord]): tool calls.
+        started_at (str): started at.
+        ended_at (str | None): ended at.
+        status (str): status.
+        error (str | None): error.
+        audit_event_ids (list[str]): audit event ids.
+        metadata (dict[str, tp.Any]): metadata."""
 
     turn_id: str
     agent_id: str | None = None
@@ -153,21 +129,13 @@ class TurnRecord:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the turn record to a JSON-compatible dictionary.
+        """To dict.
 
-        Nested ``ToolCallRecord`` instances are recursively serialized via
-        their own ``to_dict`` methods. Mutable containers are shallow-copied.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing all turn record fields with
-            JSON-serializable values.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> turn = TurnRecord(turn_id="t-1", prompt="Hello")
-            >>> data = turn.to_dict()
-            >>> data["prompt"]
-            'Hello'
-        """
         return {
             "turn_id": self.turn_id,
             "agent_id": self.agent_id,
@@ -184,28 +152,14 @@ class TurnRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> TurnRecord:
-        """Deserialize a TurnRecord from a plain dictionary.
-
-        Reconstructs a ``TurnRecord`` instance, including nested
-        ``ToolCallRecord`` objects, from a dictionary previously produced
-        by :meth:`to_dict` or any compatible mapping.
+        """From dict.
 
         Args:
-            data: A dictionary containing turn record fields. Must include
-                ``turn_id`` at minimum.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
         Returns:
-            A new ``TurnRecord`` instance populated from *data*.
+            TurnRecord: OUT: Result of the operation."""
 
-        Raises:
-            KeyError: If the required key ``turn_id`` is missing.
-
-        Example:
-            >>> data = {"turn_id": "t-1", "prompt": "Hello"}
-            >>> turn = TurnRecord.from_dict(data)
-            >>> turn.prompt
-            'Hello'
-        """
         return cls(
             turn_id=data["turn_id"],
             agent_id=data.get("agent_id"),
@@ -223,15 +177,14 @@ class TurnRecord:
 
 @dataclass
 class AgentTransitionRecord:
-    """Record of a transition between agents.
+    """Agent transition record.
 
     Attributes:
-        from_agent: ID of the agent being switched away from.
-        to_agent: ID of the agent being switched to.
-        reason: Human-readable reason for the transition.
-        turn_id: ID of the turn during which the transition occurred.
-        timestamp: ISO 8601 timestamp of the transition.
-    """
+        from_agent (str | None): from agent.
+        to_agent (str): to agent.
+        reason (str | None): reason.
+        turn_id (str): turn id.
+        timestamp (str): timestamp."""
 
     from_agent: str | None
     to_agent: str
@@ -240,20 +193,13 @@ class AgentTransitionRecord:
     timestamp: str = ""
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the agent transition record to a JSON-compatible dictionary.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing all agent transition record fields with
-            JSON-serializable values.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> transition = AgentTransitionRecord(
-            ...     from_agent="agent-a", to_agent="agent-b", reason="escalation"
-            ... )
-            >>> data = transition.to_dict()
-            >>> data["to_agent"]
-            'agent-b'
-        """
         return {
             "from_agent": self.from_agent,
             "to_agent": self.to_agent,
@@ -264,24 +210,14 @@ class AgentTransitionRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> AgentTransitionRecord:
-        """Deserialize an AgentTransitionRecord from a plain dictionary.
+        """From dict.
 
         Args:
-            data: A dictionary containing agent transition fields. Must include
-                ``to_agent`` at minimum.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
         Returns:
-            A new ``AgentTransitionRecord`` instance populated from *data*.
+            AgentTransitionRecord: OUT: Result of the operation."""
 
-        Raises:
-            KeyError: If the required key ``to_agent`` is missing.
-
-        Example:
-            >>> data = {"from_agent": "a", "to_agent": "b"}
-            >>> rec = AgentTransitionRecord.from_dict(data)
-            >>> rec.to_agent
-            'b'
-        """
         return cls(
             from_agent=data.get("from_agent"),
             to_agent=data["to_agent"],
@@ -293,18 +229,17 @@ class AgentTransitionRecord:
 
 @dataclass
 class SessionRecord:
-    """Complete record of a session.
+    """Session record.
 
     Attributes:
-        session_id: Unique identifier for this session.
-        workspace_id: Identifier for the workspace this session belongs to.
-        created_at: ISO 8601 timestamp when the session was created.
-        updated_at: ISO 8601 timestamp when the session was last updated.
-        agent_id: Initial/primary agent for the session.
-        turns: Ordered list of turn records.
-        agent_transitions: List of agent transition events.
-        metadata: Arbitrary metadata for extensibility.
-    """
+        session_id (str): session id.
+        workspace_id (str | None): workspace id.
+        created_at (str): created at.
+        updated_at (str): updated at.
+        agent_id (str | None): agent id.
+        turns (list[TurnRecord]): turns.
+        agent_transitions (list[AgentTransitionRecord]): agent transitions.
+        metadata (dict[str, tp.Any]): metadata."""
 
     session_id: str
     workspace_id: str | None = None
@@ -316,22 +251,13 @@ class SessionRecord:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the session record to a JSON-compatible dictionary.
+        """To dict.
 
-        Nested ``TurnRecord`` and ``AgentTransitionRecord`` instances are
-        recursively serialized via their own ``to_dict`` methods. Mutable
-        containers are shallow-copied.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing all session record fields with
-            JSON-serializable values.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> session = SessionRecord(session_id="sess-1")
-            >>> data = session.to_dict()
-            >>> data["session_id"]
-            'sess-1'
-        """
         return {
             "session_id": self.session_id,
             "workspace_id": self.workspace_id,
@@ -345,28 +271,14 @@ class SessionRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> SessionRecord:
-        """Deserialize a SessionRecord from a plain dictionary.
-
-        Reconstructs a complete ``SessionRecord`` including all nested
-        ``TurnRecord`` and ``AgentTransitionRecord`` objects from a dictionary
-        previously produced by :meth:`to_dict` or any compatible mapping.
+        """From dict.
 
         Args:
-            data: A dictionary containing session record fields. Must include
-                ``session_id`` at minimum.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
         Returns:
-            A new ``SessionRecord`` instance populated from *data*.
+            SessionRecord: OUT: Result of the operation."""
 
-        Raises:
-            KeyError: If the required key ``session_id`` is missing.
-
-        Example:
-            >>> data = {"session_id": "sess-1", "turns": [], "agent_transitions": []}
-            >>> session = SessionRecord.from_dict(data)
-            >>> session.session_id
-            'sess-1'
-        """
         return cls(
             session_id=data["session_id"],
             workspace_id=data.get("workspace_id"),

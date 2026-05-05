@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,20 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""History tool module for Xerxes.
 
-"""Agent-callable ``search_history`` tool.
-
-Bridges the agent runtime to :class:`SessionStore.search` /
-:class:`SessionIndex.search` so the agent itself can recall past
-sessions when the user asks "did we discuss this before?".
-
-Concrete tools register a :class:`SearchHistoryTool` instance bound to
-the runtime's session store / index and expose its :meth:`__call__`
-method to the LLM under the name ``search_history``.
-"""
+Exports:
+    - SearchHistoryTool"""
 
 from __future__ import annotations
 
@@ -31,12 +26,10 @@ if tp.TYPE_CHECKING:
 
 
 class SearchHistoryTool:
-    """Callable wrapper that exposes ``search_history`` to the agent.
+    """Search history tool.
 
-    Pass either a ``SessionStore`` (uses linear scan / overridden
-    search) or a ``SessionIndex`` (preferred for cross-session FTS5).
-    Both can be set; the index wins when both are configured.
-    """
+    Attributes:
+        name (str): name."""
 
     name: str = "search_history"
 
@@ -47,13 +40,14 @@ class SearchHistoryTool:
         index: SessionIndex | None = None,
         default_k: int = 5,
     ) -> None:
-        """Bind a history search backend; at least one of store/index is required.
+        """Initialize the instance.
 
         Args:
-            store: Session store for linear history scans.
-            index: Optional FTS5-backed cross-session index (preferred).
-            default_k: Result count used when the caller omits ``limit``.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            store (SessionStore | None, optional): IN: store. Defaults to None. OUT: Consumed during execution.
+            index (SessionIndex | None, optional): IN: index. Defaults to None. OUT: Consumed during execution.
+            default_k (int, optional): IN: default k. Defaults to 5. OUT: Consumed during execution."""
+
         if store is None and index is None:
             raise ValueError("SearchHistoryTool requires a store or an index")
         self.store = store
@@ -67,33 +61,20 @@ class SearchHistoryTool:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, tp.Any]:
-        """Search past sessions for content matching *query*.
-
-        Use this tool when the user references something they discussed
-        in a previous session (e.g. "remember when we set up that
-        webhook?"). The tool returns a list of relevant turn snippets
-        with their session IDs, agent IDs, and timestamps so the agent
-        can answer with provenance.
+        """Dunder method for call.
 
         Args:
-            query: Free-text search.
-            limit: Max results (default 5).
-            agent_id: Optional filter by agent.
-            session_id: Optional filter by session.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            query (str): IN: query. OUT: Consumed during execution.
+            limit (int | None, optional): IN: limit. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Dict with:
-                - ``query``: echo of the input query.
-                - ``count``: number of hits returned.
-                - ``hits``: list of dicts with ``session_id``,
-                  ``turn_id``, ``agent_id``, ``prompt``, ``response``,
-                  ``score``, ``timestamp``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         k = limit or self.default_k
         if self.index is not None:
-            hits: list[SearchHit] = self.index.search(  # type: ignore[name-defined]
-                query, k=k, agent_id=agent_id, session_id=session_id
-            )
+            hits: list[SearchHit] = self.index.search(query, k=k, agent_id=agent_id, session_id=session_id)
         else:
             assert self.store is not None
             hits = self.store.search(query, k=k, agent_id=agent_id, session_id=session_id)

@@ -7,10 +7,10 @@ agent:
   tools:
     - ReadFile
     - WriteFile
-    - StrReplaceFile
-    - Glob
-    - Grep
-    - Shell
+    - FileEditTool
+    - GlobTool
+    - GrepTool
+    - ExecuteShell
     - GoogleSearch
     - DuckDuckGoSearch
     - AgentTool

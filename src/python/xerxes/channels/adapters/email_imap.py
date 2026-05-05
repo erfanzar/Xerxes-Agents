@@ -1,16 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Email (SMTP) channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Email channel — inbound via webhook (forwarder) + outbound via SMTP.
-
-Inbound is intentionally not IMAP-IDLE so the same adapter works in
-serverless deployments. A small forwarder script (``msmtp -t`` /
-SendGrid Inbound Parse / Mailgun routes) POSTs the parsed email JSON
-to ``/webhooks/email`` and the channel re-emits it as a
-:class:`ChannelMessage`.
-
-Outbound uses :mod:`smtplib`; the constructor accepts an injectable
-``smtp_sender`` for tests.
+Supports sending outbound email via SMTP and parsing inbound email
+webhook payloads.
 """
 
 from __future__ import annotations
@@ -25,11 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmailChannel(WebhookChannel):
-    """Inbound: HTTP forwarder; outbound: SMTP.
-
-    Inbound JSON shape (forwarder is responsible for producing this):
-    ``{"from": "...", "to": "...", "subject": "...", "text": "...", "message_id": "..."}``.
-    """
+    """Channel implementation for email via SMTP."""
 
     name = "email"
 
@@ -43,17 +43,20 @@ class EmailChannel(WebhookChannel):
         *,
         smtp_sender: tp.Callable[[str, str, str, str], None] | None = None,
     ) -> None:
-        """Configure SMTP send parameters and optional injectable sender.
+        """Initialize the Email channel.
 
         Args:
-            smtp_host: Mail server hostname.
-            smtp_port: Mail server port.
-            smtp_user: SMTP auth username (empty to disable auth).
-            smtp_password: SMTP auth password.
-            from_address: Envelope + header ``From`` address; defaults to
-                ``smtp_user`` when empty.
-            smtp_sender: Optional callable ``(from, to, subject, body)``
-                used instead of :mod:`smtplib` for tests.
+            smtp_host (str): IN: SMTP server hostname. Defaults to "localhost".
+                OUT: stored for outbound connections.
+            smtp_port (int): IN: SMTP server port. Defaults to 25.
+                OUT: stored for outbound connections.
+            smtp_user (str): IN: SMTP username. OUT: used for authentication.
+            smtp_password (str): IN: SMTP password. OUT: used for authentication.
+            from_address (str): IN: sender email address. Defaults to
+                ``smtp_user`` if not provided.
+            smtp_sender (Callable | None): IN: optional callable
+                ``(from_addr, to_addr, subject, body) -> None`` that bypasses
+                the built-in smtplib logic.
         """
         super().__init__()
         self.smtp_host = smtp_host
@@ -64,8 +67,15 @@ class EmailChannel(WebhookChannel):
         self._smtp_sender = smtp_sender
 
     def _parse_inbound(self, headers, body):
-        """Map the forwarder JSON (``from``/``to``/``text``/``subject``)
-        to a :class:`ChannelMessage`; ``text`` falls back to ``html``."""
+        """Parse an email webhook payload into ``ChannelMessage``.
+
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
+        """
         data = parse_json_body(body)
         if not data:
             return []
@@ -82,10 +92,15 @@ class EmailChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send ``message.text`` via the injected sender or :mod:`smtplib`.
+        """Send an email message via SMTP.
 
-        Recipient is ``message.room_id`` (falling back to ``channel_user_id``);
-        subject is lifted from ``metadata['subject']`` or defaults to ``"Re:"``.
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` or
+                ``channel_user_id`` is used as the recipient, ``text`` as the
+                body, and ``metadata["subject"]`` as the subject.
+
+        Raises:
+            ValueError: If neither ``room_id`` nor ``channel_user_id`` is set.
         """
         to_addr = message.room_id or message.channel_user_id
         if not to_addr:

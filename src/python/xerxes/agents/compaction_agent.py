@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,89 +6,37 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Context compaction agent for summarizing conversation history.
 
-
-"""Dedicated agent for intelligent context compaction through summarization.
-
-This module provides the CompactionAgent class, which specializes in compacting
-conversation context and message histories through intelligent summarization.
-It helps manage context length in long-running conversations by creating concise
-summaries while preserving critical information.
-
-The agent supports features like:
-- Multiple summary length modes (brief, concise, detailed)
-- Topic preservation during summarization
-- Message history compaction with recent message preservation
-- Fallback truncation when LLM-based summarization fails
-- Asynchronous LLM integration for summary generation
-
-Typical usage example:
-    from xerxes.agents.compaction_agent import CompactionAgent
-
-    agent = CompactionAgent(
-        llm_client=my_llm_client,
-        target_length="concise"
-    )
-
-
-    summary = agent.summarize_context(long_context)
-
-
-    compacted = agent.summarize_messages(messages, preserve_recent=3)
+Provides :class:`CompactionAgent` and a factory function to create one. The
+agent uses an LLM to summarize long contexts or message histories, falling
+back to truncation if the LLM is unavailable.
 """
 
 from typing import Any
 
 
 class CompactionAgent:
-    """Agent specialized in compacting context through intelligent summarization.
+    """Summarizes conversation context to reduce token usage.
 
-    CompactionAgent provides intelligent context compaction capabilities using
-    LLM-based summarization. It can summarize raw text context or entire message
-    histories while preserving important information and recent interactions.
-
-    The agent uses configurable length instructions to control output verbosity
-    and supports topic preservation to ensure critical subjects are covered
-    in summaries.
-
-    Attributes:
-        llm_client: LLM client instance used for generating summaries.
-            Must support `generate_completion` method for async completion.
-        target_length: Target summary verbosity level. One of:
-            - 'brief': Extremely concise, 2-3 sentences
-            - 'concise': Balanced, captures key points in paragraphs
-            - 'detailed': Comprehensive, preserves context and decisions
-        length_instructions: Dictionary mapping length modes to instruction prompts
-            used to guide the LLM's summarization behavior.
-
-    Example:
-        >>> agent = CompactionAgent(llm_client=client, target_length="brief")
-        >>> summary = agent.summarize_context("Long conversation text...")
-        >>> print(summary)
+    Supports multiple summary lengths (brief, concise, detailed) and can
+    preserve specific topics during summarization.
     """
 
     def __init__(self, llm_client: Any, target_length: str = "concise"):
         """Initialize the compaction agent.
 
-        Sets up the compaction agent with an LLM client and configures the
-        target summary length. Initializes the length instruction templates
-        used for guiding summarization.
-
         Args:
-            llm_client: LLM client instance for generating summaries. Should
-                support `generate_completion` method with prompt, temperature,
-                max_tokens, and stream parameters.
-            target_length: Target summary length mode. Valid values are:
-                - 'brief': Extremely brief, 2-3 sentences only
-                - 'concise': Balanced summary with key points (default)
-                - 'detailed': Detailed summary preserving context
-
-        Note:
-            If an unsupported target_length is provided, the agent will
-            fall back to 'concise' mode during summarization.
+            llm_client (Any): IN: LLM client with a ``generate_completion`` method.
+                OUT: Stored and used for summarization calls.
+            target_length (str): IN: Desired summary length key (``"brief"``,
+                ``"concise"``, or ``"detailed"``). OUT: Selects the instruction
+                prompt used during summarization.
         """
         self.llm_client = llm_client
         self.target_length = target_length
@@ -106,37 +54,17 @@ class CompactionAgent:
         }
 
     def summarize_context(self, context: str, preserve_topics: list[str] | None = None) -> str:
-        """Summarize context intelligently using LLM-based summarization.
-
-        Uses the configured LLM client to generate an intelligent summary of
-        the provided context. The summary respects the configured target_length
-        setting and can preserve specific topics during compaction.
+        """Summarize a raw context string.
 
         Args:
-            context: The raw text context to summarize. If empty or under
-                200 characters, returns the original context unchanged.
-            preserve_topics: Optional list of topic keywords that must be
-                covered in the summary. These topics are explicitly mentioned
-                in the summarization prompt to ensure coverage.
+            context (str): IN: The full context text to summarize. OUT: Passed to
+                the LLM prompt or fallback truncation.
+            preserve_topics (list[str] | None): IN: Optional topics that must be
+                preserved in the summary. OUT: Added to the prompt if provided.
 
         Returns:
-            str: Summarized context text. Returns original context if it's
-                too short (< 200 chars) or if summarization fails.
-
-        Raises:
-            No exceptions are raised; errors fall back to truncation.
-
-        Note:
-            - Uses asyncio to run the async LLM completion synchronously
-            - Falls back to _fallback_truncate if LLM call fails
-            - Temperature is set to 0.3 for consistent, focused summaries
-            - Max tokens is limited to 2048 for the summary response
-
-        Example:
-            >>> summary = agent.summarize_context(
-            ...     "Long conversation about AI and machine learning...",
-            ...     preserve_topics=["neural networks", "training data"]
-            ... )
+            str: OUT: The summarized text, or the original context if it is too
+                short or summarization fails.
         """
         if not context or len(context) < 200:
             return context
@@ -203,42 +131,17 @@ COMPACTED SUMMARY:"""
         messages: list[dict[str, str]],
         preserve_recent: int = 3,
     ) -> list[dict[str, str]]:
-        """Summarize a list of messages into a compacted conversation history.
-
-        Compacts a message history by summarizing older messages while preserving
-        recent messages unchanged. System messages are always preserved separately.
-        The summary is inserted as a special user message indicating it represents
-        the previous conversation.
+        """Summarize older messages in a conversation, preserving recent ones.
 
         Args:
-            messages: List of message dictionaries with 'role' and 'content' keys.
-                Roles typically include 'system', 'user', and 'assistant'.
-            preserve_recent: Number of most recent non-system messages to keep
-                unchanged. Defaults to 3. Set to 0 to summarize all messages.
+            messages (list[dict[str, str]]): IN: Full message list. OUT: Split
+                into older and recent subsets for selective summarization.
+            preserve_recent (int): IN: Number of most recent non-system messages
+                to keep verbatim. OUT: Determines the split point.
 
         Returns:
-            list[dict[str, str]]: Compacted message list containing:
-                - All original system messages (preserved as-is)
-                - One summary message with role 'user' containing the summary
-                - The most recent `preserve_recent` messages unchanged
-
-        Note:
-            - If total messages <= preserve_recent + 1, returns original messages
-            - System messages are separated and always preserved at the beginning
-            - The summary message includes a header indicating how many messages
-              were summarized: "[PREVIOUS CONVERSATION SUMMARY - N messages]"
-
-        Example:
-            >>> messages = [
-            ...     {"role": "system", "content": "You are helpful."},
-            ...     {"role": "user", "content": "Hello"},
-            ...     {"role": "assistant", "content": "Hi there!"},
-            ...     {"role": "user", "content": "Tell me about AI"},
-            ...     {"role": "assistant", "content": "AI is..."},
-            ... ]
-            >>> compacted = agent.summarize_messages(messages, preserve_recent=2)
-            >>> len(compacted)
-            4
+            list[dict[str, str]]: OUT: Messages with older content replaced by
+                a summary message.
         """
         if len(messages) <= preserve_recent + 1:
             return messages
@@ -272,27 +175,14 @@ COMPACTED SUMMARY:"""
         return compacted
 
     def _fallback_truncate(self, context: str, max_chars: int = 2000) -> str:
-        """Fallback truncation when LLM-based summarization fails.
-
-        Performs a simple truncation of the context by keeping the first and
-        last portions of the text. This ensures some context is preserved
-        even when the LLM client is unavailable or encounters an error.
+        """Truncate context as a last-resort fallback.
 
         Args:
-            context: The context string to truncate.
-            max_chars: Maximum total characters to keep. The result will
-                contain roughly half from the beginning and half from the end.
-                Defaults to 2000 characters.
+            context (str): IN: The text to truncate. OUT: Sliced into head and tail.
+            max_chars (int): IN: Maximum character budget. OUT: Determines split size.
 
         Returns:
-            str: Truncated context with a marker indicating how many characters
-                were removed. Returns original context if already within limit.
-
-        Note:
-            The truncation format is:
-            "[first half]... [TRUNCATED N characters] ...[last half]"
-            This preserves both the beginning (often containing setup/context)
-            and the end (often containing conclusions/recent info).
+            str: OUT: Truncated text with a ``[TRUNCATED ...]`` marker.
         """
         if len(context) <= max_chars:
             return context
@@ -302,25 +192,15 @@ COMPACTED SUMMARY:"""
 
 
 def create_compaction_agent(llm_client: Any, target_length: str = "concise") -> CompactionAgent:
-    """Factory function to create a compaction agent.
-
-    Convenience factory for creating CompactionAgent instances with the
-    specified configuration. Provides a simple interface for agent creation
-    without needing to import and instantiate the class directly.
+    """Factory function for creating a :class:`CompactionAgent`.
 
     Args:
-        llm_client: LLM client instance for generating summaries. Should
-            support the `generate_completion` method for async completion.
-        target_length: Target summary length mode. Valid values are:
-            - 'brief': Extremely brief summaries (2-3 sentences)
-            - 'concise': Balanced summaries with key points (default)
-            - 'detailed': Comprehensive summaries preserving context
+        llm_client (Any): IN: LLM client for summarization. OUT: Passed to the
+            agent constructor.
+        target_length (str): IN: Desired summary length key. OUT: Passed to the
+            agent constructor.
 
     Returns:
-        CompactionAgent: Configured compaction agent instance ready for use.
-
-    Example:
-        >>> agent = create_compaction_agent(my_llm_client, "brief")
-        >>> summary = agent.summarize_context("Long text...")
+        CompactionAgent: OUT: A configured compaction agent instance.
     """
     return CompactionAgent(llm_client=llm_client, target_length=target_length)

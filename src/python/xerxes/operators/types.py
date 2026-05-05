@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,22 +6,20 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Types module for Xerxes.
 
-
-"""Shared operator tool datatypes.
-
-Defines the core value types used across the operator subsystem:
-
-- :class:`ImageInspectionResult` -- structured result for local image
-  inspection via the ``view_image`` tool.
-- :class:`UserPromptOption` and :class:`PendingUserPrompt` -- types
-  that model user clarification questions.
-- :class:`OperatorPlanStep` and :class:`OperatorPlanState` -- types
-  that represent the structured execution plan.
-"""
+Exports:
+    - now_iso
+    - ImageInspectionResult
+    - UserPromptOption
+    - PendingUserPrompt
+    - OperatorPlanStep
+    - OperatorPlanState"""
 
 from __future__ import annotations
 
@@ -33,40 +31,34 @@ from PIL import Image
 
 
 def now_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string.
+    """Now iso.
 
     Returns:
-        A timezone-aware ISO 8601 timestamp string representing the
-        current moment in UTC.
+        str: OUT: Result of the operation."""
 
-    Example:
-        >>> ts = now_iso()
-        >>> "T" in ts
-        True
-    """
     return datetime.now(UTC).isoformat()
+    """Now iso.
+
+    Returns:
+        str: OUT: Result of the operation."""
+    """Now iso.
+
+    Returns:
+        str: OUT: Result of the operation."""
 
 
 @dataclass
 class ImageInspectionResult:
-    """Structured result for local image inspection.
-
-    Returned by the ``view_image`` operator tool and carries both
-    serialisable metadata (path, dimensions, format) and the in-memory
-    PIL image for multimodal reinvocation.
+    """Image inspection result.
 
     Attributes:
-        path: Absolute filesystem path to the inspected image.
-        format: Image format string reported by PIL (e.g. ``"PNG"``,
-            ``"JPEG"``).  May be ``None`` if PIL could not determine
-            the format.
-        mode: PIL image mode string (e.g. ``"RGB"``, ``"RGBA"``).
-        width: Image width in pixels.
-        height: Image height in pixels.
-        image: In-memory PIL :class:`~PIL.Image.Image` instance.
-        detail: Requested inspection detail level.  Defaults to
-            ``"auto"``.
-    """
+        path (str): path.
+        format (str | None): format.
+        mode (str): mode.
+        width (int): width.
+        height (int): height.
+        image (Image.Image): image.
+        detail (str): detail."""
 
     path: str
     format: str | None
@@ -77,29 +69,51 @@ class ImageInspectionResult:
     detail: str = "auto"
 
     def summary(self) -> str:
-        """Return a compact text summary safe for tool-message persistence.
+        """Summary.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A single-line string describing the image path, dimensions,
-            mode, and format.
-        """
+            str: OUT: Result of the operation."""
+
         return (
+            """Summary.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+            """Summary.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
             f"Image loaded from {self.path} "
             f"({self.width}x{self.height}, mode={self.mode}, format={self.format or 'unknown'})"
         )
 
     def tool_metadata(self) -> dict[str, tp.Any]:
-        """Return serialisable metadata for session persistence.
+        """Tool metadata.
 
-        Produces a dictionary that can be safely JSON-encoded and
-        stored alongside tool call records, without including the
-        heavy PIL image object.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with keys ``path``, ``format``, ``mode``,
-            ``width``, ``height``, and ``detail``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return {
+            """Tool metadata.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+            """Tool metadata.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
             "path": self.path,
             "format": self.format,
             "mode": self.mode,
@@ -111,25 +125,36 @@ class ImageInspectionResult:
 
 @dataclass
 class UserPromptOption:
-    """Single selectable option for a pending user question.
+    """User prompt option.
 
     Attributes:
-        label: Human-readable display text for the option.
-        value: Machine-readable value submitted when this option is
-            selected.  Defaults to the label when ``None``.
-    """
+        label (str): label.
+        value (str | None): value."""
 
     label: str
     value: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        """Serialise the option for UI and persistence use.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``label`` and ``value`` keys.  When
-            ``value`` was ``None``, the label is used as the value.
-        """
+            dict[str, str]: OUT: Result of the operation."""
+
         return {
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, str]: OUT: Result of the operation."""
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, str]: OUT: Result of the operation."""
             "label": self.label,
             "value": self.value or self.label,
         }
@@ -137,23 +162,15 @@ class UserPromptOption:
 
 @dataclass
 class PendingUserPrompt:
-    """Live question awaiting user input from the UI.
-
-    Created by :class:`~xerxes.operators.user_prompt.UserPromptManager`
-    when the ``ask_user`` tool is invoked, and resolved once the user
-    submits an answer through the TUI.
+    """Pending user prompt.
 
     Attributes:
-        request_id: Unique identifier for this prompt request.
-        question: The question text displayed to the user.
-        options: Optional list of :class:`UserPromptOption` instances
-            the user can choose from.
-        allow_freeform: When ``True``, the user may type a custom
-            answer instead of selecting a listed option.
-        placeholder: Optional placeholder hint shown in the input
-            field.
-        created_at: ISO 8601 timestamp of when the prompt was created.
-    """
+        request_id (str): request id.
+        question (str): question.
+        options (list[UserPromptOption]): options.
+        allow_freeform (bool): allow freeform.
+        placeholder (str | None): placeholder.
+        created_at (str): created at."""
 
     request_id: str
     question: str
@@ -163,13 +180,26 @@ class PendingUserPrompt:
     created_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialise the pending prompt for UI polling.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing all prompt fields, with options
-            serialised via :meth:`UserPromptOption.to_dict`.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return {
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
             "request_id": self.request_id,
             "question": self.question,
             "options": [option.to_dict() for option in self.options],
@@ -181,42 +211,47 @@ class PendingUserPrompt:
 
 @dataclass
 class OperatorPlanStep:
-    """One step in the operator plan state.
+    """Operator plan step.
 
     Attributes:
-        step: Short description of what this step involves.
-        status: Current status label (e.g. ``"pending"``,
-            ``"in_progress"``, ``"completed"``).  Defaults to
-            ``"pending"``.
-    """
+        step (str): step.
+        status (str): status."""
 
     step: str
     status: str = "pending"
 
     def to_dict(self) -> dict[str, str]:
-        """Serialise the plan step.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``step`` and ``status`` keys.
-        """
+            dict[str, str]: OUT: Result of the operation."""
+
         return {"step": self.step, "status": self.status}
+        """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, str]: OUT: Result of the operation."""
+        """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, str]: OUT: Result of the operation."""
 
 
 @dataclass
 class OperatorPlanState:
-    """Structured plan state updated by the operator plan tool.
-
-    Tracks a sequence of :class:`OperatorPlanStep` items together with
-    an explanation and a monotonically increasing revision counter.
+    """Operator plan state.
 
     Attributes:
-        explanation: Optional text explaining the current plan state
-            or the most recent change.
-        steps: Ordered list of :class:`OperatorPlanStep` instances.
-        revision: Monotonically increasing counter bumped on every
-            call to :meth:`update`.
-        updated_at: ISO 8601 timestamp of the last update.
-    """
+        explanation (str | None): explanation.
+        steps (list[OperatorPlanStep]): steps.
+        revision (int): revision.
+        updated_at (str): updated at."""
 
     explanation: str | None = None
     steps: list[OperatorPlanStep] = field(default_factory=list)
@@ -224,35 +259,58 @@ class OperatorPlanState:
     updated_at: str = field(default_factory=now_iso)
 
     def update(self, explanation: str | None, plan: list[dict[str, str]]) -> dict[str, tp.Any]:
-        """Replace the current plan state.
-
-        Atomically swaps the explanation and step list, increments the
-        revision counter, and refreshes the timestamp.
+        """Update.
 
         Args:
-            explanation: Optional short note describing the plan change.
-            plan: List of step dictionaries.  Each must contain a
-                ``"step"`` key; ``"status"`` defaults to ``"pending"``
-                when absent.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            explanation (str | None): IN: explanation. OUT: Consumed during execution.
+            plan (list[dict[str, str]]): IN: plan. OUT: Consumed during execution.
         Returns:
-            The serialised plan state produced by :meth:`to_dict`.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         self.explanation = explanation
+        """Update.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            explanation (str | None): IN: explanation. OUT: Consumed during execution.
+            plan (list[dict[str, str]]): IN: plan. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Update.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            explanation (str | None): IN: explanation. OUT: Consumed during execution.
+            plan (list[dict[str, str]]): IN: plan. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
         self.steps = [OperatorPlanStep(step=item["step"], status=item.get("status", "pending")) for item in plan]
         self.revision += 1
         self.updated_at = now_iso()
         return self.to_dict()
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialise the plan state.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary with ``explanation``, ``revision``,
-            ``updated_at``, and ``steps`` (each serialised via
-            :meth:`OperatorPlanStep.to_dict`).
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return {
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+            """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
             "explanation": self.explanation,
             "revision": self.revision,
             "updated_at": self.updated_at,

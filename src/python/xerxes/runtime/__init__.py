@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Runtime feature integration for Xerxes.
-
-Provides loop detection, prompt profiles, prompt context assembly,
-the central runtime features orchestrator, and the full runtime
-execution infrastructure including:
-
-- Execution registry for command/tool routing
-- Query engine for multi-turn conversations
-- Transcript store with compaction
-- History log for session events
-- Cost tracker for per-event cost tracking
-- Runtime session with full state tracking
-- Tool pool with permission-filtered assembly
-- Bootstrap graph and system initialization
-- Parity audit for self-auditing coverage
-"""
+"""Init module for Xerxes."""
 
 from ..operators.config import OperatorRuntimeConfig
 from .bootstrap import BootstrapResult, BootstrapStage, bootstrap

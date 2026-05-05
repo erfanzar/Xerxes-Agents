@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,75 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Jinja2 template support for Cortex prompts.
-
-This module provides a comprehensive template system for generating prompts
-used throughout the Cortex framework. It includes:
-- Jinja2-based template rendering with automatic fallback
-- Pre-defined templates for agents, tasks, delegation, and planning
-- Template variable extraction and validation
-- Custom template creation support
-
-The template system is designed to generate consistent, well-structured
-prompts for LLM interactions across different orchestration scenarios
-including sequential, hierarchical, parallel, and consensus-based workflows.
-
-Example:
-    >>> template = PromptTemplate()
-    >>> prompt = template.render_agent_prompt(
-    ...     role="Data Analyst",
-    ...     goal="Analyze sales data",
-    ...     backstory="Expert in statistical analysis"
-    ... )
-    >>> task_prompt = template.render_task_prompt(
-    ...     description="Analyze Q4 sales trends",
-    ...     expected_output="A detailed report with insights"
-    ... )
-"""
+"""Jinja2-based prompt templates for agent and task rendering."""
 
 from jinja2 import Environment, Template, meta
 
 
 class PromptTemplate:
-    """Prompt template engine with Jinja2 support for Cortex framework.
+    """Renders Jinja2 templates for agent prompts, tasks, and planning.
 
-    PromptTemplate provides a unified interface for rendering prompts used
-    in AI agent interactions. It supports both Jinja2 templates (with
-    conditional logic, loops, etc.) and simple string formatting as a fallback.
-
-    The class includes pre-defined templates for common orchestration patterns:
-    - Agent system prompts with role, goal, and backstory
-    - Task prompts with context and constraints
-    - Manager delegation and review prompts
-    - Multi-agent consensus synthesis prompts
-    - Strategic planning prompts for workflow generation
-
-    Attributes:
-        use_jinja: Whether to use Jinja2 for template rendering. Defaults to True.
-        env: Jinja2 Environment instance configured for prompt generation.
-
-    Class Attributes:
-        AGENT_TEMPLATE: Template for generating agent system prompts.
-        TASK_TEMPLATE: Template for generating task execution prompts.
-        MANAGER_DELEGATION_TEMPLATE: Template for manager task assignment.
-        MANAGER_REVIEW_TEMPLATE: Template for reviewing agent outputs.
-        CONSENSUS_TEMPLATE: Template for synthesizing multi-agent outputs.
-        PLANNER_TEMPLATE: Template for generating XML execution plans.
-        STEP_EXECUTION_TEMPLATE: Template for executing individual plan steps.
-
-    Example:
-        >>> template = PromptTemplate()
-        >>> agent_prompt = template.render_agent_prompt(
-        ...     role="Researcher",
-        ...     goal="Find relevant papers",
-        ...     backstory="PhD in Computer Science",
-        ...     tools=[{"name": "search", "description": "Search papers"}]
-        ... )
+    Provides pre-defined templates for agent configuration, task descriptions,
+    manager delegation, consensus building, and planner step execution.
     """
 
     AGENT_TEMPLATE = """
@@ -280,36 +226,29 @@ Execute this step thoroughly and provide a clear result that can be used by subs
 """
 
     def __init__(self):
-        """Initialize the PromptTemplate engine.
+        """Initialize the template engine with a Jinja2 environment."""
 
-        Creates a Jinja2 Environment configured for prompt generation with:
-        - trim_blocks: Removes first newline after block tags
-        - lstrip_blocks: Strips leading whitespace from block lines
-        - keep_trailing_newline: Disabled to avoid extra newlines
-        """
         self.use_jinja = True
         self.env = Environment(trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=False)
 
     def render(self, template: str, **kwargs) -> str:
-        """Render a template with the given context variables.
+        """Render a template string with the provided keyword arguments.
 
-        Uses Jinja2 templating if enabled, otherwise falls back to Python's
-        string format method. Template errors are caught and the fallback
-        method is used automatically.
+        Falls back to ``str.format()`` if Jinja2 rendering fails.
 
         Args:
-            template: The template string containing Jinja2 or format placeholders.
-            **kwargs: Context variables to substitute into the template.
+            template (str): The Jinja2 or plain template string.
+                IN: A template that may contain Jinja2 expressions.
+                OUT: Parsed and rendered with the supplied *kwargs*.
+            **kwargs: Template variables.
+                IN: Named values to substitute into the template.
+                OUT: Passed to the template renderer for substitution.
 
         Returns:
-            The rendered template string with all variables substituted.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> result = template.render("Hello {{ name }}!", name="World")
-            >>> print(result)
-            Hello World!
+            str: The fully rendered template string.
+                OUT: Ready to be sent to an LLM or agent.
         """
+
         if not self.use_jinja:
             return template.format(**kwargs)
 
@@ -330,31 +269,34 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         rules: list | None = None,
         tools: list | None = None,
     ) -> str:
-        """Render an agent system prompt from role, goal, and backstory.
-
-        Generates a comprehensive system prompt that defines the agent's identity,
-        objectives, and capabilities for LLM interactions.
+        """Render the agent system prompt template.
 
         Args:
-            role: The agent's role or title (e.g., "Data Analyst", "Researcher").
-            goal: The primary objective the agent should work towards.
-            backstory: Background information providing context for the agent's expertise.
-            instructions: Optional custom instructions for the agent's behavior.
-            rules: Optional list of rules the agent must follow.
-            tools: Optional list of tool objects with 'name' and 'description' attributes.
+            role (str): The agent's role name.
+                IN: Describes the persona the agent should adopt.
+                OUT: Substituted into the agent template.
+            goal (str): The agent's primary objective.
+                IN: Defines what the agent should accomplish.
+                OUT: Substituted into the agent template.
+            backstory (str): Background context for the agent.
+                IN: Provides narrative context shaping the agent's behavior.
+                OUT: Substituted into the agent template.
+            instructions (str | None): Additional instructions.
+                IN: Optional extra guidance for the agent.
+                OUT: Rendered conditionally in the template.
+            rules (list | None): A list of rule strings.
+                IN: Optional behavioral constraints.
+                OUT: Rendered as a bulleted list in the template.
+            tools (list | None): A list of tool objects.
+                IN: Optional available tools; each should have ``name`` and
+                ``description`` attributes.
+                OUT: Rendered as a tool list in the template.
 
         Returns:
-            A formatted system prompt string for the agent.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_agent_prompt(
-            ...     role="Code Reviewer",
-            ...     goal="Review code for quality and best practices",
-            ...     backstory="Senior engineer with 10 years experience",
-            ...     rules=["Be constructive", "Explain your reasoning"]
-            ... )
+            str: The rendered agent prompt.
+                OUT: A complete system prompt for the agent.
         """
+
         return self.render(
             self.AGENT_TEMPLATE,
             role=role,
@@ -372,28 +314,27 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         context: str | None = None,
         constraints: list | None = None,
     ) -> str:
-        """Render a task execution prompt for an agent.
-
-        Generates a prompt that describes a task to be completed, including
-        context from previous tasks and any constraints that must be followed.
+        """Render the task execution prompt template.
 
         Args:
-            description: The task description explaining what needs to be done.
-            expected_output: Description of the expected output format and content.
-            context: Optional context from previous task outputs to inform this task.
-            constraints: Optional list of constraints the agent must adhere to.
+            description (str): The task description.
+                IN: Explains what the agent needs to do.
+                OUT: Substituted into the task template.
+            expected_output (str): Description of the desired output.
+                IN: Sets expectations for the result format and content.
+                OUT: Substituted into the task template.
+            context (str | None): Previous task outputs or background.
+                IN: Optional context from earlier steps in a workflow.
+                OUT: Rendered conditionally in the template.
+            constraints (list | None): A list of constraint strings.
+                IN: Optional limitations or requirements for the task.
+                OUT: Rendered as a bulleted list in the template.
 
         Returns:
-            A formatted task prompt string.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_task_prompt(
-            ...     description="Summarize the quarterly report",
-            ...     expected_output="A 3-paragraph executive summary",
-            ...     constraints=["Use formal language", "Include key metrics"]
-            ... )
+            str: The rendered task prompt.
+                OUT: A prompt ready for agent execution.
         """
+
         return self.render(
             self.TASK_TEMPLATE,
             description=description,
@@ -403,26 +344,22 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         )
 
     def render_manager_delegation(self, agents: list, tasks: list) -> str:
-        """Render a manager delegation prompt for hierarchical orchestration.
-
-        Generates a prompt for a manager agent to create an execution plan
-        that assigns tasks to the most appropriate team agents based on their
-        expertise and capabilities.
+        """Render the manager delegation prompt.
 
         Args:
-            agents: List of agent objects with 'role' and 'goal' attributes.
-            tasks: List of task objects with 'description' and 'expected_output' attributes.
+            agents (list): List of ``CortexAgent`` instances.
+                IN: Available agents with ``role`` and ``goal`` attributes.
+                OUT: Rendered into the delegation template.
+            tasks (list): List of ``CortexTask`` instances.
+                IN: Tasks to delegate; each should have ``description`` and
+                ``expected_output`` attributes.
+                OUT: Rendered into the delegation template.
 
         Returns:
-            A formatted delegation prompt requesting a JSON execution plan.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_manager_delegation(
-            ...     agents=[{"role": "Writer", "goal": "Write content"}],
-            ...     tasks=[{"description": "Write article", "expected_output": "1000 words"}]
-            ... )
+            str: The rendered manager delegation prompt.
+                OUT: A prompt instructing the manager to create an execution plan.
         """
+
         return self.render(
             self.MANAGER_DELEGATION_TEMPLATE,
             agents=agents,
@@ -435,28 +372,24 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         task_description: str,
         output: str,
     ) -> str:
-        """Render a manager review prompt for evaluating agent outputs.
-
-        Generates a prompt for a manager agent to assess the quality of
-        an agent's task output, including completeness, quality, accuracy,
-        and alignment with requirements.
+        """Render the manager review prompt.
 
         Args:
-            agent_role: The role of the agent whose output is being reviewed.
-            task_description: The original task description.
-            output: The agent's output to be reviewed.
+            agent_role (str): The role of the agent whose output is being reviewed.
+                IN: Identifies which agent produced the output.
+                OUT: Substituted into the review template.
+            task_description (str): The original task description.
+                IN: Provides context for the review.
+                OUT: Substituted into the review template.
+            output (str): The agent's output to evaluate.
+                IN: The content that the manager should assess.
+                OUT: Substituted into the review template.
 
         Returns:
-            A formatted review prompt requesting a JSON assessment.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_manager_review(
-            ...     agent_role="Writer",
-            ...     task_description="Write an article about AI",
-            ...     output="AI is transforming industries..."
-            ... )
+            str: The rendered manager review prompt.
+                OUT: A prompt requesting structured review feedback.
         """
+
         return self.render(
             self.MANAGER_REVIEW_TEMPLATE,
             agent_role=agent_role,
@@ -469,29 +402,21 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         task_description: str,
         agent_outputs: dict[str, str],
     ) -> str:
-        """Render a consensus synthesis prompt for multi-agent outputs.
-
-        Generates a prompt for synthesizing outputs from multiple agents
-        into a unified, coherent response that incorporates the best
-        insights from all perspectives.
+        """Render the consensus synthesis prompt.
 
         Args:
-            task_description: The original task that all agents addressed.
-            agent_outputs: Dictionary mapping agent roles to their outputs.
+            task_description (str): The task all agents addressed.
+                IN: Describes the shared objective.
+                OUT: Substituted into the consensus template.
+            agent_outputs (dict): Mapping from agent role to output string.
+                IN: Outputs produced by each participating agent.
+                OUT: Rendered as individual agent contributions in the template.
 
         Returns:
-            A formatted consensus prompt for synthesizing multiple perspectives.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_consensus(
-            ...     task_description="Evaluate the new product design",
-            ...     agent_outputs={
-            ...         "Designer": "The aesthetics are excellent...",
-            ...         "Engineer": "The feasibility is good..."
-            ...     }
-            ... )
+            str: The rendered consensus prompt.
+                OUT: A prompt asking an agent to synthesize multiple viewpoints.
         """
+
         return self.render(
             self.CONSENSUS_TEMPLATE,
             task_description=task_description,
@@ -504,31 +429,24 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         agents: list,
         context: str = "",
     ) -> str:
-        """Render a strategic planner prompt for XML execution plan generation.
-
-        Generates a prompt for creating a detailed execution plan that breaks
-        down an objective into sequential steps, assigns agents, and specifies
-        dependencies between steps.
+        """Render the strategic planner prompt.
 
         Args:
-            objective: The high-level objective to accomplish.
-            agents: List of available agent objects with role, goal, and tools.
-            context: Optional additional context for planning decisions.
+            objective (str): The high-level objective to plan for.
+                IN: Describes the goal the plan should achieve.
+                OUT: Substituted into the planner template.
+            agents (list): List of available ``CortexAgent`` instances.
+                IN: Agents that can be assigned to plan steps.
+                OUT: Rendered into the planner template with roles and tools.
+            context (str): Additional planning context.
+                IN: Optional background information to guide plan creation.
+                OUT: Rendered in the planner template.
 
         Returns:
-            A formatted planner prompt requesting an XML execution plan.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_planner(
-            ...     objective="Create a marketing campaign",
-            ...     agents=[
-            ...         {"role": "Writer", "goal": "Create content", "tools": []},
-            ...         {"role": "Designer", "goal": "Create visuals", "tools": []}
-            ...     ],
-            ...     context="Target audience is tech professionals"
-            ... )
+            str: The rendered planner prompt.
+                OUT: A prompt requesting an XML execution plan.
         """
+
         return self.render(
             self.PLANNER_TEMPLATE,
             objective=objective,
@@ -543,30 +461,27 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         arguments: dict | None = None,
         context: str = "",
     ) -> str:
-        """Render a step execution prompt for planned workflow execution.
-
-        Generates a prompt for executing a single step within a larger
-        planned workflow, including action details, arguments, and context
-        from previous steps.
+        """Render the step execution prompt.
 
         Args:
-            action: The specific action to perform (e.g., "research", "write", "analyze").
-            description: Detailed description of what this step should accomplish.
-            arguments: Optional dictionary of arguments for the action.
-            context: Optional context from previous steps in the workflow.
+            action (str): The action name for this step.
+                IN: Describes what operation to perform.
+                OUT: Substituted into the step execution template.
+            description (str): A detailed description of the step.
+                IN: Explains the purpose and requirements of the step.
+                OUT: Substituted into the step execution template.
+            arguments (dict | None): Key-value arguments for the step.
+                IN: Optional structured inputs for the action.
+                OUT: Rendered as a list in the template.
+            context (str): Output from previous steps.
+                IN: Optional upstream results to inform execution.
+                OUT: Rendered conditionally in the template.
 
         Returns:
-            A formatted step execution prompt.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> prompt = template.render_step_execution(
-            ...     action="analyze",
-            ...     description="Analyze the competitor data",
-            ...     arguments={"data_source": "market_report.csv"},
-            ...     context="Previous step gathered competitor list"
-            ... )
+            str: The rendered step execution prompt.
+                OUT: A prompt tailored to a single plan step.
         """
+
         return self.render(
             self.STEP_EXECUTION_TEMPLATE,
             action=action,
@@ -576,50 +491,36 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         )
 
     def create_custom_template(self, template_string: str) -> Template | None:
-        """Create a custom Jinja2 template from a template string.
-
-        Creates a reusable Jinja2 Template object that can be rendered
-        multiple times with different context variables.
+        """Compile a custom Jinja2 template string.
 
         Args:
-            template_string: A Jinja2 template string with variables and logic.
+            template_string (str): A raw Jinja2 template.
+                IN: User-defined template content.
+                OUT: Parsed into a Jinja2 ``Template`` object.
 
         Returns:
-            A Jinja2 Template object if Jinja2 is enabled, None otherwise.
-
-        Example:
-            >>> template_engine = PromptTemplate()
-            >>> custom = template_engine.create_custom_template(
-            ...     "Report for {{ department }}:\\n{{ content }}"
-            ... )
-            >>> if custom:
-            ...     result = custom.render(department="Sales", content="...")
+            Template | None: A compiled template if Jinja2 is enabled;
+                otherwise ``None``.
+                OUT: Ready for rendering with arbitrary variables.
         """
+
         if not self.use_jinja:
             return None
         return self.env.from_string(template_string)
 
     def get_template_variables(self, template_string: str) -> set:
-        """Extract all variable names from a Jinja2 template string.
-
-        Parses the template and identifies all undeclared variables that
-        need to be provided when rendering the template.
+        """Extract all undeclared variables from a template string.
 
         Args:
-            template_string: A Jinja2 template string to analyze.
+            template_string (str): A Jinja2 template to analyze.
+                IN: Template text that may contain variable references.
+                OUT: Parsed by Jinja2 to find variable names.
 
         Returns:
-            A set of variable names found in the template. Returns an empty
-            set if Jinja2 is disabled.
-
-        Example:
-            >>> template = PromptTemplate()
-            >>> variables = template.get_template_variables(
-            ...     "Hello {{ name }}, your order #{{ order_id }} is ready."
-            ... )
-            >>> print(variables)
-            {'name', 'order_id'}
+            set: The set of undeclared variable names.
+                OUT: Empty set if Jinja2 is disabled or no variables are found.
         """
+
         if not self.use_jinja:
             return set()
 

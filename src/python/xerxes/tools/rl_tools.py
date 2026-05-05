@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,33 +6,25 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Rl tools module for Xerxes.
 
-"""Reinforcement-learning control-plane agent tools.
-
-Ten ``rl_*`` tools that let the agent kick off, inspect, and tear
-down RL training runs without leaving the chat.
-
-The tools delegate every action to a pluggable :class:`RLBackend` —
-the default :class:`InMemoryRLBackend` is enough for tests and demos,
-while production deployments register their own backend (e.g. the
-EasyDeL eSurge controller) via :func:`set_rl_backend`.
-
-Tools:
-
-- :class:`rl_list_environments`
-- :class:`rl_select_environment`
-- :class:`rl_get_current_config`
-- :class:`rl_edit_config`
-- :class:`rl_start_training`
-- :class:`rl_stop_training`
-- :class:`rl_check_status`
-- :class:`rl_get_results`
-- :class:`rl_list_runs`
-- :class:`rl_test_inference`
-"""
+Exports:
+    - logger
+    - RLEnvironment
+    - RLRun
+    - RLBackend
+    - InMemoryRLBackend
+    - set_rl_backend
+    - get_rl_backend
+    - reset_rl_backend
+    - rl_list_environments
+    - rl_select_environment
+    - ... and 8 more."""
 
 from __future__ import annotations
 
@@ -50,7 +42,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RLEnvironment:
-    """Static description of a registered training environment."""
+    """Rlenvironment.
+
+    Attributes:
+        name (str): name.
+        description (str): description.
+        config (dict[str, tp.Any]): config."""
 
     name: str
     description: str = ""
@@ -59,7 +56,17 @@ class RLEnvironment:
 
 @dataclass
 class RLRun:
-    """Lifecycle record for a single training run."""
+    """Rlrun.
+
+    Attributes:
+        run_id (str): run id.
+        environment (str): environment.
+        config (dict[str, tp.Any]): config.
+        status (str): status.
+        metrics (dict[str, tp.Any]): metrics.
+        results (dict[str, tp.Any]): results.
+        started_at (float): started at.
+        ended_at (float): ended at."""
 
     run_id: str
     environment: str
@@ -72,63 +79,128 @@ class RLRun:
 
 
 class RLBackend(tp.Protocol):
-    """Pluggable backend the ``rl_*`` tools dispatch to."""
+    """Rlbackend.
+
+    Inherits from: tp.Protocol
+    """
 
     def list_environments(self) -> list[RLEnvironment]:
-        """Return every registered environment known to the backend."""
+        """List environments.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[RLEnvironment]: OUT: Result of the operation."""
+
         ...
 
     def select_environment(self, name: str) -> RLEnvironment | None:
-        """Activate *name* and return it, or ``None`` when unregistered."""
+        """Select environment.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+        Returns:
+            RLEnvironment | None: OUT: Result of the operation."""
+
         ...
 
     def get_current_config(self) -> dict[str, tp.Any]:
-        """Return ``{"environment", "config"}`` for the currently selected env."""
+        """Retrieve the current config.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         ...
 
     def edit_config(self, updates: dict[str, tp.Any]) -> dict[str, tp.Any]:
-        """Merge *updates* into the active environment's config and return the result."""
+        """Edit config.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            updates (dict[str, tp.Any]): IN: updates. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         ...
 
     def start(self) -> RLRun:
-        """Kick off a training run using the selected environment's config."""
+        """Start.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            RLRun: OUT: Result of the operation."""
+
         ...
 
     def stop(self, run_id: str) -> RLRun | None:
-        """Stop the run with ``run_id`` and return its final record, or ``None``."""
+        """Stop.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            RLRun | None: OUT: Result of the operation."""
+
         ...
 
     def status(self, run_id: str) -> RLRun | None:
-        """Return the live :class:`RLRun` for ``run_id``, or ``None`` if unknown."""
+        """Status.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            RLRun | None: OUT: Result of the operation."""
+
         ...
 
     def results(self, run_id: str) -> dict[str, tp.Any]:
-        """Return the final metrics/results payload for a completed run."""
+        """Results.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         ...
 
     def list_runs(self) -> list[RLRun]:
-        """Return every run the backend has tracked (running or finished)."""
+        """List runs.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[RLRun]: OUT: Result of the operation."""
+
         ...
 
     def test_inference(self, prompt: str, run_id: str | None = None) -> dict[str, tp.Any]:
-        """Sample the model (optionally from *run_id*) with *prompt* for quick checks."""
+        """Test inference.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            run_id (str | None, optional): IN: run id. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         ...
 
 
 class InMemoryRLBackend:
-    """Reference RL backend kept entirely in memory.
-
-    Useful for tests, demos, and offline development. Real production
-    code should swap in something talking to EasyDeL / vLLM / etc.
-
-    Example:
-        >>> b = InMemoryRLBackend()
-        >>> b.register("cartpole-v1", {"lr": 1e-3, "steps": 100})
-        >>> set_rl_backend(b)
-    """
+    """In memory rlbackend."""
 
     def __init__(self) -> None:
-        """Initialise empty environment registry and run store."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self._lock = threading.Lock()
         self._environments: dict[str, RLEnvironment] = {}
         self._selected: str | None = None
@@ -141,19 +213,41 @@ class InMemoryRLBackend:
         config: dict[str, tp.Any] | None = None,
         description: str = "",
     ) -> RLEnvironment:
-        """Register a new environment with *name* / *config* and return it."""
+        """Register.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            config (dict[str, tp.Any] | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
+        Returns:
+            RLEnvironment: OUT: Result of the operation."""
+
         env = RLEnvironment(name=name, description=description, config=dict(config or {}))
         with self._lock:
             self._environments[name] = env
         return env
 
     def list_environments(self) -> list[RLEnvironment]:
-        """Return a snapshot of every registered environment."""
+        """List environments.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[RLEnvironment]: OUT: Result of the operation."""
+
         with self._lock:
             return list(self._environments.values())
 
     def select_environment(self, name: str) -> RLEnvironment | None:
-        """Activate *name*, seeding the current config from its defaults."""
+        """Select environment.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+        Returns:
+            RLEnvironment | None: OUT: Result of the operation."""
+
         with self._lock:
             env = self._environments.get(name)
             if env is None:
@@ -163,18 +257,37 @@ class InMemoryRLBackend:
             return env
 
     def get_current_config(self) -> dict[str, tp.Any]:
-        """Return a snapshot of the active environment and its running config."""
+        """Retrieve the current config.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         with self._lock:
             return {"environment": self._selected, "config": dict(self._config)}
 
     def edit_config(self, updates: dict[str, tp.Any]) -> dict[str, tp.Any]:
-        """Merge *updates* into the current config and return the new state."""
+        """Edit config.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            updates (dict[str, tp.Any]): IN: updates. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         with self._lock:
             self._config.update(updates)
             return {"environment": self._selected, "config": dict(self._config)}
 
     def start(self) -> RLRun:
-        """Start a new in-memory training run for the currently selected environment."""
+        """Start.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            RLRun: OUT: Result of the operation."""
+
         with self._lock:
             if self._selected is None:
                 raise RuntimeError("no environment selected")
@@ -191,7 +304,14 @@ class InMemoryRLBackend:
             return run
 
     def stop(self, run_id: str) -> RLRun | None:
-        """Mark a running run as stopped, recording the end timestamp."""
+        """Stop.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            RLRun | None: OUT: Result of the operation."""
+
         with self._lock:
             run = self._runs.get(run_id)
             if run is None:
@@ -202,12 +322,26 @@ class InMemoryRLBackend:
             return run
 
     def status(self, run_id: str) -> RLRun | None:
-        """Return the :class:`RLRun` for *run_id*, or ``None`` if unknown."""
+        """Status.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            RLRun | None: OUT: Result of the operation."""
+
         with self._lock:
             return self._runs.get(run_id)
 
     def results(self, run_id: str) -> dict[str, tp.Any]:
-        """Return final (or partial, while running) metrics for *run_id*."""
+        """Results.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            run_id (str): IN: run id. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         with self._lock:
             run = self._runs.get(run_id)
             if run is None:
@@ -222,12 +356,26 @@ class InMemoryRLBackend:
             }
 
     def list_runs(self) -> list[RLRun]:
-        """Return every tracked run (running or finished)."""
+        """List runs.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[RLRun]: OUT: Result of the operation."""
+
         with self._lock:
             return list(self._runs.values())
 
     def test_inference(self, prompt: str, run_id: str | None = None) -> dict[str, tp.Any]:
-        """Return a mock completion for *prompt*; real backends should sample the model."""
+        """Test inference.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            run_id (str | None, optional): IN: run id. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         with self._lock:
             return {
                 "run_id": run_id or self._selected or "ad-hoc",
@@ -241,25 +389,40 @@ _backend: RLBackend = InMemoryRLBackend()
 
 
 def set_rl_backend(backend: RLBackend) -> None:
-    """Install a custom :class:`RLBackend` for all ``rl_*`` tools."""
+    """Set the rl backend.
+
+    Args:
+        backend (RLBackend): IN: backend. OUT: Consumed during execution."""
+
     global _backend
     with _backend_lock:
         _backend = backend
 
 
 def get_rl_backend() -> RLBackend:
-    """Return the currently installed RL backend (default: in-memory)."""
+    """Retrieve the rl backend.
+
+    Returns:
+        RLBackend: OUT: Result of the operation."""
+
     with _backend_lock:
         return _backend
 
 
 def reset_rl_backend() -> None:
-    """Restore the default in-memory backend (mainly for tests)."""
+    """Reset rl backend."""
+
     set_rl_backend(InMemoryRLBackend())
 
 
 def _run_to_dict(run: RLRun) -> dict[str, tp.Any]:
-    """Serialise *run* to a JSON-friendly dict for tool responses."""
+    """Internal helper to run to dict.
+
+    Args:
+        run (RLRun): IN: run. OUT: Consumed during execution.
+    Returns:
+        dict[str, tp.Any]: OUT: Result of the operation."""
+
     return {
         "run_id": run.run_id,
         "environment": run.environment,
@@ -271,15 +434,20 @@ def _run_to_dict(run: RLRun) -> dict[str, tp.Any]:
 
 
 class rl_list_environments(AgentBaseFn):
-    """List every registered RL environment."""
+    """Rl list environments.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Return the catalog of environments the active backend exposes.
+        """Static call.
 
+        Args:
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"count": int, "environments": [{name, description, config}]}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         envs = get_rl_backend().list_environments()
         return {
             "count": len(envs),
@@ -288,18 +456,21 @@ class rl_list_environments(AgentBaseFn):
 
 
 class rl_select_environment(AgentBaseFn):
-    """Pick an environment to operate on."""
+    """Rl select environment.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(name: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Activate ``name`` so subsequent ``rl_*`` calls use its config.
+        """Static call.
 
         Args:
-            name: Environment name returned by ``rl_list_environments``.
-
+            name (str): IN: name. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The selected environment metadata or ``{"error": "not_found"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         env = get_rl_backend().select_environment(name)
         if env is None:
             return {"error": "not_found", "name": name}
@@ -307,40 +478,60 @@ class rl_select_environment(AgentBaseFn):
 
 
 class rl_get_current_config(AgentBaseFn):
-    """Read the active environment's current configuration."""
+    """Rl get current config.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Return ``{"environment": <name|None>, "config": {...}}``."""
+        """Static call.
+
+        Args:
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return get_rl_backend().get_current_config()
 
 
 class rl_edit_config(AgentBaseFn):
-    """Patch fields on the active environment's config."""
+    """Rl edit config.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
         updates: dict[str, tp.Any],
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Merge ``updates`` into the active config and return the new state.
+        """Static call.
 
         Args:
-            updates: Dict of fields to set/replace, e.g. ``{"lr": 3e-4}``.
-        """
+            updates (dict[str, tp.Any]): IN: updates. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return get_rl_backend().edit_config(dict(updates or {}))
 
 
 class rl_start_training(AgentBaseFn):
-    """Kick off a training run with the current config."""
+    """Rl start training.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Begin a new run; returns ``{"run_id", "status", ...}``.
+        """Static call.
 
-        Use this only after :class:`rl_select_environment` (and
-        optionally :class:`rl_edit_config`) have been called.
-        """
+        Args:
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         try:
             run = get_rl_backend().start()
         except Exception as exc:
@@ -349,11 +540,21 @@ class rl_start_training(AgentBaseFn):
 
 
 class rl_stop_training(AgentBaseFn):
-    """Terminate a running training job."""
+    """Rl stop training.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(run_id: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Stop ``run_id`` and return the post-stop status."""
+        """Static call.
+
+        Args:
+            run_id (str): IN: run id. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         run = get_rl_backend().stop(run_id)
         if run is None:
             return {"error": "not_found", "run_id": run_id}
@@ -361,11 +562,21 @@ class rl_stop_training(AgentBaseFn):
 
 
 class rl_check_status(AgentBaseFn):
-    """Poll the live status + metrics of a run."""
+    """Rl check status.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(run_id: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Return ``{"run_id", "status", "metrics", ...}`` for the run."""
+        """Static call.
+
+        Args:
+            run_id (str): IN: run id. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         run = get_rl_backend().status(run_id)
         if run is None:
             return {"error": "not_found", "run_id": run_id}
@@ -373,24 +584,39 @@ class rl_check_status(AgentBaseFn):
 
 
 class rl_get_results(AgentBaseFn):
-    """Read final results for a completed (or partial for live) run."""
+    """Rl get results.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(run_id: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Return the run's metrics + summary blob.
+        """Static call.
 
-        For runs still in ``running`` state the response is
-        ``{"status": "running", "partial_metrics": {...}}``.
-        """
+        Args:
+            run_id (str): IN: run id. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return get_rl_backend().results(run_id)
 
 
 class rl_list_runs(AgentBaseFn):
-    """List every training run the backend remembers."""
+    """Rl list runs.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Return ``{"count", "runs": [...]}`` sorted by start time desc."""
+        """Static call.
+
+        Args:
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         runs = sorted(
             get_rl_backend().list_runs(),
             key=lambda r: r.started_at,
@@ -400,7 +626,10 @@ class rl_list_runs(AgentBaseFn):
 
 
 class rl_test_inference(AgentBaseFn):
-    """Run a single inference against a trained policy."""
+    """Rl test inference.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -408,13 +637,15 @@ class rl_test_inference(AgentBaseFn):
         run_id: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Execute one inference against ``run_id`` (default: active env).
+        """Static call.
 
         Args:
-            prompt: Free-text prompt the agent wants to evaluate.
-            run_id: Optional specific run; defaults to whichever
-                checkpoint the backend considers current.
-        """
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            run_id (str | None, optional): IN: run id. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return get_rl_backend().test_inference(prompt, run_id=run_id)
 
 

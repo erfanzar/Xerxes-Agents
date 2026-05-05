@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,56 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Messages module for Xerxes.
 
-
-"""Neutral message format with bidirectional provider converters.
-
-Inspired by the nano-claude-code pattern, this module defines a
-provider-agnostic message representation and conversion functions for
-the Anthropic and OpenAI API formats.
-
-Neutral format
---------------
-
-All messages are plain dicts with a ``role`` key:
-
-- **User**::
-
-      {"role": "user", "content": "Hello"}
-
-- **Assistant**::
-
-      {"role": "assistant", "content": "Hi!", "tool_calls": [
-          {"id": "tc_1", "name": "Read", "input": {"file_path": "/foo"}}
-      ]}
-
-- **Tool result**::
-
-      {"role": "tool", "tool_call_id": "tc_1", "name": "Read",
-       "content": "file contents..."}
-
-The :class:`NeutralMessage` type alias documents the expected dict shape.
-The converter functions handle all the quirks of each API's message format.
-
-Usage::
-
-    from xerxes.streaming.messages import messages_to_anthropic, messages_to_openai
-
-    neutral = [
-        {"role": "user", "content": "Read /etc/hosts"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "tc_1", "name": "Read", "input": {"file_path": "/etc/hosts"}}
-        ]},
-        {"role": "tool", "tool_call_id": "tc_1", "name": "Read",
-         "content": "127.0.0.1 localhost"},
-    ]
-
-    anthropic_msgs = messages_to_anthropic(neutral)
-    openai_msgs    = messages_to_openai(neutral)
-"""
+Exports:
+    - messages_to_anthropic
+    - messages_to_openai
+    - messages_from_anthropic
+    - messages_from_openai"""
 
 from __future__ import annotations
 
@@ -66,20 +28,26 @@ NeutralMessage: TypeAlias = dict[str, Any]
 
 
 def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]]:
-    """Convert neutral messages to the Anthropic API format.
-
-    Anthropic's API requires:
-    - Assistant messages with tool calls to use ``tool_use`` content blocks.
-    - Tool results to be wrapped in ``tool_result`` content blocks inside
-      a ``user`` message (consecutive tool results are merged).
+    """Messages to anthropic.
 
     Args:
-        messages: List of neutral-format messages.
-
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
     Returns:
-        List of messages formatted for the Anthropic Messages API.
-    """
+        list[dict[str, Any]]: OUT: Result of the operation."""
+
     result: list[dict[str, Any]] = []
+    """Messages to anthropic.
+
+    Args:
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, Any]]: OUT: Result of the operation."""
+    """Messages to anthropic.
+
+    Args:
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, Any]]: OUT: Result of the operation."""
     i = 0
     while i < len(messages):
         m = messages[i]
@@ -130,22 +98,29 @@ def messages_to_openai(
     messages: list[NeutralMessage],
     system: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Convert neutral messages to the OpenAI Chat Completions API format.
-
-    OpenAI's API requires:
-    - Tool calls to be encoded as ``function`` objects with JSON-serialized
-      ``arguments``.
-    - Tool results to use ``role: "tool"`` with ``tool_call_id``.
-    - System prompt as a separate ``system`` role message.
+    """Messages to openai.
 
     Args:
-        messages: List of neutral-format messages.
-        system: Optional system prompt to prepend.
-
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
     Returns:
-        List of messages formatted for the OpenAI Chat Completions API.
-    """
+        list[dict[str, Any]]: OUT: Result of the operation."""
+
     result: list[dict[str, Any]] = []
+    """Messages to openai.
+
+    Args:
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, Any]]: OUT: Result of the operation."""
+    """Messages to openai.
+
+    Args:
+        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, Any]]: OUT: Result of the operation."""
 
     if system:
         result.append({"role": "system", "content": system})
@@ -192,17 +167,26 @@ def messages_to_openai(
 
 
 def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessage]:
-    """Convert Anthropic API format messages back to neutral format.
-
-    Handles both string content and content-block arrays.
+    """Messages from anthropic.
 
     Args:
-        messages: List of Anthropic-format messages.
-
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
     Returns:
-        List of neutral-format messages.
-    """
+        list[NeutralMessage]: OUT: Result of the operation."""
+
     result: list[NeutralMessage] = []
+    """Messages from anthropic.
+
+    Args:
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[NeutralMessage]: OUT: Result of the operation."""
+    """Messages from anthropic.
+
+    Args:
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[NeutralMessage]: OUT: Result of the operation."""
 
     for m in messages:
         role = m["role"]
@@ -256,15 +240,26 @@ def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessa
 
 
 def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]:
-    """Convert OpenAI API format messages back to neutral format.
+    """Messages from openai.
 
     Args:
-        messages: List of OpenAI-format messages.
-
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
     Returns:
-        List of neutral-format messages.
-    """
+        list[NeutralMessage]: OUT: Result of the operation."""
+
     result: list[NeutralMessage] = []
+    """Messages from openai.
+
+    Args:
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[NeutralMessage]: OUT: Result of the operation."""
+    """Messages from openai.
+
+    Args:
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+    Returns:
+        list[NeutralMessage]: OUT: Result of the operation."""
 
     for m in messages:
         role = m.get("role", "")

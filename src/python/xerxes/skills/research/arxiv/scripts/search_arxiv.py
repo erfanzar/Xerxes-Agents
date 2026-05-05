@@ -1,15 +1,21 @@
-#!/usr/bin/env python3
-"""Search arXiv and display results in a clean format.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Search arxiv module for Xerxes.
 
-Usage:
-    python search_arxiv.py "GRPO reinforcement learning"
-    python search_arxiv.py "GRPO reinforcement learning" --max 10
-    python search_arxiv.py "GRPO reinforcement learning" --sort date
-    python search_arxiv.py --author "Yann LeCun" --max 5
-    python search_arxiv.py --category cs.AI --sort date --max 10
-    python search_arxiv.py --id 2402.03300
-    python search_arxiv.py --id 2402.03300,2401.12345
-"""
+Exports:
+    - NS
+    - search"""
 
 import sys
 import urllib.parse
@@ -20,7 +26,40 @@ NS = {"a": "http://www.w3.org/2005/Atom"}
 
 
 def search(query=None, author=None, category=None, ids=None, max_results=5, sort="relevance"):
+    """Search.
+
+    Args:
+        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
+        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
+        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
+        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
+        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     params = {}
+    """Search.
+
+    Args:
+        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
+        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
+        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
+        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
+        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+    """Search.
+
+    Args:
+        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
+        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
+        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
+        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
+        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
 
     if ids:
         params["id_list"] = ids
@@ -64,7 +103,7 @@ def search(query=None, author=None, category=None, ids=None, max_results=5, sort
         title = entry.find("a:title", NS).text.strip().replace("\n", " ")
         raw_id = entry.find("a:id", NS).text.strip()
         full_id = raw_id.split("/abs/")[-1] if "/abs/" in raw_id else raw_id
-        arxiv_id = full_id.split("v")[0]  # base ID for links
+        arxiv_id = full_id.split("v")[0]
         published = entry.find("a:published", NS).text[:10]
         updated = entry.find("a:updated", NS).text[:10]
         authors = ", ".join(a.find("a:name", NS).text for a in entry.findall("a:author", NS))

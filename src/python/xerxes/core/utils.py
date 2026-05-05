@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,16 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Core utility functions and base classes for Xerxes.
 
-
-"""Utility functions for the Xerxes framework.
-
-This module provides helper functions for debugging, data merging, and function
-introspection. It includes utilities for converting Python functions to JSON schema
-format, merging response chunks, and debug printing with timestamps.
+Provides ``run_sync`` for bridging async/sync code, ``XerxesBase`` as a
+strict Pydantic base model, ``function_to_json`` for OpenAI-compatible tool
+schema generation, and various text helpers.
 """
 
 import asyncio
@@ -29,28 +29,16 @@ from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 from pydantic import BaseModel, ConfigDict
 
 T = TypeVar("T")
-"""Generic type variable for type-safe operations."""
 
 
 def run_sync(coro: Coroutine[Any, Any, T]) -> T:
-    """Run an async coroutine synchronously, handling nested event loops.
-
-    This function safely executes a coroutine from synchronous code,
-    handling the case where an event loop is already running (e.g., in
-    Jupyter notebooks or async frameworks).
+    """Run an async coroutine from synchronous code.
 
     Args:
-        coro: The coroutine to execute.
+        coro (Coroutine[Any, Any, T]): IN: coroutine to execute.
 
     Returns:
-        The result of the coroutine.
-
-    Example:
-        >>> async def fetch_data():
-        ...     return "data"
-        >>> result = run_sync(fetch_data())
-        >>> print(result)
-        data
+        T: OUT: coroutine result.
     """
     try:
         _loop = asyncio.get_running_loop()
@@ -65,41 +53,17 @@ def run_sync(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class XerxesBase(BaseModel):
-    """Base Pydantic model for Xerxes configuration classes.
-
-    This class provides a strict configuration base that enforces data validation
-    and prevents accidental attribute errors. All Xerxes configuration models
-    should inherit from this class.
-
-    Attributes:
-        model_config: Pydantic configuration that forbids extra attributes,
-            validates default values, and uses enum values directly.
-
-    Example:
-        >>> class MyConfig(XerxesBase):
-        ...     name: str
-        ...     count: int = 0
-        >>> config = MyConfig(name="test")
-        >>> config.name
-        'test'
-    """
+    """Strict Pydantic base model used across Xerxes data classes."""
 
     model_config = ConfigDict(extra="forbid", validate_default=True, use_enum_values=True)
 
 
 def debug_print(debug: bool, *args: str) -> None:
-    """Print debug messages with timestamp if debug mode is enabled.
+    """Print a timestamped debug message when ``debug`` is enabled.
 
     Args:
-        debug: Whether debug mode is enabled.
-        *args: Variable number of string arguments to print.
-
-    Returns:
-        None
-
-    Example:
-        >>> debug_print(True, "Processing", "function", "call")
-        [2025-01-27 10:30:45] Processing function call
+        debug (bool): IN: whether to actually print.
+        *args (str): IN: message parts.
     """
     if not debug:
         return
@@ -109,23 +73,11 @@ def debug_print(debug: bool, *args: str) -> None:
 
 
 def merge_fields(target: dict, source: dict) -> None:
-    """Recursively merge fields from source dictionary into target dictionary.
-
-    For string values, concatenates them. For dict values, merges recursively.
+    """Recursively merge string or dict values from ``source`` into ``target``.
 
     Args:
-        target: The target dictionary to merge into.
-        source: The source dictionary to merge from.
-
-    Returns:
-        None (modifies target in place)
-
-    Example:
-        >>> target = {"text": "Hello", "nested": {"key": "value"}}
-        >>> source = {"text": " World", "nested": {"key": "2"}}
-        >>> merge_fields(target, source)
-        >>> print(target)
-        {"text": "Hello World", "nested": {"key": "value2"}}
+        target (dict): IN: dictionary to mutate.
+        source (dict): IN: dictionary providing new values.
     """
     for key, value in source.items():
         if isinstance(value, str):
@@ -135,27 +87,12 @@ def merge_fields(target: dict, source: dict) -> None:
 
 
 def merge_chunk(final_response: dict, delta: dict) -> None:
-    """Merge a streaming response chunk into the final response.
-
-    Handles special processing for tool_calls and removes role field.
+    """Merge a streaming delta chunk into an accumulating response dict.
 
     Args:
-        final_response: The accumulated response dictionary.
-        delta: The new chunk to merge.
-
-    Returns:
-        None (modifies final_response in place)
-
-    Note:
-        This function is specifically designed for merging streaming API
-        response chunks that may contain tool calls.
-
-    Example:
-        >>> response = {"content": "Hello", "tool_calls": [{"name": "func"}]}
-        >>> delta = {"content": " World"}
-        >>> merge_chunk(response, delta)
-        >>> print(response["content"])
-        Hello World
+        final_response (dict): IN: accumulated response. OUT: mutated in
+            place with delta values merged.
+        delta (dict): IN: incremental chunk from the stream.
     """
     delta.pop("role", None)
     merge_fields(final_response, delta)
@@ -167,21 +104,15 @@ def merge_chunk(final_response: dict, delta: dict) -> None:
 
 
 def estimate_tokens(text: str, chars_per_token: float = 4.0) -> int:
-    """Estimate the number of tokens in a text string.
-
-    Uses a simple character-based heuristic. For more accurate counting,
-    consider using tiktoken or a provider-specific tokenizer.
+    """Estimate token count from character length.
 
     Args:
-        text: The text to estimate tokens for.
-        chars_per_token: Average characters per token (default: 4.0 for English).
+        text (str): IN: text to estimate.
+        chars_per_token (float): IN: average characters per token.
+            Defaults to 4.0.
 
     Returns:
-        Estimated number of tokens.
-
-    Example:
-        >>> estimate_tokens("Hello, world!")
-        4
+        int: OUT: estimated token count (minimum 1 for non-empty text).
     """
     if not text:
         return 0
@@ -189,18 +120,13 @@ def estimate_tokens(text: str, chars_per_token: float = 4.0) -> int:
 
 
 def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    """Estimate the total number of tokens in a list of messages.
+    """Estimate total tokens for a list of chat messages.
 
     Args:
-        messages: List of message dictionaries with 'role' and 'content' keys.
+        messages (list[dict[str, Any]]): IN: OpenAI-style message dicts.
 
     Returns:
-        Estimated total number of tokens.
-
-    Example:
-        >>> msgs = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]
-        >>> estimate_messages_tokens(msgs)
-        5
+        int: OUT: estimated token count.
     """
     total = 0
     for msg in messages:
@@ -212,26 +138,14 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def get_callable_public_name(func: Callable[..., Any]) -> str:
-    """Return the public tool name exposed to the model/runtime.
-
-    Xerxes tools may carry a ``__xerxes_schema__`` dict whose ``name`` key
-    differs from the Python callable's ``__name__``. This allows compatibility
-    aliases and dotted tool names without changing the underlying implementation
-    name.
+    """Return the public name for a callable.
 
     Args:
-        func: The callable whose public tool name should be resolved.
+        func (Callable[..., Any]): IN: function or callable object.
 
     Returns:
-        The public name string. If the callable carries a ``__xerxes_schema__``
-        dictionary with a non-empty ``name`` entry, that value is returned.
-        Otherwise falls back to ``func.__name__`` or ``str(func)``.
-
-    Example:
-        >>> def my_tool():
-        ...     pass
-        >>> get_callable_public_name(my_tool)
-        'my_tool'
+        str: OUT: ``__xerxes_schema__['name']`` if available, otherwise
+        ``__name__`` or a string representation.
     """
     schema = getattr(func, "__xerxes_schema__", None)
     if isinstance(schema, dict):
@@ -242,36 +156,17 @@ def get_callable_public_name(func: Callable[..., Any]) -> str:
 
 
 def function_to_json(func: Callable[..., Any]) -> dict:
-    """Convert a Python function into a JSON-serializable dictionary.
-
-    Extracts the function's signature, including its name, description
-    (from docstring), and parameters with their types and descriptions.
-    This is used to generate function schemas for LLM tool calling.
-
-    If the function has a `__xerxes_schema__` attribute, it will be used
-    directly instead of extracting from the signature. This is useful for
-    dynamically created functions like MCP tool wrappers.
+    """Convert a Python callable to an OpenAI-compatible function JSON schema.
 
     Args:
-        func: The function to be converted.
+        func (Callable[..., Any]): IN: function to describe.
 
     Returns:
-        A dictionary representing the function's signature in JSON format,
-        compatible with OpenAI function calling schema.
+        dict: OUT: JSON schema dict with ``type``, ``function.name``,
+        ``function.description``, and ``function.parameters``.
 
     Raises:
-        ValueError: If the function signature cannot be extracted.
-
-    Example:
-        >>> def greet(name: str, age: int = 0) -> str:
-        ...     '''Greet a person.
-        ...     name: Person's name
-        ...     age: Person's age
-        ...     '''
-        ...     return f"Hello {name}"
-        >>> schema = function_to_json(greet)
-        >>> print(schema["function"]["name"])
-        greet
+        ValueError: If the function signature cannot be inspected.
     """
     schema = getattr(func, "__xerxes_schema__", None)
     custom_name = None

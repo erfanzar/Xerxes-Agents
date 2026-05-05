@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Public exports for the Xerxes core package.
 
-
-"""Core building blocks for Xerxes.
-
-Provides prompt template structures, formatting utilities, configuration,
-error types, multimodal handling, streaming buffers, and base utilities.
-
-Submodules (use direct imports to avoid circular dependencies):
-- xerxes.core.basics
-- xerxes.core.config
-- xerxes.core.errors
-- xerxes.core.multimodal
-- xerxes.core.prompt_template
-- xerxes.core.streamer_buffer
-- xerxes.core.utils
+Re-exports configuration, error types, utilities, prompt templates,
+multimodal helpers, and streaming buffers via lazy attribute resolution.
 """
 
 import importlib as _importlib
@@ -92,16 +83,16 @@ _SUBMODULE_MAP = {
 
 
 def __getattr__(name: str) -> object:
-    """Lazily import attributes from submodules to avoid circular imports.
+    """Lazy-load core objects from their respective submodules.
 
     Args:
-        name: The attribute name to resolve.
+        name (str): IN: attribute name being requested.
 
     Returns:
-        The resolved attribute from the appropriate submodule.
+        object: OUT: the requested object.
 
     Raises:
-        AttributeError: If the attribute is not found in any submodule.
+        AttributeError: If the name is not a known export.
     """
     if name in _SUBMODULE_MAP:
         module = _importlib.import_module(_SUBMODULE_MAP[name], __package__)

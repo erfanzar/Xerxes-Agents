@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tool pool module for Xerxes.
 
-
-"""Permission-filtered tool pool assembly.
-
-Assembles a curated set of tools for an agent session, applying
-permission policies, category filters, and capability constraints.
-
-Inspired by the claw-code ``ToolPool`` and ``assemble_tool_pool`` patterns.
-
-Usage::
-
-    from xerxes.runtime.tool_pool import ToolPool, assemble_tool_pool
-
-    pool = assemble_tool_pool(
-        categories=["file_system", "execution"],
-        deny_tools={"ExecuteShell"},
-        safe_only=False,
-    )
-    print(pool.as_markdown())
-    schemas = pool.to_schemas()
-"""
+Exports:
+    - ToolPool
+    - assemble_tool_pool"""
 
 from __future__ import annotations
 
@@ -41,14 +27,13 @@ from .execution_registry import ExecutionRegistry, RegistryEntry
 
 @dataclass(frozen=True)
 class ToolPool:
-    """An assembled, filtered set of tools ready for agent use.
+    """Tool pool.
 
     Attributes:
-        tools: Tuple of tool entries included in the pool.
-        denied_tools: Tools that were explicitly denied.
-        categories: Categories that were requested.
-        safe_only: Whether only safe tools were included.
-    """
+        tools (tuple[RegistryEntry, ...]): tools.
+        denied_tools (frozenset[str]): denied tools.
+        categories (tuple[str, ...]): categories.
+        safe_only (bool): safe only."""
 
     tools: tuple[RegistryEntry, ...] = ()
     denied_tools: frozenset[str] = frozenset()
@@ -57,21 +42,46 @@ class ToolPool:
 
     @property
     def tool_count(self) -> int:
+        """Return Tool count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
         return len(self.tools)
 
     @property
     def tool_names(self) -> tuple[str, ...]:
+        """Return Tool names.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            tuple[str, ...]: OUT: Result of the operation."""
         return tuple(t.name for t in self.tools)
 
     def get_tool(self, name: str) -> RegistryEntry | None:
-        """Look up a tool by name."""
+        """Retrieve the tool.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+        Returns:
+            RegistryEntry | None: OUT: Result of the operation."""
+
         for t in self.tools:
             if t.name == name:
                 return t
         return None
 
     def to_schemas(self) -> list[dict[str, Any]]:
-        """Convert to Anthropic-format tool schemas."""
+        """To schemas.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, Any]]: OUT: Result of the operation."""
+
         schemas = []
         for entry in self.tools:
             if entry.schema:
@@ -87,7 +97,13 @@ class ToolPool:
         return schemas
 
     def as_markdown(self) -> str:
-        """Render as markdown."""
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
             "# Tool Pool",
             "",
@@ -112,20 +128,18 @@ def assemble_tool_pool(
     safe_only: bool = False,
     include_mcp: bool = True,
 ) -> ToolPool:
-    """Assemble a filtered tool pool from the execution registry.
+    """Assemble tool pool.
 
     Args:
-        registry: The execution registry to pull tools from.
-            If None, creates an empty pool.
-        categories: Only include tools from these categories.
-        deny_tools: Explicit set of tool names to exclude.
-        deny_prefixes: Exclude tools whose names start with these prefixes.
-        safe_only: Only include safe (read-only) tools.
-        include_mcp: Include MCP-sourced tools.
-
+        registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+        categories (list[str] | None, optional): IN: categories. Defaults to None. OUT: Consumed during execution.
+        deny_tools (set[str] | None, optional): IN: deny tools. Defaults to None. OUT: Consumed during execution.
+        deny_prefixes (list[str] | None, optional): IN: deny prefixes. Defaults to None. OUT: Consumed during execution.
+        safe_only (bool, optional): IN: safe only. Defaults to False. OUT: Consumed during execution.
+        include_mcp (bool, optional): IN: include mcp. Defaults to True. OUT: Consumed during execution.
     Returns:
-        A :class:`ToolPool` with the filtered tools.
-    """
+        ToolPool: OUT: Result of the operation."""
+
     if registry is None:
         return ToolPool()
 

@@ -1,21 +1,23 @@
-#!/usr/bin/env python3
-"""
-Fetch a YouTube video transcript and output it as structured JSON.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Fetch transcript module for Xerxes.
 
-Usage:
-    python fetch_transcript.py <url_or_video_id> [--language en,tr] [--timestamps]
-
-Output (JSON):
-    {
-        "video_id": "...",
-        "language": "en",
-        "segments": [{"text": "...", "start": 0.0, "duration": 2.5}, ...],
-        "full_text": "complete transcript as plain text",
-        "timestamped_text": "00:00 first line\n00:05 second line\n..."
-    }
-
-Install dependency:  pip install youtube-transcript-api
-"""
+Exports:
+    - extract_video_id
+    - format_timestamp
+    - fetch_transcript
+    - main"""
 
 import argparse
 import json
@@ -24,7 +26,13 @@ import sys
 
 
 def extract_video_id(url_or_id: str) -> str:
-    """Extract the 11-character video ID from various YouTube URL formats."""
+    """Extract video id.
+
+    Args:
+        url_or_id (str): IN: url or id. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     url_or_id = url_or_id.strip()
     patterns = [
         r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})",
@@ -38,7 +46,13 @@ def extract_video_id(url_or_id: str) -> str:
 
 
 def format_timestamp(seconds: float) -> str:
-    """Convert seconds to HH:MM:SS or MM:SS format."""
+    """Format timestamp.
+
+    Args:
+        seconds (float): IN: seconds. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     total = int(seconds)
     h, remainder = divmod(total, 3600)
     m, s = divmod(remainder, 60)
@@ -48,11 +62,14 @@ def format_timestamp(seconds: float) -> str:
 
 
 def fetch_transcript(video_id: str, languages: list | None = None):
-    """Fetch transcript segments from YouTube.
+    """Fetch transcript.
 
-    Returns a list of dicts with 'text', 'start', and 'duration' keys.
-    Compatible with youtube-transcript-api v1.x.
-    """
+    Args:
+        video_id (str): IN: video id. OUT: Consumed during execution.
+        languages (list | None, optional): IN: languages. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
@@ -65,11 +82,14 @@ def fetch_transcript(video_id: str, languages: list | None = None):
     else:
         result = api.fetch(video_id)
 
-    # v1.x returns FetchedTranscriptSnippet objects; normalize to dicts
     return [{"text": seg.text, "start": seg.start, "duration": seg.duration} for seg in result]
 
 
 def main():
+    """Main.
+
+    Returns:
+        Any: OUT: Result of the operation."""
     parser = argparse.ArgumentParser(description="Fetch YouTube transcript as JSON")
     parser.add_argument("url", help="YouTube URL or video ID")
     parser.add_argument(

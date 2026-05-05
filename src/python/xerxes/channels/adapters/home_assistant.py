@@ -1,7 +1,21 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Home Assistant channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Home Assistant conversation adapter."""
+Sends outbound messages as persistent notifications and parses inbound
+conversation webhook payloads.
+"""
 
 from __future__ import annotations
 
@@ -12,13 +26,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class HomeAssistantChannel(WebhookChannel):
-    """Home Assistant conversation API adapter.
-
-    Inbound: HA fires a webhook (``automation -> rest``) on each user
-    voice/text request.
-    Outbound: ``POST {ha_url}/api/conversation/process`` (or
-    ``persistent_notification.create`` for room messages).
-    """
+    """Channel implementation for Home Assistant."""
 
     name = "home_assistant"
 
@@ -29,12 +37,15 @@ class HomeAssistantChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a Home Assistant instance.
+        """Initialize the Home Assistant channel.
 
         Args:
-            ha_url: Base URL of the Home Assistant REST API.
-            access_token: Long-lived access token used as ``Bearer``.
-            http_client: Optional injected HTTP callable for tests.
+            ha_url (str): IN: Home Assistant instance URL.
+                OUT: stored with trailing slash removed.
+            access_token (str): IN: long-lived access token.
+                OUT: stored for API authorization.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.ha_url = ha_url.rstrip("/")
@@ -42,9 +53,14 @@ class HomeAssistantChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Pick ``text`` / ``input.text`` / ``message`` out of the HA payload.
+        """Parse a Home Assistant webhook payload into ``ChannelMessage``.
 
-        Also retains ``language`` in metadata for downstream NLU routing.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -65,7 +81,12 @@ class HomeAssistantChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Post ``message`` via the ``persistent_notification.create`` service."""
+        """Create a persistent notification in Home Assistant.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``text`` becomes
+                the notification body and ``message_id`` the notification ID.
+        """
         url = f"{self.ha_url}/api/services/persistent_notification/create"
         body = {
             "title": "Xerxes",

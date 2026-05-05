@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,29 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Cost tracker module for Xerxes.
 
-
-"""Granular cost tracking for LLM API usage.
-
-Tracks per-event, per-model, and per-session costs with support for
-token-level and dollar-level accounting.
-
-Inspired by the claw-code ``CostTracker`` and enhanced with Xerxes's
-provider registry cost tables.
-
-Usage::
-
-    from xerxes.runtime.cost_tracker import CostTracker
-
-    tracker = CostTracker()
-    tracker.record_turn("gpt-4o", in_tokens=1500, out_tokens=800)
-    tracker.record_turn("claude-opus-4-6", in_tokens=2000, out_tokens=500)
-    print(tracker.total_cost_usd)
-    print(tracker.summary())
-"""
+Exports:
+    - CostEvent
+    - CostTracker"""
 
 from __future__ import annotations
 
@@ -39,16 +26,15 @@ from typing import Any
 
 @dataclass
 class CostEvent:
-    """A single cost event.
+    """Cost event.
 
     Attributes:
-        model: Model name used.
-        in_tokens: Input tokens consumed.
-        out_tokens: Output tokens generated.
-        cost_usd: Estimated cost in USD.
-        label: Human-readable label (e.g. ``"turn_3"``, ``"tool_agent"``).
-        timestamp: ISO 8601 timestamp.
-    """
+        model (str): model.
+        in_tokens (int): in tokens.
+        out_tokens (int): out tokens.
+        cost_usd (float): cost usd.
+        label (str): label.
+        timestamp (str): timestamp."""
 
     model: str
     in_tokens: int
@@ -60,11 +46,10 @@ class CostEvent:
 
 @dataclass
 class CostTracker:
-    """Tracks API costs across an entire session.
+    """Cost tracker.
 
-    Provides per-event recording, per-model aggregation, and
-    formatted summaries.
-    """
+    Attributes:
+        events (list[CostEvent]): events."""
 
     events: list[CostEvent] = field(default_factory=list)
 
@@ -75,19 +60,17 @@ class CostTracker:
         out_tokens: int,
         label: str = "",
     ) -> CostEvent:
-        """Record a single LLM turn.
-
-        Calculates cost using the provider registry's pricing table.
+        """Record turn.
 
         Args:
-            model: Model name.
-            in_tokens: Input tokens for this turn.
-            out_tokens: Output tokens for this turn.
-            label: Optional label for this event.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            model (str): IN: model. OUT: Consumed during execution.
+            in_tokens (int): IN: in tokens. OUT: Consumed during execution.
+            out_tokens (int): IN: out tokens. OUT: Consumed during execution.
+            label (str, optional): IN: label. Defaults to ''. OUT: Consumed during execution.
         Returns:
-            The created cost event.
-        """
+            CostEvent: OUT: Result of the operation."""
+
         from xerxes.llms.registry import calc_cost
 
         cost = calc_cost(model, in_tokens, out_tokens)
@@ -102,7 +85,16 @@ class CostTracker:
         return event
 
     def record_raw(self, label: str, cost_usd: float, model: str = "") -> CostEvent:
-        """Record a raw cost event (no token calculation)."""
+        """Record raw.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            label (str): IN: label. OUT: Consumed during execution.
+            cost_usd (float): IN: cost usd. OUT: Consumed during execution.
+            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
+        Returns:
+            CostEvent: OUT: Result of the operation."""
+
         event = CostEvent(
             model=model,
             in_tokens=0,
@@ -115,34 +107,66 @@ class CostTracker:
 
     @property
     def total_cost_usd(self) -> float:
-        """Total cost across all events."""
+        """Return Total cost usd.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
+
         return sum(e.cost_usd for e in self.events)
 
     @property
     def total_input_tokens(self) -> int:
-        """Total input tokens across all events."""
+        """Return Total input tokens.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return sum(e.in_tokens for e in self.events)
 
     @property
     def total_output_tokens(self) -> int:
-        """Total output tokens across all events."""
+        """Return Total output tokens.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return sum(e.out_tokens for e in self.events)
 
     @property
     def total_tokens(self) -> int:
-        """Total tokens (input + output)."""
+        """Return Total tokens.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return self.total_input_tokens + self.total_output_tokens
 
     @property
     def event_count(self) -> int:
+        """Return Event count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
         return len(self.events)
 
     def by_model(self) -> dict[str, dict[str, Any]]:
-        """Aggregate costs by model.
+        """By model.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dict mapping model name to aggregated stats.
-        """
+            dict[str, dict[str, Any]]: OUT: Result of the operation."""
+
         agg: dict[str, dict[str, Any]] = {}
         for e in self.events:
             if e.model not in agg:
@@ -154,10 +178,20 @@ class CostTracker:
         return agg
 
     def clear(self) -> None:
+        """Clear.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
         self.events.clear()
 
     def summary(self) -> str:
-        """Return a formatted cost summary."""
+        """Summary.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
             "# Cost Summary",
             "",
@@ -179,7 +213,13 @@ class CostTracker:
         return "\n".join(lines)
 
     def as_dicts(self) -> list[dict[str, Any]]:
-        """Serialize events for JSON storage."""
+        """As dicts.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, Any]]: OUT: Result of the operation."""
+
         return [
             {
                 "model": e.model,

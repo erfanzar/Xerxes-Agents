@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,53 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Dynamic task creator agent for generating tasks from prompts.
-
-This module provides the TaskCreator class for automatically generating
-structured task breakdowns from natural language objectives. It uses an
-LLM-powered agent to analyze objectives and produce detailed, actionable
-task plans that can be executed within the Cortex framework.
-
-The module includes:
-- TaskCreator: Main class for generating tasks from prompts
-- TaskDefinition: Data class representing individual task specifications
-- TaskCreationPlan: Container for complete task breakdowns
-
-Key features:
-- Natural language to structured task conversion
-- Automatic agent assignment based on task requirements
-- Dependency detection and ordering
-- Priority and importance scoring
-- Tool requirement identification
-- Background/approach context integration
-- Streaming support for task creation
-- Fallback handling for parsing failures
-
-Typical usage example:
-    from xerxes.cortex.task_creator import TaskCreator
-    from xerxes.cortex.agent import CortexAgent
-
-    creator = TaskCreator(verbose=True, model="gpt-4")
-
-    agents = [
-        CortexAgent(role="Researcher", goal="Research topics", backstory="Expert"),
-        CortexAgent(role="Writer", goal="Write content", backstory="Expert")
-    ]
-
-    plan, tasks = creator.create_tasks_from_prompt(
-        prompt="Write a research report on AI trends",
-        background="Focus on recent developments",
-        available_agents=agents
-    )
-
-    for task in tasks:
-        print(f"Task: {task.description}")
-"""
+"""Task creation specialist that decomposes objectives into executable tasks."""
 
 from __future__ import annotations
 
@@ -79,23 +38,19 @@ if typing.TYPE_CHECKING:
 
 @dataclass
 class TaskDefinition:
-    """Definition of a task to be created from an LLM-generated plan.
-
-    TaskDefinition represents the specification of a single task as parsed
-    from the LLM's XML task plan output. It contains all the metadata needed
-    to create an actual CortexTask instance.
+    """A declarative description of a single task within a creation plan.
 
     Attributes:
-        task_id: Unique integer identifier for this task within the plan.
-        description: Detailed description of what the task should accomplish.
-        expected_output: Description of what successful completion looks like.
-        agent_role: Suggested role name for the agent to execute this task.
-        dependencies: List of task_ids that must complete before this task.
-        context_needed: Whether this task requires context from previous tasks.
-        tools_needed: List of tool names that may be needed for execution.
-        importance: Priority score from 0.1 (low) to 1.0 (critical).
-        validation_required: Whether output should be validated against a schema.
-        human_feedback: Whether to request human review of the output.
+        task_id (int): Unique identifier for the task.
+        description (str): What the task should accomplish.
+        expected_output (str): Description of the desired result.
+        agent_role (str | None): Suggested agent role for execution.
+        dependencies (list[int]): IDs of tasks this task depends on.
+        context_needed (bool): Whether outputs from prior tasks are needed.
+        tools_needed (list[str]): Names of tools required for the task.
+        importance (float): Importance score from 0.1 to 1.0.
+        validation_required (bool): Whether the output should be validated.
+        human_feedback (bool): Whether human feedback is requested.
     """
 
     task_id: int
@@ -110,31 +65,28 @@ class TaskDefinition:
     human_feedback: bool = False
 
     def __str__(self) -> str:
-        """Return a string representation of the task definition.
+        """Return a concise description of the task definition.
 
         Returns:
-            Formatted string showing task ID and truncated description.
+            str: Formatted as ``"Task {id}: {description}..."``.
+                OUT: Suitable for logging and display.
         """
+
         return f"Task {self.task_id}: {self.description[:50]}..."
 
 
 @dataclass
 class TaskCreationPlan:
-    """Complete task creation plan containing all task definitions.
-
-    TaskCreationPlan represents the full breakdown of an objective into
-    structured tasks. It includes metadata about the plan itself and
-    a collection of TaskDefinition instances.
+    """A plan produced by decomposing an objective into individual tasks.
 
     Attributes:
-        plan_id: Unique identifier for this plan (typically based on objective hash).
-        objective: The original objective or goal that was broken down.
-        approach: Description of the strategy used for task decomposition.
-        tasks: List of TaskDefinition instances in execution order.
-        estimated_complexity: Overall complexity rating ('simple', 'medium', 'complex').
-        total_tasks: Current count of tasks in the plan.
-        sequential: Whether tasks should be executed in sequence (True) or
-            can be parallelized where dependencies allow (False).
+        plan_id (str): Unique identifier for the plan.
+        objective (str): The original high-level objective.
+        approach (str): Description of the chosen decomposition strategy.
+        tasks (list[TaskDefinition]): The tasks derived from the objective.
+        estimated_complexity (Literal["simple", "medium", "complex"]): Overall complexity.
+        total_tasks (int): Total number of tasks in the plan.
+        sequential (bool): Whether the tasks are intended to run sequentially.
     """
 
     plan_id: str
@@ -146,14 +98,14 @@ class TaskCreationPlan:
     sequential: bool = True
 
     def add_task(self, task: TaskDefinition):
-        """Add a task to the plan and update the task count.
+        """Append a task definition and update the total count.
 
         Args:
-            task: The TaskDefinition to add to the plan.
-
-        Side Effects:
-            Appends task to the tasks list and updates total_tasks.
+            task (TaskDefinition): The task to add.
+                IN: Appended to ``self.tasks``.
+                OUT: ``self.total_tasks`` is updated to reflect the new length.
         """
+
         self.tasks.append(task)
         self.total_tasks = len(self.tasks)
 
@@ -161,11 +113,15 @@ class TaskCreationPlan:
         """Retrieve a task definition by its ID.
 
         Args:
-            task_id: The unique identifier of the task to find.
+            task_id (int): The task identifier to search for.
+                IN: Matched against ``task.task_id``.
+                OUT: Used for lookup in ``self.tasks``.
 
         Returns:
-            The matching TaskDefinition, or None if not found.
+            TaskDefinition | None: The matching task, or ``None`` if not found.
+                OUT: Direct reference from the task list.
         """
+
         for task in self.tasks:
             if task.task_id == task_id:
                 return task
@@ -173,36 +129,11 @@ class TaskCreationPlan:
 
 
 class TaskCreator:
-    """Dynamic task creator that generates structured tasks from natural language prompts.
+    """Uses an LLM agent to break down objectives into structured task plans.
 
-    TaskCreator uses an LLM-powered agent to analyze high-level objectives and
-    automatically generate detailed, actionable task breakdowns. It produces
-    structured XML output that is parsed into TaskDefinition and TaskCreationPlan
-    objects, which can then be converted to CortexTask instances for execution.
-
-    Attributes:
-        verbose: Whether to output detailed logging during task creation.
-        model: Model identifier for the creator agent's LLM.
-        llm: Direct BaseLLM instance for LLM operations.
-        max_tasks: Maximum number of tasks to include in a plan.
-        auto_assign_agents: Whether to suggest agent assignments based on roles.
-        logger: Logger instance for verbose output (None if verbose=False).
-        template_engine: PromptTemplate engine for rendering prompts.
-        creator_agent: Internal CortexAgent that performs task creation.
-
-    Class Attributes:
-        TASK_CREATION_TEMPLATE: Jinja2 template for generating task creation prompts.
-            Includes placeholders for objective, background, available agents,
-            and constraints.
-
-    Example:
-        >>> creator = TaskCreator(model="gpt-4", verbose=True)
-        >>> plan, tasks = creator.create_tasks_from_prompt(
-        ...     prompt="Build a REST API for user management",
-        ...     background="Use FastAPI with PostgreSQL",
-        ...     available_agents=my_agents
-        ... )
-        >>> print(f"Created {len(tasks)} tasks")
+    The ``TaskCreator`` renders a prompt template, invokes a ``CortexAgent``,
+    parses the XML response into a ``TaskCreationPlan``, and optionally
+    converts the plan into executable ``CortexTask`` objects.
     """
 
     TASK_CREATION_TEMPLATE = """
@@ -284,30 +215,27 @@ Respond ONLY with the XML plan, no additional text.
         max_tasks: int = 10,
         auto_assign_agents: bool = True,
     ):
-        """Initialize the TaskCreator with configuration options.
-
-        Creates a TaskCreator instance with an internal CortexAgent specialized
-        for task breakdown and planning. The agent uses the provided model
-        or LLM to generate structured task plans.
+        """Initialize the task creator with a dedicated agent.
 
         Args:
-            verbose: Whether to output detailed logging during task creation.
-                Enables informative log messages about the creation process.
-            model: Model identifier string for the creator agent (e.g., 'gpt-4').
-                Used if llm is not provided.
-            llm: Direct BaseLLM instance to use for task creation. Takes
-                precedence over the model parameter if both are provided.
-            max_tasks: Maximum number of tasks to include in any plan.
-                Plans with more tasks will be truncated (default: 10).
-            auto_assign_agents: Whether to automatically create CortexTask
-                instances with agent assignments when available_agents
-                is provided to create_tasks_from_prompt().
-
-        Side Effects:
-            - Creates internal creator_agent CortexAgent instance
-            - Initializes logger if verbose=True
-            - Sets up template_engine for prompt rendering
+            verbose (bool): Whether to log creation activity.
+                IN: Controls console and logger output.
+                OUT: Passed to the internal ``CortexAgent``.
+            model (str | None): Model identifier for the creator agent.
+                IN: Overrides the default model selection.
+                OUT: Set as the ``model`` field of the creator agent.
+            llm (BaseLLM | None): LLM backend for the creator agent.
+                IN: Passed to the creator agent constructor.
+                OUT: Configures the agent's language model.
+            max_tasks (int): Maximum number of tasks to allow in a plan.
+                IN: Limits the size of parsed plans.
+                OUT: Plans with more tasks are truncated.
+            auto_assign_agents (bool): Whether to auto-assign agents to tasks.
+                IN: If ``True``, ``create_tasks_from_prompt`` returns ``CortexTask``
+                objects mapped to available agents.
+                OUT: Controls the return type of task creation.
         """
+
         self.verbose = verbose
         self.model = model
         self.llm = llm
@@ -341,34 +269,39 @@ Respond ONLY with the XML plan, no additional text.
         stream_callback: Callable[[Any], None] | None = None,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> tuple[TaskCreationPlan, list[CortexTask] | None]:
-        """Create structured tasks from a natural language prompt.
-
-        Analyzes the provided objective and generates a detailed task breakdown
-        using the internal creator agent. Optionally assigns agents to tasks
-        based on role matching.
+        """Generate a task plan from a natural language objective.
 
         Args:
-            prompt: The objective or goal to break down into tasks.
-            background: Optional approach or context to guide task creation.
-                Helps the creator understand the preferred methodology.
-            available_agents: Optional list of CortexAgent instances for
-                automatic task assignment. If provided and auto_assign_agents
-                is True, returns CortexTask instances with agents assigned.
-            constraints: Optional constraints or requirements that tasks
-                must satisfy.
-            stream: Whether to stream the LLM response during creation.
-            stream_callback: Optional callback invoked with each streamed chunk.
-            streamer_buffer: Optional StreamerBuffer for collecting stream output.
+            prompt (str): The high-level objective to decompose.
+                IN: Rendered into the task creation template.
+                OUT: Drives the agent's task breakdown.
+            background (str | None): Additional context for decomposition.
+                IN: Passed to the template to guide the agent's strategy.
+                OUT: Rendered conditionally in the prompt.
+            available_agents (list | None): Agents that may be assigned to tasks.
+                IN: Their roles and goals are rendered into the prompt.
+                OUT: Used for agent mapping when ``auto_assign_agents`` is enabled.
+            constraints (str | None): Constraints to respect during creation.
+                IN: Rendered into the prompt.
+                OUT: Guides the agent to respect limitations.
+            stream (bool): Whether to stream the agent's response.
+                IN: Passed to the creator agent's ``execute`` method.
+                OUT: Enables real-time observation of task creation.
+            stream_callback (Callable | None): Callback for streamed chunks.
+                IN: Invoked during streaming if *stream* is ``True``.
+                OUT: Forwarded to the creator agent.
+            streamer_buffer (StreamerBuffer | None): Buffer for streaming.
+                IN: Forwarded to the creator agent.
+                OUT: Receives chunks when streaming is enabled.
 
         Returns:
-            Tuple of (TaskCreationPlan, list[CortexTask] | None):
-            - TaskCreationPlan containing all parsed TaskDefinition objects
-            - List of CortexTask instances if available_agents provided and
-              auto_assign_agents is True, otherwise None
-
-        Note:
-            If XML parsing fails, a fallback single-task plan is returned.
+            tuple[TaskCreationPlan, list[CortexTask] | None]: The parsed plan and,
+                when agents are available and ``auto_assign_agents`` is ``True``,
+                a list of executable ``CortexTask`` instances.
+                OUT: ``None`` for the task list when auto-assignment is disabled
+                or no agents are provided.
         """
+
         if self.verbose and self.logger:
             self.logger.info(f"📝 Creating tasks for: {prompt[:100]}...")
             if background:
@@ -417,21 +350,24 @@ Respond ONLY with the XML plan, no additional text.
             return self._create_fallback_plan(prompt, background)
 
     def _parse_xml_tasks(self, xml_response: str, objective: str) -> TaskCreationPlan:
-        """Parse XML task response into a TaskCreationPlan object.
-
-        Extracts the task_plan XML structure from the LLM response and
-        parses it into TaskDefinition objects within a TaskCreationPlan.
+        """Parse an XML task plan response into a ``TaskCreationPlan``.
 
         Args:
-            xml_response: Raw LLM output containing XML task plan.
-            objective: Original objective for fallback and plan identification.
+            xml_response (str): Raw XML or text containing a ``<task_plan>`` element.
+                IN: Extracted and parsed as XML.
+                OUT: Transformed into ``TaskDefinition`` objects.
+            objective (str): The original objective (fallback if not in XML).
+                IN: Used when the XML lacks an ``<objective>`` tag.
+                OUT: Becomes the plan's objective.
 
         Returns:
-            TaskCreationPlan with parsed tasks, truncated to max_tasks if needed.
+            TaskCreationPlan: The parsed plan with task definitions.
+                OUT: Truncated to ``self.max_tasks`` if necessary.
 
         Raises:
-            ValueError: If XML parsing fails with details about the error.
+            ValueError: If the XML is malformed or cannot be parsed.
         """
+
         try:
             xml_match = re.search(r"<task_plan>.*?</task_plan>", xml_response, re.DOTALL)
             if xml_match:
@@ -526,20 +462,21 @@ Respond ONLY with the XML plan, no additional text.
             raise ValueError(f"Invalid XML task format: {e}") from e
 
     def _create_cortex_tasks(self, task_plan: TaskCreationPlan, available_agents: list[CortexAgent]) -> list[CortexTask]:
-        """Convert TaskDefinitions to executable CortexTask objects.
-
-        Maps TaskDefinition instances to CortexTask instances with agent
-        assignments based on role matching. If no matching agent is found,
-        the first available agent is used as a fallback.
+        """Convert a ``TaskCreationPlan`` into executable ``CortexTask`` objects.
 
         Args:
-            task_plan: The TaskCreationPlan containing TaskDefinitions.
-            available_agents: List of CortexAgent instances for assignment.
+            task_plan (TaskCreationPlan): The plan to convert.
+                IN: Iterated to create one ``CortexTask`` per ``TaskDefinition``.
+                OUT: Task descriptions, expected outputs, and assignments are mapped.
+            available_agents (list[CortexAgent]): Agents to assign to tasks.
+                IN: Matched by ``agent_role``; falls back to the first agent.
+                OUT: Each created task gets an ``agent`` reference.
 
         Returns:
-            List of CortexTask instances with agents assigned and
-            dependencies linked to previously created tasks.
+            list[CortexTask]: Executable tasks in plan order.
+                OUT: Dependencies are wired between tasks by index.
         """
+
         cortex_tasks: list[CortexTask] = []
         agent_map = {agent.role: agent for agent in available_agents}
 
@@ -571,19 +508,22 @@ Respond ONLY with the XML plan, no additional text.
         return cortex_tasks
 
     def _create_fallback_plan(self, objective: str, background: str | None) -> tuple[TaskCreationPlan, None]:
-        """Create a simple fallback plan when XML parsing fails.
-
-        Generates a minimal single-task plan that wraps the original
-        objective as one task. Used as a graceful degradation when
-        the LLM response cannot be parsed.
+        """Create a minimal fallback plan when decomposition fails.
 
         Args:
-            objective: The original objective to wrap as a single task.
-            background: Optional background to use as approach description.
+            objective (str): The goal to fall back on.
+                IN: Becomes the fallback plan's objective.
+                OUT: Stored in the generated plan.
+            background (str | None): Additional context for the fallback.
+                IN: Used as the plan's approach if provided.
+                OUT: Stored in the fallback plan.
 
         Returns:
-            Tuple of (TaskCreationPlan, None) with a single task.
+            tuple[TaskCreationPlan, None]: A single-task fallback plan with no
+                executable ``CortexTask`` list.
+                OUT: Ensures the system can still attempt execution.
         """
+
         plan = TaskCreationPlan(
             plan_id=f"fallback_{hash(objective) % 10000}",
             objective=objective,
@@ -602,18 +542,14 @@ Respond ONLY with the XML plan, no additional text.
         return plan, None
 
     def _log_task_summary(self, plan: TaskCreationPlan):
-        """Log a formatted summary of the created task plan.
-
-        Outputs detailed information about the plan including objective,
-        approach, complexity, and individual task descriptions with
-        their dependencies and agent assignments.
+        """Log a summary of the task creation plan.
 
         Args:
-            plan: The TaskCreationPlan to summarize.
-
-        Note:
-            Only logs if self.logger is not None (verbose mode enabled).
+            plan (TaskCreationPlan): The plan to summarize.
+                IN: Provides objective, approach, complexity, and task list.
+                OUT: Iterated to produce structured log lines.
         """
+
         if self.logger:
             self.logger.info("📋 Task Creation Summary:")
             self.logger.info(f"  • Objective: {plan.objective}")
@@ -637,32 +573,39 @@ Respond ONLY with the XML plan, no additional text.
         stream_callback: Callable[[Any], None] | None = None,
         log_process: bool = False,
     ) -> Any | tuple[StreamerBuffer, Thread]:
-        """Create tasks from a prompt and immediately execute them using a Cortex.
-
-        Combines task creation and execution into a single operation. First
-        generates tasks from the prompt using available agents in the Cortex,
-        then kicks off execution of those tasks.
+        """Create tasks from a prompt and immediately execute them through a ``Cortex``.
 
         Args:
-            prompt: The objective or goal to accomplish.
-            background: Optional approach or context for task creation.
-            cortex: The Cortex instance containing agents for execution.
-                Must have agents defined.
-            process_type: Optional ProcessType to override the Cortex's
-                default process type for this execution.
-            use_streaming: Whether to stream execution output.
-            stream_callback: Optional callback for streaming chunks.
-            log_process: Whether to log the execution process.
+            prompt (str): The objective to decompose and execute.
+                IN: Passed to ``create_tasks_from_prompt``.
+                OUT: Drives both task creation and execution.
+            background (str | None): Background context for task creation.
+                IN: Passed to ``create_tasks_from_prompt``.
+                OUT: Guides the decomposition strategy.
+            cortex (Cortex): The orchestration instance to execute through.
+                IN: Must have at least one agent defined.
+                OUT: Its ``tasks`` list is replaced with the created tasks.
+            process_type (ProcessType | None): Optional process type override.
+                IN: Temporarily sets ``cortex.process`` during execution.
+                OUT: Restored to its original value afterward.
+            use_streaming (bool): Whether to stream execution output.
+                IN: Passed to ``cortex.kickoff``.
+                OUT: Determines the return type.
+            stream_callback (Callable | None): Callback for streamed chunks.
+                IN: Passed to ``cortex.kickoff``.
+                OUT: Invoked during streaming execution.
+            log_process (bool): Whether to log the execution process.
+                IN: Passed to ``cortex.kickoff``.
+                OUT: Controls process-level logging.
 
         Returns:
-            If use_streaming=False: The execution result from cortex.kickoff().
-            If use_streaming=True: Tuple of (StreamerBuffer, Thread).
+            Any | tuple[StreamerBuffer, Thread]: The execution result, or a
+                streaming tuple when *use_streaming* is ``True``.
+                OUT: Direct return from ``cortex.kickoff``.
 
         Raises:
-            ValueError: If the Cortex has no agents defined.
-
-        Note:
-            The original process_type is restored after execution if overridden.
+            ValueError: If the cortex has no agents defined.
+            RuntimeError: If task creation fails to produce executable tasks.
         """
 
         if cortex.agents:

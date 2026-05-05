@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Mattermost channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Mattermost adapter — outgoing webhook + REST post."""
+Connects to a Mattermost server for sending and receiving messages.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class MattermostChannel(WebhookChannel):
-    """Mattermost outgoing-webhook ingest + REST post-message outbound."""
+    """Channel implementation for Mattermost."""
 
     name = "mattermost"
 
@@ -23,12 +36,15 @@ class MattermostChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a Mattermost server.
+        """Initialize the Mattermost channel.
 
         Args:
-            base_url: Base URL of the Mattermost instance.
-            bot_token: Bot personal access token used as ``Bearer``.
-            http_client: Optional injected HTTP callable for tests.
+            base_url (str): IN: Mattermost server base URL.
+                OUT: stored with trailing slash removed.
+            bot_token (str): IN: bot access token.
+                OUT: stored for API authorization.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.base_url = base_url.rstrip("/")
@@ -36,10 +52,14 @@ class MattermostChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Map an outgoing-webhook form payload to a :class:`ChannelMessage`.
+        """Parse a Mattermost webhook payload into ``ChannelMessage``.
 
-        Preserves ``team_id`` in metadata so replies can be routed back to
-        the right team.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -57,7 +77,13 @@ class MattermostChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST to ``/api/v4/posts``; uses ``reply_to`` as ``root_id`` for threading."""
+        """Send a message to a Mattermost channel.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is the
+                target channel ID, ``text`` the content, and ``reply_to``
+                (if set) the root post ID for threading.
+        """
         url = f"{self.base_url}/api/v4/posts"
         body = {"channel_id": message.room_id, "message": message.text}
         if message.reply_to:

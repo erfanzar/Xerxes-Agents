@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,47 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Hook-point registry and dispatcher for the Xerxes runtime.
 
-
-"""Hook system for Xerxes lifecycle events.
-
-Hooks allow external code to observe and mutate agent execution at
-well-defined points. Each hook point has documented semantics:
-
-Hook Points:
-    - ``before_tool_call(tool_name, arguments, agent_id) -> arguments``
-        Called before a tool is executed. Can modify arguments.
-        Return modified arguments dict or None to keep original.
-
-    - ``after_tool_call(tool_name, arguments, result, agent_id) -> result``
-        Called after a tool executes. Can transform the result.
-        Return modified result or None to keep original.
-
-    - ``tool_result_persist(tool_name, result, agent_id) -> result``
-        Called before tool result is stored in conversation history.
-        Allows sanitizing/transforming results for persistence.
-
-    - ``bootstrap_files(agent_id) -> list[str]``
-        Called during prompt assembly. Returns extra content strings
-        to inject into the system prompt.
-
-    - ``on_turn_start(agent_id, messages)``
-        Called when a new agent turn begins.
-
-    - ``on_turn_end(agent_id, response)``
-        Called when an agent turn completes.
-
-    - ``on_error(agent_id, error)``
-        Called when an error occurs during execution.
-
-Execution semantics:
-    - Hooks run in registration order.
-    - A hook that raises is logged and skipped (does not break the chain).
-    - Mutation hooks (before_tool_call, after_tool_call, tool_result_persist)
-      pass their return value to the next hook in the chain.
+Plugins and internal components can register callbacks at predefined hook
+points. Mutation hooks (``before_tool_call``, ``after_tool_call``,
+``tool_result_persist``) allow returning modified values; observation hooks
+simply collect side effects.
 """
 
 from __future__ import annotations
@@ -75,50 +45,32 @@ _MUTATION_HOOKS = frozenset({"before_tool_call", "after_tool_call", "tool_result
 
 
 class HookRunner:
-    """Manages registration and execution of lifecycle hooks.
+    """Stores and executes callbacks for named hook points.
 
-    ``HookRunner`` maintains an ordered list of callback functions for each
-    defined hook point.  Hooks are divided into two categories:
-
-    * **Mutation hooks** (``before_tool_call``, ``after_tool_call``,
-      ``tool_result_persist``) -- callbacks are chained so each can modify a
-      value that is passed to the next callback.
-    * **Observation hooks** (``bootstrap_files``, ``on_turn_start``,
-      ``on_turn_end``, ``on_error``) -- all callbacks are invoked and their
-      non-``None`` return values are collected into a list.
-
-    Callbacks that raise exceptions are logged and skipped without breaking
-    the hook chain.
-
-    Attributes:
-        _hooks: Internal mapping from hook point names to ordered lists of
-            registered callbacks.
-
-    Example:
-        >>> runner = HookRunner()
-        >>> runner.register("before_tool_call", my_hook_fn)
-        >>> modified_args = runner.run("before_tool_call",
-        ...     tool_name="search", arguments={"q": "hello"}, agent_id="a1")
+    On instantiation every valid hook point is pre-allocated an empty list.
     """
 
     def __init__(self) -> None:
-        """Initialize the HookRunner with empty callback lists for all hook points.
+        """Initialize empty callback lists for all ``HOOK_POINTS``."""
 
-        Pre-populates the internal ``_hooks`` dictionary with an empty list
-        for every name defined in :data:`HOOK_POINTS`.
-        """
         self._hooks: dict[str, list[HookCallback]] = {name: [] for name in HOOK_POINTS}
 
     def register(self, hook_point: str, callback: HookCallback) -> None:
-        """Register a hook callback for a specific hook point.
+        """Add a callback to a hook point.
 
         Args:
-            hook_point: One of the defined HOOK_POINTS.
-            callback: The callable to invoke at this hook point.
+            hook_point (str): IN: Name from ``HOOK_POINTS``. OUT: Validates
+                membership and appends ``callback``.
+            callback (HookCallback): IN: Callable to invoke. OUT: Stored in
+                the internal list.
+
+        Returns:
+            None: OUT: Callback is registered.
 
         Raises:
-            ValueError: If hook_point is not recognized.
+            ValueError: OUT: If ``hook_point`` is not in ``HOOK_POINTS``.
         """
+
         if hook_point not in HOOK_POINTS:
             raise ValueError(f"Unknown hook point '{hook_point}'. Valid: {sorted(HOOK_POINTS)}")
         self._hooks[hook_point].append(callback)
@@ -129,16 +81,18 @@ class HookRunner:
         )
 
     def unregister(self, hook_point: str, callback: HookCallback) -> bool:
-        """Remove a previously registered callback from a hook point.
+        """Remove a previously registered callback.
 
         Args:
-            hook_point: The hook point name to search in.
-            callback: The exact callable instance to remove (identity match).
+            hook_point (str): IN: Hook point name. OUT: Looked up in the
+                registry.
+            callback (HookCallback): IN: Exact callable to remove. OUT:
+                Removed by identity from the list.
 
         Returns:
-            ``True`` if the callback was found and removed, ``False`` if the
-            hook point does not exist or the callback was not registered.
+            bool: OUT: ``True`` if the callback was found and removed.
         """
+
         if hook_point not in self._hooks:
             return False
         try:
@@ -148,50 +102,35 @@ class HookRunner:
             return False
 
     def clear(self, hook_point: str | None = None) -> None:
-        """Clear all registered callbacks for one or all hook points.
+        """Remove all callbacks, globally or for a specific hook point.
 
         Args:
-            hook_point: If provided, only callbacks for this specific hook
-                point are removed.  If ``None`` (the default), callbacks
-                for **every** hook point are removed.
+            hook_point (str | None): IN: Specific hook to clear, or ``None``
+                for all. OUT: Empties the selected list(s).
+
+        Returns:
+            None: OUT: Selected callbacks are removed.
         """
+
         if hook_point:
             self._hooks[hook_point] = []
         else:
             self._hooks = {name: [] for name in HOOK_POINTS}
 
     def run(self, hook_point: str, **kwargs) -> tp.Any:
-        """Execute all hooks registered for a hook point.
-
-        Dispatches to :meth:`_run_mutation` or :meth:`_run_observation`
-        depending on the hook category.
-
-        For mutation hooks (``before_tool_call``, ``after_tool_call``,
-        ``tool_result_persist``):
-            - The return value from each hook is passed as updated kwargs
-              to the next hook in the chain.
-            - For ``before_tool_call``: the return value replaces
-              ``'arguments'``.
-            - For ``after_tool_call`` / ``tool_result_persist``: the return
-              value replaces ``'result'``.
-            - Returns the final mutated value.
-
-        For observation hooks (``bootstrap_files``, ``on_turn_start``, etc.):
-            - All callbacks are invoked; return values are collected.
-            - Returns a list of non-``None`` return values.
-
-        If no callbacks are registered the method returns the relevant
-        default value (``arguments`` or ``result`` from *kwargs*).
+        """Execute callbacks for a hook point.
 
         Args:
-            hook_point: The hook point name to execute.
-            **kwargs: Keyword arguments forwarded to every callback.  The
-                exact keys depend on the hook point (see module docstring).
+            hook_point (str): IN: Name of the hook to fire. OUT: Determines
+                mutation vs observation behaviour.
+            **kwargs: IN: Keyword arguments forwarded to each callback. OUT:
+                May be mutated for mutation hooks.
 
         Returns:
-            The final mutated value for mutation hooks, or a list of
-            collected results for observation hooks.
+            tp.Any: OUT: Mutated value for mutation hooks, or list of results
+            for observation hooks.
         """
+
         callbacks = self._hooks.get(hook_point, [])
         if not callbacks:
             return kwargs.get("arguments") if hook_point == "before_tool_call" else kwargs.get("result")
@@ -202,21 +141,20 @@ class HookRunner:
             return self._run_observation(hook_point, callbacks, **kwargs)
 
     def _run_mutation(self, hook_point: str, callbacks: list[HookCallback], **kwargs) -> tp.Any:
-        """Run mutation hooks, chaining non-``None`` return values.
-
-        Each callback receives the current *kwargs*.  When a callback returns
-        a non-``None`` value the corresponding mutable key (``"arguments"``
-        for ``before_tool_call``, ``"result"`` for others) is updated in
-        *kwargs* before the next callback is invoked.
+        """Run mutation hooks, allowing each callback to replace a value.
 
         Args:
-            hook_point: The mutation hook point name.
-            callbacks: Ordered list of callbacks to invoke.
-            **kwargs: The keyword arguments passed through the chain.
+            hook_point (str): IN: Hook name. OUT: Selects whether
+                ``arguments`` or ``result`` is the mutable key.
+            callbacks (list[HookCallback]): IN: Registered mutators. OUT:
+                Invoked sequentially; non-``None`` returns replace the current
+                value.
+            **kwargs: IN: Arguments / result dict. OUT: Mutated in place.
 
         Returns:
-            The final value of the mutated key after all callbacks have run.
+            tp.Any: OUT: Final mutated value.
         """
+
         if hook_point == "before_tool_call":
             mutated_key = "arguments"
         else:
@@ -236,18 +174,16 @@ class HookRunner:
     def _run_observation(self, hook_point: str, callbacks: list[HookCallback], **kwargs) -> list[tp.Any]:
         """Run observation hooks, collecting non-``None`` return values.
 
-        All callbacks are invoked regardless of individual return values.
-        Exceptions are logged and do not prevent subsequent callbacks from
-        executing.
-
         Args:
-            hook_point: The observation hook point name.
-            callbacks: Ordered list of callbacks to invoke.
-            **kwargs: The keyword arguments forwarded to every callback.
+            hook_point (str): IN: Hook name. OUT: Used only for logging.
+            callbacks (list[HookCallback]): IN: Registered observers. OUT:
+                Invoked sequentially.
+            **kwargs: IN: Forwarded to each callback. OUT: Unchanged.
 
         Returns:
-            A list of non-``None`` values returned by the callbacks.
+            list[tp.Any]: OUT: List of non-``None`` results from callbacks.
         """
+
         results = []
         for cb in callbacks:
             try:
@@ -259,13 +195,14 @@ class HookRunner:
         return results
 
     def has_hooks(self, hook_point: str) -> bool:
-        """Check whether any callbacks are registered for a hook point.
+        """Return whether any callbacks are registered for a hook point.
 
         Args:
-            hook_point: The hook point name to query.
+            hook_point (str): IN: Hook name to query. OUT: Checked against the
+                internal registry.
 
         Returns:
-            ``True`` if at least one callback is registered, ``False``
-            otherwise (including when *hook_point* is not a recognized name).
+            bool: OUT: ``True`` if at least one callback exists.
         """
+
         return bool(self._hooks.get(hook_point))

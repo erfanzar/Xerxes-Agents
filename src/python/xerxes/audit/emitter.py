@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,34 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""High-level audit event emitter.
 
-
-"""High-level audit emitter with convenience methods.
-
-:class:`AuditEmitter` wraps an :class:`~xerxes.audit.collector.AuditCollector`
-and exposes one dedicated ``emit_*`` method for every event type defined in
-:mod:`xerxes.audit.events`. This keeps call-sites in the executor and
-response loop clean -- callers never need to construct event dataclasses
-directly.
-
-The emitter is fully thread-safe: an internal :class:`threading.Lock`
-serializes all writes to the underlying collector, and an optional
-``session_id`` is automatically stamped onto every event.
-
-Example:
-    ::
-
-        from xerxes.audit import AuditEmitter, InMemoryCollector
-
-        collector = InMemoryCollector()
-        emitter = AuditEmitter(collector=collector, session_id="sess-01")
-        tid = emitter.emit_turn_start(agent_id="agent-1", prompt="Hello")
-        emitter.emit_tool_call_attempt("web_search", args='{"q":"hi"}', turn_id=tid)
-        emitter.emit_turn_end(agent_id="agent-1", turn_id=tid, fc_count=1)
-        emitter.flush()
+This module provides :class:`AuditEmitter`, a convenience facade that constructs
+specific audit event dataclasses and forwards them to a collector.
 """
 
 from __future__ import annotations
@@ -64,50 +45,19 @@ from .events import (
 
 
 def _generate_turn_id() -> str:
-    """Generate a compact random turn identifier.
-
-    Produces a 12-character hexadecimal string derived from a UUID4,
-    providing sufficient uniqueness for correlating events within a
-    single session while remaining compact enough for log readability.
+    """Generate a short unique turn identifier.
 
     Returns:
-        str: A 12-character lowercase hexadecimal string
-            (e.g. ``"a1b2c3d4e5f6"``).
+        str: OUT: A 12-character hexadecimal UUID fragment.
     """
     return uuid.uuid4().hex[:12]
 
 
 class AuditEmitter:
-    """Thread-safe emitter that converts method calls into typed audit events.
+    """Facade for emitting structured audit events to a collector.
 
-    The emitter provides a dedicated ``emit_*`` convenience method for each
-    event type so that call-sites do not need to import or construct event
-    dataclasses directly. Every event is automatically stamped with the
-    emitter's ``session_id`` before being forwarded to the underlying
-    collector.
-
-    Attributes:
-        _collector: The audit collector that receives forwarded events.
-        _session_id: Optional session-level identifier stamped onto
-            every event.
-        _lock: Internal threading lock serializing writes.
-
-    Args:
-        collector: The audit collector that receives all emitted events.
-            Defaults to a new :class:`InMemoryCollector` when ``None``.
-        session_id: An optional session identifier that is stamped onto
-            every event emitted through this instance.
-
-    Example:
-        ::
-
-            from xerxes.audit import AuditEmitter, InMemoryCollector
-
-            collector = InMemoryCollector()
-            emitter = AuditEmitter(collector=collector, session_id="s1")
-            tid = emitter.emit_turn_start(agent_id="a1", prompt="Hi")
-            emitter.emit_turn_end(agent_id="a1", turn_id=tid)
-            assert len(collector) == 2
+    Provides typed convenience methods for each event subclass and handles
+    session ID injection.
     """
 
     def __init__(
@@ -116,17 +66,15 @@ class AuditEmitter:
         session_id: str | None = None,
         hook_runner: Any = None,
     ) -> None:
-        """Initialize the audit emitter.
+        """Initialize the emitter.
 
         Args:
-            collector: The audit collector that receives all emitted
-                events. When ``None``, an :class:`InMemoryCollector` is
-                created automatically.
-            session_id: An optional session identifier stamped onto
-                every emitted event.
-            hook_runner: Optional :class:`HookRunner` for emitting events
-                through registered hooks. When ``None``, events are emitted
-                directly to the collector.
+            collector (AuditCollector | InMemoryCollector | None): IN: Target
+                collector. OUT: Defaults to a new :class:`InMemoryCollector`.
+            session_id (str | None): IN: Session identifier. OUT: Injected into
+                all emitted events.
+            hook_runner (Any): IN: Optional hook runner for loop warnings. OUT:
+                Used by :meth:`emit_loop_warning`.
         """
         self._collector: Any = collector if collector is not None else InMemoryCollector()
         self._session_id = session_id
@@ -135,31 +83,28 @@ class AuditEmitter:
 
     @property
     def collector(self) -> Any:
-        """Return the underlying audit collector instance.
+        """Return the underlying collector.
 
         Returns:
-            The collector that this emitter forwards events to.
+            Any: OUT: The collector instance.
         """
         return self._collector
 
     @property
     def session_id(self) -> str | None:
-        """Return the session identifier stamped onto every event.
+        """Return the session identifier.
 
         Returns:
-            str | None: The session ID, or ``None`` if not set.
+            str | None: OUT: The session ID, if set.
         """
         return self._session_id
 
     def _emit(self, event: AuditEvent) -> None:
-        """Stamp the session ID and forward the event to the collector.
-
-        This is the internal dispatch point used by all public
-        ``emit_*`` methods. It sets the event's ``session_id`` field
-        and writes to the collector under the internal lock.
+        """Inject the session ID and forward the event to the collector.
 
         Args:
-            event: The fully-constructed audit event to emit.
+            event (AuditEvent): IN: Event to emit. OUT: ``session_id`` is set
+                before forwarding.
         """
         event.session_id = self._session_id
         with self._lock:
@@ -171,22 +116,15 @@ class AuditEmitter:
         turn_id: str | None = None,
         prompt: str = "",
     ) -> str:
-        """Emit a :class:`TurnStartEvent` and return the turn identifier.
-
-        If no ``turn_id`` is provided, a new random 12-hex-character ID
-        is generated via :func:`_generate_turn_id`. The prompt is
-        truncated to 200 characters for the ``prompt_preview`` field.
+        """Emit a turn start event.
 
         Args:
-            agent_id: Optional identifier of the agent starting the turn.
-            turn_id: Optional pre-assigned turn identifier. When ``None``,
-                a new one is generated automatically.
-            prompt: The full user prompt text. Only the first 200
-                characters are stored in the event.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored in the event.
+            turn_id (str | None): IN: Optional turn ID. OUT: Auto-generated if not provided.
+            prompt (str): IN: Prompt preview text. OUT: Truncated and stored.
 
         Returns:
-            str: The turn identifier (either the provided ``turn_id``
-                or the auto-generated one).
+            str: OUT: The turn ID (generated or provided).
         """
         tid = turn_id or _generate_turn_id()
         self._emit(
@@ -205,20 +143,13 @@ class AuditEmitter:
         content: str = "",
         fc_count: int = 0,
     ) -> None:
-        """Emit a :class:`TurnEndEvent` recording turn completion details.
-
-        The assistant's response content is truncated to 200 characters
-        for the ``content_preview`` field.
+        """Emit a turn end event.
 
         Args:
-            agent_id: Optional identifier of the agent that completed
-                the turn.
-            turn_id: Optional turn identifier correlating this end event
-                with its corresponding :class:`TurnStartEvent`.
-            content: The full assistant response text. Only the first
-                200 characters are stored in the event.
-            fc_count: The total number of function / tool calls that
-                were executed during this turn.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored in the event.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored in the event.
+            content (str): IN: Response content preview. OUT: Truncated and stored.
+            fc_count (int): IN: Number of function calls in the turn. OUT: Stored.
         """
         self._emit(
             TurnEndEvent(
@@ -236,19 +167,13 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolCallAttemptEvent` before a tool is dispatched.
-
-        Should be called immediately before the tool executor runs the
-        tool, so that the audit trail records the intent even if the
-        tool subsequently fails.
+        """Emit a tool call attempt event.
 
         Args:
-            tool_name: The registered name of the tool about to be
-                invoked.
-            args: A string representation of the tool arguments. Only
-                the first 200 characters are stored in the event.
-            agent_id: Optional identifier of the agent making the call.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Name of the tool being called. OUT: Stored.
+            args (str): IN: Arguments preview. OUT: Truncated and stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolCallAttemptEvent(
@@ -268,22 +193,15 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolCallCompleteEvent` after a tool returns.
-
-        Should be called immediately after a successful tool execution.
-        The result text is truncated to 200 characters for the
-        ``result_preview`` field.
+        """Emit a tool call completion event.
 
         Args:
-            tool_name: The registered name of the tool that completed.
-            status: Completion status string, typically ``"success"``.
-            duration_ms: Wall-clock execution time of the tool in
-                milliseconds.
-            result: The full string representation of the tool result.
-                Only the first 200 characters are stored.
-            agent_id: Optional identifier of the agent that invoked the
-                tool.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            status (str): IN: Completion status. OUT: Stored.
+            duration_ms (float): IN: Execution duration in milliseconds. OUT: Stored.
+            result (str): IN: Result preview. OUT: Truncated and stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolCallCompleteEvent(
@@ -304,21 +222,14 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolCallFailureEvent` when a tool raises an error.
-
-        This should be called in the exception handler of the tool
-        executor, capturing the exception class name and message for
-        the audit trail.
+        """Emit a tool call failure event.
 
         Args:
-            tool_name: The registered name of the tool that failed.
-            error_type: A short error classifier, typically the
-                exception class name (e.g. ``"ValueError"``).
-            error_msg: The human-readable error description or
-                stringified exception message.
-            agent_id: Optional identifier of the agent that invoked the
-                tool.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            error_type (str): IN: Error classification. OUT: Stored.
+            error_msg (str): IN: Error message. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolCallFailureEvent(
@@ -338,21 +249,14 @@ class AuditEmitter:
         source: str = "",
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolPolicyDecisionEvent` for a policy verdict.
-
-        Records whether the tool-policy engine allowed or denied a
-        given tool invocation, along with the policy rule that produced
-        the decision.
+        """Emit a tool policy decision event.
 
         Args:
-            tool_name: The registered name of the tool under evaluation.
-            agent_id: Optional identifier of the agent requesting the
-                tool call.
-            action: The policy verdict, typically ``"allow"`` or
-                ``"deny"``.
-            source: An identifier for the policy rule or configuration
-                that produced the decision.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            action (str): IN: Policy action taken. OUT: Stored.
+            source (str): IN: Policy source. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolPolicyDecisionEvent(
@@ -373,24 +277,15 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolLoopWarningEvent` for a suspected call loop.
-
-        This is a soft warning -- the tool call is still dispatched, but
-        the event alerts downstream consumers that the agent may be
-        stuck in a repetitive invocation pattern.
+        """Emit a tool loop warning event.
 
         Args:
-            tool_name: The registered name of the tool involved in the
-                suspected loop.
-            pattern: A short descriptor of the detected repetitive
-                pattern (e.g. ``"same_args_3x"``).
-            severity: The severity qualifier assigned by the loop
-                detector (e.g. ``"warning"``, ``"critical"``).
-            count: The number of consecutive or recent calls that
-                matched the loop pattern.
-            agent_id: Optional identifier of the agent exhibiting the
-                loop behavior.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            pattern (str): IN: Detected loop pattern. OUT: Stored.
+            severity (str): IN: Severity level. OUT: Stored.
+            count (int): IN: Call count. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolLoopWarningEvent(
@@ -411,20 +306,14 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolLoopBlockEvent` when a loop causes a hard block.
-
-        Unlike :meth:`emit_tool_loop_warning`, this indicates that the
-        loop detector has **prevented** the tool call from executing.
+        """Emit a tool loop block event.
 
         Args:
-            tool_name: The registered name of the tool that was blocked.
-            pattern: A short descriptor of the repetitive pattern that
-                triggered the block (e.g. ``"same_args_5x"``).
-            count: The number of consecutive or recent calls that
-                matched the loop pattern before the block was imposed.
-            agent_id: Optional identifier of the agent exhibiting the
-                loop behavior.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            pattern (str): IN: Detected loop pattern. OUT: Stored.
+            count (int): IN: Call count. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ToolLoopBlockEvent(
@@ -445,23 +334,15 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`SandboxDecisionEvent` for a sandbox routing choice.
-
-        Records which execution backend the sandbox router selected for
-        a given tool call, along with the context and reasoning behind
-        the decision.
+        """Emit a sandbox decision event.
 
         Args:
-            tool_name: The registered name of the tool being routed.
-            context: A short description of the execution context that
-                influenced the routing decision.
-            reason: A human-readable explanation of why the particular
-                backend was chosen.
-            backend_type: The identifier of the selected sandbox backend
-                (e.g. ``"local"``, ``"docker"``, ``"subprocess"``).
-            agent_id: Optional identifier of the agent whose tool call
-                is being routed.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Stored.
+            context (str): IN: Execution context. OUT: Stored.
+            reason (str): IN: Decision rationale. OUT: Stored.
+            backend_type (str): IN: Sandbox backend type. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             SandboxDecisionEvent(
@@ -482,22 +363,14 @@ class AuditEmitter:
         field: str = "",
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`HookMutationEvent` when a hook alters data.
-
-        Records which hook mutated which field of a tool call or its
-        result, providing a full audit trail for data transformations
-        applied outside the tool's own logic.
+        """Emit a hook mutation event.
 
         Args:
-            hook_name: The identifier of the hook that performed the
-                mutation (e.g. ``"sanitize_output"``).
-            tool_name: The registered name of the tool whose call or
-                result was mutated.
-            agent_id: Optional identifier of the agent whose pipeline
-                includes the hook.
-            field: The specific field that was changed
-                (e.g. ``"arguments"``, ``"result"``).
-            turn_id: Optional turn identifier for event correlation.
+            hook_name (str): IN: Name of the mutated hook. OUT: Stored.
+            tool_name (str): IN: Related tool name. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            field (str): IN: Mutated field name. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             HookMutationEvent(
@@ -517,23 +390,14 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a generic :class:`ErrorEvent` for non-tool-specific errors.
-
-        Use this for infrastructure-level or agent-level errors that
-        cannot be attributed to a single tool invocation (e.g. LLM API
-        failures, serialization errors). For tool-specific failures,
-        prefer :meth:`emit_tool_call_failure`.
+        """Emit an error event.
 
         Args:
-            error_type: A short error classifier, typically the
-                exception class name (e.g. ``"RuntimeError"``).
-            error_msg: The human-readable error description or
-                stringified exception message.
-            context: Additional context about where or why the error
-                occurred (e.g. ``"during response parsing"``).
-            agent_id: Optional identifier of the agent that encountered
-                the error.
-            turn_id: Optional turn identifier for event correlation.
+            error_type (str): IN: Error classification. OUT: Stored.
+            error_msg (str): IN: Error message. OUT: Stored.
+            context (str): IN: Error context. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             ErrorEvent(
@@ -555,18 +419,17 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`SkillUsedEvent` after an authored skill executes.
+        """Emit a skill used event.
 
         Args:
-            skill_name: Name of the skill that ran.
-            version: Skill version at time of use.
-            outcome: ``"success"`` / ``"failure"`` / ``"unknown"``.
-            duration_ms: Wall-clock execution time of the skill's
-                procedure.
-            triggered_automatically: ``True`` when the skill matcher
-                surfaced it; ``False`` when invoked explicitly.
-            agent_id: Optional agent identifier.
-            turn_id: Optional turn correlator.
+            skill_name (str): IN: Skill name. OUT: Stored.
+            version (str): IN: Skill version. OUT: Stored.
+            outcome (str): IN: Execution outcome. OUT: Stored.
+            duration_ms (float): IN: Execution duration. OUT: Stored.
+            triggered_automatically (bool): IN: Whether the skill was auto-triggered.
+                OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             SkillUsedEvent(
@@ -591,7 +454,18 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`SkillAuthoredEvent` when a new skill is drafted."""
+        """Emit a skill authored event.
+
+        Args:
+            skill_name (str): IN: Skill name. OUT: Stored.
+            version (str): IN: Skill version. OUT: Stored.
+            source_path (str): IN: Filesystem path to the skill source. OUT: Stored.
+            tool_count (int): IN: Number of tools in the skill. OUT: Stored.
+            unique_tools (list[str] | None): IN: List of unique tool names. OUT: Stored.
+            confirmed_by_user (bool): IN: Whether the user confirmed the skill. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
+        """
         self._emit(
             SkillAuthoredEvent(
                 skill_name=skill_name,
@@ -614,16 +488,15 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`SkillFeedbackEvent`.
+        """Emit a skill feedback event.
 
         Args:
-            skill_name: Skill that was rated.
-            rating: ``"good"`` / ``"bad"`` / ``"neutral"``.
-            reason: Optional free-text explanation.
-            source: ``"user"`` (explicit) or ``"system"``
-                (e.g. derived from verification failures).
-            agent_id: Optional agent identifier.
-            turn_id: Optional turn correlator.
+            skill_name (str): IN: Skill name. OUT: Stored.
+            rating (str): IN: Feedback rating. OUT: Stored.
+            reason (str): IN: Feedback reason. OUT: Stored.
+            source (str): IN: Feedback source. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             SkillFeedbackEvent(
@@ -637,13 +510,7 @@ class AuditEmitter:
         )
 
     def flush(self) -> None:
-        """Flush the underlying collector's buffered state.
-
-        Acquires the internal lock and delegates to the collector's
-        :meth:`~xerxes.audit.collector.AuditCollector.flush` method,
-        ensuring that all previously emitted events have been fully
-        persisted or transmitted.
-        """
+        """Flush the underlying collector."""
         with self._lock:
             self._collector.flush()
 
@@ -655,14 +522,14 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit an :class:`AgentSwitchEvent` when the orchestrator switches agents.
+        """Emit an agent switch event.
 
         Args:
-            from_agent: ID of the agent that was active before the switch.
-            to_agent: ID of the agent that became active.
-            reason: Human-readable explanation for the switch.
-            agent_id: Optional identifier of the agent initiating the switch.
-            turn_id: Optional turn identifier for event correlation.
+            from_agent (str): IN: Previous agent name. OUT: Stored.
+            to_agent (str): IN: New agent name. OUT: Stored.
+            reason (str): IN: Switch reason. OUT: Stored.
+            agent_id (str | None): IN: Agent identifier. OUT: Stored.
+            turn_id (str | None): IN: Turn identifier. OUT: Stored.
         """
         self._emit(
             AgentSwitchEvent(
@@ -683,24 +550,18 @@ class AuditEmitter:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Emit a :class:`ToolLoopWarningEvent` via the ``on_loop_warning`` hook.
+        """Emit a loop warning, preferring hooks if available.
 
-        This method invokes the ``on_loop_warning`` hook registered in the
-        hook runner, allowing listeners to handle loop warnings. If no hook
-        is registered, it falls back to emitting a ``ToolLoopWarningEvent``
-        directly to the collector.
+        If a hook runner is configured and has ``on_loop_warning`` hooks, they
+        are executed instead of emitting a standard event.
 
         Args:
-            tool_name: The registered name of the tool involved in the
-                suspected loop.
-            pattern: A short descriptor of the detected repetitive
-                pattern (e.g. ``"same_args_3x"``).
-            severity: The severity qualifier (e.g. ``"warning"``, ``"critical"``).
-            count: The number of consecutive or recent calls that
-                matched the loop pattern.
-            agent_id: Optional identifier of the agent exhibiting the
-                loop behavior.
-            turn_id: Optional turn identifier for event correlation.
+            tool_name (str): IN: Tool name. OUT: Passed to hooks or event.
+            pattern (str): IN: Detected loop pattern. OUT: Passed to hooks or event.
+            severity (str): IN: Severity level. OUT: Passed to hooks or event.
+            count (int): IN: Call count. OUT: Passed to hooks or event.
+            agent_id (str | None): IN: Agent identifier. OUT: Passed to hooks or event.
+            turn_id (str | None): IN: Turn identifier. OUT: Passed to hooks or event.
         """
         if hasattr(self, "_hook_runner") and self._hook_runner.has_hooks("on_loop_warning"):
             self._hook_runner.run(

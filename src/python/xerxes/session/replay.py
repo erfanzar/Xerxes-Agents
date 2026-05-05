@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Replay module for Xerxes.
 
-
-"""Session replay and timeline inspection.
-
-Provides ReplayView for exploring recorded session data --
-filtering by agent, aggregating tool calls, generating timelines,
-and producing human-readable markdown summaries.
-"""
+Exports:
+    - TimelineEvent
+    - ReplayView
+    - SessionReplay"""
 
 from __future__ import annotations
 
@@ -28,14 +28,13 @@ from .models import AgentTransitionRecord, SessionRecord, ToolCallRecord, TurnRe
 
 @dataclass
 class TimelineEvent:
-    """A single event on the session timeline.
+    """Timeline event.
 
     Attributes:
-        timestamp: ISO 8601 timestamp of the event.
-        event_type: Category string (turn_start, turn_end, tool_call, agent_transition).
-        summary: Short human-readable description.
-        data: Arbitrary data payload for the event.
-    """
+        timestamp (str): timestamp.
+        event_type (str): event type.
+        summary (str): summary.
+        data (dict[str, tp.Any]): data."""
 
     timestamp: str
     event_type: str
@@ -44,50 +43,32 @@ class TimelineEvent:
 
 
 class ReplayView:
-    """Read-only view over a recorded session for inspection and replay.
-
-    Provides methods for querying turns, aggregating tool calls, building
-    chronological timelines, filtering by agent, and rendering the session
-    as a human-readable markdown summary.
-
-    Attributes:
-        session: The underlying ``SessionRecord`` being viewed.
-        turns: The list of ``TurnRecord`` instances visible in this view.
-            May be a subset of the full session when created via
-            :meth:`filter_by_agent`.
-
-    Example:
-        >>> from xerxes.session.models import SessionRecord
-        >>> record = SessionRecord(session_id="s1")
-        >>> view = ReplayView(session=record)
-        >>> len(view.turns)
-        0
-    """
+    """Replay view."""
 
     def __init__(
         self,
         session: SessionRecord,
         turns: list[TurnRecord] | None = None,
     ) -> None:
-        """Initialise the replay view over a session record.
+        """Initialize the instance.
 
         Args:
-            session: The session record to inspect.
-            turns: Optional subset of turns to include. When ``None``,
-                all turns from *session* are used.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
+            turns (list[TurnRecord] | None, optional): IN: turns. Defaults to None. OUT: Consumed during execution."""
+
         self.session = session
         self.turns: list[TurnRecord] = turns if turns is not None else list(session.turns)
 
     def get_turn(self, index_or_id: int | str) -> TurnRecord | None:
-        """Retrieve a turn by integer index or turn_id string.
+        """Retrieve the turn.
 
         Args:
-            index_or_id: Zero-based index or turn_id.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            index_or_id (int | str): IN: index or id. OUT: Consumed during execution.
         Returns:
-            The matching TurnRecord, or None if not found.
-        """
+            TurnRecord | None: OUT: Result of the operation."""
+
         if isinstance(index_or_id, int):
             if 0 <= index_or_id < len(self.turns):
                 return self.turns[index_or_id]
@@ -98,32 +79,36 @@ class ReplayView:
         return None
 
     def get_tool_calls(self) -> list[ToolCallRecord]:
-        """Aggregate all tool calls across all turns.
+        """Retrieve the tool calls.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Flat list of ToolCallRecord from every turn.
-        """
+            list[ToolCallRecord]: OUT: Result of the operation."""
+
         result: list[ToolCallRecord] = []
         for turn in self.turns:
             result.extend(turn.tool_calls)
         return result
 
     def get_agent_transitions(self) -> list[AgentTransitionRecord]:
-        """Return all agent transitions for the session.
+        """Retrieve the agent transitions.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            List of AgentTransitionRecord.
-        """
+            list[AgentTransitionRecord]: OUT: Result of the operation."""
+
         return list(self.session.agent_transitions)
 
     def get_timeline(self) -> list[TimelineEvent]:
-        """Build a chronologically sorted timeline of session events.
+        """Retrieve the timeline.
 
-        Events include turn starts/ends, tool calls, and agent transitions.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Chronologically sorted list of TimelineEvent.
-        """
+            list[TimelineEvent]: OUT: Result of the operation."""
+
         events: list[TimelineEvent] = []
 
         for turn in self.turns:
@@ -177,23 +162,25 @@ class ReplayView:
         return events
 
     def filter_by_agent(self, agent_id: str) -> ReplayView:
-        """Create a new ReplayView containing only turns from a specific agent.
+        """Filter by agent.
 
         Args:
-            agent_id: The agent ID to filter by.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
         Returns:
-            A new ReplayView with filtered turns.
-        """
+            ReplayView: OUT: Result of the operation."""
+
         filtered = [t for t in self.turns if t.agent_id == agent_id]
         return ReplayView(session=self.session, turns=filtered)
 
     def to_markdown(self) -> str:
-        """Render the session as a human-readable markdown summary.
+        """To markdown.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Markdown string summarizing the session.
-        """
+            str: OUT: Result of the operation."""
+
         lines: list[str] = []
         lines.append(f"# Session {self.session.session_id}")
         lines.append("")
@@ -245,35 +232,15 @@ class ReplayView:
 
 
 class SessionReplay:
-    """Factory for creating :class:`ReplayView` instances from session records.
-
-    This class acts as the primary entry point for replaying recorded
-    sessions. It is stateless and exposes only a static factory method.
-
-    Example:
-        >>> from xerxes.session.models import SessionRecord
-        >>> record = SessionRecord(session_id="s1")
-        >>> view = SessionReplay.load(record)
-        >>> isinstance(view, ReplayView)
-        True
-    """
+    """Session replay."""
 
     @staticmethod
     def load(session: SessionRecord) -> ReplayView:
-        """Create a ReplayView from a SessionRecord.
-
-        This is the recommended way to start inspecting a recorded session.
+        """Load.
 
         Args:
-            session: The session record to replay.
-
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            A new :class:`ReplayView` over the entire session, including
-            all turns and agent transitions.
+            ReplayView: OUT: Result of the operation."""
 
-        Example:
-            >>> view = SessionReplay.load(SessionRecord(session_id="s1"))
-            >>> view.session.session_id
-            's1'
-        """
         return ReplayView(session=session)

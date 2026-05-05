@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,37 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Agent definition for Cortex framework.
-
-This module provides the CortexAgent class, which represents an intelligent agent
-within the Cortex framework for AI agent orchestration. CortexAgent enables
-autonomous task execution, delegation, tool usage, and memory integration for
-building complex multi-agent systems.
-
-The agent supports features like:
-- Task execution with context and memory
-- Automatic delegation to other agents
-- Rate limiting and execution timeouts
-- Knowledge management and tool integration
-- Step-by-step callback mechanisms
-- Pydantic model output formatting
-
-Typical usage example:
-    agent = CortexAgent(
-        role="Data Analyst",
-        goal="Analyze data and provide insights",
-        backstory="Expert in statistical analysis",
-        model="gpt-4",
-        tools=[analysis_tool],
-        allow_delegation=True
-    )
-    result = agent.execute("Analyze sales trends")
-"""
+"""Core agent implementation for the Cortex orchestration framework."""
 
 import hashlib
 import threading
@@ -69,50 +44,46 @@ if TYPE_CHECKING:
 
 @dataclass
 class CortexAgent:
-    """Agent with specific role, goal, and capabilities.
+    """An agent within the Cortex framework that executes tasks via an LLM.
 
-    CortexAgent represents an autonomous AI agent that can execute tasks,
-    use tools, delegate to other agents, and maintain context through memory.
-    It serves as a wrapper around Xerxes's Agent class with additional
-    orchestration capabilities for the Cortex framework.
+    Wraps a ``XerxesAgent`` with additional capabilities such as memory
+    integration, rate limiting, delegation, auto-compaction, format guidance,
+    and MCP tool attachment.
 
     Attributes:
-        role: The agent's role or title defining its specialization.
-        goal: The primary objective or purpose of the agent.
-        backstory: Background information providing context for the agent's expertise.
-        model: Optional model identifier for the LLM to use (e.g., 'gpt-4').
-        instructions: Optional custom system instructions. Auto-generated if not provided.
-        tools: List of CortexTool instances the agent can use.
-        max_iterations: Maximum number of retry attempts for failed executions.
-        verbose: Whether to output detailed logging information.
-        allow_delegation: Whether the agent can delegate tasks to other agents.
-        temperature: LLM temperature parameter for response randomness (0.0-1.0).
-        max_tokens: Maximum tokens for LLM responses.
-        memory_enabled: Whether to use memory for context building.
-        capabilities: List of special capabilities the agent possesses.
-        xerxes_instance: Reference to the Xerxes instance for LLM operations.
-        memory: Optional CortexMemory instance for persistent context.
-        llm: Optional BaseLLM instance for direct LLM access.
-        reinvoke_after_function: Whether to reinvoke LLM after tool execution.
-        cortex_instance: Reference to parent Cortex instance for multi-agent coordination.
-        max_execution_time: Optional timeout in seconds for task execution.
-        max_rpm: Optional rate limit for requests per minute.
-        step_callback: Optional callback function invoked at each execution step.
-        config: Dictionary for custom configuration parameters.
-        knowledge: Dictionary storing agent-specific knowledge.
-        knowledge_sources: List of knowledge source identifiers.
-        auto_format_guidance: Whether to auto-generate format instructions for Pydantic models.
-        output_format_preference: Preferred output format ('xml' or 'json').
-
-    Private Attributes:
-        _internal_agent: Internal Xerxes Agent instance.
-        _logger: Logger instance for verbose output.
-        _template_engine: PromptTemplate engine for generating prompts.
-        _delegation_count: Current delegation depth to prevent infinite recursion.
-        _times_executed: Total number of task executions.
-        _execution_times: List of execution durations for statistics.
-        _last_rpm_window: Timestamp for rate limiting window.
-        _rpm_requests: List of request timestamps for rate limiting.
+        role (str): The agent's role name.
+        goal (str): The agent's primary objective.
+        backstory (str): Narrative context shaping the agent's behavior.
+        model (str | None): LLM model identifier.
+        instructions (str | None): System instructions for the agent.
+        tools (list): Available tools (callables, ``CortexTool``, or ``Tool``).
+        max_iterations (int): Maximum retry iterations on failure.
+        verbose (bool): Whether to log agent activity.
+        allow_delegation (bool): Whether the agent may delegate to peers.
+        temperature (float): LLM sampling temperature.
+        max_tokens (int): Maximum tokens per LLM response.
+        memory_enabled (bool): Whether to use memory context.
+        capabilities (list[AgentCapability]): Declared agent capabilities.
+        xerxes_instance (Xerxes | None): The parent Xerxes LLM runner.
+        memory (CortexMemory | None): Memory subsystem for context and recall.
+        llm (BaseLLM | None): Direct LLM backend (used to build a Xerxes instance).
+        reinvoke_after_function (bool): Whether to reinvoke after tool execution.
+        cortex_instance (Cortex | None): The parent Cortex orchestrator.
+        max_execution_time (int | None): Execution timeout in seconds.
+        max_rpm (int | None): Maximum requests per minute.
+        step_callback (Callable | None): Callback for execution step events.
+        config (dict): Arbitrary configuration dictionary.
+        knowledge (dict): Key-value knowledge entries.
+        knowledge_sources (list): Source references for knowledge.
+        auto_format_guidance (bool): Whether to inject format guidance.
+        output_format_preference (Literal["xml", "json"]): Preferred output format.
+        auto_compact (bool): Whether to auto-compact conversation history.
+        compact_threshold (float): Token ratio threshold for compaction.
+        compact_target (float): Target token ratio after compaction.
+        max_context_tokens (int | None): Maximum context token budget.
+        compaction_strategy (CompactionStrategy): Strategy for compaction.
+        preserve_system_prompt (bool): Whether to preserve the system prompt.
+        preserve_recent_messages (int): Number of recent messages to preserve.
     """
 
     role: str
@@ -161,8 +132,8 @@ class CortexAgent:
     _delegation_count: int = 0
     _times_executed: int = 0
     _execution_times: list = field(default_factory=list)
-    _last_rpm_window: float = 0
     _rpm_requests: list = field(default_factory=list)
+    _last_rpm_window: float = 0
 
     _original_role: str | None = None
     _original_goal: str | None = None
@@ -170,24 +141,12 @@ class CortexAgent:
     _original_instructions: str | None = None
 
     def __post_init__(self):
-        """Initialize the internal Xerxes agent and supporting components.
+        """Finalize initialization after dataclass field assignment.
 
-        This method is automatically called after dataclass initialization.
-        It sets up the logger, template engine, generates default instructions
-        if needed, processes tools into functions, and creates the internal
-        Xerxes Agent instance that handles actual LLM interactions.
-
-        Side Effects:
-            - Initializes _logger based on verbose setting
-            - Creates _template_engine instance
-            - Generates default instructions if not provided
-            - Processes tools list into callable functions
-            - Creates Xerxes instance if needed
-            - Initializes _internal_agent
-
-        Raises:
-            ImportError: If Xerxes module cannot be imported when creating instance.
+        Sets up the logger, template engine, internal XerxesAgent, and
+        optional auto-compaction agent.
         """
+
         self._logger = get_logger() if self.verbose else None
         self._template_engine = PromptTemplate()
 
@@ -246,62 +205,63 @@ class CortexAgent:
 
     @property
     def functions(self) -> list[Callable]:
-        """Get the list of callable functions registered with the internal agent.
+        """Return the internal agent's function list.
 
         Returns:
-            List of callable functions available to the agent, or an empty
-            list if the internal agent has not been initialized.
+            list[Callable]: The list of callable tools/functions.
+                OUT: Empty if the internal agent is not initialized.
         """
+
         if self._internal_agent is None:
             return []
         return self._internal_agent.functions
 
     @functions.setter
     def functions(self, value: list[Callable] | None) -> None:
-        """Set the list of callable functions on the internal agent.
+        """Set the internal agent's function list.
 
         Args:
-            value: List of callables to register, or None to clear all functions.
+            value (list[Callable] | None): The new function list.
+                IN: Replaces the existing functions.
+                OUT: Assigned to ``self._internal_agent.functions``.
         """
+
         if self._internal_agent is None:
             return
         self._internal_agent.functions = value or []
 
     def get_compaction_stats(self) -> dict[str, Any] | None:
-        """Get auto-compaction statistics.
+        """Return statistics from the auto-compaction agent.
 
         Returns:
-            Dictionary with compaction statistics or None if not enabled.
+            dict[str, Any] | None: Compaction metrics, or ``None`` if disabled.
+                OUT: Delegated to ``AutoCompactAgent.get_statistics``.
         """
+
         if self._auto_compact_agent:
             return self._auto_compact_agent.get_statistics()
         return None
 
     def check_context_usage(self) -> dict[str, Any] | None:
-        """Check current context usage.
+        """Return context usage metrics from the auto-compaction agent.
 
         Returns:
-            Dictionary with usage statistics or None if not enabled.
+            dict[str, Any] | None: Usage metrics, or ``None`` if disabled.
+                OUT: Delegated to ``AutoCompactAgent.check_usage``.
         """
+
         if self._auto_compact_agent:
             return self._auto_compact_agent.check_usage()
         return None
 
     def _check_rate_limit(self) -> bool:
-        """Check if agent is within rate limit.
-
-        Verifies whether the agent can make a new request based on the
-        configured max_rpm (requests per minute) limit. Maintains a sliding
-        window of request timestamps to enforce the rate limit.
+        """Check whether the agent is within its rate limit.
 
         Returns:
-            bool: True if within rate limit or no limit configured,
-                  False if rate limit would be exceeded.
-
-        Note:
-            This method cleans up old request timestamps outside the
-            60-second window before checking the limit.
+            bool: ``True`` if the request may proceed, ``False`` if rate limited.
+                OUT: Compares recent requests against ``max_rpm``.
         """
+
         if not self.max_rpm:
             return True
 
@@ -317,39 +277,18 @@ class CortexAgent:
         return True
 
     def _record_request(self):
-        """Record a request for rate limiting.
+        """Record the current request timestamp for rate limiting."""
 
-        Adds the current timestamp to the list of request times used for
-        rate limiting. Only records if max_rpm is configured.
-
-        Side Effects:
-            Appends current timestamp to _rpm_requests list.
-        """
         if self.max_rpm:
             self._rpm_requests.append(time.time())
 
     def interpolate_inputs(self, inputs: dict[str, Any]) -> None:
-        """
-        Interpolate inputs into the agent's role, goal, backstory, and instructions.
-
-        This method replaces template variables (e.g., {variable_name}) in the agent's
-        attributes with values from the provided inputs dictionary. Original values
-        are preserved for potential re-interpolation.
+        """Substitute template variables into role, goal, backstory, and instructions.
 
         Args:
-            inputs: Dictionary mapping template variables to their values.
-                   Supported value types are strings, integers, floats, bools,
-                   and serializable dicts/lists.
-
-        Side Effects:
-            Updates role, goal, backstory, and instructions with interpolated values.
-            Stores original values if not already saved.
-
-        Example:
-            >>> agent = CortexAgent(role="Expert in {domain}", goal="Master {topic}")
-            >>> agent.interpolate_inputs({"domain": "AI", "topic": "LLMs"})
-
-
+            inputs (dict): Mapping of template variable names to values.
+                IN: Applied to the original (uninterpolated) versions of text fields.
+                OUT: Updates the agent's descriptive fields and internal agent instructions.
         """
 
         if self._original_role is None:
@@ -372,40 +311,20 @@ class CortexAgent:
                 self._internal_agent.instructions = self.instructions
 
     def attach_mcp(self, mcp_servers: Any, server_names: list[str] | None = None) -> None:
-        """Attach MCP servers to this agent, connecting and adding their tools.
-
-        This method provides a convenient way to connect MCP servers and automatically
-        add their tools to the agent's function list. Works with both CortexAgent and
-        its internal Xerxes Agent.
+        """Attach MCP (Model Context Protocol) servers to the agent.
 
         Args:
-            mcp_servers: Can be one of:
-                - MCPManager: An existing MCP manager instance
-                - MCPServerConfig: A single server config (will create manager and connect)
-                - list[MCPServerConfig]: Multiple server configs (will create manager and connect all)
-            server_names: Optional list of server names to filter tools from.
-                         If None, adds tools from all servers in the manager.
+            mcp_servers (Any): An ``MCPManager``, ``MCPServerConfig``, or list of configs.
+                IN: Used to set up MCP tool access.
+                OUT: Tools are added to the internal agent via ``add_mcp_tools_to_agent``.
+            server_names (list[str] | None): Optional subset of server names to include.
+                IN: Filters which MCP servers contribute tools.
+                OUT: Passed to ``add_mcp_tools_to_agent``.
 
-        Example:
-            >>>
-            >>> agent.attach_mcp(MCPServerConfig(
-            ...     name="filesystem",
-            ...     command="npx",
-            ...     args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-            ... ))
-            >>>
-            >>>
-            >>> agent.attach_mcp([
-            ...     MCPServerConfig(name="filesystem", ...),
-            ...     MCPServerConfig(name="sqlite", ...)
-            ... ])
-            >>>
-            >>>
-            >>> manager = MCPManager()
-            >>> await manager.add_server(config1)
-            >>> await manager.add_server(config2)
-            >>> agent.attach_mcp(manager, server_names=["filesystem"])
+        Raises:
+            TypeError: If *mcp_servers* is not a recognized type.
         """
+
         from ...core.utils import run_sync
         from ..mcp import MCPManager, MCPServerConfig
         from ..mcp.integration import add_mcp_tools_to_agent
@@ -438,21 +357,18 @@ class CortexAgent:
         self._mcp_managers.append(manager)
 
     def _check_execution_timeout(self, start_time: float) -> bool:
-        """Check if execution has exceeded timeout.
-
-        Determines whether the elapsed time since start_time exceeds the
-        configured max_execution_time limit.
+        """Check whether execution has exceeded ``max_execution_time``.
 
         Args:
-            start_time: Unix timestamp marking the start of execution.
+            start_time (float): The execution start timestamp.
+                IN: Compared against the current time.
+                OUT: Used to compute elapsed duration.
 
         Returns:
-            bool: True if timeout exceeded, False otherwise or if no
-                  timeout is configured.
-
-        Side Effects:
-            Logs error message if timeout is exceeded and verbose is True.
+            bool: ``True`` if the timeout has been exceeded.
+                OUT: Triggers a ``TimeoutError`` in the caller.
         """
+
         if not self.max_execution_time:
             return False
 
@@ -464,22 +380,14 @@ class CortexAgent:
         return False
 
     def _execute_step_callback(self, step_info: dict):
-        """Execute step callback if provided.
-
-        Safely invokes the configured step_callback function with information
-        about the current execution step. Catches and logs any exceptions to
-        prevent callback failures from disrupting agent execution.
+        """Invoke the user-registered step callback safely.
 
         Args:
-            step_info: Dictionary containing step details such as:
-                - step: Step type (e.g., 'execution_start', 'retry', 'execution_complete')
-                - agent: Agent role identifier
-                - Additional context-specific fields
-
-        Side Effects:
-            Invokes step_callback if configured.
-            Logs errors if callback fails and verbose is True.
+            step_info (dict): Information about the current execution step.
+                IN: Passed to ``self.step_callback``.
+                OUT: Enables external observation of agent execution progress.
         """
+
         if self.step_callback and callable(self.step_callback):
             try:
                 self.step_callback(step_info)
@@ -488,24 +396,18 @@ class CortexAgent:
                     log_error(f"Step callback failed: {e}")
 
     def _build_knowledge_context(self, task_description: str) -> str:
-        """Build context from knowledge sources.
-
-        Constructs a formatted context string from the agent's knowledge
-        dictionary and knowledge_sources list to provide additional context
-        for task execution.
+        """Assemble knowledge entries and sources into a context string.
 
         Args:
-            task_description: The task being executed (currently unused but
-                            available for future context filtering).
+            task_description (str): The current task (unused but kept for API consistency).
+                IN: Reserved for future relevance filtering.
+                OUT: Not currently used in context assembly.
 
         Returns:
-            str: Formatted context string containing knowledge items and
-                 sources, or empty string if no knowledge is configured.
-
-        Example:
-            Returns a string like:
-            "Available Knowledge:\n- domain: healthcare\n- expertise: diagnostics\n\nKnowledge Sources:\n- medical_db\n\n"
+            str: A formatted knowledge context string.
+                OUT: Empty if no knowledge or sources are configured.
         """
+
         if not self.knowledge and not self.knowledge_sources:
             return ""
 
@@ -524,25 +426,18 @@ class CortexAgent:
         return "\n".join(context_parts) + "\n\n" if context_parts else ""
 
     def _generate_format_guidance(self, output_model) -> str:
-        """Generate format guidance from Pydantic model.
-
-        Creates detailed formatting instructions for LLM responses based on
-        a Pydantic model schema. Supports both XML and JSON output formats
-        and handles nested structures with proper example generation.
+        """Generate format instructions based on a Pydantic model schema.
 
         Args:
-            output_model: A Pydantic BaseModel class to generate guidance for.
+            output_model: A ``BaseModel`` subclass or ``None``.
+                IN: Its JSON schema drives the generated guidance.
+                OUT: Used to create an example and formatting rules.
 
         Returns:
-            str: Formatted instruction string with examples and validation rules,
-                 or empty string if model is invalid or auto_format_guidance is False.
-
-        Note:
-            - Automatically detects Pydantic v1 vs v2 schema methods
-            - Generates realistic example data based on field names and types
-            - Provides special handling for nested arrays of objects
-            - Includes critical formatting rules to ensure LLM compliance
+            str: Format instructions for the LLM, or an empty string.
+                OUT: XML or JSON guidance depending on ``output_format_preference``.
         """
+
         if not output_model or not self.auto_format_guidance:
             return ""
 
@@ -597,26 +492,21 @@ Ensure your response is valid JSON that can be parsed directly.
             return ""
 
     def _resolve_schema_refs(self, schema: dict, definitions: dict | None = None) -> dict:
-        """Resolve $ref references in schema (supports both Pydantic v1 and v2).
-
-        Recursively resolves JSON Schema $ref references to their actual definitions,
-        supporting both Pydantic v1 (
+        """Recursively resolve ``$ref`` references in a JSON schema.
 
         Args:
-            schema: JSON schema dictionary potentially containing $ref references.
-            definitions: Optional dictionary of schema definitions. If not provided,
-                        extracted from schema['definitions'] or schema['$defs'].
+            schema (dict): The schema dict that may contain ``$ref``.
+                IN: Walked recursively to resolve references.
+                OUT: Returns a copy with all ``$ref`` values inlined.
+            definitions (dict | None): The schema's definitions or ``$defs``.
+                IN: Used to look up referenced types.
+                OUT: Passed down during recursive resolution.
 
         Returns:
-            dict: Schema with all $ref references resolved to their actual definitions.
-
-        Example:
-            Input schema with $ref:
-            {"$ref": "#/definitions/User"}
-
-            Returns resolved schema:
-            {"type": "object", "properties": {"name": {"type": "string"}}}
+            dict: A schema with all references resolved.
+                OUT: Safe for example generation and validation.
         """
+
         if definitions is None:
             definitions = schema.get("definitions", schema.get("$defs", {}))
 
@@ -640,24 +530,16 @@ Ensure your response is valid JSON that can be parsed directly.
         return resolved
 
     def _create_example_from_schema(self, schema: dict) -> dict:
-        """Create realistic example data structure from JSON schema with full resolution.
-
-        Generates example data that conforms to a JSON schema, creating realistic
-        values based on field names and types. Handles nested objects, arrays,
-        and various primitive types with appropriate example values.
+        """Generate an example dictionary from a JSON schema.
 
         Args:
-            schema: JSON schema dictionary defining the data structure.
+            schema (dict): A JSON schema dict with ``properties``.
+                IN: Used to infer field types and generate realistic examples.
+                OUT: Resolved for ``$ref`` before traversal.
 
         Returns:
-            dict: Example data conforming to the schema with realistic values.
-
-        Note:
-            - Field names influence example values (e.g., 'name' fields get name-like values)
-            - Respects minimum/maximum constraints for numeric types
-            - Generates multiple items for array fields based on minItems
-            - Recursively handles nested objects and arrays of objects
-            - Creates industry-specific examples for recognized field names
+            dict: A dictionary with example values for each property.
+                OUT: Suitable for embedding in LLM prompts.
         """
 
         resolved_schema = self._resolve_schema_refs(schema)
@@ -723,26 +605,21 @@ Ensure your response is valid JSON that can be parsed directly.
         return example
 
     def _create_nested_example(self, schema: dict, index: int = 1) -> dict:
-        """Create a realistic nested object example with variation.
-
-        Generates varied example data for nested objects in arrays, ensuring
-        each object has different but realistic values based on its index.
-        Particularly useful for demonstrating arrays of complex objects.
+        """Generate an example for a nested object schema.
 
         Args:
-            schema: JSON schema for the nested object structure.
-            index: Index of this object in its parent array, used to create variation.
+            schema (dict): The nested object's JSON schema.
+                IN: Should have a ``properties`` key.
+                OUT: Used to generate example values per field.
+            index (int): A numeric index to vary example values.
+                IN: Used to rotate through example data sets.
+                OUT: Produces distinct examples for array items.
 
         Returns:
-            dict: Example nested object with varied realistic values.
-
-        Example:
-            For a trend object schema, generates different trend names and
-            descriptions for each index:
-            - Index 1: "Generative AI Enterprise Integration"
-            - Index 2: "Edge AI and IoT Convergence"
-            - Index 3: "AI-Powered Cybersecurity"
+            dict: A dictionary with example values for the nested object.
+                OUT: Suitable for embedding in LLM prompts.
         """
+
         properties = schema.get("properties", {})
 
         example: dict[str, Any] = {}
@@ -794,21 +671,18 @@ Ensure your response is valid JSON that can be parsed directly.
         return example
 
     def _count_nested_structures(self, schema: dict) -> int:
-        """Count nested arrays of objects to provide better guidance.
-
-        Analyzes a schema to count how many fields contain arrays of objects,
-        which require special formatting guidance to ensure LLM compliance.
+        """Count the number of array-of-object properties in a schema.
 
         Args:
-            schema: JSON schema to analyze.
+            schema (dict): A JSON schema dict.
+                IN: Inspected for nested array-of-object structures.
+                OUT: Used to decide whether to add extra formatting guidance.
 
         Returns:
-            int: Number of array fields containing objects or $ref references.
-
-        Note:
-            This count is used to determine whether to include additional
-            formatting warnings about properly structuring nested arrays.
+            int: The number of nested array-of-object fields.
+                OUT: A positive count triggers stronger formatting rules.
         """
+
         count = 0
         properties = schema.get("properties", {})
 
@@ -821,18 +695,18 @@ Ensure your response is valid JSON that can be parsed directly.
         return count
 
     def _format_json_example(self, data: dict) -> str:
-        """Format JSON data as a readable example.
-
-        Converts a dictionary to a formatted JSON string for use in
-        LLM prompts and formatting instructions.
+        """Format a dictionary as an indented JSON string.
 
         Args:
-            data: Dictionary to format as JSON.
+            data (dict): The dictionary to serialize.
+                IN: Typically an example generated from a schema.
+                OUT: Rendered as a pretty-printed JSON string.
 
         Returns:
-            str: Formatted JSON string with 2-space indentation,
-                 or string representation if JSON serialization fails.
+            str: Indented JSON or ``str(data)`` on failure.
+                OUT: Suitable for embedding in LLM prompts.
         """
+
         import json
 
         try:
@@ -848,42 +722,36 @@ Ensure your response is valid JSON that can be parsed directly.
         stream_callback: Callable[[Any], None] | None = None,
         use_thread: bool = False,
     ) -> str | tuple[StreamerBuffer, threading.Thread]:
-        """Execute a task using the agent with advanced controls.
-
-        Main method for task execution. Handles rate limiting, timeouts,
-        memory integration, knowledge context, retries, and step callbacks.
-        Streams responses from the LLM and processes function calls if configured.
+        """Execute a task through the agent.
 
         Args:
-            task_description: Natural language description of the task to execute.
-            context: Optional additional context to include in the prompt.
-            streamer_buffer: Optional StreamerBuffer to receive streaming chunks.
-            stream_callback: Optional callback function for streaming responses.
-            use_thread: If True, executes in background thread and returns immediately
-                       with (buffer, thread) tuple. If False, blocks until complete.
+            task_description (str): The task to execute.
+                IN: Rendered into a prompt and sent to the LLM.
+                OUT: Drives the agent's response generation.
+            context (str | None): Additional context for the task.
+                IN: Combined with knowledge and memory context.
+                OUT: Appended to the task prompt.
+            streamer_buffer (StreamerBuffer | None): Optional buffer for streaming.
+                IN: If provided, the agent streams its response.
+                OUT: Receives chunks during execution.
+            stream_callback (Callable | None): Callback for streamed chunks.
+                IN: Invoked for each chunk during streaming.
+                OUT: Enables real-time observation.
+            use_thread (bool): Whether to execute in a background thread.
+                IN: If ``True``, returns ``(StreamerBuffer, Thread)``.
+                OUT: Delegates to ``_execute_threaded``.
 
         Returns:
-            If use_thread=False: str containing the agent's response.
-            If use_thread=True: tuple of (StreamerBuffer, Thread) for async consumption.
+            str | tuple[StreamerBuffer, threading.Thread]: The result string, or
+                streaming handles when *use_thread* is ``True``.
+                OUT: ``str`` on normal completion; tuple for threaded execution.
 
         Raises:
-            ValueError: If the agent is not connected to a Cortex instance.
-            TimeoutError: If execution exceeds max_execution_time.
-            RuntimeError: If no response is received after max_iterations.
-            Exception: Re-raises any exceptions from the underlying LLM execution.
-
-        Side Effects:
-            - Records request for rate limiting
-            - Updates execution statistics
-            - Invokes step callbacks
-            - Saves interaction to memory if enabled
-
-        Example:
-            result = agent.execute(
-                "Analyze the sales data",
-                context="Focus on Q4 2024 trends"
-            )
+            ValueError: If the agent is not connected to a Xerxes instance.
+            TimeoutError: If execution exceeds ``max_execution_time``.
+            RuntimeError: If the template engine is not initialized or no response is received.
         """
+
         if not self.xerxes_instance:
             raise ValueError(f"Agent {self.role} not connected to Xerxes instance")
 
@@ -1145,24 +1013,32 @@ Ensure your response is valid JSON that can be parsed directly.
         streamer_buffer: StreamerBuffer | None = None,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> tuple[StreamerBuffer, threading.Thread]:
-        """Execute task in background thread with streaming.
-
-        Internal method that wraps the main execute logic in a thread for
-        non-blocking execution with real-time streaming capabilities.
+        """Execute a task in a background thread with optional streaming.
 
         Args:
-            task_description: Natural language description of the task to execute.
-            context: Optional additional context to include in the prompt.
-            streamer_buffer: Optional StreamerBuffer to use, creates one if not provided.
-            stream_callback: Optional callback function for streaming responses.
+            task_description (str): The task to execute.
+                IN: Rendered into a prompt and sent to the LLM in the thread.
+                OUT: Drives the agent's response generation.
+            context (str | None): Additional context for the task.
+                IN: Combined with knowledge and memory context.
+                OUT: Appended to the task prompt.
+            streamer_buffer (StreamerBuffer | None): Optional pre-existing buffer.
+                IN: Used for streaming if provided.
+                OUT: Passed to ``xerxes_instance.thread_run``.
+            stream_callback (Callable | None): Callback for streamed chunks.
+                IN: If provided, a consumer thread is started to forward chunks.
+                OUT: Invoked for each chunk from the buffer.
 
         Returns:
-            tuple: (StreamerBuffer, Thread) for async consumption of results.
+            tuple[StreamerBuffer, threading.Thread]: The streaming buffer and
+                the execution thread. OUT: The buffer yields chunks; the thread
+                runs the agent.
 
-        Note:
-            This method returns immediately, allowing the caller to consume
-            streaming chunks while the agent executes in the background.
+        Raises:
+            ValueError: If the agent is not connected to a Xerxes instance.
+            RuntimeError: If the template engine is not initialized.
         """
+
         if not self.xerxes_instance:
             raise ValueError(f"Agent {self.role} not connected to Cortex")
 
@@ -1203,7 +1079,11 @@ Ensure your response is valid JSON that can be parsed directly.
         if stream_callback:
 
             def consume_and_callback() -> None:
-                """Consume chunks from the buffer and invoke the stream callback for each."""
+                """Consume the buffer stream and forward chunks to the callback.
+
+                Args:
+                    None: Closure over *buffer* and *stream_callback*.
+                """
                 for chunk in buffer.stream():
                     stream_callback(chunk)
 
@@ -1214,26 +1094,21 @@ Ensure your response is valid JSON that can be parsed directly.
         return buffer, thread
 
     def _check_delegation_needed(self, task_description: str, initial_response: str) -> tuple[bool, str]:
-        """Check if delegation is needed based on task and initial response.
-
-        Analyzes the initial response and task complexity to determine whether
-        the agent should delegate to another agent. Checks for indicators of
-        uncertainty or need for assistance, and considers task complexity.
+        """Determine whether the agent's response indicates a need for delegation.
 
         Args:
-            task_description: The original task description.
-            initial_response: The agent's initial response to analyze.
+            task_description (str): The original task.
+                IN: Used as a complexity heuristic (word count).
+                OUT: Tasks longer than 50 words may trigger delegation.
+            initial_response (str): The agent's initial output.
+                IN: Scanned for delegation indicators.
+                OUT: Matched against a list of submissive phrases.
 
         Returns:
-            tuple[bool, str]: A tuple containing:
-                - bool: Whether delegation is needed
-                - str: Reason for delegation (empty if not needed)
-
-        Note:
-            - Delegation is prevented if already at depth 3 to avoid infinite recursion
-            - Looks for phrases like "I need help", "I cannot", "beyond my expertise"
-            - Also considers task length as complexity indicator (>50 words)
+            tuple[bool, str]: Whether delegation is recommended and a reason string.
+                OUT: ``(False, "")`` when delegation is unnecessary.
         """
+
         if not self.allow_delegation or not self.cortex_instance or self._delegation_count >= 3:
             return False, ""
 
@@ -1259,25 +1134,21 @@ Ensure your response is valid JSON that can be parsed directly.
         return False, ""
 
     def _select_delegate_agent(self, task_description: str, reason: str) -> Optional["CortexAgent"]:
-        """Select the best agent to delegate to.
-
-        Uses the LLM to intelligently select the most appropriate agent
-        from available agents based on the task requirements and each
-        agent's role and goal.
+        """Select the most suitable peer agent for delegation.
 
         Args:
-            task_description: Description of the task requiring delegation.
-            reason: Reason why delegation is needed.
+            task_description (str): The task requiring delegation.
+                IN: Included in the selection prompt sent to the LLM.
+                OUT: Used to evaluate which peer is best suited.
+            reason (str): Why delegation was triggered.
+                IN: Included in the selection prompt.
+                OUT: Provides context for the LLM's selection.
 
         Returns:
-            Optional[CortexAgent]: The selected agent for delegation,
-                                  or None if no suitable agent is found.
-
-        Note:
-            - Excludes the current agent from selection
-            - Falls back to first available agent if selection fails
-            - Uses fuzzy matching to find agent by role name
+            CortexAgent | None: The selected peer agent, or ``None`` if unavailable.
+                OUT: Falls back to the first available agent if LLM selection fails.
         """
+
         if not self.cortex_instance:
             return None
 
@@ -1336,31 +1207,24 @@ Ensure your response is valid JSON that can be parsed directly.
         context: str | None = None,
         callback: Callable[[StreamingResponseType], None] | None = None,
     ) -> str:
-        """Execute task with real-time streaming and optional callback.
-
-        Convenience method that executes a task in a background thread and
-        processes streaming chunks through an optional callback while returning
-        the final result.
+        """Execute a task with streaming and return the final result.
 
         Args:
-            task_description: Natural language description of the task to execute.
-            context: Optional additional context to include in the prompt.
-            callback: Optional function to call with each streaming chunk.
-                     If not provided, chunks are silently consumed.
+            task_description (str): The task to execute.
+                IN: Passed to ``execute`` with ``use_thread=True``.
+                OUT: Drives the agent's response generation.
+            context (str | None): Additional context for the task.
+                IN: Passed to ``execute``.
+                OUT: Included in the agent's prompt.
+            callback (Callable | None): Callback for each streamed chunk.
+                IN: Invoked for every chunk received from the stream.
+                OUT: Enables real-time observation.
 
         Returns:
-            str: The final agent response after all streaming is complete.
-
-        Example:
-            def print_chunk(chunk):
-                if hasattr(chunk, 'content') and chunk.content:
-                    print(chunk.content, end='', flush=True)
-
-            result = agent.execute_stream(
-                "Write a poem",
-                callback=print_chunk
-            )
+            str: The concatenated final output.
+                OUT: Extracted from the buffer after the thread completes.
         """
+
         from xerxes.types import StreamChunk
 
         exec_result = self.execute(task_description=task_description, context=context, use_thread=True)
@@ -1387,29 +1251,21 @@ Ensure your response is valid JSON that can be parsed directly.
         return str(result)
 
     def delegate_task(self, task_description: str, context: str | None = None) -> str:
-        """Delegate a task to another agent.
-
-        Delegates a task to another agent in the Cortex system. Selects the
-        most appropriate agent and passes the task with additional context
-        about the delegation.
+        """Delegate a task to a peer agent within the same Cortex.
 
         Args:
-            task_description: Description of the task to delegate.
-            context: Optional additional context for the delegated task.
+            task_description (str): The task to delegate.
+                IN: Passed to the selected delegate agent's ``execute`` method.
+                OUT: Drives the delegate's response generation.
+            context (str | None): Additional context for the delegate.
+                IN: Included in the delegate's prompt.
+                OUT: Prepended with delegation metadata.
 
         Returns:
-            str: Result from the delegate agent, or error message if delegation fails.
-
-        Side Effects:
-            - Increments delegation count
-            - Logs delegation activity
-            - Saves delegation to memory if enabled
-            - Passes delegation count to delegate to maintain depth tracking
-
-        Note:
-            Returns "Delegation not available" if delegation is disabled or
-            no Cortex instance is available.
+            str: The result from the delegate agent.
+                OUT: Empty or error message if delegation is unavailable.
         """
+
         if not self.allow_delegation or not self.cortex_instance:
             return "Delegation not available"
 
@@ -1456,31 +1312,19 @@ Ensure your response is valid JSON that can be parsed directly.
         return result
 
     def execute_with_delegation(self, task_description: str, context: str | None = None) -> str:
-        """Execute task with automatic delegation if needed and allowed.
-
-        Executes a task with intelligent delegation support. First attempts
-        to execute the task directly, then checks if delegation would be
-        beneficial. If delegation occurs, combines both responses into a
-        comprehensive final answer.
+        """Execute a task and automatically delegate if the response suggests it.
 
         Args:
-            task_description: Description of the task to execute.
-            context: Optional additional context.
+            task_description (str): The task to execute.
+                IN: First executed directly; then evaluated for delegation need.
+                OUT: May be forwarded to a delegate agent.
+            context (str | None): Additional context.
+                IN: Passed to both initial and delegated execution.
+                OUT: Included in all prompts.
 
         Returns:
-            str: Final response, potentially combining insights from multiple agents.
-
-        Note:
-            - Automatically determines if delegation is needed based on initial response
-            - Combines delegated results with initial response for comprehensive answer
-            - Falls back to delegated result if combination fails
-            - Returns initial result if delegation is not needed or not available
-
-        Example:
-
-            result = agent.execute_with_delegation(
-                "Create a marketing strategy with technical implementation details"
-            )
+            str: The final result, potentially from a delegate agent.
+                OUT: Combines initial and delegated insights when delegation occurs.
         """
 
         initial_result = self.execute(task_description, context)
@@ -1536,23 +1380,13 @@ Ensure your response is valid JSON that can be parsed directly.
         return initial_result
 
     def get_execution_stats(self) -> dict:
-        """Get execution statistics.
-
-        Compiles comprehensive statistics about the agent's execution history,
-        including timing metrics and execution counts.
+        """Return aggregated execution statistics for the agent.
 
         Returns:
-            dict: Statistics dictionary containing:
-                - times_executed: Total number of executions
-                - avg_execution_time: Average execution duration in seconds
-                - total_execution_time: Sum of all execution times
-                - min_execution_time: Fastest execution time
-                - max_execution_time: Slowest execution time
-                - recent_execution_times: Last 5 execution durations (if available)
-
-        Note:
-            Returns zero values for timing metrics if no executions have occurred.
+            dict: Contains ``times_executed``, average/min/max execution times,
+                and recent execution times. OUT: Empty averages if no executions yet.
         """
+
         if not self._execution_times:
             return {
                 "times_executed": self._times_executed,
@@ -1572,139 +1406,100 @@ Ensure your response is valid JSON that can be parsed directly.
         }
 
     def reset_stats(self):
-        """Reset execution statistics.
+        """Reset all execution and rate-limit statistics."""
 
-        Clears all execution statistics and counters, returning the agent
-        to a fresh state for metric tracking.
-
-        Side Effects:
-            - Resets _times_executed to 0
-            - Clears _execution_times list
-            - Clears _rpm_requests list
-            - Resets _delegation_count to 0
-        """
         self._times_executed = 0
         self._execution_times.clear()
         self._rpm_requests.clear()
         self._delegation_count = 0
 
     def add_knowledge(self, key: str, value: str):
-        """Add knowledge to the agent's knowledge base.
-
-        Adds or updates a knowledge entry that will be included in the
-        agent's context during task execution.
+        """Add a key-value entry to the agent's knowledge base.
 
         Args:
-            key: Knowledge identifier or category.
-            value: Knowledge content or description.
-
-        Side Effects:
-            Updates the knowledge dictionary.
-
-        Example:
-            agent.add_knowledge("company_policy", "Always prioritize customer satisfaction")
-            agent.add_knowledge("domain_expertise", "Specialized in healthcare analytics")
+            key (str): The knowledge entry key.
+                IN: Used as the dictionary key.
+                OUT: Retrievable via ``self.knowledge``.
+            value (str): The knowledge entry value.
+                IN: Stored as the dictionary value.
+                OUT: Included in ``_build_knowledge_context``.
         """
+
         self.knowledge[key] = value
 
     def add_knowledge_source(self, source: str):
-        """Add a knowledge source.
-
-        Registers a knowledge source identifier that represents an external
-        source of information available to the agent.
+        """Add a source reference to the agent's knowledge.
 
         Args:
-            source: Knowledge source identifier (e.g., database name, API endpoint).
-
-        Side Effects:
-            Appends to knowledge_sources list if not already present.
-
-        Note:
-            Duplicate sources are automatically prevented.
+            source (str): A knowledge source string.
+                IN: Appended to ``self.knowledge_sources`` if unique.
+                OUT: Included in ``_build_knowledge_context``.
         """
+
         if source not in self.knowledge_sources:
             self.knowledge_sources.append(source)
 
     def update_config(self, key: str, value: Any) -> None:
-        """Update agent configuration.
-
-        Sets or updates a configuration parameter for the agent.
-        Configuration can be used to store agent-specific settings
-        or runtime parameters.
+        """Update the agent's configuration dictionary.
 
         Args:
-            key: Configuration parameter name.
-            value: Configuration parameter value (any type).
-
-        Side Effects:
-            Updates the config dictionary.
+            key (str): The configuration key.
+                IN: Used as the dictionary key.
+                OUT: Stored in ``self.config``.
+            value (Any): The configuration value.
+                IN: Stored as the dictionary value.
+                OUT: Retrievable via ``get_config``.
         """
+
         self.config[key] = value
 
     def get_config(self, key: str, default: Any = None) -> Any:
-        """Get configuration value.
-
-        Retrieves a configuration parameter value with optional default.
+        """Retrieve a value from the agent's configuration.
 
         Args:
-            key: Configuration parameter name to retrieve.
-            default: Default value if key is not found.
+            key (str): The configuration key to look up.
+                IN: Used for dictionary lookup.
+                OUT: Matched against ``self.config`` keys.
+            default (Any): Value to return if the key is absent.
+                IN: Fallback when *key* is not found.
+                OUT: Returned instead of raising ``KeyError``.
 
         Returns:
-            The configuration value for the key, or default if not found.
+            Any: The stored configuration value, or *default*.
+                OUT: Direct result from ``self.config.get``.
         """
+
         return self.config.get(key, default)
 
     def set_step_callback(self, callback: Callable):
-        """Set step callback function.
-
-        Registers a callback function that will be invoked at each step
-        of task execution, useful for monitoring and debugging.
+        """Register a callback for execution step events.
 
         Args:
-            callback: Callable that accepts a dict parameter containing step information.
-                     The dict includes fields like 'step', 'agent', 'task', etc.
-
-        Example:
-            def my_callback(step_info):
-                print(f"Step: {step_info['step']} for agent: {step_info['agent']}")
-
-            agent.set_step_callback(my_callback)
+            callback (Callable): A function accepting a step info dict.
+                IN: Stored in ``self.step_callback``.
+                OUT: Invoked during ``execute`` at key lifecycle points.
         """
+
         self.step_callback = callback
 
     def is_rate_limited(self) -> bool:
-        """Check if agent is currently rate limited.
-
-        Determines whether the agent would be rate limited if it attempted
-        to make a request right now.
+        """Check whether the agent is currently rate limited.
 
         Returns:
-            bool: True if currently rate limited, False otherwise.
-
-        Note:
-            This is a read-only check that doesn't modify rate limit state.
+            bool: ``True`` if the rate limit is active.
+                OUT: Negated result of ``_check_rate_limit``.
         """
+
         return not self._check_rate_limit()
 
     def get_rate_limit_status(self) -> dict:
-        """Get current rate limiting status.
-
-        Provides detailed information about the current rate limiting state,
-        including requests made and remaining capacity.
+        """Return detailed rate limit status.
 
         Returns:
-            dict: Rate limit status containing:
-                - rate_limited: Whether currently rate limited
-                - max_rpm: Maximum requests per minute allowed (None if no limit)
-                - current_requests: Number of requests in current 60-second window
-                - requests_remaining: Available requests before hitting limit
-
-        Example:
-            status = agent.get_rate_limit_status()
-            if status['requests_remaining'] < 5:
-                print("Approaching rate limit")
+            dict: Contains ``rate_limited``, ``max_rpm``, ``current_requests``,
+                and ``requests_remaining``. OUT: Empty status if ``max_rpm`` is ``None``.
         """
+
         if not self.max_rpm:
             return {"rate_limited": False, "max_rpm": None, "current_requests": 0}
 
@@ -1719,17 +1514,18 @@ Ensure your response is valid JSON that can be parsed directly.
         }
 
     def __eq__(self, other: object) -> bool:
-        """Check equality between two CortexAgent instances.
-
-        Two agents are considered equal if they have the same role, goal,
-        backstory, and model configuration.
+        """Compare two ``CortexAgent`` instances by identity fields.
 
         Args:
-            other: Another object to compare with.
+            other (object): The object to compare against.
+                IN: Checked for type and field equality.
+                OUT: Compared on ``role``, ``goal``, ``backstory``, and ``model``.
 
         Returns:
-            bool: True if agents are equal, False otherwise.
+            bool: ``True`` if the agents are equivalent.
+                OUT: ``False`` for non-``CortexAgent`` objects.
         """
+
         if not isinstance(other, CortexAgent):
             return False
         return (
@@ -1740,18 +1536,11 @@ Ensure your response is valid JSON that can be parsed directly.
         )
 
     def __hash__(self) -> int:
-        """Generate a hash value for the CortexAgent using SHA256.
-
-        The hash is computed from the agent's role, goal, backstory, and model
-        to ensure consistent hashing based on the agent's core identity.
+        """Compute a hash from the agent's identity fields.
 
         Returns:
-            int: Hash value derived from SHA256 digest of agent attributes.
-
-        Example:
-            agent1 = CortexAgent(role="Analyst", goal="Analyze data", ...)
-            agent2 = CortexAgent(role="Analyst", goal="Analyze data", ...)
-            assert hash(agent1) == hash(agent2)
+            int: A stable hash derived from ``role``, ``goal``, ``backstory``,
+                and ``model``. OUT: Used for set membership and deduplication.
         """
 
         identity_str = f"{self.role}|{self.goal}|{self.backstory}|{self.model or 'default'}"

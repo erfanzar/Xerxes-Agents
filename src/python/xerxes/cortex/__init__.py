@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,65 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Cortex package for multi-agent orchestration and task execution.
 
-
-"""Cortex: A multi-agent orchestration framework built on top of Xerxes.
-
-This module provides a comprehensive orchestration framework for building and managing
-complex multi-agent systems with sophisticated collaboration patterns, task management,
-and execution strategies. Cortex enables agents to work together on complex workflows
-with support for sequential, parallel, hierarchical, consensus-based, and planned
-execution modes.
-
-Key Features:
-    - Multi-agent orchestration with dynamic task assignment
-    - Multiple execution strategies (sequential, parallel, hierarchical, consensus, planned)
-    - Task chaining and conditional workflows
-    - Integrated memory system for context preservation
-    - Tool integration for agent capabilities
-    - Streaming support for real-time output
-    - Dynamic task and agent creation
-    - Universal agents for flexible task handling
-
-Components:
-    - Cortex: Main orchestrator for coordinating agents and tasks
-    - CortexAgent: Intelligent agent with specific role, goal, and capabilities
-    - CortexTask: Task definition with execution context and dependencies
-    - CortexTool: Tool wrapper for agent function integration
-    - CortexMemory: Memory management for context and knowledge retention
-    - CortexPlanner: AI-powered planning for complex task sequences
-    - DynamicCortex: Runtime configuration for dynamic workflows
-
-Example:
-    >>> from xerxes.cortex import Cortex, CortexAgent, CortexTask, ProcessType
-    >>> from xerxes.llms import OpenAILLM
-    >>>
-    >>> llm = OpenAILLM(api_key="your-api-key")
-    >>>
-    >>> researcher = CortexAgent(
-    ...     role="Research Analyst",
-    ...     goal="Gather and analyze information",
-    ...     backstory="Expert in data research and analysis"
-    ... )
-    >>>
-    >>> task = CortexTask(
-    ...     description="Research market trends for AI",
-    ...     expected_output="Comprehensive market analysis report",
-    ...     agent=researcher
-    ... )
-    >>>
-    >>> cortex = Cortex(
-    ...     agents=[researcher],
-    ...     tasks=[task],
-    ...     llm=llm,
-    ...     process=ProcessType.SEQUENTIAL
-    ... )
-    >>>
-    >>> result = cortex.kickoff()
-    >>> print(result.raw_output)
+This module exports the main components of the Cortex system, including agents,
+memory integration, orchestration engines, task management, and core utilities.
 """
 
 from .agents.agent import CortexAgent

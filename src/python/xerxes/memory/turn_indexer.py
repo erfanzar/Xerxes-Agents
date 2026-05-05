@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,26 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Turn indexer module for Xerxes.
 
-"""Per-turn memory indexer hook.
-
-Builds a hook callable that the runtime registers under
-``on_turn_end``. Every completed agent turn is condensed into a
-:class:`MemoryItem` (with an embedding) and persisted to the supplied
-memory store, enabling cross-session semantic recall.
-
-Usage::
-
-    from xerxes.memory import LongTermMemory
-    from xerxes.memory.turn_indexer import make_turn_indexer_hook
-
-    memory = LongTermMemory()
-    hook = make_turn_indexer_hook(memory)
-    runtime_features.hook_runner.register("on_turn_end", hook)
-"""
+Exports:
+    - logger
+    - make_turn_indexer_hook
+    - make_memory_provider"""
 
 from __future__ import annotations
 
@@ -38,19 +29,13 @@ logger = logging.getLogger(__name__)
 
 
 def _coerce_text(response: tp.Any) -> str:
-    """Best-effort string extraction from a response payload.
-
-    The runtime delivers many different response shapes — raw strings,
-    ``ChatMessage``-like objects, dicts with ``content`` keys, lists of
-    chunks, etc. This helper accepts any of those and returns a plain
-    string suitable for embedding.
+    """Internal helper to coerce text.
 
     Args:
-        response: The runtime response in any supported shape.
-
+        response (tp.Any): IN: response. OUT: Consumed during execution.
     Returns:
-        A plain string. Empty when nothing extractable is found.
-    """
+        str: OUT: Result of the operation."""
+
     if response is None:
         return ""
     if isinstance(response, str):
@@ -83,27 +68,22 @@ def make_turn_indexer_hook(
     importance: float = 0.5,
     memory_type: str = "turn",
 ) -> tp.Callable[..., None]:
-    """Build an ``on_turn_end`` hook that indexes completed turns.
-
-    Each invocation extracts text from the agent response, skips empty
-    or trivially short turns, and persists the content to ``memory``
-    along with ``agent_id`` and the chosen ``importance``. Failures are
-    swallowed and logged so a misbehaving memory store can never break
-    the agent loop.
+    """Make turn indexer hook.
 
     Args:
-        memory: A :class:`Memory` implementation (e.g. :class:`LongTermMemory`).
-        min_chars: Minimum response length to index. Skips short
-            acknowledgements like "ok" / "done".
-        importance: Importance score attached to the saved memory.
-        memory_type: ``memory_type`` field on the saved item.
-
+        memory (Memory): IN: memory. OUT: Consumed during execution.
+        min_chars (int, optional): IN: min chars. Defaults to 32. OUT: Consumed during execution.
+        importance (float, optional): IN: importance. Defaults to 0.5. OUT: Consumed during execution.
+        memory_type (str, optional): IN: memory type. Defaults to 'turn'. OUT: Consumed during execution.
     Returns:
-        A callable suitable for :meth:`HookRunner.register("on_turn_end", ...)`.
-    """
+        tp.Callable[..., None]: OUT: Result of the operation."""
 
     def _hook(**kwargs: tp.Any) -> None:
-        """Persist the turn's agent response to *memory* if it is long enough."""
+        """Internal helper to hook.
+
+        Args:
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
+
         agent_id = kwargs.get("agent_id")
         response = kwargs.get("response")
         text = _coerce_text(response).strip()
@@ -134,27 +114,23 @@ def make_memory_provider(
     *,
     use_semantic: bool = True,
 ) -> tp.Callable[[str | None, int], list[str]]:
-    """Build a ``memory_provider`` callable for :class:`PromptContextBuilder`.
-
-    The returned callable performs ``memory.search(query, limit=k)``
-    using a *recent context* hint as the query (the agent_id helps scope
-    when multiple agents share a memory). Results are formatted into
-    short snippets suitable for ``[Relevant Memories]`` injection.
-
-    For now ``query`` is derived from the agent_id (a coarse signal).
-    A future iteration will pull the recent user message instead.
+    """Make memory provider.
 
     Args:
-        memory: A :class:`Memory` instance.
-        use_semantic: If supported by the storage backend, perform
-            semantic search instead of keyword matching.
-
+        memory (Memory): IN: memory. OUT: Consumed during execution.
+        use_semantic (bool, optional): IN: use semantic. Defaults to True. OUT: Consumed during execution.
     Returns:
-        A callable ``(agent_id, k) -> list[str]``.
-    """
+        tp.Callable[[str | None, int], list[str]]: OUT: Result of the operation."""
 
     def _provider(agent_id: str | None, k: int) -> list[str]:
-        """Search *memory* for up to *k* snippets scoped by *agent_id*."""
+        """Internal helper to provider.
+
+        Args:
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            k (int): IN: k. OUT: Consumed during execution.
+        Returns:
+            list[str]: OUT: Result of the operation."""
+
         query = agent_id or "context"
         try:
             items = memory.search(query, limit=k, use_semantic=use_semantic)

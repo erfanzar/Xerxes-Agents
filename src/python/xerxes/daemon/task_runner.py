@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Task data model and synchronous task execution for the daemon.
 
-
-"""Task runner for the daemon.
-
-Wraps the streaming agent loop in a synchronous function suitable for
-:class:`concurrent.futures.ThreadPoolExecutor`. Each task gets its own
-:class:`~xerxes.streaming.events.AgentState` and streams events via an
-optional callback for real-time progress to WebSocket clients.
+``Task`` tracks metadata and cancellation state. ``create_task`` builds a new
+instance, and ``run_task`` executes the agent loop in a blocking manner so it
+can be offloaded to a thread pool.
 """
 
 from __future__ import annotations
@@ -33,6 +32,23 @@ from ..streaming.loop import run as run_agent_loop
 
 @dataclass
 class Task:
+    """Represents a single unit of work submitted to the daemon.
+
+    Attributes:
+        id (str): IN: Unique identifier (generated). OUT: Used for lookups.
+        prompt (str): IN: User message text. OUT: Passed to the agent loop.
+        source (str): IN: Origin label (e.g. ``"ws:..."`` or ``"socket"``).
+            OUT: Stored for logging and listing.
+        status (str): IN: Initial status. OUT: Updated by ``run_task``.
+        result (str): IN: Empty initially. OUT: Filled on completion.
+        error (str): IN: Empty initially. OUT: Filled on failure.
+        created_at (str): IN: ISO timestamp at creation. OUT: Set by
+            ``create_task``.
+        completed_at (str): IN: Empty initially. OUT: Set on finish.
+        _cancel (bool): IN: ``False`` initially. OUT: Set to ``True`` by
+            ``cancel()`` to signal the loop to stop.
+    """
+
     id: str
     prompt: str
     source: str = ""
@@ -44,10 +60,24 @@ class Task:
     _cancel: bool = False
 
     def cancel(self) -> None:
+        """Signal that this task should be aborted.
+
+        Returns:
+            None: OUT: Sets ``_cancel`` to ``True``.
+        """
         self._cancel = True
 
 
 def create_task(prompt: str, source: str = "") -> Task:
+    """Instantiate a new ``Task`` with a generated ID and timestamp.
+
+    Args:
+        prompt (str): IN: User message text. OUT: Stored on the task.
+        source (str): IN: Origin label. OUT: Stored on the task.
+
+    Returns:
+        Task: OUT: Fresh task in ``"pending"`` status.
+    """
     return Task(
         id=str(uuid.uuid4())[:8],
         prompt=prompt,
@@ -64,20 +94,30 @@ def run_task(
     tool_schemas: list[dict[str, Any]] | None = None,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> str:
-    """Run a single agent task synchronously (meant for ThreadPoolExecutor).
+    """Execute the agent loop for a task and collect the result.
+
+    This function is blocking and intended to run inside a thread-pool
+    executor.
 
     Args:
-        task: The task to execute.
-        config: LLM config (model, base_url, api_key, sampling params).
-        system_prompt: System prompt for the agent.
-        tool_executor: Tool executor callable.
-        tool_schemas: Tool schemas for the LLM.
-        on_event: Optional callback for streaming events to clients.
-            Called as on_event(event_type, data_dict).
+        task (Task): IN: The task to execute. OUT: Mutated with status,
+            result, error, and completion timestamp.
+        config (dict[str, Any]): IN: Runtime configuration (model, API keys,
+            etc.). OUT: Passed to ``run_agent_loop``.
+        system_prompt (str): IN: System prompt text. OUT: Passed to the agent
+            loop.
+        tool_executor (Any): IN: Callable registry for tool execution. OUT:
+            Passed to ``run_agent_loop``.
+        tool_schemas (list[dict[str, Any]] | None): IN: JSON schemas for
+            available tools. OUT: Passed to ``run_agent_loop``.
+        on_event (Callable[[str, dict[str, Any]], None] | None): IN: Optional
+            callback for streaming events (``task.started``,
+            ``task.progress``, etc.). OUT: Invoked as events are produced.
 
     Returns:
-        The agent's final text response.
+        str: OUT: Full agent response text, or an error message on failure.
     """
+
     task.status = "running"
     if on_event:
         on_event("task.started", {"task_id": task.id, "prompt": task.prompt})

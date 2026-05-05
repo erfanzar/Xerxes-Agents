@@ -1,25 +1,17 @@
 #!/usr/bin/env sh
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
-# Licensed under the Apache License, Version 2.0.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Xerxes installer — zero-dependency bootstrap.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#   curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
-# What it does, in order:
-#   1. Detect OS + arch, refuse on unsupported targets.
-#   2. Install uv (Astral's Python manager) for fast resolution + venv.
-#   3. Install the `xerxes` CLI as an isolated uv tool from GitHub.
-#   4. Ensure Node.js ≥20 is available (required by the TypeScript CLI at runtime).
-#   5. Ensure ~/.local/bin is on PATH.
-#
-# Environment overrides:
-#   XERXES_VERSION      Pin a specific PyPI version (default: latest).
-#   XERXES_REF          Install from a git ref instead of PyPI.
-#   XERXES_NO_NODE_CHECK=1  Skip the Node.js version check.
-#   XERXES_NO_MODIFY_PATH=1  Do not touch shell rc files.
-#   XERXES_INSTALL_EXTRAS Comma-separated PEP 508 extras (e.g. "tui,server").
-
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 set -eu
 
 REPO_URL="https://github.com/erfanzar/Xerxes-Agents"
@@ -68,7 +60,7 @@ detect_platform() {
         Linux)  os=linux ;;
         Darwin) os=macos ;;
         MINGW*|MSYS*|CYGWIN*)
-            die "Windows is not supported by this script. Use WSL2 or PowerShell with uv + rustup-init.exe." ;;
+            die "Windows is not supported by this script. Use WSL2 or install uv from https://astral.sh/uv." ;;
         *) die "unsupported OS: $uname_s" ;;
     esac
     case "$uname_m" in
@@ -95,54 +87,6 @@ ensure_build_prereqs() {
             fi
             ;;
     esac
-}
-
-check_runtime() {
-    if [ "${XERXES_NO_NODE_CHECK:-0}" = "1" ]; then
-        info "skipping runtime check (XERXES_NO_NODE_CHECK=1)"
-        return 0
-    fi
-    if command -v node >/dev/null 2>&1; then
-        node_version=$(node --version 2>/dev/null | sed 's/^v//')
-        major=$(echo "$node_version" | cut -d. -f1)
-        if [ "$major" -ge 20 ] 2>/dev/null; then
-            ok "Node.js $node_version already present (>=20 required)"
-            return 0
-        fi
-        warn "Node.js $node_version found but >=20 required"
-    fi
-    if command -v bun >/dev/null 2>&1; then
-        ok "Bun $(bun --version) already present (can run the CLI)"
-        return 0
-    fi
-    warn "Neither Node.js >=20 nor Bun found. The Xerxes CLI needs one of them at runtime."
-    warn "  Node.js -> https://nodejs.org  or  apt install nodejs"
-    warn "  Bun     -> https://bun.sh      or  let this installer set it up next"
-}
-
-install_bun() {
-    if command -v bun >/dev/null 2>&1; then
-        ok "bun already present ($(bun --version))"
-        return 0
-    fi
-    info "installing bun (required for CLI build)"
-    # Try curl install first.
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL https://bun.sh/install | bash
-    else
-        warn "curl not found — cannot auto-install bun"
-        warn "Install manually from https://bun.sh"
-        return 0
-    fi
-    # shellcheck disable=SC1091
-    if [ -f "$HOME/.bun/bin/bun" ]; then
-        export PATH="$HOME/.bun/bin:$PATH"
-    fi
-    if command -v bun >/dev/null 2>&1; then
-        ok "bun installed ($(bun --version))"
-    else
-        warn "bun installed but not on PATH; you may need to restart your shell"
-    fi
 }
 
 install_uv() {
@@ -267,9 +211,7 @@ main() {
     detect_platform
     info "target: $PLATFORM"
     ensure_build_prereqs
-    check_runtime
     install_uv
-    install_bun
     install_xerxes
     modify_path
     verify

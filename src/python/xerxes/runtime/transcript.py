@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,29 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Transcript module for Xerxes.
 
-
-"""Transcript store for conversation message tracking.
-
-Provides a mutable message log with compaction support for managing
-long conversations within context limits. Messages can be appended,
-compacted (keeping only recent entries), replayed, and serialized.
-
-Inspired by the claw-code ``TranscriptStore`` pattern.
-
-Usage::
-
-    from xerxes.runtime.transcript import TranscriptStore
-
-    store = TranscriptStore()
-    store.append("user", "Hello")
-    store.append("assistant", "Hi there!")
-    store.compact(keep_last=10)
-    messages = store.replay()
-"""
+Exports:
+    - TranscriptEntry
+    - TranscriptStore"""
 
 from __future__ import annotations
 
@@ -39,14 +26,13 @@ from typing import Any
 
 @dataclass
 class TranscriptEntry:
-    """A single transcript entry.
+    """Transcript entry.
 
     Attributes:
-        role: Message role (user, assistant, tool, system).
-        content: Message content.
-        timestamp: When the entry was created.
-        metadata: Optional metadata (tool_call_id, name, etc.).
-    """
+        role (str): role.
+        content (str): content.
+        timestamp (str): timestamp.
+        metadata (dict[str, Any]): metadata."""
 
     role: str
     content: str
@@ -56,37 +42,48 @@ class TranscriptEntry:
 
 @dataclass
 class TranscriptStore:
-    """Mutable message transcript with compaction support.
+    """Transcript store.
 
     Attributes:
-        entries: List of transcript entries.
-        flushed: Whether the transcript has been flushed/persisted.
-        compaction_count: Number of times compact() has been called.
-    """
+        entries (list[TranscriptEntry]): entries.
+        flushed (bool): flushed.
+        compaction_count (int): compaction count."""
 
     entries: list[TranscriptEntry] = field(default_factory=list)
     flushed: bool = False
     compaction_count: int = 0
 
     def append(self, role: str, content: str, **metadata: Any) -> None:
-        """Add a message to the transcript."""
+        """Append.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            role (str): IN: role. OUT: Consumed during execution.
+            content (str): IN: content. OUT: Consumed during execution.
+            **metadata: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
+
         self.entries.append(TranscriptEntry(role=role, content=content, metadata=metadata))
         self.flushed = False
 
     def append_entry(self, entry: TranscriptEntry) -> None:
-        """Add a pre-built entry to the transcript."""
+        """Append entry.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            entry (TranscriptEntry): IN: entry. OUT: Consumed during execution."""
+
         self.entries.append(entry)
         self.flushed = False
 
     def compact(self, keep_last: int = 10) -> int:
-        """Compact the transcript, keeping only the last N entries.
+        """Compact.
 
         Args:
-            keep_last: Number of recent entries to keep.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            keep_last (int, optional): IN: keep last. Defaults to 10. OUT: Consumed during execution.
         Returns:
-            Number of entries removed.
-        """
+            int: OUT: Result of the operation."""
+
         if len(self.entries) <= keep_last:
             return 0
         removed = len(self.entries) - keep_last
@@ -95,18 +92,15 @@ class TranscriptStore:
         return removed
 
     def compact_with_summary(self, keep_last: int = 10, summarizer: Any = None) -> int:
-        """Compact with an optional summary of removed entries.
-
-        If a summarizer is provided, the removed entries are summarized
-        and prepended as a system message.
+        """Compact with summary.
 
         Args:
-            keep_last: Number of recent entries to keep.
-            summarizer: Optional callable(entries) -> str.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            keep_last (int, optional): IN: keep last. Defaults to 10. OUT: Consumed during execution.
+            summarizer (Any, optional): IN: summarizer. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Number of entries removed.
-        """
+            int: OUT: Result of the operation."""
+
         if len(self.entries) <= keep_last:
             return 0
 
@@ -126,11 +120,23 @@ class TranscriptStore:
         return removed
 
     def replay(self) -> tuple[TranscriptEntry, ...]:
-        """Return all entries as an immutable tuple."""
+        """Replay.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            tuple[TranscriptEntry, ...]: OUT: Result of the operation."""
+
         return tuple(self.entries)
 
     def to_messages(self) -> list[dict[str, Any]]:
-        """Convert to neutral message format (list of dicts)."""
+        """To messages.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, Any]]: OUT: Result of the operation."""
+
         messages = []
         for entry in self.entries:
             msg: dict[str, Any] = {"role": entry.role, "content": entry.content}
@@ -139,26 +145,52 @@ class TranscriptStore:
         return messages
 
     def flush(self) -> None:
-        """Mark the transcript as flushed/persisted."""
+        """Flush.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self.flushed = True
 
     def clear(self) -> None:
-        """Remove all entries."""
+        """Clear.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self.entries.clear()
         self.flushed = False
 
     @property
     def turn_count(self) -> int:
-        """Number of user messages in the transcript."""
+        """Return Turn count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return sum(1 for e in self.entries if e.role == "user")
 
     @property
     def message_count(self) -> int:
-        """Total number of entries."""
+        """Return Message count.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return len(self.entries)
 
     def as_markdown(self) -> str:
-        """Render the transcript as markdown."""
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = ["# Transcript", "", f"Messages: {self.message_count}", ""]
         for entry in self.entries:
             role_tag = f"**{entry.role}**"

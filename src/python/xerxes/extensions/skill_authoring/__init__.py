@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Public exports for the skill authoring subsystem.
 
-"""Hermes-style autonomous skill authoring.
-
-The skill authoring subsystem watches tool-call sequences during a turn,
-detects when the agent has completed something worth canonicalising,
-and (optionally) drafts a new SKILL.md capturing the procedure,
-pitfalls observed, and a verification recipe.
-
-Modules:
-    - :mod:`tracker`: per-turn :class:`ToolSequenceTracker`.
-    - :mod:`triggers`: heuristics for "is this skill-worthy?".
-    - :mod:`drafter`: LLM-driven SKILL.md drafter.
-    - :mod:`verifier`: verification step generator.
-    - :mod:`improver`: feedback-driven skill rework.
-    - :mod:`matcher`: semantic skill matcher for re-use.
+Provides components for auto-drafting, improving, verifying, and managing the
+lifecycle of Hermes-style agent skills from observed tool sequences.
 """
 
 from .drafter import SkillDrafter, render_skill_template

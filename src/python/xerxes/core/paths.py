@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,22 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Filesystem path helpers for Xerxes.
 
-"""Filesystem path resolution for Xerxes user data.
-
-Centralises the location of Xerxes's per-user state directory (sessions,
-skills, profiles, daemon files, agents) so it can be redirected via the
-``XERXES_HOME`` environment variable. This is essential for:
-
-- Containerised deployments (override to a mounted volume).
-- Multi-tenant hosts (per-tenant home directories).
-- Test isolation (per-test temporary directory).
-- XDG-compliant setups (``XERXES_HOME=$XDG_DATA_HOME/xerxes``).
-
-When ``XERXES_HOME`` is unset, the default ``~/.xerxes`` is used.
+Provides ``xerxes_home()`` and ``xerxes_subdir()`` for resolving the project's
+home directory (default ``~/.xerxes``, overridable via ``XERXES_HOME``).
 """
 
 from __future__ import annotations
@@ -34,18 +27,13 @@ _DEFAULT_DIR_NAME = ".xerxes"
 
 
 def xerxes_home() -> Path:
-    """Return the root Xerxes data directory.
+    """Return the Xerxes home directory path.
 
-    Resolution order:
-
-    1. ``$XERXES_HOME`` environment variable (if set and non-empty).
-    2. ``~/.xerxes`` (user home directory).
-
-    The returned path is **not** created on disk; callers should
-    ``mkdir(parents=True, exist_ok=True)`` themselves when writing.
+    Uses ``XERXES_HOME`` environment variable when set, otherwise
+    ``~/.xerxes``.
 
     Returns:
-        The :class:`~pathlib.Path` to the Xerxes data root.
+        Path: OUT: resolved home directory.
     """
     override = os.environ.get(XERXES_HOME_ENV, "").strip()
     if override:
@@ -54,15 +42,12 @@ def xerxes_home() -> Path:
 
 
 def xerxes_subdir(*parts: str) -> Path:
-    """Return a subdirectory under the Xerxes home.
-
-    Convenience wrapper for ``xerxes_home() / part1 / part2 / ...``.
-    The directory is **not** created.
+    """Return a subpath inside the Xerxes home directory.
 
     Args:
-        *parts: Path segments to join under the Xerxes home.
+        *parts (str): IN: path components to join.
 
     Returns:
-        Joined :class:`~pathlib.Path` underneath the Xerxes home.
+        Path: OUT: resolved subpath.
     """
     return xerxes_home().joinpath(*parts)

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,20 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Resilience module for Xerxes.
 
-"""Resilience helpers: jittered backoff + tool result dedup cache.
-
-Two small utilities the executor wires in:
-
-- :class:`BackoffPolicy` — exponential backoff with full / equal /
-  decorrelated jitter for retry loops.
-- :class:`ToolResultCache` — TTL-bounded LRU cache keyed by
-  ``(tool_name, args_hash)``; used to skip identical tool calls fired
-  in quick succession (e.g. inside a loop).
-"""
+Exports:
+    - JitterMode
+    - BackoffPolicy
+    - hash_args
+    - ToolResultCache"""
 
 from __future__ import annotations
 
@@ -35,7 +33,10 @@ from enum import Enum
 
 
 class JitterMode(Enum):
-    """Jitter algorithm. ``FULL`` is the AWS-recommended default."""
+    """Jitter mode.
+
+    Inherits from: Enum
+    """
 
     NONE = "none"
     FULL = "full"
@@ -45,15 +46,14 @@ class JitterMode(Enum):
 
 @dataclass
 class BackoffPolicy:
-    """Exponential backoff with optional jitter.
+    """Backoff policy.
 
     Attributes:
-        base_delay: First retry delay in seconds.
-        max_delay: Cap on the computed delay.
-        multiplier: Exponential growth factor.
-        mode: Which jitter algorithm to use.
-        rng: Optional RNG for deterministic tests.
-    """
+        base_delay (float): base delay.
+        max_delay (float): max delay.
+        multiplier (float): multiplier.
+        mode (JitterMode): mode.
+        rng (random.Random | None): rng."""
 
     base_delay: float = 0.5
     max_delay: float = 30.0
@@ -62,15 +62,15 @@ class BackoffPolicy:
     rng: random.Random | None = None
 
     def delay(self, attempt: int, *, last_delay: float = 0.0) -> float:
-        """Compute the next sleep duration.
+        """Delay.
 
         Args:
-            attempt: Zero-indexed retry attempt number.
-            last_delay: Previous delay (used by DECORRELATED mode).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            attempt (int): IN: attempt. OUT: Consumed during execution.
+            last_delay (float, optional): IN: last delay. Defaults to 0.0. OUT: Consumed during execution.
         Returns:
-            Seconds to sleep before the next retry.
-        """
+            float: OUT: Result of the operation."""
+
         rng = self.rng or random
         attempt = max(0, attempt)
         cap = max(self.base_delay, self.max_delay)
@@ -87,10 +87,14 @@ class BackoffPolicy:
         return exp
 
     def sleep_iter(self, max_attempts: int) -> tp.Iterator[float]:
-        """Yield delays for ``max_attempts`` retries.
+        """Sleep iter.
 
-        Use as ``for d in policy.sleep_iter(5): time.sleep(d); ...``.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            max_attempts (int): IN: max attempts. OUT: Consumed during execution.
+        Returns:
+            tp.Iterator[float]: OUT: Result of the operation."""
+
         last = 0.0
         for i in range(max_attempts):
             d = self.delay(i, last_delay=last)
@@ -99,7 +103,13 @@ class BackoffPolicy:
 
 
 def hash_args(args: tp.Any) -> str:
-    """Stable MD5 hash of an argument bundle (dict / str / None)."""
+    """Hash args.
+
+    Args:
+        args (tp.Any): IN: args. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     if args is None:
         return "null"
     if isinstance(args, str):
@@ -111,28 +121,27 @@ def hash_args(args: tp.Any) -> str:
 
 @dataclass
 class _CacheEntry:
-    """Single stored value alongside the monotonic timestamp of insertion."""
+    """Cache entry.
+
+    Attributes:
+        value (tp.Any): value.
+        inserted_at (float): inserted at."""
 
     value: tp.Any
     inserted_at: float
 
 
 class ToolResultCache:
-    """TTL-bounded LRU cache for tool results.
-
-    Skips identical ``(tool_name, args)`` invocations made within the
-    TTL window. Pure in-memory; threadsafe via a single lock.
-
-    Example:
-        >>> cache = ToolResultCache(ttl_seconds=30, max_entries=128)
-        >>> hit, val = cache.get_or_set("Read", {"path": "x"}, lambda: "abc")
-        >>> assert val == "abc"
-        >>> hit, val = cache.get_or_set("Read", {"path": "x"}, lambda: "boom")
-        >>> assert val == "abc"
-    """
+    """Tool result cache."""
 
     def __init__(self, ttl_seconds: float = 30.0, max_entries: int = 256) -> None:
-        """Configure the TTL (seconds) and the maximum LRU capacity."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            ttl_seconds (float, optional): IN: ttl seconds. Defaults to 30.0. OUT: Consumed during execution.
+            max_entries (int, optional): IN: max entries. Defaults to 256. OUT: Consumed during execution."""
+
         self.ttl_seconds = float(ttl_seconds)
         self.max_entries = int(max_entries)
         self._entries: OrderedDict[tuple[str, str], _CacheEntry] = OrderedDict()
@@ -142,20 +151,47 @@ class ToolResultCache:
 
     @property
     def hits(self) -> int:
-        """Number of lookups that returned a fresh cached value."""
+        """Return Hits.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return self._hits
 
     @property
     def misses(self) -> int:
-        """Number of lookups that missed the cache or found an expired entry."""
+        """Return Misses.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return self._misses
 
     def __len__(self) -> int:
-        """Number of entries currently held in the cache."""
+        """Dunder method for len.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return len(self._entries)
 
     def get(self, tool_name: str, args: tp.Any, *, now: float | None = None) -> tuple[bool, tp.Any]:
-        """Return ``(hit, value_or_None)`` for a cached entry."""
+        """Get.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            args (tp.Any): IN: args. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            tuple[bool, tp.Any]: OUT: Result of the operation."""
+
         now = time.monotonic() if now is None else now
         key = (tool_name, hash_args(args))
         with self._lock:
@@ -172,7 +208,15 @@ class ToolResultCache:
             return True, entry.value
 
     def set(self, tool_name: str, args: tp.Any, value: tp.Any, *, now: float | None = None) -> None:
-        """Insert (or refresh) a cache entry, evicting LRU if needed."""
+        """Set.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            args (tp.Any): IN: args. OUT: Consumed during execution.
+            value (tp.Any): IN: value. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution."""
+
         now = time.monotonic() if now is None else now
         key = (tool_name, hash_args(args))
         with self._lock:
@@ -189,7 +233,17 @@ class ToolResultCache:
         *,
         now: float | None = None,
     ) -> tuple[bool, tp.Any]:
-        """Return cached value or compute via *producer* and cache it."""
+        """Retrieve the or set.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            args (tp.Any): IN: args. OUT: Consumed during execution.
+            producer (tp.Callable[[], tp.Any]): IN: producer. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            tuple[bool, tp.Any]: OUT: Result of the operation."""
+
         hit, value = self.get(tool_name, args, now=now)
         if hit:
             return True, value
@@ -198,7 +252,14 @@ class ToolResultCache:
         return False, value
 
     def invalidate(self, tool_name: str | None = None) -> int:
-        """Drop cache entries; ``None`` clears everything."""
+        """Invalidate.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str | None, optional): IN: tool name. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            int: OUT: Result of the operation."""
+
         with self._lock:
             if tool_name is None:
                 n = len(self._entries)

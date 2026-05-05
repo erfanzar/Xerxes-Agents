@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Matrix channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Matrix adapter — Application Service hookshot style."""
+Connects to a Matrix homeserver for sending and receiving room messages.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +26,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class MatrixChannel(WebhookChannel):
-    """Matrix homeserver adapter using a long-lived access token.
-
-    Inbound: appservice or webhook bridge POSTs Matrix events.
-    Outbound: ``PUT /_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}``.
-    """
+    """Channel implementation for Matrix."""
 
     name = "matrix"
 
@@ -28,12 +37,15 @@ class MatrixChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a Matrix homeserver.
+        """Initialize the Matrix channel.
 
         Args:
-            homeserver_url: Base URL of the Matrix homeserver.
-            access_token: Long-lived client access token.
-            http_client: Optional injected HTTP callable for tests.
+            homeserver_url (str): IN: base URL of the Matrix homeserver.
+                OUT: stored with trailing slash removed.
+            access_token (str): IN: Matrix access token for the bot user.
+                OUT: stored for authorizing API requests.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.homeserver_url = homeserver_url.rstrip("/")
@@ -41,7 +53,16 @@ class MatrixChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Iterate ``events`` (or a single event), keeping only ``m.room.message``."""
+        """Parse a Matrix webhook payload into ``ChannelMessage``.
+
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages. Only
+            ``m.room.message`` events are processed.
+        """
         data = parse_json_body(body)
         events = data.get("events") or [data]
         out = []
@@ -62,7 +83,12 @@ class MatrixChannel(WebhookChannel):
         return out
 
     async def _send_outbound(self, message):
-        """PUT an ``m.text`` event into ``message.room_id`` with a fresh txn id."""
+        """Send a text message to a Matrix room.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is the
+                target room and ``text`` the message body.
+        """
         txn = f"xerxes-{int(time.time() * 1000)}"
         url = f"{self.homeserver_url}/_matrix/client/v3/rooms/{message.room_id}/send/m.room.message/{txn}"
         body = {"msgtype": "m.text", "body": message.text}

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Parity audit module for Xerxes.
 
-
-"""Parity audit system for self-auditing module coverage.
-
-Compares the current Xerxes module set against a reference surface
-(expected modules, tools, commands) to identify gaps, new additions,
-and coverage metrics.
-
-Inspired by the claw-code ``parity_audit`` pattern.
-
-Usage::
-
-    from xerxes.runtime.parity_audit import run_parity_audit
-
-    result = run_parity_audit()
-    print(result.as_markdown())
-    print(f"Coverage: {result.coverage_pct:.1f}%")
-"""
+Exports:
+    - ModuleStatus
+    - ParityAuditResult
+    - run_parity_audit"""
 
 from __future__ import annotations
 
@@ -37,16 +27,15 @@ from pathlib import Path
 
 @dataclass
 class ModuleStatus:
-    """Status of a single module in the audit.
+    """Module status.
 
     Attributes:
-        name: Module name.
-        category: Module category (llms, tools, runtime, etc.).
-        expected: Whether this module is in the reference surface.
-        present: Whether this module exists in the current codebase.
-        file_count: Number of Python files in the module.
-        notes: Any notes about the module.
-    """
+        name (str): name.
+        category (str): category.
+        expected (bool): expected.
+        present (bool): present.
+        file_count (int): file count.
+        notes (str): notes."""
 
     name: str
     category: str = ""
@@ -58,41 +47,127 @@ class ModuleStatus:
 
 @dataclass
 class ParityAuditResult:
-    """Result of a parity audit.
+    """Parity audit result.
 
     Attributes:
-        modules: List of module statuses.
-        missing: Modules expected but not found.
-        extra: Modules found but not expected.
-        present: Modules both expected and found.
-        total_files: Total Python files audited.
-    """
+        modules (list[ModuleStatus]): modules.
+        total_files (int): total files."""
 
     modules: list[ModuleStatus] = field(default_factory=list)
     total_files: int = 0
 
     @property
     def missing(self) -> list[ModuleStatus]:
+        """Return Missing.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
         return [m for m in self.modules if m.expected and not m.present]
+        """Return Missing.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
+        """Return Missing.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def extra(self) -> list[ModuleStatus]:
+        """Return Extra.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
         return [m for m in self.modules if not m.expected and m.present]
+        """Return Extra.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
+        """Return Extra.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def present(self) -> list[ModuleStatus]:
+        """Return Present.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
         return [m for m in self.modules if m.expected and m.present]
+        """Return Present.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
+        """Return Present.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def coverage_pct(self) -> float:
+        """Return Coverage pct.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
         expected = [m for m in self.modules if m.expected]
+        """Return Coverage pct.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
+        """Return Coverage pct.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
         if not expected:
             return 100.0
         return len(self.present) / len(expected) * 100
 
     def as_markdown(self) -> str:
-        """Render the audit as markdown."""
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
+            """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+            """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
             "# Parity Audit",
             "",
             f"Coverage: {self.coverage_pct:.1f}%",
@@ -161,16 +236,29 @@ def run_parity_audit(
     package_root: Path | None = None,
     reference: list[dict[str, str]] | None = None,
 ) -> ParityAuditResult:
-    """Run a parity audit of the Xerxes package.
+    """Run parity audit.
 
     Args:
-        package_root: Root path of the xerxes package.
-        reference: Optional custom reference surface.
-
+        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
+        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
     Returns:
-        :class:`ParityAuditResult` with coverage details.
-    """
+        ParityAuditResult: OUT: Result of the operation."""
+
     root = package_root or Path(__file__).resolve().parent.parent
+    """Run parity audit.
+
+    Args:
+        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
+        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        ParityAuditResult: OUT: Result of the operation."""
+    """Run parity audit.
+
+    Args:
+        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
+        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        ParityAuditResult: OUT: Result of the operation."""
     ref = reference or REFERENCE_SURFACE
     result = ParityAuditResult()
 

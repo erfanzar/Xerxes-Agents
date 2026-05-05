@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Skill verification recipe generation and evaluation.
 
-"""Skill verifier — generate assertable verification recipes.
-
-A drafted skill is most useful when it ships with a programmatic check
-that a future agent's invocation actually followed the recipe. This
-module produces an assertion list (one per call) that the runtime can
-later replay against a candidate sequence to decide whether the agent
-"applied the skill correctly".
+``SkillVerifier`` produces ``VerificationStep`` objects from a
+``SkillCandidate`` and can later validate whether another candidate satisfies
+those steps.
 """
 
 from __future__ import annotations
@@ -29,17 +28,20 @@ from .tracker import SkillCandidate, ToolCallEvent
 
 @dataclass
 class VerificationStep:
-    """One assertable expectation in a skill verification recipe.
+    """A single assertion in a skill verification recipe.
 
     Attributes:
-        kind: Assertion kind. One of ``"tool_called"``, ``"args_subset"``,
-            ``"sequence_position"``, ``"call_count"``, ``"status_success"``.
-        tool_name: Tool the assertion concerns.
-        position: Expected 0-indexed position in the sequence (when
-            ``kind == "sequence_position"``).
-        args_required: Required argument keys/values (when
-            ``kind == "args_subset"``).
-        message: Human-readable description.
+        kind (str): IN: Step type (``call_count``, ``sequence_position``,
+            ``args_subset``, etc.). OUT: Determines evaluation logic.
+        tool_name (str): IN: Target tool. OUT: Used for sequence and args
+            checks.
+        position (int | None): IN: Expected index in the event list. OUT:
+            Used for positional checks.
+        args_required (dict[str, tp.Any]): IN: Required argument keys/values.
+            OUT: Checked during ``args_subset`` evaluation.
+        expected_count (int | None): IN: Expected number of successful calls.
+            OUT: Checked during ``call_count`` evaluation.
+        message (str): IN: Human-readable description. OUT: Stored.
     """
 
     kind: str
@@ -52,12 +54,15 @@ class VerificationStep:
 
 @dataclass
 class VerificationResult:
-    """Outcome of running a recipe against an actual sequence.
+    """Outcome of verifying a candidate against a recipe.
 
     Attributes:
-        passed: Whether all assertions held.
-        passed_steps: Indices of steps that passed.
-        failed_steps: List of ``(index, reason)`` tuples for failures.
+        passed (bool): IN: Overall result. OUT: ``True`` if ``failed_steps``
+            is empty.
+        passed_steps (list[int]): IN: Empty initially. OUT: Indices of steps
+            that passed.
+        failed_steps (list[tuple[int, str]]): IN: Empty initially. OUT:
+            Indices and reasons for steps that failed.
     """
 
     passed: bool
@@ -66,30 +71,19 @@ class VerificationResult:
 
 
 class SkillVerifier:
-    """Generate and run skill verification recipes.
-
-    Use :meth:`generate` at draft time to produce a recipe that ships
-    with the SKILL.md (e.g. as a JSON sidecar). Use :meth:`verify` to
-    evaluate a future :class:`SkillCandidate` against that recipe.
-    """
+    """Generate and evaluate skill verification recipes."""
 
     def generate(self, candidate: SkillCandidate) -> list[VerificationStep]:
-        """Produce a verification recipe for *candidate*.
-
-        Recipe shape:
-
-        - ``call_count`` step: total successful calls expected.
-        - For each successful call, a ``sequence_position`` step
-          asserting the tool name at that index.
-        - For calls with non-trivial arguments, an ``args_subset`` step
-          asserting that future arguments include the same keys.
+        """Build a verification recipe from a successful tool sequence.
 
         Args:
-            candidate: Source candidate to derive the recipe from.
+            candidate (SkillCandidate): IN: Observed turn data. OUT: Successful
+                events are turned into steps.
 
         Returns:
-            Ordered list of :class:`VerificationStep` instances.
+            list[VerificationStep]: OUT: Recipe steps.
         """
+
         steps: list[VerificationStep] = []
         successful = candidate.successful_events
         steps.append(
@@ -125,15 +119,18 @@ class SkillVerifier:
         steps: list[VerificationStep],
         candidate: SkillCandidate,
     ) -> VerificationResult:
-        """Run a recipe against an actual sequence.
+        """Evaluate whether ``candidate`` satisfies every recipe step.
 
         Args:
-            steps: The generated recipe.
-            candidate: Real sequence captured at runtime.
+            steps (list[VerificationStep]): IN: Recipe to evaluate. OUT:
+                Iterated and passed to ``_evaluate``.
+            candidate (SkillCandidate): IN: Observed turn to validate. OUT:
+                Successful events are extracted.
 
         Returns:
-            A :class:`VerificationResult` summarising the outcome.
+            VerificationResult: OUT: Aggregated pass/fail result.
         """
+
         observed = candidate.successful_events
         passed: list[int] = []
         failed: list[tuple[int, str]] = []
@@ -150,7 +147,19 @@ class SkillVerifier:
         step: VerificationStep,
         observed: list[ToolCallEvent],
     ) -> tuple[bool, str]:
-        """Evaluate a single verification step against the observed events."""
+        """Check a single verification step against observed events.
+
+        Args:
+            step (VerificationStep): IN: Step to evaluate. OUT: ``kind``
+                selects the logic branch.
+            observed (list[ToolCallEvent]): IN: Successful events from the
+                candidate. OUT: Compared against the step.
+
+        Returns:
+            tuple[bool, str]: OUT: ``(True, "")`` on pass, or
+            ``(False, reason)`` on failure.
+        """
+
         if step.kind == "call_count":
             if step.expected_count is not None and len(observed) != step.expected_count:
                 return False, f"expected {step.expected_count} successful calls, got {len(observed)}"

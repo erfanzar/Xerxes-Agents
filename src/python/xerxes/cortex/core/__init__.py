@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,36 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Core utilities for the Cortex orchestration framework.
 
-
-"""Core sub-package for the Cortex multi-agent orchestration framework.
-
-This sub-package provides foundational building blocks used throughout the
-Cortex framework, including enumeration types, tool wrappers, string
-utilities, and prompt template engines.
-
-Modules:
-    enums: ProcessType and ChainType enumerations defining execution
-        strategies (sequential, parallel, hierarchical, consensus, planned)
-        and task dependency structures (linear, branching, loop).
-    string_utils: Template variable interpolation, extraction, and
-        validation utilities using simple ``{variable}`` placeholder syntax.
-    templates: Jinja2-based PromptTemplate engine with pre-defined templates
-        for agent prompts, task prompts, manager delegation, consensus
-        synthesis, strategic planning, and step execution.
-    tool: CortexTool dataclass for wrapping Python callables as agent tools
-        with automatic OpenAI-compatible JSON schema generation.
-
-Example:
-    >>> from xerxes.cortex.core import ProcessType, CortexTool, PromptTemplate
-    >>> tool = CortexTool.from_function(my_function, name="search")
-    >>> template = PromptTemplate()
-    >>> prompt = template.render_agent_prompt(
-    ...     role="Analyst", goal="Analyze data", backstory="Expert"
-    ... )
+This module exports enums, string utilities, prompt templates, and tool
+abstractions used across the Cortex system.
 """
 
 from .enums import ChainType, ProcessType

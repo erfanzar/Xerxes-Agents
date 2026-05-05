@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,43 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Audit event collectors.
 
-
-"""Audit event collectors for buffering, persisting, and fanning-out events.
-
-Collectors implement a simple two-method protocol defined by
-:class:`AuditCollector`:
-
-    * :meth:`~AuditCollector.emit` -- accept a single audit event.
-    * :meth:`~AuditCollector.flush` -- flush any buffered state to the
-      backing store.
-
-Three concrete implementations ship with this module:
-
-    * :class:`InMemoryCollector` -- thread-safe in-memory list with
-      filtering and snapshot capabilities.
-    * :class:`JSONLSinkCollector` -- streams each event as a single
-      newline-delimited JSON line to a file or IO stream.
-    * :class:`CompositeCollector` -- fans out every event to an
-      arbitrary number of child collectors.
-
-Example:
-    Wiring an in-memory collector and a JSONL file sink together::
-
-        from xerxes.audit.collector import (
-            CompositeCollector,
-            InMemoryCollector,
-            JSONLSinkCollector,
-        )
-
-        mem = InMemoryCollector()
-        jsonl = JSONLSinkCollector("/tmp/audit.jsonl")
-        composite = CompositeCollector([mem, jsonl])
-        composite.emit(some_event)
-        composite.flush()
+This module defines several collector implementations for persisting or
+buffering audit events: an in-memory collector, a JSONL file sink, and a
+composite that forwards to multiple collectors.
 """
 
 from __future__ import annotations
@@ -58,181 +31,89 @@ from .events import AuditEvent
 
 @runtime_checkable
 class AuditCollector(Protocol):
-    """Protocol that all audit collectors must satisfy.
+    """Protocol for audit event collectors.
 
-    Any object that implements :meth:`emit` and :meth:`flush` is
-    considered a valid audit collector. The protocol is decorated with
-    :func:`~typing.runtime_checkable` so that ``isinstance`` checks
-    work at runtime.
-
-    Example:
-        Implementing a custom collector::
-
-            class MyCollector:
-                def emit(self, event: AuditEvent) -> None:
-                    print(event.to_json())
-
-                def flush(self) -> None:
-                    pass
-
-            assert isinstance(MyCollector(), AuditCollector)
+    Implementations must accept events and support flushing.
     """
 
     def emit(self, event: AuditEvent) -> None:
-        """Accept a single audit event and process or store it.
+        """Emit an audit event.
 
         Args:
-            event: The audit event to collect.
+            event (AuditEvent): IN: The event to record. OUT: Stored or forwarded.
         """
         ...
 
     def flush(self) -> None:
-        """Flush any buffered state to the collector's backing store.
-
-        Implementations that write to IO streams or network sockets
-        should ensure all pending data is written. In-memory collectors
-        may treat this as a no-op.
-        """
+        """Flush any buffered events to their final destination."""
         ...
 
 
 class InMemoryCollector:
-    """Thread-safe in-memory audit event buffer.
-
-    Events are stored in insertion order and can be retrieved, filtered,
-    or cleared at any time. All public methods acquire an internal
-    :class:`threading.Lock` to guarantee safe concurrent access.
-
-    Attributes:
-        _lock: Internal threading lock for thread-safe access.
-        _events: Internal list storing collected audit events.
-
-    Example:
-        ::
-
-            collector = InMemoryCollector()
-            collector.emit(TurnStartEvent(agent_id="a1", prompt_preview="Hi"))
-            assert len(collector) == 1
-            events = collector.get_events()
-            collector.clear()
-            assert len(collector) == 0
-    """
+    """Thread-safe in-memory collector for audit events."""
 
     def __init__(self) -> None:
-        """Initialize an empty in-memory collector with a threading lock."""
+        """Initialize the collector with an empty event list."""
         self._lock = threading.Lock()
         self._events: list[AuditEvent] = []
 
     def emit(self, event: AuditEvent) -> None:
-        """Append an audit event to the in-memory buffer.
-
-        The event is appended under the internal lock to ensure
-        thread-safe writes from concurrent producers.
+        """Append an event to the in-memory list.
 
         Args:
-            event: The audit event to store.
+            event (AuditEvent): IN: Event to store. OUT: Appended under lock.
         """
         with self._lock:
             self._events.append(event)
 
     def flush(self) -> None:
-        """No-op for in-memory storage.
-
-        Provided for protocol compatibility with :class:`AuditCollector`.
-        """
+        """No-op for in-memory storage."""
 
     def get_events(self) -> list[AuditEvent]:
-        """Return a shallow-copy snapshot of all collected events.
-
-        The returned list is a copy, so callers may mutate it without
-        affecting the internal buffer.
+        """Return a copy of all stored events.
 
         Returns:
-            list[AuditEvent]: A new list containing all events in
-                insertion order.
+            list[AuditEvent]: OUT: Snapshot of the event list.
         """
         with self._lock:
             return list(self._events)
 
     def get_events_by_type(self, event_type: str) -> list[AuditEvent]:
-        """Return events whose ``event_type`` matches the given string.
+        """Return events filtered by type.
 
         Args:
-            event_type: The event type tag to filter on
-                (e.g. ``"turn_start"``, ``"tool_call_attempt"``).
+            event_type (str): IN: Event type string to match. OUT: Used as filter.
 
         Returns:
-            list[AuditEvent]: A filtered list of matching events in
-                insertion order.
+            list[AuditEvent]: OUT: Matching events.
         """
         with self._lock:
             return [e for e in self._events if e.event_type == event_type]
 
     def clear(self) -> None:
-        """Discard all collected events from the internal buffer.
-
-        After this call, :meth:`get_events` will return an empty list
-        and ``len(self)`` will return ``0``.
-        """
+        """Remove all stored events."""
         with self._lock:
             self._events.clear()
 
     def __len__(self) -> int:
-        """Return the number of events currently in the buffer.
+        """Return the number of stored events.
 
         Returns:
-            int: The event count.
+            int: OUT: Event count.
         """
         with self._lock:
             return len(self._events)
 
 
 class JSONLSinkCollector:
-    """Writes each event as a single JSON line to a file or IO stream.
-
-    Each call to :meth:`emit` serializes the event via
-    :meth:`~xerxes.audit.events.AuditEvent.to_dict` and writes it as a
-    single newline-terminated JSON object. All writes are protected by
-    an internal :class:`threading.Lock`.
-
-    When a filesystem path is provided, the file is opened in **append**
-    mode so that existing audit logs are preserved across restarts.
-
-    Attributes:
-        _lock: Internal threading lock for thread-safe writes.
-        _owns_stream: Whether this collector owns (and should close) the
-            underlying IO stream.
-        _stream: The writable IO stream that receives JSON lines.
-
-    Args:
-        sink: Either a filesystem path (``str`` or ``pathlib.Path``) or
-            an already-open writable text IO stream. When a path is
-            given the file is opened in append mode with UTF-8 encoding.
-
-    Example:
-        Writing to a file::
-
-            collector = JSONLSinkCollector("/tmp/audit.jsonl")
-            collector.emit(some_event)
-            collector.flush()
-            collector.close()
-
-        Writing to an in-memory stream::
-
-            import io
-            buf = io.StringIO()
-            collector = JSONLSinkCollector(buf)
-            collector.emit(some_event)
-            print(buf.getvalue())
-    """
+    """Collector that appends events as JSON Lines to a file or stream."""
 
     def __init__(self, sink: str | Path | IO[str]) -> None:
-        """Initialize the JSONL sink collector.
+        """Initialize the JSONL collector.
 
         Args:
-            sink: A filesystem path (``str`` or ``pathlib.Path``) to
-                open in append mode, or an already-open writable text IO
-                stream.
+            sink (str | Path | IO[str]): IN: File path or open text stream. OUT:
+                If a path, opened in append mode and owned by this collector.
         """
         self._lock = threading.Lock()
         self._owns_stream = False
@@ -244,106 +125,61 @@ class JSONLSinkCollector:
             self._stream = sink
 
     def emit(self, event: AuditEvent) -> None:
-        """Serialize the event to a JSON line and write it to the stream.
-
-        Non-serializable values in the event dict are coerced to strings
-        via the ``default=str`` JSON encoder fallback.
+        """Serialize an event to JSON and append a line.
 
         Args:
-            event: The audit event to serialize and write.
+            event (AuditEvent): IN: Event to persist. OUT: Serialized and written.
         """
         line = json.dumps(event.to_dict(), default=str) + "\n"
         with self._lock:
             self._stream.write(line)
 
     def flush(self) -> None:
-        """Flush the underlying IO stream.
-
-        Ensures that all buffered data has been written to the stream's
-        backing store (e.g. the operating system's file buffer).
-        """
+        """Flush the underlying stream."""
         with self._lock:
             self._stream.flush()
 
     def close(self) -> None:
-        """Flush pending writes and close the stream if owned.
-
-        If this collector opened the stream itself (i.e. a path was
-        passed to the constructor), the stream is closed after flushing.
-        Externally-supplied streams are flushed but left open so that
-        the caller retains control of the stream lifecycle.
-        """
+        """Flush and close the underlying stream if owned."""
         self.flush()
         if self._owns_stream:
             self._stream.close()
 
 
 class CompositeCollector:
-    """Fans out every emitted event to multiple child collectors.
-
-    This collector acts as a multiplexer: each call to :meth:`emit`
-    forwards the event to every registered child, and :meth:`flush`
-    flushes all children in sequence. New children can be added at any
-    time via :meth:`add`.
-
-    Attributes:
-        _collectors: Internal list of child collectors that receive
-            forwarded events.
-
-    Args:
-        collectors: An optional initial sequence of child collectors.
-            When ``None`` (the default), the composite starts empty.
-
-    Example:
-        ::
-
-            mem = InMemoryCollector()
-            jsonl = JSONLSinkCollector("/tmp/audit.jsonl")
-            composite = CompositeCollector([mem, jsonl])
-            composite.emit(some_event)
-            assert len(mem) == 1
-    """
+    """Collector that forwards events to multiple child collectors."""
 
     def __init__(
         self,
         collectors: Sequence[AuditCollector | InMemoryCollector | JSONLSinkCollector | CompositeCollector] | None = None,
     ) -> None:
-        """Initialize the composite collector with optional children.
+        """Initialize the composite collector.
 
         Args:
-            collectors: An optional sequence of child collectors to
-                register immediately. Defaults to an empty list when
-                ``None``.
+            collectors (Sequence | None): IN: Child collectors. OUT: Stored for
+                event forwarding.
         """
         self._collectors: list[Any] = list(collectors or [])
 
     def add(self, collector: AuditCollector | InMemoryCollector | JSONLSinkCollector) -> None:
-        """Append a collector to the fan-out list.
+        """Add a child collector.
 
         Args:
-            collector: The child collector to register. It must
-                implement the :class:`AuditCollector` protocol (i.e.
-                provide ``emit`` and ``flush`` methods).
+            collector (AuditCollector | InMemoryCollector | JSONLSinkCollector):
+                IN: Collector to append. OUT: Added to the internal list.
         """
         self._collectors.append(collector)
 
     def emit(self, event: AuditEvent) -> None:
-        """Forward the event to every registered child collector.
-
-        Children are called in registration order. If a child raises an
-        exception, subsequent children will **not** receive the event.
+        """Forward an event to all child collectors.
 
         Args:
-            event: The audit event to broadcast.
+            event (AuditEvent): IN: Event to broadcast. OUT: Passed to each child.
         """
         for collector in self._collectors:
             collector.emit(event)
 
     def flush(self) -> None:
-        """Flush every registered child collector in registration order.
-
-        Each child's :meth:`flush` is called sequentially. If a child
-        raises an exception, subsequent children will **not** be flushed.
-        """
+        """Flush all child collectors."""
         for collector in self._collectors:
             collector.flush()

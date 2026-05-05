@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""DingTalk (钉钉) channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""DingTalk (Alibaba) bot adapter."""
+Supports inbound and outbound messaging via DingTalk webhooks.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class DingTalkChannel(WebhookChannel):
-    """DingTalk custom-bot adapter (incoming webhook + access_token send)."""
+    """Channel implementation for DingTalk."""
 
     name = "dingtalk"
 
@@ -22,19 +35,28 @@ class DingTalkChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a DingTalk custom-bot webhook.
+        """Initialize the DingTalk channel.
 
         Args:
-            webhook_url: Full webhook URL including the ``access_token``
-                query parameter provided by DingTalk.
-            http_client: Optional injected HTTP callable for tests.
+            webhook_url (str): IN: DingTalk incoming webhook URL.
+                OUT: stored for outbound message delivery.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.webhook_url = webhook_url
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Extract ``text.content`` / ``content``, sender id and conversation id."""
+        """Parse a DingTalk webhook payload into ``ChannelMessage``.
+
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
+        """
         data = parse_json_body(body)
         if not data:
             return []
@@ -52,6 +74,11 @@ class DingTalkChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST a ``msgtype=text`` envelope back to the bot webhook URL."""
+        """Send a text message via the DingTalk webhook.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``text`` is used
+                as the message content.
+        """
         body = {"msgtype": "text", "text": {"content": message.text}}
         http_post(self.webhook_url, json_body=body, http_client=self._http)

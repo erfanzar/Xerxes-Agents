@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Slack channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Slack Events API adapter."""
+Connects to Slack via bot token or OAuth for sending and receiving messages.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class SlackChannel(WebhookChannel):
-    """Slack adapter using Events API (``POST /events``) + chat.postMessage.
-
-    Provide a static bot token *or* an ``oauth_client`` plus
-    ``install_id`` to fetch a token dynamically.
-    """
+    """Channel implementation for Slack."""
 
     name = "slack"
 
@@ -28,14 +37,18 @@ class SlackChannel(WebhookChannel):
         install_id: str = "default",
         http_client: tp.Any = None,
     ) -> None:
-        """Configure Slack credentials (static token or OAuth lookup).
+        """Initialize the Slack channel.
 
         Args:
-            bot_token: Static ``xoxb-`` token; takes precedence when set.
-            oauth_client: :class:`OAuthClient` used when ``bot_token`` is
-                empty; fetched via ``get_valid_token(install_id)``.
-            install_id: Workspace identifier when using OAuth storage.
-            http_client: Optional injected HTTP callable for tests.
+            bot_token (str): IN: static Slack bot token. Defaults to empty.
+                OUT: used directly when provided.
+            oauth_client (Any): IN: optional ``OAuthClient``-like object with
+                ``get_valid_token(install_id)``. OUT: used to resolve a token
+                when ``bot_token`` is empty.
+            install_id (str): IN: installation identifier for OAuth lookup.
+                Defaults to "default".
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.bot_token = bot_token
@@ -44,7 +57,15 @@ class SlackChannel(WebhookChannel):
         self._http = http_client
 
     def _resolve_token(self) -> str:
-        """Return the Slack bot token, preferring the static value over OAuth."""
+        """Resolve the Slack bot token to use for API calls.
+
+        Returns:
+            str: OUT: static ``bot_token`` if available, otherwise the access
+            token from ``oauth_client``.
+
+        Raises:
+            RuntimeError: If no token can be resolved.
+        """
         if self.bot_token:
             return self.bot_token
         if self.oauth_client is not None:
@@ -54,11 +75,15 @@ class SlackChannel(WebhookChannel):
         raise RuntimeError("Slack bot token unavailable")
 
     def _parse_inbound(self, headers, body):
-        """Translate a Slack Events API envelope to a :class:`ChannelMessage`.
+        """Parse a Slack Events API payload into ``ChannelMessage``.
 
-        Drops ``url_verification`` challenges and bot-authored events, and
-        keeps only ``message``/``app_mention`` events. Retains ``team_id``
-        and ``thread_ts`` in metadata.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages. Empty for
+            URL verifications and bot messages.
         """
         data = parse_json_body(body)
         if data.get("type") == "url_verification":
@@ -81,7 +106,13 @@ class SlackChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Call ``chat.postMessage``; uses ``reply_to`` as ``thread_ts``."""
+        """Send a message to a Slack channel.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is the
+                target channel, ``text`` the content, and ``reply_to`` (if set)
+                the thread timestamp.
+        """
         body = {"channel": message.room_id, "text": message.text}
         if message.reply_to:
             body["thread_ts"] = message.reply_to

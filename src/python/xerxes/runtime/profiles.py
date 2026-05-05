@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Profiles module for Xerxes.
 
-
-"""Prompt profiles for controlling system prompt verbosity.
-
-Profiles allow sub-agents and internal delegation to receive compressed
-system prompts, reducing token usage while preserving safety-relevant
-context (sandbox, guardrails).
-"""
+Exports:
+    - PromptProfile
+    - PromptProfileConfig
+    - get_profile_config"""
 
 from __future__ import annotations
 
@@ -25,15 +25,9 @@ from enum import Enum
 
 
 class PromptProfile(Enum):
-    """System prompt verbosity profile.
+    """Prompt profile.
 
-    - FULL: all sections expanded (default, current behaviour).
-    - COMPACT: compressed for sub-agents; trims workspace/bootstrap
-      and caps skill instructions and tool lists.
-    - MINIMAL: bare-minimum for internal delegation; only sandbox,
-      guardrails, and a short tool list are included.
-    - NONE: OpenClaw-style identity-only prompt with no runtime
-      sections. Useful when the caller wants to supply all context.
+    Inherits from: Enum
     """
 
     FULL = "full"
@@ -44,12 +38,23 @@ class PromptProfile(Enum):
 
 @dataclass
 class PromptProfileConfig:
-    """Fine-grained control over which prompt sections are emitted.
+    """Prompt profile config.
 
-    Each flag controls whether the corresponding ``PromptContext``
-    section is populated.  Length caps (``max_skill_instructions_length``,
-    ``max_tools_listed``) truncate the content when set.
-    """
+    Attributes:
+        profile (PromptProfile): profile.
+        include_runtime_info (bool): include runtime info.
+        include_workspace_info (bool): include workspace info.
+        include_sandbox_info (bool): include sandbox info.
+        include_skills_index (bool): include skills index.
+        include_enabled_skills (bool): include enabled skills.
+        include_tools_list (bool): include tools list.
+        include_guardrails (bool): include guardrails.
+        include_bootstrap (bool): include bootstrap.
+        include_relevant_memories (bool): include relevant memories.
+        include_user_profile (bool): include user profile.
+        max_skill_instructions_length (int | None): max skill instructions length.
+        max_tools_listed (int | None): max tools listed.
+        max_memories_injected (int): max memories injected."""
 
     profile: PromptProfile = PromptProfile.FULL
     include_runtime_info: bool = True
@@ -68,18 +73,13 @@ class PromptProfileConfig:
 
 
 def get_profile_config(profile: PromptProfile) -> PromptProfileConfig:
-    """Return the canonical ``PromptProfileConfig`` for *profile*.
+    """Retrieve the profile config.
 
-    The returned configs are:
+    Args:
+        profile (PromptProfile): IN: profile. OUT: Consumed during execution.
+    Returns:
+        PromptProfileConfig: OUT: Result of the operation."""
 
-    - **FULL** -- everything enabled, no caps.
-    - **COMPACT** -- runtime info and safety sections kept; workspace
-      and bootstrap dropped; skill instructions capped at 500 chars;
-      tool list capped at 20 entries.
-    - **MINIMAL** -- only sandbox, guardrails, and a 10-entry tool list.
-    - **NONE** -- no runtime sections; the prompt builder returns only
-      the base identity line.
-    """
     if profile == PromptProfile.FULL:
         return PromptProfileConfig(profile=PromptProfile.FULL)
 

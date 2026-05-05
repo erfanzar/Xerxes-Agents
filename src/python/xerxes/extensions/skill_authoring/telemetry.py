@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,21 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Skill usage telemetry and statistics aggregation.
 
-"""Per-skill telemetry aggregator.
-
-Subscribes to :class:`SkillUsedEvent` / :class:`SkillFeedbackEvent` /
-:class:`SkillAuthoredEvent` and maintains rolling stats per skill:
-
-- Invocation count and success rate.
-- p50/p95 latency.
-- Last-failure reason and timestamp.
-- Net feedback score.
-
-Powers Epic 7's auto-deprecation and A/B testing logic.
+``SkillTelemetry`` consumes audit events and maintains per-skill success rates,
+duration percentiles, and feedback scores.
 """
 
 from __future__ import annotations
@@ -40,20 +34,26 @@ from ...audit.events import (
 
 @dataclass
 class SkillStats:
-    """Rolling per-skill statistics.
+    """Aggregated metrics for a single skill.
 
     Attributes:
-        skill_name: The skill being tracked.
-        version: Latest version observed.
-        invocations: Total :class:`SkillUsedEvent` count.
-        successes: Successful invocations.
-        failures: Failed invocations.
-        durations_ms: Sorted list of invocation latencies.
-        last_invoked: Timestamp of the most recent invocation.
-        last_failure_reason: ``outcome`` field of the most recent failure.
-        feedback_good: Count of ``"good"`` feedback events.
-        feedback_bad: Count of ``"bad"`` feedback events.
-        authored_at: Timestamp from the originating ``SkillAuthoredEvent``.
+        skill_name (str): IN: Skill identifier. OUT: Stored.
+        version (str): IN: Current version. OUT: Updated on use / author.
+        invocations (int): IN: Use counter. OUT: Incremented by ``record``.
+        successes (int): IN: Success counter. OUT: Incremented by ``record``.
+        failures (int): IN: Failure counter. OUT: Incremented by ``record``.
+        durations_ms (list[float]): IN: Empty initially. OUT: Kept sorted for
+            percentile queries.
+        last_invoked (datetime | None): IN: ``None`` initially. OUT: Updated
+            on use.
+        last_failure_reason (str): IN: Empty initially. OUT: Updated on
+            failure.
+        feedback_good (int): IN: Zero initially. OUT: Incremented on positive
+            feedback.
+        feedback_bad (int): IN: Zero initially. OUT: Incremented on negative
+            feedback.
+        authored_at (datetime | None): IN: ``None`` initially. OUT: Set on
+            author event.
     """
 
     skill_name: str
@@ -70,36 +70,57 @@ class SkillStats:
 
     @property
     def success_rate(self) -> float:
-        """Successes ÷ invocations (0.0 when never invoked)."""
+        """Return the ratio of successes to total invocations.
+
+        Returns:
+            float: OUT: 0.0 if no invocations, else ``successes / invocations``.
+        """
+
         if self.invocations == 0:
             return 0.0
         return self.successes / self.invocations
 
     @property
     def feedback_score(self) -> int:
-        """``feedback_good - feedback_bad``."""
+        """Return the net feedback score.
+
+        Returns:
+            int: OUT: ``feedback_good - feedback_bad``.
+        """
+
         return self.feedback_good - self.feedback_bad
 
     @property
     def p50_ms(self) -> float:
-        """Median latency in milliseconds (0.0 when no data)."""
+        """Return the 50th percentile duration in milliseconds.
+
+        Returns:
+            float: OUT: Median duration or 0.0 if no data.
+        """
+
         return self._percentile(0.5)
 
     @property
     def p95_ms(self) -> float:
-        """95th-percentile latency in milliseconds (0.0 when no data)."""
+        """Return the 95th percentile duration in milliseconds.
+
+        Returns:
+            float: OUT: 95th percentile duration or 0.0 if no data.
+        """
+
         return self._percentile(0.95)
 
     def _percentile(self, q: float) -> float:
-        """Return the *q*-quantile of the sorted ``durations_ms`` buffer.
+        """Compute a percentile from the sorted duration list.
 
         Args:
-            q: Quantile in ``[0.0, 1.0]`` (e.g. ``0.5`` for the median).
+            q (float): IN: Quantile in [0.0, 1.0]. OUT: Used to index the
+                sorted durations.
 
         Returns:
-            The sampled duration in milliseconds, or ``0.0`` when no
-            measurements have been recorded.
+            float: OUT: Duration at the requested percentile.
         """
+
         if not self.durations_ms:
             return 0.0
         idx = max(0, min(len(self.durations_ms) - 1, round(q * (len(self.durations_ms) - 1))))
@@ -107,28 +128,26 @@ class SkillStats:
 
 
 class SkillTelemetry:
-    """Thread-safe aggregator for skill-related audit events.
-
-    Wire it into the audit collector via :meth:`record`. Inspect via
-    :meth:`stats` (single skill) or :meth:`all_stats` (all known).
-
-    Example:
-        >>> tel = SkillTelemetry()
-        >>> tel.record(SkillUsedEvent(skill_name="a", outcome="success", duration_ms=12))
-        >>> assert tel.stats("a").invocations == 1
-    """
+    """Thread-safe aggregator of skill-related audit events."""
 
     def __init__(self) -> None:
-        """Initialise an empty telemetry registry."""
+        """Initialize empty stats and a threading lock."""
+
         self._stats: dict[str, SkillStats] = {}
         self._lock = threading.Lock()
 
     def record(self, event: tp.Any) -> None:
-        """Update stats for any of the three skill-related event types.
+        """Process an audit event and update internal metrics.
 
-        Other event types are ignored, so this can safely be wired into
-        a generic audit collector that fans out to multiple consumers.
+        Args:
+            event (tp.Any): IN: Expected to be a ``SkillUsedEvent``,
+                ``SkillFeedbackEvent``, or ``SkillAuthoredEvent``. OUT:
+                Dispatched to the appropriate handler.
+
+        Returns:
+            None: OUT: Internal stats are updated under ``_lock``.
         """
+
         with self._lock:
             if isinstance(event, SkillUsedEvent):
                 self._on_used(event)
@@ -138,14 +157,15 @@ class SkillTelemetry:
                 self._on_authored(event)
 
     def _entry(self, name: str) -> SkillStats:
-        """Return the :class:`SkillStats` for *name*, creating it on first use.
+        """Get or create a ``SkillStats`` record by name.
 
         Args:
-            name: Canonical skill name.
+            name (str): IN: Skill identifier. OUT: Lookup key.
 
         Returns:
-            The mutable stats record stored for this skill.
+            SkillStats: OUT: Existing or newly created stats object.
         """
+
         s = self._stats.get(name)
         if s is None:
             s = SkillStats(skill_name=name)
@@ -153,15 +173,16 @@ class SkillTelemetry:
         return s
 
     def _on_used(self, ev: SkillUsedEvent) -> None:
-        """Fold a :class:`SkillUsedEvent` into its stats entry.
-
-        Increments invocation counters, captures the outcome, updates the
-        latest version, and inserts the duration into the sorted
-        percentile buffer.
+        """Update stats from a ``SkillUsedEvent``.
 
         Args:
-            ev: The usage event to apply.
+            ev (SkillUsedEvent): IN: Usage event. OUT: Fields are copied into
+                the stats record.
+
+        Returns:
+            None: OUT: Stats are mutated.
         """
+
         s = self._entry(ev.skill_name)
         s.invocations += 1
         s.last_invoked = datetime.now()
@@ -177,11 +198,16 @@ class SkillTelemetry:
             bisect.insort(s.durations_ms, float(ev.duration_ms))
 
     def _on_feedback(self, ev: SkillFeedbackEvent) -> None:
-        """Fold a :class:`SkillFeedbackEvent` into the good/bad tally.
+        """Update stats from a ``SkillFeedbackEvent``.
 
         Args:
-            ev: Feedback event carrying a ``"good"`` or ``"bad"`` rating.
+            ev (SkillFeedbackEvent): IN: Feedback event. OUT: Rating is
+                applied to the stats record.
+
+        Returns:
+            None: OUT: Stats are mutated.
         """
+
         s = self._entry(ev.skill_name)
         if ev.rating == "good":
             s.feedback_good += 1
@@ -189,22 +215,41 @@ class SkillTelemetry:
             s.feedback_bad += 1
 
     def _on_authored(self, ev: SkillAuthoredEvent) -> None:
-        """Record a new authoring event, updating version and authored time.
+        """Update stats from a ``SkillAuthoredEvent``.
 
         Args:
-            ev: The authoring event emitted by the pipeline.
+            ev (SkillAuthoredEvent): IN: Authorship event. OUT: Version and
+                timestamp are updated.
+
+        Returns:
+            None: OUT: Stats are mutated.
         """
+
         s = self._entry(ev.skill_name)
         s.version = ev.version or s.version
         s.authored_at = datetime.now()
 
     def stats(self, skill_name: str) -> SkillStats | None:
-        """Return the stats entry for *skill_name* or ``None`` if unknown."""
+        """Retrieve stats for a single skill.
+
+        Args:
+            skill_name (str): IN: Skill identifier. OUT: Looked up under
+                ``_lock``.
+
+        Returns:
+            SkillStats | None: OUT: Stats snapshot or ``None``.
+        """
+
         with self._lock:
             return self._stats.get(skill_name)
 
     def all_stats(self) -> dict[str, SkillStats]:
-        """Return a snapshot mapping skill name → stats."""
+        """Return a snapshot of all skill stats.
+
+        Returns:
+            dict[str, SkillStats]: OUT: Copy of the internal mapping.
+        """
+
         with self._lock:
             return dict(self._stats)
 
@@ -214,19 +259,19 @@ class SkillTelemetry:
         min_invocations: int = 5,
         max_success_rate: float = 0.4,
     ) -> list[str]:
-        """Return skill names that look like good auto-deprecation candidates.
-
-        Heuristic: at least ``min_invocations`` recorded uses with a
-        success rate at or below ``max_success_rate``.
+        """List skill names that fall below the success-rate threshold.
 
         Args:
-            min_invocations: Required minimum invocation count to avoid
-                evaluating skills with insufficient data.
-            max_success_rate: Skills at or below this rate are flagged.
+            min_invocations (int): IN: Minimum sample size. OUT: Filters out
+                rarely-used skills.
+            max_success_rate (float): IN: Success rate ceiling. OUT: Skills at
+                or below this rate are flagged.
 
         Returns:
-            List of skill names sorted by ascending success rate.
+            list[str]: OUT: Flagged skill names sorted by success rate
+            ascending.
         """
+
         with self._lock:
             flagged = [
                 (s.success_rate, s.skill_name)

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,12 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""User memory module for Xerxes.
 
-
-"""User-specific memory for personalization."""
+Exports:
+    - UserMemory"""
 
 from typing import Any
 
@@ -20,43 +23,15 @@ from .entity_memory import EntityMemory
 
 
 class UserMemory:
-    """User-specific memory manager with per-user isolation.
-
-    Maintains separate :class:`ContextualMemory` and :class:`EntityMemory`
-    instances for each user, along with per-user preference dictionaries.
-    This allows agents to personalise responses and retain context across
-    sessions on a per-user basis.
-
-    Attributes:
-        storage: Optional :class:`~xerxes.memory.storage.MemoryStorage`
-            backend used for persisting user preferences and passed to
-            per-user memory instances.
-        user_memories: Dictionary mapping user IDs to their
-            :class:`ContextualMemory` instances.
-        user_entities: Dictionary mapping user IDs to their
-            :class:`EntityMemory` instances.
-        user_preferences: Dictionary mapping user IDs to preference
-            dictionaries (response style, verbosity, language, etc.).
-
-    Example:
-        >>> from xerxes.memory import UserMemory
-        >>> um = UserMemory()
-        >>> um.save_memory("user-1", "Prefers dark mode")
-        >>> um.update_user_preferences("user-1", {"theme": "dark"})
-        >>> ctx = um.get_user_context("user-1")
-    """
+    """User memory."""
 
     def __init__(self, storage: Any | None = None) -> None:
-        """Initialize user memory manager with optional persistence.
-
-        On initialisation, attempts to load previously persisted user
-        preferences from the storage backend.
+        """Initialize the instance.
 
         Args:
-            storage: Optional :class:`~xerxes.memory.storage.MemoryStorage`
-                backend for persisting user preference data and for
-                providing long-term storage to per-user memory instances.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution."""
+
         self.storage = storage
         self.user_memories: dict[str, ContextualMemory] = {}
         self.user_entities: dict[str, EntityMemory] = {}
@@ -64,31 +39,23 @@ class UserMemory:
         self._load_users()
 
     def _load_users(self) -> None:
-        """Load persisted user preference data from storage on initialisation.
+        """Internal helper to load users.
 
-        Checks for a ``_user_preferences`` key in the storage backend and,
-        if found, restores the :attr:`user_preferences` dictionary from it.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if self.storage and self.storage.exists("_user_preferences"):
             self.user_preferences = self.storage.load("_user_preferences") or {}
 
     def get_or_create_user_memory(self, user_id: str) -> ContextualMemory:
-        """Get or lazily create the memory subsystem for a user.
-
-        On first call for a given ``user_id``, creates:
-
-        - A :class:`ContextualMemory` (using :attr:`storage` for long-term).
-        - An :class:`EntityMemory` (using :attr:`storage` for persistence).
-        - A default preferences dictionary (see :meth:`_get_default_preferences`).
-
-        Subsequent calls return the existing :class:`ContextualMemory`.
+        """Retrieve the or create user memory.
 
         Args:
-            user_id: Unique identifier for the user.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
         Returns:
-            The :class:`ContextualMemory` instance associated with the user.
-        """
+            ContextualMemory: OUT: Result of the operation."""
+
         if user_id not in self.user_memories:
             self.user_memories[user_id] = ContextualMemory(long_term_storage=self.storage)
             self.user_entities[user_id] = EntityMemory(storage=self.storage)
@@ -98,26 +65,17 @@ class UserMemory:
         return self.user_memories[user_id]
 
     def save_memory(self, user_id: str, content: str, metadata: dict[str, Any] | None = None, **kwargs):
-        """Save a memory item for a specific user.
-
-        Stores the content in both the user's :class:`ContextualMemory`
-        (for context-aware retrieval and promotion) and
-        :class:`EntityMemory` (for entity tracking).
+        """Save memory.
 
         Args:
-            user_id: Unique identifier for the user. If the user does not
-                yet exist, their memory subsystem is created automatically.
-            content: Text content to store.
-            metadata: Optional key-value metadata. A ``"user_id"`` key is
-                added automatically.
-            **kwargs: Additional keyword arguments forwarded to the
-                underlying ``save`` methods (e.g. ``importance``,
-                ``agent_id``).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
+            content (str): IN: content. OUT: Consumed during execution.
+            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The :class:`~xerxes.memory.base.MemoryItem` created by the
-            contextual memory store.
-        """
+            Any: OUT: Result of the operation."""
+
         memory = self.get_or_create_user_memory(user_id)
         metadata = metadata or {}
         metadata["user_id"] = user_id
@@ -131,44 +89,29 @@ class UserMemory:
         return item
 
     def search_user_memory(self, user_id: str, query: str, limit: int = 10, **kwargs) -> list:
-        """Search memories for a specific user.
-
-        Delegates to the user's :class:`ContextualMemory` search, which
-        queries both short-term and long-term stores.
+        """Search for user memory.
 
         Args:
-            user_id: Unique identifier for the user. If the user does not
-                yet exist, their memory subsystem is created automatically.
-            query: Natural-language or keyword search query string.
-            limit: Maximum number of results to return.
-            **kwargs: Additional keyword arguments forwarded to
-                :meth:`ContextualMemory.search`.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
+            query (str): IN: query. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            List of matching :class:`~xerxes.memory.base.MemoryItem`
-            instances sorted by relevance.
-        """
+            list: OUT: Result of the operation."""
+
         memory = self.get_or_create_user_memory(user_id)
         return memory.search(query=query, limit=limit, **kwargs)
 
     def get_user_context(self, user_id: str) -> str:
-        """Build a formatted context string for a user.
-
-        Combines three sections into a single string separated by blank
-        lines:
-
-        1. **User preferences** -- the current preference dictionary.
-        2. **Context summary** -- from the user's :class:`ContextualMemory`.
-        3. **Known entities** -- up to 10 entity names from the user's
-           :class:`EntityMemory`.
+        """Retrieve the user context.
 
         Args:
-            user_id: Unique identifier for the user.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
         Returns:
-            Multi-line context string suitable for inclusion in an agent's
-            system prompt or context window.
-        """
+            str: OUT: Result of the operation."""
+
         memory = self.get_or_create_user_memory(user_id)
         entity_mem = self.user_entities.get(user_id)
 
@@ -187,17 +130,13 @@ class UserMemory:
         return "\n\n".join(context_parts)
 
     def update_user_preferences(self, user_id: str, preferences: dict[str, Any]) -> None:
-        """Update user preferences by merging new values.
-
-        Existing keys are overwritten, new keys are added, and the full
-        preference dictionary is persisted to the storage backend.
+        """Update user preferences.
 
         Args:
-            user_id: Unique identifier for the user. If no preferences
-                exist yet, defaults are initialised first.
-            preferences: Dictionary of preference keys and their new
-                values to merge into the existing preferences.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
+            preferences (dict[str, Any]): IN: preferences. OUT: Consumed during execution."""
+
         if user_id not in self.user_preferences:
             self.user_preferences[user_id] = self._get_default_preferences()
 
@@ -205,33 +144,25 @@ class UserMemory:
         self._save_preferences()
 
     def get_user_preferences(self, user_id: str) -> dict[str, Any]:
-        """Retrieve the preferences for a user.
+        """Retrieve the user preferences.
 
         Args:
-            user_id: Unique identifier for the user.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
         Returns:
-            Dictionary of user preferences. Returns a fresh set of default
-            preferences if the user has not been registered yet.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         return self.user_preferences.get(user_id, self._get_default_preferences())
 
     def get_user_statistics(self, user_id: str) -> dict[str, Any]:
-        """Compute aggregate statistics for a user's memory subsystem.
+        """Retrieve the user statistics.
 
         Args:
-            user_id: Unique identifier for the user.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution.
         Returns:
-            Dictionary with keys:
-                - ``"user_id"``: the queried user ID.
-                - ``"total_memories"``: combined short-term and long-term count.
-                - ``"short_term_memories"``: short-term item count (if available).
-                - ``"long_term_memories"``: long-term item count (if available).
-                - ``"entities_known"``: number of tracked entities.
-                - ``"relationships"``: total relationship pair count.
-                - ``"preferences"``: the user's current preference dictionary.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         stats = {
             "user_id": user_id,
             "total_memories": 0,
@@ -253,17 +184,12 @@ class UserMemory:
         return stats
 
     def clear_user_memory(self, user_id: str) -> None:
-        """Clear all data for a user and remove them from the manager.
-
-        Clears and deletes the user's :class:`ContextualMemory`,
-        :class:`EntityMemory`, and preference dictionary. After this call
-        the user is treated as if they never existed; a subsequent call
-        to :meth:`get_or_create_user_memory` will re-initialise them with
-        fresh defaults.
+        """Clear user memory.
 
         Args:
-            user_id: Unique identifier for the user to clear.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            user_id (str): IN: user id. OUT: Consumed during execution."""
+
         if user_id in self.user_memories:
             self.user_memories[user_id].clear()
             del self.user_memories[user_id]
@@ -277,18 +203,13 @@ class UserMemory:
             self._save_preferences()
 
     def _get_default_preferences(self) -> dict[str, Any]:
-        """Build the default user preferences dictionary.
+        """Internal helper to get default preferences.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary with default values:
-                - ``"response_style"``: ``"balanced"``
-                - ``"verbosity"``: ``"normal"``
-                - ``"technical_level"``: ``"intermediate"``
-                - ``"language"``: ``"en"``
-                - ``"timezone"``: ``"UTC"``
-                - ``"memory_enabled"``: ``True``
-                - ``"max_context_items"``: ``10``
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         return {
             "response_style": "balanced",
             "verbosity": "normal",
@@ -300,11 +221,10 @@ class UserMemory:
         }
 
     def _save_preferences(self) -> None:
-        """Persist the full user preferences dictionary to storage.
+        """Internal helper to save preferences.
 
-        Writes the :attr:`user_preferences` mapping under the
-        ``_user_preferences`` key. No-op if no storage backend is
-        configured.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if self.storage:
             self.storage.save("_user_preferences", self.user_preferences)

@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Discord channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Discord adapter — Interactions webhook + REST channel message API."""
+Connects to Discord via bot token for sending and receiving messages.
+"""
 
 from __future__ import annotations
 
@@ -12,30 +25,32 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class DiscordChannel(WebhookChannel):
-    """Discord adapter via the Interactions endpoint URL + REST send.
-
-    Inbound: ``POST /interactions`` (or message-create webhook).
-    Outbound: ``POST https://discord.com/api/v10/channels/<id>/messages``.
-    """
+    """Channel implementation for Discord."""
 
     name = "discord"
 
     def __init__(self, bot_token: str, *, http_client: tp.Any = None) -> None:
-        """Bind the adapter to a Discord bot.
+        """Initialize the Discord channel.
 
         Args:
-            bot_token: Bot token used as ``Authorization: Bot <token>``.
-            http_client: Optional injected HTTP callable for tests.
+            bot_token (str): IN: Discord bot authentication token.
+                OUT: stored for authorizing API requests.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.bot_token = bot_token
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Translate a Discord message-create / interaction payload.
+        """Parse a Discord webhook payload into ``ChannelMessage``.
 
-        Reads ``content``, ``author.id``, ``channel_id`` and ``id`` from
-        either a bare message object or an interaction envelope.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -55,7 +70,13 @@ class DiscordChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST ``message.text`` to the channel, threading via ``message_reference`` when set."""
+        """Send a message to a Discord channel.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is the
+                target channel ID, ``text`` is the content, and ``reply_to``
+                (if set) becomes a message reference.
+        """
         url = f"https://discord.com/api/v10/channels/{message.room_id}/messages"
         body = {"content": message.text}
         if message.reply_to:

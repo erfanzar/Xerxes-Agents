@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""BlueBubbles channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""BlueBubbles iMessage bridge adapter."""
+Connects to a self-hosted BlueBubbles server for iMessage bridging.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class BlueBubblesChannel(WebhookChannel):
-    """BlueBubbles server adapter (iMessage / SMS via macOS bridge).
-
-    Inbound: BlueBubbles server POSTs ``new-message`` events.
-    Outbound: ``POST {server}/api/v1/message/text?password=...``.
-    """
+    """Channel implementation for BlueBubbles iMessage bridge."""
 
     name = "bluebubbles"
 
@@ -27,12 +36,15 @@ class BlueBubblesChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a BlueBubbles server.
+        """Initialize the BlueBubbles channel.
 
         Args:
-            server_url: Base URL of the BlueBubbles API (trailing ``/`` ok).
-            password: Shared password used as a query-string credential.
-            http_client: Optional injected HTTP callable for tests.
+            server_url (str): IN: base URL of the BlueBubbles server.
+                OUT: stored with trailing slash removed.
+            password (str): IN: server API password.
+                OUT: stored for authenticating outbound requests.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.server_url = server_url.rstrip("/")
@@ -40,10 +52,14 @@ class BlueBubblesChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Convert a BlueBubbles ``new-message`` envelope into messages.
+        """Parse a BlueBubbles webhook payload into ``ChannelMessage``.
 
-        Reads ``text`` / ``body`` as the content, ``chats[0].guid`` as the
-        conversation id, and ``handle.address`` as the sender.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -66,7 +82,12 @@ class BlueBubblesChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST ``message`` to ``/api/v1/message/text`` using the private-api method."""
+        """Send a text message via the BlueBubbles API.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is used
+                as the target chat GUID and ``text`` as the message body.
+        """
         url = f"{self.server_url}/api/v1/message/text?password={self.password}"
         body = {"chatGuid": message.room_id, "message": message.text, "method": "private-api"}
         http_post(url, json_body=body, http_client=self._http)

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,18 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Browser module for Xerxes.
 
-
-"""Playwright-backed browser state manager for operator tooling.
-
-Provides :class:`BrowserManager`, which lazily initialises a Chromium
-browser via Playwright and manages a pool of tracked pages.  Each page
-is represented by a lightweight :class:`BrowserPageState` dataclass that
-records the page reference ID, current URL, title, and extracted links.
-"""
+Exports:
+    - BrowserPageState
+    - BrowserManager"""
 
 from __future__ import annotations
 
@@ -31,16 +29,13 @@ from pathlib import Path
 
 @dataclass
 class BrowserPageState:
-    """Tracked state for an opened browser page.
+    """Browser page state.
 
     Attributes:
-        ref_id: Unique reference identifier used to address this page
-            across operator tool calls.
-        url: The last-known URL loaded by this page.
-        title: The page title extracted after navigation.
-        link_map: Mapping of numeric link IDs to their ``href`` values,
-            populated after each page load or refresh.
-    """
+        ref_id (str): ref id.
+        url (str): url.
+        title (str): title.
+        link_map (dict[int, str]): link map."""
 
     ref_id: str
     url: str
@@ -49,33 +44,16 @@ class BrowserPageState:
 
 
 class BrowserManager:
-    """Manage a shared Playwright browser and tracked pages.
-
-    The manager lazily starts a Chromium browser on the first call that
-    requires a live page.  All pages opened through the manager are
-    tracked by a generated ``ref_id`` so that subsequent operator tool
-    calls (click, find, screenshot) can address them without re-opening.
-
-    Attributes:
-        _headless: Whether the browser runs in headless mode.
-        _screenshot_dir: Optional directory for screenshot output.
-        _playwright: Playwright instance, created lazily.
-        _browser: Chromium browser instance, created lazily.
-        _context: Default browser context.
-        _pages: Mapping of ``ref_id`` to live Playwright page objects.
-        _page_state: Mapping of ``ref_id`` to :class:`BrowserPageState`.
-    """
+    """Browser manager."""
 
     def __init__(self, *, headless: bool = True, screenshot_dir: str | None = None) -> None:
-        """Initialise the browser manager.
+        """Initialize the instance.
 
         Args:
-            headless: If ``True``, the Chromium browser is launched
-                without a visible window.  Defaults to ``True``.
-            screenshot_dir: Optional directory path where screenshots
-                are saved.  When ``None``, a temporary directory is
-                created per screenshot call.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            headless (bool, optional): IN: headless. Defaults to True. OUT: Consumed during execution.
+            screenshot_dir (str | None, optional): IN: screenshot dir. Defaults to None. OUT: Consumed during execution."""
+
         self._headless = headless
         self._screenshot_dir = screenshot_dir
         self._playwright: tp.Any = None
@@ -85,31 +63,16 @@ class BrowserManager:
         self._page_state: dict[str, BrowserPageState] = {}
 
     async def open(self, *, url: str | None = None, ref_id: str | None = None, wait_ms: int = 500) -> dict[str, tp.Any]:
-        """Open a URL or inspect an existing tracked page.
-
-        Either ``url`` or ``ref_id`` must be provided.  When ``url`` is
-        given, a new page is created (or an existing page navigated) and
-        its metadata is returned.  When only ``ref_id`` is given, the
-        currently loaded page is re-inspected.
+        """Asynchronously Open.
 
         Args:
-            url: URL to navigate to.  A new tracked page is created when
-                no ``ref_id`` is supplied alongside the URL.
-            ref_id: Reference identifier of a previously opened page to
-                re-inspect without navigating.
-            wait_ms: Milliseconds to wait after navigation before
-                extracting page metadata.  Defaults to ``500``.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            url (str | None, optional): IN: url. Defaults to None. OUT: Consumed during execution.
+            ref_id (str | None, optional): IN: ref id. Defaults to None. OUT: Consumed during execution.
+            wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
         Returns:
-            A dictionary containing the page ``ref_id``, current URL,
-            title, a truncated content preview (first 2000 characters),
-            and a list of extracted links with numeric IDs.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If neither ``url`` nor ``ref_id`` is provided,
-                or if the given ``ref_id`` does not match any tracked
-                page.
-        """
         page, state = await self._resolve_page(url=url, ref_id=ref_id)
         if url is not None:
             await page.goto(url, wait_until="domcontentloaded")
@@ -135,31 +98,18 @@ class BrowserManager:
         text: str | None = None,
         wait_ms: int = 500,
     ) -> dict[str, tp.Any]:
-        """Click an element on a tracked page.
-
-        Exactly one of ``link_id``, ``selector``, or ``text`` must be
-        provided to identify the target element.
+        """Asynchronously Click.
 
         Args:
-            ref_id: Reference identifier of the tracked page.
-            link_id: Numeric link identifier from the page's
-                :attr:`BrowserPageState.link_map`.  When provided, the
-                browser navigates to the corresponding ``href``.
-            selector: CSS selector of the element to click.
-            text: Visible text used to locate the element via
-                Playwright's ``get_by_text``.
-            wait_ms: Milliseconds to wait after the click before
-                refreshing the page metadata.  Defaults to ``500``.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            ref_id (str): IN: ref id. OUT: Consumed during execution.
+            link_id (int | None, optional): IN: link id. Defaults to None. OUT: Consumed during execution.
+            selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
+            text (str | None, optional): IN: text. Defaults to None. OUT: Consumed during execution.
+            wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
         Returns:
-            The refreshed page metadata dictionary (same shape as
-            :meth:`open`).
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the ``ref_id`` is unknown, the ``link_id``
-                is not found, or none of the three target parameters
-                is provided.
-        """
         page = self._require_page(ref_id)
         state = self._page_state[ref_id]
         if link_id is not None:
@@ -177,24 +127,15 @@ class BrowserManager:
         return await self.open(ref_id=ref_id)
 
     async def find(self, ref_id: str, pattern: str) -> dict[str, tp.Any]:
-        """Find text matches on a tracked page.
-
-        Performs a case-insensitive regular expression search across the
-        visible body text of the referenced page.
+        """Asynchronously Find.
 
         Args:
-            ref_id: Reference identifier of the tracked page to search.
-            pattern: Regular expression pattern to match against the
-                page's visible text content.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            ref_id (str): IN: ref id. OUT: Consumed during execution.
+            pattern (str): IN: pattern. OUT: Consumed during execution.
         Returns:
-            A dictionary with the ``ref_id``, the ``pattern`` used, the
-            total ``match_count``, and up to 20 matching strings.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the ``ref_id`` does not correspond to a
-                tracked page.
-        """
         page = self._require_page(ref_id)
         body_text = await page.locator("body").inner_text()
         regex = re.compile(pattern, re.IGNORECASE)
@@ -207,63 +148,44 @@ class BrowserManager:
         }
 
     async def screenshot(self, ref_id: str, *, path: str | None = None, full_page: bool = True) -> dict[str, tp.Any]:
-        """Capture a screenshot of a tracked page.
+        """Asynchronously Screenshot.
 
         Args:
-            ref_id: Reference identifier of the tracked page to
-                capture.
-            path: Optional file path for the screenshot.  If omitted, a
-                default path inside the configured screenshot directory
-                (or a temporary directory) is used.
-            full_page: When ``True``, capture the entire scrollable page
-                instead of just the visible viewport.  Defaults to
-                ``True``.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            ref_id (str): IN: ref id. OUT: Consumed during execution.
+            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
+            full_page (bool, optional): IN: full page. Defaults to True. OUT: Consumed during execution.
         Returns:
-            A dictionary containing the ``ref_id``, saved file ``path``,
-            and the ``full_page`` flag.
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the ``ref_id`` is not tracked.
-        """
         page = self._require_page(ref_id)
         screenshot_path = path or self._default_screenshot_path(ref_id)
         await page.screenshot(path=screenshot_path, full_page=full_page)
         return {"ref_id": ref_id, "path": screenshot_path, "full_page": full_page}
 
     def list_pages(self) -> list[dict[str, str]]:
-        """Return summaries for tracked pages.
+        """List pages.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A list of dictionaries, each containing the ``ref_id``,
-            ``url``, and ``title`` of a tracked page, sorted by
-            ``ref_id``.
-        """
+            list[dict[str, str]]: OUT: Result of the operation."""
+
         return [
             {"ref_id": ref_id, "url": state.url, "title": state.title}
             for ref_id, state in sorted(self._page_state.items())
         ]
 
     async def _resolve_page(self, *, url: str | None, ref_id: str | None) -> tuple[tp.Any, BrowserPageState]:
-        """Resolve or create a Playwright page and its tracking state.
-
-        If ``ref_id`` is given, the existing page and state are returned.
-        If only ``url`` is given, a new page is created in the shared
-        browser context.
+        """Asynchronously Internal helper to resolve page.
 
         Args:
-            url: URL for which a new page should be created when no
-                ``ref_id`` is provided.
-            ref_id: Reference identifier of an existing tracked page.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            url (str | None): IN: url. OUT: Consumed during execution.
+            ref_id (str | None): IN: ref id. OUT: Consumed during execution.
         Returns:
-            A tuple of ``(page, state)`` where *page* is the Playwright
-            page object and *state* is the :class:`BrowserPageState`.
+            tuple[tp.Any, BrowserPageState]: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If neither ``url`` nor ``ref_id`` is provided,
-                or the ``ref_id`` is unknown.
-        """
         await self._ensure_browser()
         if ref_id is not None:
             return self._require_page(ref_id), self._page_state[ref_id]
@@ -277,31 +199,24 @@ class BrowserManager:
         return page, state
 
     def _require_page(self, ref_id: str) -> tp.Any:
-        """Return a tracked Playwright page or raise.
+        """Internal helper to require page.
 
         Args:
-            ref_id: Reference identifier of the page to retrieve.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            ref_id (str): IN: ref id. OUT: Consumed during execution.
         Returns:
-            The live Playwright page object.
+            tp.Any: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If no page with the given ``ref_id`` exists.
-        """
         if ref_id not in self._pages:
             raise ValueError(f"Browser page not found: {ref_id}")
         return self._pages[ref_id]
 
     async def _ensure_browser(self) -> None:
-        """Lazily start the Playwright Chromium browser.
+        """Asynchronously Internal helper to ensure browser.
 
-        Called automatically before any page operation.  If the browser
-        is already running this method is a no-op.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
 
-        Raises:
-            RuntimeError: If the ``playwright`` package is not
-                installed.
-        """
         if self._browser is not None:
             return
         try:
@@ -314,31 +229,26 @@ class BrowserManager:
         self._context = await self._browser.new_context()
 
     async def _extract_link_map(self, page: tp.Any) -> dict[int, str]:
-        """Extract an ordered mapping of link hrefs from the page.
+        """Asynchronously Internal helper to extract link map.
 
         Args:
-            page: Playwright page object to inspect.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            page (tp.Any): IN: page. OUT: Consumed during execution.
         Returns:
-            A dictionary mapping sequential integer IDs to the ``href``
-            values of all ``<a>`` elements found on the page.
-        """
+            dict[int, str]: OUT: Result of the operation."""
+
         links = await page.locator("a[href]").evaluate_all("(els) => els.map((el) => el.href).filter(Boolean)")
         return {index: href for index, href in enumerate(links)}
 
     def _default_screenshot_path(self, ref_id: str) -> str:
-        """Compute a default screenshot file path.
-
-        Uses the configured :attr:`_screenshot_dir` when set, otherwise
-        creates a temporary directory.
+        """Internal helper to default screenshot path.
 
         Args:
-            ref_id: Page reference identifier used to construct the
-                filename.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            ref_id (str): IN: ref id. OUT: Consumed during execution.
         Returns:
-            Absolute path string for the screenshot file.
-        """
+            str: OUT: Result of the operation."""
+
         if self._screenshot_dir:
             directory = Path(self._screenshot_dir)
             directory.mkdir(parents=True, exist_ok=True)

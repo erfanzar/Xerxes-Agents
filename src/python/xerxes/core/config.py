@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,28 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Xerxes configuration models and loaders.
 
-
-"""Configuration management system for Xerxes.
-
-This module provides a comprehensive configuration management system
-for the Xerxes framework. It includes:
-- Pydantic-based configuration models with validation
-- Support for JSON and YAML configuration files
-- Environment variable configuration loading
-- Configuration merging and persistence
-- Separate config sections for executor, memory, security, LLM, logging, and observability
-
-The configuration system follows a hierarchical structure with sensible
-defaults and extensive validation to ensure configuration integrity.
-
-Example:
-    >>> config = XerxesConfig.from_file("config.yaml")
-    >>> config.llm.model = "gpt-4"
-    >>> config.to_file("updated_config.yaml")
+Defines Pydantic models for all configurable subsystems and helpers to load
+configuration from files (YAML/JSON), environment variables, or defaults.
 """
 
 import json
@@ -48,11 +35,7 @@ except ImportError:
 
 
 class LogLevel(StrEnum):
-    """Enumeration of available logging levels.
-
-    Standard Python logging levels for controlling
-    log verbosity throughout the application.
-    """
+    """Supported logging levels."""
 
     DEBUG = "DEBUG"
     INFO = "INFO"
@@ -62,11 +45,7 @@ class LogLevel(StrEnum):
 
 
 class EnvironmentType(StrEnum):
-    """Enumeration of deployment environment types.
-
-    Used to configure different behaviors and settings
-    based on the deployment environment.
-    """
+    """Deployment environment categories."""
 
     DEVELOPMENT = "development"
     TESTING = "testing"
@@ -75,11 +54,7 @@ class EnvironmentType(StrEnum):
 
 
 class LLMProvider(StrEnum):
-    """Enumeration of supported LLM provider backends.
-
-    Defines the available LLM providers that can be configured
-    for use with Xerxes agents.
-    """
+    """Supported LLM provider identifiers."""
 
     OPENAI = "openai"
     GEMINI = "gemini"
@@ -90,20 +65,7 @@ class LLMProvider(StrEnum):
 
 
 class ExecutorConfig(BaseModel):
-    """Configuration for function execution behavior.
-
-    Controls timeout, retry, concurrency, and caching settings
-    for function/tool execution within agents.
-
-    Attributes:
-        default_timeout: Default timeout in seconds for function execution.
-        max_retries: Maximum number of retry attempts on failure.
-        retry_delay: Delay in seconds between retry attempts.
-        max_concurrent_executions: Maximum concurrent function executions.
-        enable_metrics: Whether to collect execution metrics.
-        enable_caching: Whether to cache function results.
-        cache_ttl: Cache time-to-live in seconds.
-    """
+    """Configuration for the function execution subsystem."""
 
     default_timeout: float = Field(default=30.0, ge=1.0, le=600.0)
     max_retries: int = Field(default=3, ge=0, le=10)
@@ -115,22 +77,7 @@ class ExecutorConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for the memory management system.
-
-    Controls memory capacity, persistence, and consolidation
-    settings for agent memory systems.
-
-    Attributes:
-        max_short_term: Maximum short-term memory entries.
-        max_working: Maximum working memory entries.
-        max_long_term: Maximum long-term memory entries.
-        enable_embeddings: Whether to use embeddings for memory.
-        embedding_model: Model to use for embeddings.
-        enable_persistence: Whether to persist memory to disk.
-        persistence_path: Path for memory persistence.
-        auto_consolidate: Whether to automatically consolidate memories.
-        consolidation_threshold: Threshold for memory consolidation.
-    """
+    """Configuration for the memory subsystem."""
 
     max_short_term: int = Field(default=10, ge=1, le=1000)
     max_working: int = Field(default=5, ge=1, le=100)
@@ -144,25 +91,7 @@ class MemoryConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    """Security and safety configuration.
-
-    Controls input validation, output sanitization, rate limiting,
-    and authentication settings for secure operation.
-
-    Attributes:
-        enable_input_validation: Whether to validate inputs.
-        enable_output_sanitization: Whether to sanitize outputs.
-        max_input_length: Maximum allowed input length.
-        max_output_length: Maximum allowed output length.
-        allowed_functions: Whitelist of allowed function names.
-        blocked_functions: Blacklist of blocked function names.
-        enable_rate_limiting: Whether to enable rate limiting.
-        rate_limit_per_minute: Maximum requests per minute.
-        rate_limit_per_hour: Maximum requests per hour.
-        enable_authentication: Whether to require authentication.
-        api_key: API key for authentication.
-        api_key_env_var: Environment variable for API key.
-    """
+    """Configuration for security and rate-limiting policies."""
 
     enable_input_validation: bool = True
     enable_output_sanitization: bool = True
@@ -179,29 +108,7 @@ class SecurityConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """Configuration for LLM provider and model settings.
-
-    Controls LLM provider selection, model parameters, and
-    generation settings for agent responses.
-
-    Attributes:
-        provider: The LLM provider to use.
-        model: Model identifier (e.g., 'gpt-4', 'claude-3').
-        api_key: API key for the provider.
-        api_key_env_var: Environment variable for API key.
-        base_url: Optional custom base URL for API.
-        temperature: Sampling temperature (0.0-2.0).
-        max_tokens: Maximum tokens to generate.
-        top_p: Nucleus sampling parameter.
-        top_k: Top-k sampling parameter.
-        frequency_penalty: Frequency penalty for repetition.
-        presence_penalty: Presence penalty for repetition.
-        repetition_penalty: Repetition penalty multiplier.
-        timeout: Request timeout in seconds.
-        max_retries: Maximum retry attempts.
-        enable_streaming: Whether to enable streaming responses.
-        enable_caching: Whether to cache LLM responses.
-    """
+    """Configuration for LLM client interactions."""
 
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4"
@@ -222,14 +129,14 @@ class LLMConfig(BaseModel):
 
     @field_validator("api_key")
     def validate_api_key(cls, v, info):
-        """Validate or load API key from environment.
+        """Load API key from environment if not explicitly provided.
 
         Args:
-            v: The API key value.
-            info: Validation context information.
+            v (str | None): IN: explicit API key value.
+            info: Pydantic validation info.
 
         Returns:
-            The validated API key, loaded from environment if not provided.
+            str | None: OUT: resolved API key.
         """
         if v is None:
             env_var = info.data.get("api_key_env_var", "OPENAI_API_KEY")
@@ -238,21 +145,7 @@ class LLMConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
-    """Configuration for logging behavior.
-
-    Controls log formatting, output destinations, and rotation
-    settings for application logging.
-
-    Attributes:
-        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
-        format: Log message format string.
-        file_path: Path to log file.
-        enable_console: Whether to log to console.
-        enable_file: Whether to log to file.
-        max_file_size: Maximum log file size in bytes.
-        backup_count: Number of backup log files to keep.
-        enable_json_format: Whether to use JSON log format.
-    """
+    """Configuration for application logging."""
 
     level: LogLevel = LogLevel.INFO
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -265,23 +158,7 @@ class LoggingConfig(BaseModel):
 
 
 class ObservabilityConfig(BaseModel):
-    """Configuration for observability and monitoring.
-
-    Controls tracing, metrics, profiling, and request/response
-    logging for system observability.
-
-    Attributes:
-        enable_tracing: Whether to enable distributed tracing.
-        enable_metrics: Whether to collect metrics.
-        enable_profiling: Whether to enable performance profiling.
-        trace_endpoint: Endpoint for trace collection.
-        metrics_endpoint: Endpoint for metrics collection.
-        service_name: Name of the service for identification.
-        service_version: Version of the service.
-        enable_request_logging: Whether to log requests.
-        enable_response_logging: Whether to log responses.
-        enable_function_logging: Whether to log function calls.
-    """
+    """Configuration for observability features (tracing, metrics, profiling)."""
 
     enable_tracing: bool = False
     enable_metrics: bool = True
@@ -296,24 +173,7 @@ class ObservabilityConfig(BaseModel):
 
 
 class XerxesConfig(BaseModel):
-    """Main Xerxes configuration container.
-
-    Root configuration object that aggregates all configuration
-    sections and provides methods for loading, saving, and merging
-    configurations from various sources.
-
-    Attributes:
-        environment: Deployment environment type.
-        debug: Whether debug mode is enabled.
-        executor: Executor configuration section.
-        memory: Memory configuration section.
-        security: Security configuration section.
-        llm: LLM configuration section.
-        logging: Logging configuration section.
-        observability: Observability configuration section.
-        plugins: Plugin-specific configurations.
-        features: Feature flags for enabling/disabling capabilities.
-    """
+    """Top-level Xerxes configuration model."""
 
     environment: EnvironmentType = EnvironmentType.DEVELOPMENT
     debug: bool = False
@@ -339,21 +199,18 @@ class XerxesConfig(BaseModel):
 
     @classmethod
     def from_file(cls, path: str | Path) -> "XerxesConfig":
-        """Load configuration from a JSON or YAML file.
+        """Load configuration from a YAML or JSON file.
 
         Args:
-            path: Path to the configuration file.
+            path (str | Path): IN: path to the configuration file.
 
         Returns:
-            XerxesConfig instance loaded from the file.
+            XerxesConfig: OUT: populated configuration instance.
 
         Raises:
-            FileNotFoundError: If the configuration file doesn't exist.
-            ImportError: If YAML file is specified but PyYAML is not installed.
-            ValueError: If the file format is not supported.
-
-        Example:
-            >>> config = XerxesConfig.from_file("config.yaml")
+            FileNotFoundError: If the file does not exist.
+            ImportError: If YAML is required but not installed.
+            ValueError: If the file format is unsupported.
         """
         path = Path(path)
         if not path.exists():
@@ -373,21 +230,14 @@ class XerxesConfig(BaseModel):
 
     @classmethod
     def from_env(cls, prefix: str = "XERXES_") -> "XerxesConfig":
-        """Load configuration from environment variables.
-
-        Environment variables are parsed hierarchically using underscores
-        as separators. JSON values are automatically parsed.
+        """Build configuration from environment variables.
 
         Args:
-            prefix: Prefix for environment variables (default: "XERXES_").
+            prefix (str): IN: environment variable prefix.
+                Defaults to ``"XERXES_"``.
 
         Returns:
-            XerxesConfig instance loaded from environment variables.
-
-        Example:
-            >>>
-            >>> config = XerxesConfig.from_env()
-            >>> print(config.llm.model)
+            XerxesConfig: OUT: configuration populated from matching env vars.
         """
         config_dict: dict[str, Any] = {}
 
@@ -411,17 +261,14 @@ class XerxesConfig(BaseModel):
         return cls(**config_dict)
 
     def to_file(self, path: str | Path) -> None:
-        """Save configuration to a JSON or YAML file.
+        """Save the current configuration to a file.
 
         Args:
-            path: Path where the configuration should be saved.
+            path (str | Path): IN: target file path. Supports ``.yaml``,
+                ``.yml``, and ``.json``.
 
         Raises:
-            ValueError: If the file format is not supported.
-
-        Note:
-            If YAML format is specified but PyYAML is not installed,
-            the configuration will be saved as JSON instead.
+            ValueError: If the file extension is unsupported.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -441,35 +288,26 @@ class XerxesConfig(BaseModel):
                 raise ValueError(f"Unsupported configuration file format: {path.suffix}")
 
     def merge(self, other: "XerxesConfig") -> "XerxesConfig":
-        """Merge with another configuration.
-
-        Creates a new configuration by deep merging this configuration
-        with another. The other configuration takes precedence for
-        conflicting values.
+        """Deep-merge another configuration into this one.
 
         Args:
-            other: Configuration to merge with.
+            other (XerxesConfig): IN: configuration to merge on top.
 
         Returns:
-            New XerxesConfig with merged values.
-
-        Example:
-            >>> base_config = XerxesConfig.from_file("base.yaml")
-            >>> override_config = XerxesConfig.from_file("override.yaml")
-            >>> final_config = base_config.merge(override_config)
+            XerxesConfig: OUT: new instance with merged values.
         """
         self_dict = self.model_dump()
         other_dict = other.model_dump()
 
         def deep_merge(dict1: dict, dict2: dict) -> dict:
-            """Deep merge two dictionaries recursively.
+            """Recursively merge dict2 into dict1.
 
             Args:
-                dict1: Base dictionary.
-                dict2: Dictionary to merge (takes precedence).
+                dict1 (dict): IN: base dictionary.
+                dict2 (dict): IN: dictionary to overlay.
 
             Returns:
-                Merged dictionary.
+                dict: OUT: merged dictionary.
             """
             result = dict1.copy()
             for key, value in dict2.items():
@@ -487,14 +325,11 @@ _config: XerxesConfig | None = None
 
 
 def get_config() -> XerxesConfig:
-    """Get the global configuration instance.
+    """Return the global configuration singleton.
 
     Returns:
-        The global XerxesConfig instance, creating a default one if needed.
-
-    Example:
-        >>> config = get_config()
-        >>> config.llm.model = "gpt-4"
+        XerxesConfig: OUT: current global config, instantiating defaults if
+        none has been set.
     """
     global _config
     if _config is None:
@@ -503,38 +338,24 @@ def get_config() -> XerxesConfig:
 
 
 def set_config(config: XerxesConfig) -> None:
-    """Set the global configuration instance.
+    """Set the global configuration singleton.
 
     Args:
-        config: The configuration to set as global.
-
-    Example:
-        >>> new_config = XerxesConfig(debug=True)
-        >>> set_config(new_config)
+        config (XerxesConfig): IN: configuration instance to store globally.
     """
     global _config
     _config = config
 
 
 def load_config(path: str | Path | None = None) -> XerxesConfig:
-    """Load configuration from file or environment.
-
-    Attempts to load configuration in the following order:
-    1. From specified path
-    2. From XERXES_CONFIG_FILE environment variable
-    3. From default file locations (current dir, home dir)
-    4. From environment variables
+    """Load configuration from a file, env var, or environment defaults.
 
     Args:
-        path: Optional specific path to configuration file.
+        path (str | Path | None): IN: explicit config file path. If omitted,
+            checks ``XERXES_CONFIG_FILE`` and then standard search paths.
 
     Returns:
-        Loaded XerxesConfig instance (also sets as global).
-
-    Example:
-        >>> config = load_config("my_config.yaml")
-        >>>
-        >>> config = load_config()
+        XerxesConfig: OUT: loaded configuration, stored as the global singleton.
     """
     if path:
         config = XerxesConfig.from_file(path)

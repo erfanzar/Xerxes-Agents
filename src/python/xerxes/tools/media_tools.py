@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,23 +6,22 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Media tools module for Xerxes.
 
-"""Multimodal agent tools — image generation, vision, and speech.
-
-Three tools backed by the OpenAI-compatible image / chat / audio
-endpoints:
-
-- :class:`image_generate` — text-to-image via ``/v1/images/generations``.
-- :class:`vision_analyze` — analyse an image with a vision-capable LLM.
-- :class:`text_to_speech` — render text to MP3/WAV via ``/v1/audio/speech``.
-
-All three accept an injected HTTP client through
-:func:`set_media_client` so tests run fully offline. Production code
-configures the real endpoint via :func:`configure_media`.
-"""
+Exports:
+    - logger
+    - MediaConfig
+    - configure_media
+    - get_media_config
+    - set_media_client
+    - image_generate
+    - vision_analyze
+    - text_to_speech"""
 
 from __future__ import annotations
 
@@ -41,7 +40,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MediaConfig:
-    """Endpoint + auth used by the three media tools."""
+    """Media config.
+
+    Attributes:
+        base_url (str): base url.
+        api_key (str): api key.
+        image_model (str): image model.
+        vision_model (str): vision model.
+        tts_model (str): tts model.
+        tts_voice (str): tts voice."""
 
     base_url: str = ""
     api_key: str = ""
@@ -68,7 +75,18 @@ def configure_media(
     tts_model: str | None = None,
     tts_voice: str | None = None,
 ) -> MediaConfig:
-    """Update the process-wide media tool configuration."""
+    """Configure media.
+
+    Args:
+        base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution.
+        api_key (str | None, optional): IN: api key. Defaults to None. OUT: Consumed during execution.
+        image_model (str | None, optional): IN: image model. Defaults to None. OUT: Consumed during execution.
+        vision_model (str | None, optional): IN: vision model. Defaults to None. OUT: Consumed during execution.
+        tts_model (str | None, optional): IN: tts model. Defaults to None. OUT: Consumed during execution.
+        tts_voice (str | None, optional): IN: tts voice. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        MediaConfig: OUT: Result of the operation."""
+
     global _config
     with _lock:
         _config = MediaConfig(
@@ -83,34 +101,36 @@ def configure_media(
 
 
 def get_media_config() -> MediaConfig:
-    """Return the currently active media tool configuration."""
+    """Retrieve the media config.
+
+    Returns:
+        MediaConfig: OUT: Result of the operation."""
+
     with _lock:
         return _config
 
 
 def set_media_client(client: tp.Any | None) -> None:
-    """Install (or clear) an injected HTTP client for the media tools.
+    """Set the media client.
 
-    The client should expose ``post(url, json=..., headers=...)`` and
-    return either a dict, an object with ``json()``, or raw bytes. Set
-    to ``None`` to revert to the default ``httpx`` path.
-    """
+    Args:
+        client (tp.Any | None): IN: client. OUT: Consumed during execution."""
+
     global _http_client
     with _lock:
         _http_client = client
 
 
 def _post(url: str, *, json_body: dict[str, tp.Any], expect: str = "json") -> tp.Any:
-    """POST *json_body* to *url* using the injected client or httpx.
+    """Internal helper to post.
 
     Args:
-        url: Absolute endpoint URL.
-        json_body: Request payload (serialised as JSON).
-        expect: ``"json"`` to decode the response, or ``"bytes"`` to return raw bytes.
-
+        url (str): IN: url. OUT: Consumed during execution.
+        json_body (dict[str, tp.Any]): IN: json body. OUT: Consumed during execution.
+        expect (str, optional): IN: expect. Defaults to 'json'. OUT: Consumed during execution.
     Returns:
-        Parsed JSON (dict) or raw bytes depending on *expect*.
-    """
+        tp.Any: OUT: Result of the operation."""
+
     cfg = get_media_config()
     headers = {"Content-Type": "application/json"}
     if cfg.api_key:
@@ -130,7 +150,14 @@ def _post(url: str, *, json_body: dict[str, tp.Any], expect: str = "json") -> tp
 
 
 def _coerce(resp: tp.Any, *, expect: str) -> tp.Any:
-    """Normalise diverse response types into bytes or a dict as requested."""
+    """Internal helper to coerce.
+
+    Args:
+        resp (tp.Any): IN: resp. OUT: Consumed during execution.
+        expect (str): IN: expect. OUT: Consumed during execution.
+    Returns:
+        tp.Any: OUT: Result of the operation."""
+
     if expect == "bytes":
         if isinstance(resp, bytes | bytearray):
             return bytes(resp)
@@ -152,7 +179,10 @@ def _coerce(resp: tp.Any, *, expect: str) -> tp.Any:
 
 
 class image_generate(AgentBaseFn):
-    """Generate an image from a text prompt."""
+    """Image generate.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -162,21 +192,17 @@ class image_generate(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Call the OpenAI-compatible images endpoint and return base64 PNG(s).
-
-        Use this when the user asks for an image, diagram, illustration,
-        cover art, etc.
+        """Static call.
 
         Args:
-            prompt: Plain-language description of the desired image.
-            size: ``"WIDTHxHEIGHT"``. Common: ``"512x512"``,
-                ``"1024x1024"``, ``"1792x1024"``.
-            n: Number of variations (1-4 typically).
-            model: Override the configured image model.
-
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            size (str, optional): IN: size. Defaults to '1024x1024'. OUT: Consumed during execution.
+            n (int, optional): IN: n. Defaults to 1. OUT: Consumed during execution.
+            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"model", "size", "count", "images": [{"b64", "format"}], "raw"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         cfg = get_media_config()
         body = {
             "model": model or cfg.image_model,
@@ -203,7 +229,10 @@ class image_generate(AgentBaseFn):
 
 
 class vision_analyze(AgentBaseFn):
-    """Analyse an image with a vision LLM and return a description."""
+    """Vision analyze.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -213,20 +242,17 @@ class vision_analyze(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Send an image + question to a vision-capable chat model.
-
-        Either pass a remote ``image_url`` or an inline ``image_b64``
-        payload (PNG/JPEG, no data URL prefix needed).
+        """Static call.
 
         Args:
-            image_url: HTTPS URL of the image.
-            image_b64: Base64-encoded image bytes (alternative to URL).
-            question: What the agent wants to know about the image.
-            model: Override the configured vision model.
-
+            image_url (str | None, optional): IN: image url. Defaults to None. OUT: Consumed during execution.
+            image_b64 (str | None, optional): IN: image b64. Defaults to None. OUT: Consumed during execution.
+            question (str, optional): IN: question. Defaults to 'Describe this image in detail.'. OUT: Consumed during execution.
+            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"model", "answer", "raw"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         if not image_url and not image_b64:
             return {"error": "either image_url or image_b64 is required"}
         cfg = get_media_config()
@@ -256,7 +282,10 @@ class vision_analyze(AgentBaseFn):
 
 
 class text_to_speech(AgentBaseFn):
-    """Synthesise speech audio from text."""
+    """Text to speech.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -266,25 +295,17 @@ class text_to_speech(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Call the OpenAI-compatible audio/speech endpoint.
-
-        Use this when the user explicitly asks the agent to "read",
-        "speak", or "narrate" something out loud — the result is
-        suitable for shipping over a channel adapter that supports
-        audio (Telegram voice, Signal voice notes, BlueBubbles).
+        """Static call.
 
         Args:
-            text: Text to render. Trimmed at provider's max length.
-            voice: Voice id (e.g. ``"alloy"``, ``"verse"``); falls
-                back to the configured default.
-            audio_format: ``"mp3"`` (default), ``"wav"``, ``"opus"``,
-                ``"aac"``. (Also accepted as ``format`` via
-                ``**context_variables`` for backward compatibility.)
-            model: Override the configured TTS model.
-
+            text (str): IN: text. OUT: Consumed during execution.
+            voice (str | None, optional): IN: voice. Defaults to None. OUT: Consumed during execution.
+            audio_format (str, optional): IN: audio format. Defaults to 'mp3'. OUT: Consumed during execution.
+            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"model", "voice", "format", "audio_b64", "bytes"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         legacy_format = context_variables.pop("format", None)
         if legacy_format:
             audio_format = legacy_format

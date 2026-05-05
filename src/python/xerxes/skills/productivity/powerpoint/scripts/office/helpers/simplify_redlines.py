@@ -1,14 +1,23 @@
-"""Simplify tracked changes by merging adjacent w:ins or w:del elements.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Simplify redlines module for Xerxes.
 
-Merges adjacent <w:ins> elements from the same author into a single element.
-Same for <w:del> elements. This makes heavily-redlined documents easier to
-work with by reducing the number of tracked change wrappers.
-
-Rules:
-- Only merges w:ins with w:ins, w:del with w:del (same element type)
-- Only merges if same author (ignores timestamp differences)
-- Only merges if truly adjacent (only whitespace between them)
-"""
+Exports:
+    - WORD_NS
+    - simplify_redlines
+    - get_tracked_change_authors
+    - infer_author"""
 
 import xml.etree.ElementTree as ET
 import zipfile
@@ -20,6 +29,12 @@ WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
 def simplify_redlines(input_dir: str) -> tuple[int, str]:
+    """Simplify redlines.
+
+    Args:
+        input_dir (str): IN: input dir. OUT: Consumed during execution.
+    Returns:
+        tuple[int, str]: OUT: Result of the operation."""
     doc_xml = Path(input_dir) / "word" / "document.xml"
 
     if not doc_xml.exists():
@@ -45,6 +60,13 @@ def simplify_redlines(input_dir: str) -> tuple[int, str]:
 
 
 def _merge_tracked_changes_in(container, tag: str) -> int:
+    """Internal helper to merge tracked changes in.
+
+    Args:
+        container (Any): IN: container. OUT: Consumed during execution.
+        tag (str): IN: tag. OUT: Consumed during execution.
+    Returns:
+        int: OUT: Result of the operation."""
     merge_count = 0
 
     tracked = [
@@ -71,11 +93,24 @@ def _merge_tracked_changes_in(container, tag: str) -> int:
 
 
 def _is_element(node, tag: str) -> bool:
+    """Internal helper to is element.
+
+    Args:
+        node (Any): IN: node. OUT: Consumed during execution.
+        tag (str): IN: tag. OUT: Consumed during execution.
+    Returns:
+        bool: OUT: Result of the operation."""
     name = node.localName or node.tagName
     return name == tag or name.endswith(f":{tag}")
 
 
 def _get_author(elem) -> str:
+    """Internal helper to get author.
+
+    Args:
+        elem (Any): IN: elem. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
     author = elem.getAttribute("w:author")
     if not author:
         for attr in elem.attributes.values():
@@ -85,6 +120,13 @@ def _get_author(elem) -> str:
 
 
 def _can_merge_tracked(elem1, elem2) -> bool:
+    """Internal helper to can merge tracked.
+
+    Args:
+        elem1 (Any): IN: elem1. OUT: Consumed during execution.
+        elem2 (Any): IN: elem2. OUT: Consumed during execution.
+    Returns:
+        bool: OUT: Result of the operation."""
     if _get_author(elem1) != _get_author(elem2):
         return False
 
@@ -100,6 +142,13 @@ def _can_merge_tracked(elem1, elem2) -> bool:
 
 
 def _merge_tracked_content(target, source):
+    """Internal helper to merge tracked content.
+
+    Args:
+        target (Any): IN: target. OUT: Consumed during execution.
+        source (Any): IN: source. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     while source.firstChild:
         child = source.firstChild
         source.removeChild(child)
@@ -107,9 +156,22 @@ def _merge_tracked_content(target, source):
 
 
 def _find_elements(root, tag: str) -> list:
+    """Internal helper to find elements.
+
+    Args:
+        root (Any): IN: root. OUT: Consumed during execution.
+        tag (str): IN: tag. OUT: Consumed during execution.
+    Returns:
+        list: OUT: Result of the operation."""
     results = []
 
     def traverse(node):
+        """Traverse.
+
+        Args:
+            node (Any): IN: node. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
         if node.nodeType == node.ELEMENT_NODE:
             name = node.localName or node.tagName
             if name == tag or name.endswith(f":{tag}"):
@@ -122,6 +184,12 @@ def _find_elements(root, tag: str) -> list:
 
 
 def get_tracked_change_authors(doc_xml_path: Path) -> dict[str, int]:
+    """Retrieve the tracked change authors.
+
+    Args:
+        doc_xml_path (Path): IN: doc xml path. OUT: Consumed during execution.
+    Returns:
+        dict[str, int]: OUT: Result of the operation."""
     if not doc_xml_path.exists():
         return {}
 
@@ -145,6 +213,12 @@ def get_tracked_change_authors(doc_xml_path: Path) -> dict[str, int]:
 
 
 def _get_authors_from_docx(docx_path: Path) -> dict[str, int]:
+    """Internal helper to get authors from docx.
+
+    Args:
+        docx_path (Path): IN: docx path. OUT: Consumed during execution.
+    Returns:
+        dict[str, int]: OUT: Result of the operation."""
     try:
         with zipfile.ZipFile(docx_path, "r") as zf:
             if "word/document.xml" not in zf.namelist():
@@ -168,6 +242,14 @@ def _get_authors_from_docx(docx_path: Path) -> dict[str, int]:
 
 
 def infer_author(modified_dir: Path, original_docx: Path, default: str = "Claude") -> str:
+    """Infer author.
+
+    Args:
+        modified_dir (Path): IN: modified dir. OUT: Consumed during execution.
+        original_docx (Path): IN: original docx. OUT: Consumed during execution.
+        default (str, optional): IN: default. Defaults to 'Claude'. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
     modified_xml = modified_dir / "word" / "document.xml"
     modified_authors = get_tracked_change_authors(modified_xml)
 

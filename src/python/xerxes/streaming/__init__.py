@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,23 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Streaming event protocol for Xerxes agent loops.
-
-This package provides a typed event protocol for streaming agent execution,
-a neutral message format with bidirectional provider converters, a permission
-modes system, and a generator-based agent loop.
-
-Modules:
-    - :mod:`events`: Typed streaming events (TextChunk, ToolStart, etc.)
-    - :mod:`messages`: Neutral message format with Anthropic/OpenAI converters
-    - :mod:`permissions`: Permission modes (auto/accept-all/manual)
-    - :mod:`loop`: Generator-based streaming agent loop
-"""
+"""Init module for Xerxes."""
 
 from .events import (
     AgentState,
@@ -41,19 +30,84 @@ from .messages import (
     messages_to_openai,
 )
 from .permissions import PermissionMode, check_permission
+from .wire_events import (
+    ApprovalRequest,
+    ApprovalResponse,
+    BtwBegin,
+    BtwEnd,
+    CompactionBegin,
+    CompactionEnd,
+    ContentPart,
+    HookResolved,
+    HookTriggered,
+    MCPLoadingBegin,
+    MCPLoadingEnd,
+    Notification,
+    PlanDisplay,
+    QuestionItem,
+    QuestionRequest,
+    QuestionResponse,
+    StatusUpdate,
+    SteerInput,
+    StepBegin,
+    StepEnd,
+    StepInterrupted,
+    SubagentEvent,
+    TextPart,
+    ThinkPart,
+    ToolCall,
+    ToolCallPart,
+    ToolResult,
+    TurnBegin,
+    TurnEnd,
+    WireEvent,
+    WireEventType,
+    event_from_dict,
+)
 
 __all__ = [
     "AgentState",
+    "ApprovalRequest",
+    "ApprovalResponse",
+    "BtwBegin",
+    "BtwEnd",
+    "CompactionBegin",
+    "CompactionEnd",
+    "ContentPart",
+    "HookResolved",
+    "HookTriggered",
+    "MCPLoadingBegin",
+    "MCPLoadingEnd",
     "NeutralMessage",
+    "Notification",
     "PermissionMode",
     "PermissionRequest",
+    "PlanDisplay",
+    "QuestionItem",
+    "QuestionRequest",
+    "QuestionResponse",
+    "StatusUpdate",
+    "SteerInput",
+    "StepBegin",
+    "StepEnd",
+    "StepInterrupted",
     "StreamEvent",
+    "SubagentEvent",
     "TextChunk",
-    "ThinkingChunk",
+    "TextPart",
+    "ThinkPart",
+    "ToolCall",
+    "ToolCallPart",
     "ToolEnd",
+    "ToolResult",
     "ToolStart",
+    "TurnBegin",
     "TurnDone",
+    "TurnEnd",
+    "WireEvent",
+    "WireEventType",
     "check_permission",
+    "event_from_dict",
     "messages_to_anthropic",
     "messages_to_openai",
     "run_agent_loop",

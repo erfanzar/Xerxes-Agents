@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,39 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tool calls module for Xerxes.
 
-
-"""Tool and function call type definitions for Xerxes.
-
-This module defines the core data structures for representing tools
-and function calls in the Xerxes framework. It provides:
-- Function definitions with JSON Schema parameters
-- Tool wrappers for functions
-- Tool choice options for controlling tool selection
-- Function call representations for LLM outputs
-- Tool call structures with unique identifiers
-
-The types are designed to be compatible with OpenAI's function calling
-API format while providing additional validation and type safety through
-Pydantic models.
-
-Example:
-    >>> from xerxes.types.tool_calls import Tool, Function, ToolCall, FunctionCall
-    >>> tool = Tool(
-    ...     function=Function(
-    ...         name="get_weather",
-    ...         description="Get weather for a location",
-    ...         parameters={"type": "object", "properties": {"location": {"type": "string"}}}
-    ...     )
-    ... )
-    >>> tool_call = ToolCall(
-    ...     id="call_123",
-    ...     function=FunctionCall(name="get_weather", arguments='{"location": "NYC"}')
-    ... )
-"""
+Exports:
+    - Function
+    - ToolTypes
+    - ToolChoice
+    - Tool
+    - FunctionCall
+    - ToolCall
+    - ToolType"""
 
 import json
 from enum import StrEnum
@@ -50,30 +32,14 @@ from ..core.utils import XerxesBase
 
 
 class Function(XerxesBase):
-    r"""Function definition for tools.
+    """Function.
+
+    Inherits from: XerxesBase
 
     Attributes:
-        name: The name of the function.
-        description: A description of what the function does.
-        parameters: The parameters the functions accepts, described as a JSON Schema object.
-
-    Examples:
-        >>> function = Function(
-        ...     name="get_current_weather",
-        ...     description="Get the current weather in a given location",
-        ...     parameters={
-        ...         "type": "object",
-        ...         "properties": {
-        ...             "location": {
-        ...                 "type": "string",
-        ...                 "description": "The city and state, e.g. San Francisco, CA",
-        ...             },
-        ...             "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-        ...         },
-        ...         "required": ["location"],
-        ...     },
-        ... )
-    """
+        name (str): name.
+        description (str): description.
+        parameters (dict[str, Any]): parameters."""
 
     name: str
     description: str = ""
@@ -81,28 +47,18 @@ class Function(XerxesBase):
 
 
 class ToolTypes(StrEnum):
-    r"""Enum of tool types.
+    """Tool types.
 
-    Attributes:
-       function: A function tool.
-
-    Examples:
-        >>> tool_type = ToolTypes.function
+    Inherits from: StrEnum
     """
 
     function = "function"
 
 
 class ToolChoice(StrEnum):
-    r"""Enum of tool choice types.
+    """Tool choice.
 
-    Attributes:
-        auto: Automatically choose the tool.
-        none: Do not use any tools.
-        any: Use any tool.
-
-    Examples:
-        >>> tool_choice = ToolChoice.auto
+    Inherits from: StrEnum
     """
 
     auto = "auto"
@@ -111,86 +67,62 @@ class ToolChoice(StrEnum):
 
 
 class Tool(XerxesBase):
-    r"""Tool definition.
+    """Tool.
+
+    Inherits from: XerxesBase
 
     Attributes:
-        type: The type of the tool.
-        function: The function definition.
-
-    Examples:
-        >>> tool = Tool(
-        ...     function=Function(
-        ...         name="get_current_weather",
-        ...         description="Get the current weather in a given location",
-        ...         parameters={
-        ...             "type": "object",
-        ...             "properties": {
-        ...                 "location": {
-        ...                     "type": "string",
-        ...                     "description": "The city and state, e.g. San Francisco, CA",
-        ...                 },
-        ...                 "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-        ...             },
-        ...             "required": ["location"],
-        ...         },
-        ...     ),
-        ... )
-    """
+        type (ToolTypes): type.
+        function (Function): function."""
 
     type: ToolTypes = ToolTypes.function
     function: Function
 
     def to_openai(self) -> dict[str, Any]:
-        """Convert the tool to OpenAI-compatible format.
+        """To openai.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary representation compatible with OpenAI's API.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, openai_tool: dict[str, Any]) -> "Tool":
-        """Create a Tool instance from an OpenAI-formatted dictionary.
+        """From openai.
 
         Args:
-            openai_tool: Dictionary in OpenAI tool format.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            openai_tool (dict[str, Any]): IN: openai tool. OUT: Consumed during execution.
         Returns:
-            A new Tool instance.
-        """
+            'Tool': OUT: Result of the operation."""
+
         return cls.model_validate(openai_tool)
 
 
 class FunctionCall(XerxesBase):
-    r"""Function call.
+    """Function call.
+
+    Inherits from: XerxesBase
 
     Attributes:
-        name: The name of the function to call.
-        arguments: The arguments to pass to the function.
-
-    Examples:
-        >>> function_call = FunctionCall(
-        ...     name="get_current_weather",
-        ...     arguments={"location": "San Francisco, CA", "unit": "celsius"},
-        ... )
-    """
+        name (str): name.
+        arguments (str): arguments."""
 
     name: str
     arguments: str
 
     @field_validator("arguments", mode="before")
     def validate_arguments(cls, v: str | dict[str, Any]) -> str:
-        """Convert arguments to a JSON string if they are a dictionary.
+        """Validate arguments.
 
         Args:
-            v: The arguments to validate.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            v (str | dict[str, Any]): IN: v. OUT: Consumed during execution.
         Returns:
-            The arguments as a JSON string.
+            str: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If arguments is a string that is not valid JSON.
-        """
         if isinstance(v, dict):
             return json.dumps(v)
         if isinstance(v, str):
@@ -204,47 +136,40 @@ class FunctionCall(XerxesBase):
 
 
 class ToolCall(XerxesBase):
-    r"""Tool call.
+    """Tool call.
+
+    Inherits from: XerxesBase
 
     Attributes:
-        id: The ID of the tool call. Required for V3+ tokenization
-        type: The type of the tool call.
-        function: The function call.
-
-    Examples:
-        >>> tool_call = ToolCall(
-        ...     id="call_abc123",
-        ...     function=FunctionCall(
-        ...         name="get_current_weather",
-        ...         arguments={"location": "San Francisco, CA", "unit": "celsius"},
-        ...     ),
-        ... )
-    """
+        id (str): id.
+        type (ToolTypes): type.
+        function (FunctionCall): function."""
 
     id: str = "null"
     type: ToolTypes = ToolTypes.function
     function: FunctionCall
 
     def to_openai(self) -> dict[str, Any]:
-        """Convert the tool call to OpenAI-compatible format.
+        """To openai.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary representation compatible with OpenAI's API.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, tool_call: dict[str, Any]) -> "ToolCall":
-        """Create a ToolCall instance from an OpenAI-formatted dictionary.
+        """From openai.
 
         Args:
-            tool_call: Dictionary in OpenAI tool call format.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
         Returns:
-            A new ToolCall instance.
-        """
+            'ToolCall': OUT: Result of the operation."""
+
         return cls.model_validate(tool_call)
 
 
 ToolType = TypeVar("ToolType", bound=Tool)
-"""TypeVar bound to Tool for generic tool handling."""

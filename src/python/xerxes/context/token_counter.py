@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Token counting utilities for various LLM providers.
 
-
-"""Token counting utilities using provider-specific APIs.
-
-This module provides accurate token counting for various LLM providers.
-It supports OpenAI (via tiktoken), Anthropic, Google, and includes
-fallback mechanisms when provider-specific libraries are unavailable.
-
-The module includes:
-
-- ProviderTokenCounter: Low-level provider-specific token counting
-- SmartTokenCounter: High-level automatic provider detection and counting
-
-Token counting is essential for managing context limits, estimating
-costs, and implementing effective compaction strategies.
-
-Example:
-    >>> from xerxes.context import SmartTokenCounter
-    >>> counter = SmartTokenCounter(model="gpt-4")
-    >>> token_count = counter.count_tokens("Hello, world!")
-    >>> remaining = counter.count_remaining_capacity("Hello", max_tokens=4096)
+Implements ``SmartTokenCounter``, which dispatches to provider-specific
+counters (OpenAI via tiktoken, Anthropic via client SDK, Google, etc.) and
+falls back to character-based estimation when libraries are unavailable.
 """
 
 from typing import Any
@@ -41,25 +27,13 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-try:
-    import anthropic  # noqa: F401
+import importlib.util
 
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
+ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
 
 
 class ProviderTokenCounter:
-    """Token counter that uses actual provider APIs.
-
-    Provides static methods for counting tokens using provider-specific
-    implementations. Supports OpenAI (tiktoken), Anthropic, and Google,
-    with fallback to character-based estimation when libraries are
-    unavailable.
-
-    This class is designed for internal use; prefer SmartTokenCounter
-    for most use cases as it provides automatic provider detection.
-    """
+    """Provider-specific token counting implementations."""
 
     @classmethod
     def count_tokens_for_provider(
@@ -69,18 +43,21 @@ class ProviderTokenCounter:
         model: str | None = None,
         llm_client: Any | None = None,
     ) -> int:
-        """Count tokens using the appropriate provider's API.
+        """Count tokens for the given text and provider.
 
         Args:
-            text: Text string or messages list to count
-            provider: Provider name (openai, anthropic, etc.)
-            model: Model name
-            llm_client: Optional LLM client instance
+            text (str | list[dict[str, str]]): IN: plain text or a list of
+                message dicts to count.
+            provider (str | None): IN: explicit provider name. OUT: inferred
+                from ``model`` when omitted.
+            model (str | None): IN: model identifier used for provider
+                detection and encoding selection.
+            llm_client (Any | None): IN: optional client instance for
+                provider-native token counting.
 
         Returns:
-            Token count
+            int: OUT: estimated token count.
         """
-
         if isinstance(text, list):
             text = cls._messages_to_text(text)
 
@@ -98,13 +75,13 @@ class ProviderTokenCounter:
 
     @classmethod
     def _detect_provider(cls, model: str) -> str | None:
-        """Detect provider from model name.
+        """Guess the provider from a model name string.
 
         Args:
-            model: Model identifier string.
+            model (str): IN: model identifier.
 
         Returns:
-            Provider name (openai, anthropic, google, etc.) or None.
+            str | None: OUT: provider slug, or ``None`` if unknown.
         """
         if not model:
             return None
@@ -124,13 +101,13 @@ class ProviderTokenCounter:
 
     @classmethod
     def _messages_to_text(cls, messages: list[dict[str, str]]) -> str:
-        """Convert messages list to plain text for token counting.
+        """Convert a list of message dicts to a single text string.
 
         Args:
-            messages: List of message dictionaries with role and content.
+            messages (list[dict[str, str]]): IN: conversation messages.
 
         Returns:
-            Concatenated text representation of all messages.
+            str: OUT: joined ``role: content`` lines.
         """
         text_parts = []
         for msg in messages:
@@ -141,17 +118,14 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_openai_tokens(cls, text: str, model: str | None = None) -> int:
-        """Count tokens for OpenAI models using tiktoken.
-
-        Uses the appropriate encoding based on the model version.
-        Falls back to character estimation if tiktoken is unavailable.
+        """Count tokens using tiktoken for OpenAI models.
 
         Args:
-            text: Text to count tokens for.
-            model: Optional OpenAI model name for encoding selection.
+            text (str): IN: text to count.
+            model (str | None): IN: model identifier for encoding selection.
 
         Returns:
-            Token count for the given text.
+            int: OUT: token count.
         """
         if not TIKTOKEN_AVAILABLE:
             return len(text) // 4
@@ -178,16 +152,14 @@ class ProviderTokenCounter:
     def _count_anthropic_tokens(cls, text: str, model: str | None = None, client: Any | None = None) -> int:
         """Count tokens for Anthropic models.
 
-        Attempts to use the Anthropic client's token counting API if
-        available, otherwise falls back to tiktoken or character estimation.
-
         Args:
-            text: Text to count tokens for.
-            model: Optional Anthropic model name.
-            client: Optional Anthropic client instance with count_tokens method.
+            text (str): IN: text to count.
+            model (str | None): IN: model identifier.
+            client (Any | None): IN: optional Anthropic client with
+                ``count_tokens``.
 
         Returns:
-            Token count for the given text.
+            int: OUT: token count.
         """
         if ANTHROPIC_AVAILABLE and client:
             try:
@@ -207,21 +179,16 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_google_tokens(cls, text: str, model: str | None = None, client: Any | None = None) -> int:
-        """Count tokens for Google models (Gemini, PaLM).
-
-        Uses tiktoken with a 1.1x adjustment factor to approximate
-        Google's tokenization, which tends to produce slightly more
-        tokens than OpenAI's encoding.
+        """Count tokens for Google models.
 
         Args:
-            text: Text to count tokens for.
-            model: Optional Google model name.
-            client: Optional Google AI client instance.
+            text (str): IN: text to count.
+            model (str | None): IN: model identifier.
+            client (Any | None): IN: optional client (unused).
 
         Returns:
-            Estimated token count for the given text.
+            int: OUT: token count.
         """
-
         if TIKTOKEN_AVAILABLE:
             try:
                 encoding = tiktoken.get_encoding("cl100k_base")
@@ -235,17 +202,14 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_fallback_tokens(cls, text: str, model: str | None = None) -> int:
-        """Fallback token counting when provider-specific methods aren't available.
-
-        Uses tiktoken if available, otherwise estimates based on
-        character count (approximately 4 characters per token).
+        """Fallback token counting when provider is unknown.
 
         Args:
-            text: Text to count tokens for.
-            model: Optional model name (unused, kept for API consistency).
+            text (str): IN: text to count.
+            model (str | None): IN: model identifier (unused).
 
         Returns:
-            Estimated token count for the given text.
+            int: OUT: token count.
         """
         if TIKTOKEN_AVAILABLE:
             try:
@@ -258,18 +222,7 @@ class ProviderTokenCounter:
 
 
 class SmartTokenCounter:
-    """Smart token counter that automatically selects the best counting method.
-
-    Provides a high-level interface for token counting with automatic
-    provider detection based on model name. Supports all major LLM
-    providers and includes utility methods for capacity calculation
-    and compression ratio estimation.
-
-    Attributes:
-        provider: Detected or specified provider name.
-        model: Model name for token counting.
-        llm_client: Optional LLM client for provider-specific counting.
-    """
+    """Unified token counter that auto-detects provider and model."""
 
     def __init__(
         self,
@@ -277,12 +230,14 @@ class SmartTokenCounter:
         model: str | None = None,
         llm_client: Any | None = None,
     ):
-        """Initialize the smart token counter.
+        """Initialize the token counter.
 
         Args:
-            provider: Provider name
-            model: Model name
-            llm_client: Optional LLM client with token counting capabilities
+            provider (str | None): IN: explicit provider name.
+            model (str | None): IN: model identifier. OUT: used to infer
+                provider when ``provider`` is omitted.
+            llm_client (Any | None): IN: optional client for provider-native
+                counting.
         """
         self.provider = provider
         self.model = model
@@ -292,13 +247,13 @@ class SmartTokenCounter:
             self.provider = ProviderTokenCounter._detect_provider(self.model)
 
     def count_tokens(self, text: str | list[dict[str, str]]) -> int:
-        """Count tokens using the best available method.
+        """Count tokens for the given text or messages.
 
         Args:
-            text: Text string or list of message dictionaries.
+            text (str | list[dict[str, str]]): IN: text or message list.
 
         Returns:
-            Token count for the given input.
+            int: OUT: token count.
         """
         return ProviderTokenCounter.count_tokens_for_provider(
             text=text,
@@ -308,28 +263,28 @@ class SmartTokenCounter:
         )
 
     def count_remaining_capacity(self, text: str | list[dict[str, str]], max_tokens: int) -> int:
-        """Calculate remaining token capacity.
+        """Calculate how many tokens remain under a maximum budget.
 
         Args:
-            text: Current text or messages to count.
-            max_tokens: Maximum token limit.
+            text (str | list[dict[str, str]]): IN: current text or messages.
+            max_tokens (int): IN: maximum allowed tokens.
 
         Returns:
-            Number of tokens remaining before reaching the limit.
+            int: OUT: remaining token budget (never negative).
         """
         used_tokens = self.count_tokens(text)
         return max(0, max_tokens - used_tokens)
 
     def estimate_compression_ratio(self, original_text: str, compressed_text: str) -> float:
-        """Estimate the compression ratio achieved.
+        """Estimate the compression ratio between two texts.
 
         Args:
-            original_text: Original text before compression.
-            compressed_text: Text after compression.
+            original_text (str): IN: text before compaction.
+            compressed_text (str): IN: text after compaction.
 
         Returns:
-            Compression ratio as a float between 0.0 and 1.0,
-            where 1.0 means complete compression and 0.0 means no compression.
+            float: OUT: ratio in the range ``[0.0, 1.0]`` where ``1.0`` means
+            fully compressed to zero tokens.
         """
         original_tokens = self.count_tokens(original_text)
         compressed_tokens = self.count_tokens(compressed_text)

@@ -1,18 +1,17 @@
-"""
-Loader for G0DM0D3 scripts. Handles the exec-scoping issues.
-
-Usage in execute_code:
-    exec(open(os.path.expanduser(
-        "~/.hermes/skills/red-teaming/godmode/scripts/load_godmode.py"
-    )).read())
-
-    # Now all functions are available:
-    # - auto_jailbreak(), undo_jailbreak()
-    # - race_models(), race_godmode_classic()
-    # - generate_variants(), obfuscate_query(), detect_triggers()
-    # - score_response(), is_refusal(), count_hedges()
-    # - escalate_encoding()
-"""
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Load godmode module for Xerxes."""
 
 import os
 import sys
@@ -27,7 +26,25 @@ sys.argv = ["_godmode_loader"]
 
 
 def _gm_load(path):
+    """Internal helper to gm load.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     ns = dict(globals())
+    """Internal helper to gm load.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+    """Internal helper to gm load.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     ns["__name__"] = "_godmode_module"
     ns["__file__"] = str(path)
     exec(compile(open(path).read(), str(path), "exec"), ns)
@@ -44,7 +61,6 @@ for _gm_script in ["parseltongue.py", "godmode_race.py", "auto_jailbreak.py"]:
 
 sys.argv = _gm_old_argv
 
-# Cleanup loader vars
 for _gm_cleanup in [
     "_gm_scripts_dir",
     "_gm_old_argv",

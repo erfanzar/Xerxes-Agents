@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,39 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Tool definition for Cortex agents.
-
-This module provides the CortexTool class, which represents callable tools
-that can be used by Cortex agents to perform specific actions. Tools wrap
-Python functions and automatically generate OpenAI-compatible function
-schemas for integration with LLM function calling capabilities.
-
-Key features:
-- Automatic JSON schema generation from function signatures
-- OpenAI function calling format compatibility
-- Factory method for easy tool creation from existing functions
-- Customizable parameter schemas for complex tool definitions
-
-Typical usage example:
-
-    @CortexTool.from_function
-    def search_database(query: str, limit: int = 10) -> list:
-        '''Search the database for matching records.'''
-        return db.search(query, limit)
-
-
-    tool = CortexTool(
-        name="calculate",
-        description="Perform arithmetic calculations",
-        function=calculate_fn,
-        parameters={"type": "object", "properties": {...}}
-    )
-"""
+"""Cortex tool wrapper for callable functions."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -49,32 +22,15 @@ from ...core.utils import function_to_json
 
 @dataclass
 class CortexTool:
-    """Tool that can be used by Cortex agents.
-
-    CortexTool wraps a Python callable function and provides metadata
-    and schema information required for integration with LLM function
-    calling APIs. It can automatically generate parameter schemas from
-    function signatures or accept custom schema definitions.
+    """Wraps a callable as a tool with a JSON schema for LLM function calling.
 
     Attributes:
-        name: The name of the tool as it will appear to the LLM.
-        description: Human-readable description of what the tool does.
-            This is used by the LLM to decide when to use the tool.
-        function: The Python callable that implements the tool's functionality.
-        parameters: Optional dictionary defining the JSON schema for tool
-            parameters. If empty and auto_generate_schema is True, the schema
-            is automatically generated from the function signature.
-        auto_generate_schema: Whether to automatically generate the parameter
-            schema from the function signature when parameters is empty.
-            Defaults to True.
-
-    Example:
-        >>> def get_weather(city: str, units: str = "celsius") -> str:
-        ...     '''Get current weather for a city.'''
-        ...     return f"Weather in {city}: 22 {units}"
-        >>> tool = CortexTool.from_function(get_weather)
-        >>> tool.to_function_json()
-        {'type': 'function', 'function': {'name': 'get_weather', ...}}
+        name (str): The tool name exposed to the LLM.
+        description (str): A description of what the tool does.
+        function (Callable): The actual Python function to invoke.
+        parameters (dict): JSON Schema for the function parameters.
+        auto_generate_schema (bool): Whether to auto-generate the schema from
+            the function signature when *parameters* is empty.
     """
 
     name: str
@@ -84,23 +40,14 @@ class CortexTool:
     auto_generate_schema: bool = True
 
     def to_function_json(self) -> dict:
-        """Convert tool to OpenAI function JSON format.
-
-        Generates a dictionary conforming to the OpenAI function calling
-        schema format. If auto_generate_schema is True and no parameters
-        are provided, automatically generates the schema from the function
-        signature using type hints and docstrings.
+        """Serialize the tool to a function-calling JSON schema.
 
         Returns:
-            dict: A dictionary in OpenAI function format containing:
-                - type: Always "function"
-                - function: Dictionary with name, description, and parameters
-
-        Note:
-            When using auto_generate_schema, the function should have type
-            hints for best results. The tool name and description from this
-            instance will override any auto-generated values.
+            dict: A JSON object compatible with OpenAI-style function calling.
+                OUT: Contains ``type``, ``function.name``, ``function.description``,
+                and ``function.parameters``.
         """
+
         if self.auto_generate_schema and not self.parameters:
             schema = function_to_json(self.function)
 
@@ -131,38 +78,24 @@ class CortexTool:
         name: str | None = None,
         description: str | None = None,
     ) -> "CortexTool":
-        """Create a CortexTool from a function, automatically extracting metadata.
-
-        Factory method that wraps an existing Python function as a CortexTool.
-        Automatically extracts the function name and docstring for tool metadata,
-        and enables auto-generation of the parameter schema from the function's
-        type hints and signature.
+        """Create a ``CortexTool`` instance from a plain callable.
 
         Args:
-            function: The Python callable to wrap as a tool. Should have type
-                hints on parameters for best schema generation results.
-            name: Optional custom name for the tool. If None, defaults to
-                ``function.__name__``.
-            description: Optional custom description of the tool's purpose.
-                If None, defaults to the function's docstring, or an empty
-                string if no docstring is available.
+            function (Callable): The function to wrap.
+                IN: Any callable object that will be exposed as a tool.
+                OUT: Stored as the tool's executable function.
+            name (str | None): Optional override for the tool name.
+                IN: If ``None``, ``function.__name__`` is used.
+                OUT: Becomes the ``name`` attribute of the created tool.
+            description (str | None): Optional override for the tool description.
+                IN: If ``None``, ``function.__doc__`` or an empty string is used.
+                OUT: Becomes the ``description`` attribute of the created tool.
 
         Returns:
-            A new CortexTool instance configured with ``auto_generate_schema=True``
-            and empty parameters dict (schema will be generated on first call
-            to ``to_function_json()``).
-
-        Example:
-            >>> def search_db(query: str, limit: int = 10) -> list:
-            ...     '''Search the database for records.'''
-            ...     return []
-            >>> tool = CortexTool.from_function(search_db)
-            >>> tool.name
-            'search_db'
-            >>> tool = CortexTool.from_function(search_db, name="db_search")
-            >>> tool.name
-            'db_search'
+            CortexTool: A fully configured tool instance.
+                OUT: Ready for registration with an agent or LLM.
         """
+
         return cls(
             name=name or function.__name__,
             description=description or function.__doc__ or "",

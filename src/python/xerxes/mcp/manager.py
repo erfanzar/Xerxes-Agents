@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,23 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Manager module for Xerxes.
 
-
-"""MCP Manager for managing multiple MCP server connections.
-
-This module provides the MCPManager class for orchestrating connections
-to multiple MCP servers, including:
-- Connection lifecycle management (add, remove, disconnect)
-- Unified access to tools, resources, and prompts across all servers
-- Cross-server tool invocation and resource reading
-- Capability discovery and summarization
-
-The manager abstracts away the complexity of dealing with multiple
-MCP servers, providing a single interface for tool and resource access.
-"""
+Exports:
+    - MCPManager"""
 
 from typing import Any
 
@@ -32,44 +24,28 @@ from .types import MCPPrompt, MCPResource, MCPServerConfig, MCPTool
 
 
 class MCPManager:
-    """Manager for multiple MCP server connections.
-
-    Manages connections to multiple MCP servers, provides unified access
-    to tools and resources, and converts MCP tools to Xerxes functions.
-
-    Attributes:
-        servers: Dictionary of server name to MCPClient
-        logger: Logger instance
-    """
+    """Mcpmanager."""
 
     def __init__(self):
-        """Initialize the MCP manager.
+        """Initialize the instance.
 
-        Creates a new MCPManager instance with an empty server registry.
-        Use ``add_server`` to register and connect to MCP servers after
-        initialization.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
 
-        Example:
-            >>> manager = MCPManager()
-            >>> await manager.add_server(MCPServerConfig(name="my-server", command="npx", args=[...]))
-            >>> tools = manager.get_all_tools()
-        """
         self.servers: dict[str, MCPClient] = {}
         self.logger = get_logger()
 
     async def add_server(self, config: MCPServerConfig) -> bool:
-        """Add and connect to an MCP server.
-
-        Creates a new MCPClient instance, attempts to connect, and registers
-        it with the manager if successful. Skips servers that are disabled
-        in their configuration.
+        """Asynchronously Add server.
 
         Args:
-            config: Server configuration specifying connection details.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            config (MCPServerConfig): IN: config. OUT: Consumed during execution.
         Returns:
-            True if server added successfully, False otherwise.
-        """
+            bool: OUT: Result of the operation."""
+
         if config.name in self.servers:
             self.logger.warning(f"MCP server {config.name} already exists")
             return False
@@ -90,88 +66,77 @@ class MCPManager:
             return False
 
     async def remove_server(self, name: str) -> None:
-        """Remove and disconnect from an MCP server.
-
-        Disconnects from the specified server and removes it from the manager.
-        If the server is not found, this method does nothing.
+        """Asynchronously Remove server.
 
         Args:
-            name: Name of the server to remove.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution."""
+
         if name in self.servers:
             await self.servers[name].disconnect()
             del self.servers[name]
             self.logger.info(f"Removed MCP server: {name}")
 
     def get_all_tools(self) -> list[MCPTool]:
-        """Get all tools from all connected servers.
+        """Retrieve the all tools.
 
-        Aggregates tools from all connected MCP servers into a single list.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            List of all available MCP tools across all servers.
-        """
+            list[MCPTool]: OUT: Result of the operation."""
+
         tools = []
         for client in self.servers.values():
             tools.extend(client.tools)
         return tools
 
     def get_all_resources(self) -> list[MCPResource]:
-        """Get all resources from all connected servers.
+        """Retrieve the all resources.
 
-        Aggregates resources from all connected MCP servers into a single list.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            List of all available MCP resources across all servers.
-        """
+            list[MCPResource]: OUT: Result of the operation."""
+
         resources = []
         for client in self.servers.values():
             resources.extend(client.resources)
         return resources
 
     def get_all_prompts(self) -> list[MCPPrompt]:
-        """Get all prompts from all connected servers.
+        """Retrieve the all prompts.
 
-        Aggregates prompts from all connected MCP servers into a single list.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            List of all available MCP prompts across all servers.
-        """
+            list[MCPPrompt]: OUT: Result of the operation."""
+
         prompts = []
         for client in self.servers.values():
             prompts.extend(client.prompts)
         return prompts
 
     def get_server(self, name: str) -> MCPClient | None:
-        """Get MCP server client by name.
-
-        Retrieves the MCPClient instance for a specific server, allowing
-        direct access to the server's capabilities and methods.
+        """Retrieve the server.
 
         Args:
-            name: Name of the server to retrieve.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
         Returns:
-            MCPClient instance or None if not found.
-        """
+            MCPClient | None: OUT: Result of the operation."""
+
         return self.servers.get(name)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Call an MCP tool by name.
-
-        Finds the tool across all connected servers and executes it on the
-        server that provides it. The first matching tool found is used.
+        """Asynchronously Call tool.
 
         Args:
-            tool_name: Name of the tool to call.
-            arguments: Dictionary of arguments to pass to the tool.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            arguments (dict[str, Any]): IN: arguments. OUT: Consumed during execution.
         Returns:
-            Tool execution result from the MCP server.
+            Any: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the tool is not found in any connected server.
-        """
         for client in self.servers.values():
             for tool in client.tools:
                 if tool.name == tool_name:
@@ -180,20 +145,14 @@ class MCPManager:
         raise ValueError(f"Tool {tool_name} not found in any connected MCP server")
 
     async def read_resource(self, uri: str) -> Any:
-        """Read a resource by URI.
-
-        Searches all connected servers for a resource matching the given URI
-        and reads its content from the server that provides it.
+        """Asynchronously Read resource.
 
         Args:
-            uri: Resource URI to read.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            uri (str): IN: uri. OUT: Consumed during execution.
         Returns:
-            Resource content as returned by the MCP server.
+            Any: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the resource is not found in any connected server.
-        """
         for client in self.servers.values():
             for resource in client.resources:
                 if resource.uri == uri:
@@ -202,21 +161,15 @@ class MCPManager:
         raise ValueError(f"Resource {uri} not found in any connected MCP server")
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
-        """Get a prompt by name.
-
-        Searches all connected servers for a prompt matching the given name
-        and retrieves it from the server that provides it.
+        """Asynchronously Retrieve the prompt.
 
         Args:
-            name: Name of the prompt to retrieve.
-            arguments: Optional dictionary of arguments for prompt rendering.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            arguments (dict[str, Any] | None, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Rendered prompt text as a string.
+            str: OUT: Result of the operation."""
 
-        Raises:
-            ValueError: If the prompt is not found in any connected server.
-        """
         for client in self.servers.values():
             for prompt in client.prompts:
                 if prompt.name == name:
@@ -225,35 +178,34 @@ class MCPManager:
         raise ValueError(f"Prompt {name} not found in any connected MCP server")
 
     async def disconnect_all(self) -> None:
-        """Disconnect from all MCP servers.
+        """Asynchronously Disconnect all.
 
-        Gracefully closes all active server connections and clears the
-        internal server registry. This method is safe to call even if
-        no servers are connected.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         for client in list(self.servers.values()):
             await client.disconnect()
         self.servers.clear()
         self.logger.info("Disconnected from all MCP servers")
 
     def list_servers(self) -> list[str]:
-        """Get list of connected server names.
+        """List servers.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            List of server names currently connected to the manager.
-        """
+            list[str]: OUT: Result of the operation."""
+
         return list(self.servers.keys())
 
     def get_capabilities_summary(self) -> dict[str, Any]:
-        """Get summary of all capabilities across servers.
+        """Retrieve the capabilities summary.
 
-        Provides an overview of the tools, resources, and prompts available
-        from each connected server, useful for debugging and monitoring.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary mapping server names to capability counts, with keys
-            'tools', 'resources', and 'prompts' for each server.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         summary = {}
         for name, client in self.servers.items():
             summary[name] = {

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,53 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Built-in Planning Assistant agent definition.
 
-
-"""Pre-built Planner Agent for project planning and strategic coordination.
-
-This module provides a pre-configured AI agent specialized in project planning
-and strategic coordination tasks within the Xerxes framework. The planner agent
-excels at breaking down complex projects, creating timelines, and providing
-structured approaches to problem-solving.
-
-The agent is equipped with tools for:
-- Processing and generating JSON structured data for plans
-- Reading files to understand project context and requirements
-- Writing files to persist plans and documentation
-
-Agent Capabilities:
-    - Task Decomposition: Breaking down complex projects into manageable tasks
-    - Timeline Planning: Creating realistic timelines and milestones
-    - Risk Assessment: Identifying and planning for potential risks
-    - Resource Optimization: Allocating resources effectively
-    - Progress Tracking: Monitoring and adjusting plans as needed
-    - Strategic Analysis: Providing insights and recommendations
-
-Planning Principles:
-    - Clear objectives and success criteria definition
-    - Specific, measurable task breakdown
-    - Dependency and critical path identification
-    - Buffer time allocation for contingencies
-    - Resource constraint consideration
-    - Regular checkpoint planning
-
-Typical usage example:
-    from xerxes import Xerxes
-    from xerxes.agents import planner_agent
-
-    xerxes = Xerxes(llm=your_llm)
-    response = xerxes.run(
-        prompt="Create a project plan for building a REST API",
-        agent_id=planner_agent
-    )
-
-Note:
-    The agent uses a low temperature (0.2) to ensure consistent and
-    deterministic planning outputs. It has a high token limit (8192)
-    to accommodate detailed project plans and comprehensive breakdowns.
+This module instantiates a pre-configured Agent for project planning,
+strategic coordination, and task breakdown.
 """
 
 from ..tools import JSONProcessor, ReadFile, WriteFile

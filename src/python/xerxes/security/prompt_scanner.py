@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Prompt scanner module for Xerxes.
 
-
-"""Prompt injection and context-file security scanner.
-
-Detects common prompt-injection attacks, hidden unicode, and exfiltration
-patterns in context files (AGENTS.md, XERXES.md, .cursorrules, SOUL.md)
-and skill files before they are injected into the system prompt.
-
-Inspired by Hermes Agent's context threat detection in
-``agent/prompt_builder.py``.
-
-Usage::
-
-    from xerxes.security.prompt_scanner import scan_context_content
-
-    safe = scan_context_content(raw_text, filename="AGENTS.md")
-
-"""
+Exports:
+    - logger
+    - scan_context_content
+    - scan_context_file"""
 
 from __future__ import annotations
 
@@ -36,7 +26,6 @@ import re
 from typing import Final
 
 logger = logging.getLogger(__name__)
-
 
 _CONTEXT_THREAT_PATTERNS: Final[list[tuple[str, str]]] = [
     (r"ignore\s+(all\s+)?(previous|above|prior)\s+instructions", "prompt_injection"),
@@ -66,11 +55,9 @@ _CONTEXT_THREAT_PATTERNS: Final[list[tuple[str, str]]] = [
     ),
 ]
 
-
 _COMPILED_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [
     (re.compile(pat, re.IGNORECASE), pid) for pat, pid in _CONTEXT_THREAT_PATTERNS
 ]
-
 
 _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
     "\u200b",
@@ -87,20 +74,29 @@ _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
 
 
 def scan_context_content(content: str, filename: str = "unknown") -> str:
-    """Scan *content* for prompt-injection threats and invisible unicode.
-
-    Returns the original *content* if clean, otherwise a sanitized block
-    that explains what was blocked so the agent (and user) know the file
-    was not loaded.
+    """Scan context content.
 
     Args:
-        content: Raw text content of the context file.
-        filename: Human-readable filename for logging (e.g. ``"AGENTS.md"``).
-
+        content (str): IN: content. OUT: Consumed during execution.
+        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
     Returns:
-        Either the original *content* or a ``[BLOCKED: ...]`` replacement.
-    """
+        str: OUT: Result of the operation."""
+
     findings: list[str] = []
+    """Scan context content.
+
+    Args:
+        content (str): IN: content. OUT: Consumed during execution.
+        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+    """Scan context content.
+
+    Args:
+        content (str): IN: content. OUT: Consumed during execution.
+        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
 
     for char in _CONTEXT_INVISIBLE_CHARS:
         if char in content:
@@ -118,18 +114,30 @@ def scan_context_content(content: str, filename: str = "unknown") -> str:
 
 
 def scan_context_file(path: str | os.PathLike[str], filename: str | None = None) -> str:
-    """Convenience wrapper that reads a file and scans it.
+    """Scan context file.
 
     Args:
-        path: A :class:`~pathlib.Path` or path-like object pointing to the
-            file to scan.
-        filename: Optional override for the filename used in logs / block
-            messages.  Defaults to ``path.name`` when *path* has one.
-
+        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
+        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
     Returns:
-        File content if clean, otherwise a ``[BLOCKED: ...]`` message.
-    """
+        str: OUT: Result of the operation."""
+
     from pathlib import Path
+
+    """Scan context file.
+
+    Args:
+        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
+        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+    """Scan context file.
+
+    Args:
+        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
+        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
 
     p = Path(path)
     name = filename or p.name

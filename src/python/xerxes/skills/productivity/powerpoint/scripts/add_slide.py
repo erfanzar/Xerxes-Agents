@@ -1,22 +1,23 @@
-"""Add a new slide to an unpacked PPTX directory.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Add slide module for Xerxes.
 
-Usage: python add_slide.py <unpacked_dir> <source>
-
-The source can be:
-  - A slide file (e.g., slide2.xml) - duplicates the slide
-  - A layout file (e.g., slideLayout2.xml) - creates from layout
-
-Examples:
-    python add_slide.py unpacked/ slide2.xml
-    # Duplicates slide2, creates slide5.xml
-
-    python add_slide.py unpacked/ slideLayout2.xml
-    # Creates slide5.xml from slideLayout2.xml
-
-To see available layouts: ls unpacked/ppt/slideLayouts/
-
-Prints the <p:sldId> element to add to presentation.xml.
-"""
+Exports:
+    - get_next_slide_number
+    - create_slide_from_layout
+    - duplicate_slide
+    - parse_source"""
 
 import re
 import shutil
@@ -25,11 +26,22 @@ from pathlib import Path
 
 
 def get_next_slide_number(slides_dir: Path) -> int:
+    """Retrieve the next slide number.
+
+    Args:
+        slides_dir (Path): IN: slides dir. OUT: Consumed during execution.
+    Returns:
+        int: OUT: Result of the operation."""
     existing = [int(m.group(1)) for f in slides_dir.glob("slide*.xml") if (m := re.match(r"slide(\d+)\.xml", f.name))]
     return max(existing) + 1 if existing else 1
 
 
 def create_slide_from_layout(unpacked_dir: Path, layout_file: str) -> None:
+    """Create slide from layout.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+        layout_file (str): IN: layout file. OUT: Consumed during execution."""
     slides_dir = unpacked_dir / "ppt" / "slides"
     rels_dir = slides_dir / "_rels"
     layouts_dir = unpacked_dir / "ppt" / "slideLayouts"
@@ -87,6 +99,11 @@ def create_slide_from_layout(unpacked_dir: Path, layout_file: str) -> None:
 
 
 def duplicate_slide(unpacked_dir: Path, source: str) -> None:
+    """Duplicate slide.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+        source (str): IN: source. OUT: Consumed during execution."""
     slides_dir = unpacked_dir / "ppt" / "slides"
     rels_dir = slides_dir / "_rels"
 
@@ -127,6 +144,11 @@ def duplicate_slide(unpacked_dir: Path, source: str) -> None:
 
 
 def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
+    """Internal helper to add to content types.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+        dest (str): IN: dest. OUT: Consumed during execution."""
     content_types_path = unpacked_dir / "[Content_Types].xml"
     content_types = content_types_path.read_text(encoding="utf-8")
 
@@ -138,6 +160,13 @@ def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
 
 
 def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
+    """Internal helper to add to presentation rels.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+        dest (str): IN: dest. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
     pres_rels_path = unpacked_dir / "ppt" / "_rels" / "presentation.xml.rels"
     pres_rels = pres_rels_path.read_text(encoding="utf-8")
 
@@ -155,6 +184,12 @@ def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
 
 
 def _get_next_slide_id(unpacked_dir: Path) -> int:
+    """Internal helper to get next slide id.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+    Returns:
+        int: OUT: Result of the operation."""
     pres_path = unpacked_dir / "ppt" / "presentation.xml"
     pres_content = pres_path.read_text(encoding="utf-8")
     slide_ids = [int(m) for m in re.findall(r'<p:sldId[^>]*id="(\d+)"', pres_content)]
@@ -162,6 +197,12 @@ def _get_next_slide_id(unpacked_dir: Path) -> int:
 
 
 def parse_source(source: str) -> tuple[str, str | None]:
+    """Parse source.
+
+    Args:
+        source (str): IN: source. OUT: Consumed during execution.
+    Returns:
+        tuple[str, str | None]: OUT: Result of the operation."""
     if source.startswith("slideLayout") and source.endswith(".xml"):
         return ("layout", source)
 

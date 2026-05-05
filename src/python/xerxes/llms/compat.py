@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,43 +6,22 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Compat module for Xerxes.
 
-
-"""OpenAI-compatible provider for non-native backends.
-
-This module provides :class:`OpenAICompatLLM`, a thin wrapper around
-:class:`OpenAILLM` that automatically configures the ``base_url`` and
-``api_key`` for OpenAI-compatible providers such as:
-
-- **DeepSeek**: ``deepseek-chat``, ``deepseek-reasoner``
-- **Kimi / Moonshot**: ``moonshot-v1-8k``, ``kimi-latest``
-- **Qwen / DashScope**: ``qwen-max``, ``qwen-plus``, ``qwen-turbo``
-- **Zhipu / GLM**: ``glm-4-plus``, ``glm-4-flash``
-- **LM Studio**: Any locally-loaded model
-- **Custom**: Any OpenAI-compatible endpoint
-
-The class reads provider metadata from :mod:`xerxes.llms.registry` and
-resolves API keys from environment variables automatically.
-
-Usage::
-
-    from xerxes.llms.compat import OpenAICompatLLM
-
-
-    llm = OpenAICompatLLM(model="deepseek-chat")
-
-
-    llm = OpenAICompatLLM(model="my-model", provider="custom",
-                          base_url="http://localhost:8000/v1")
-
-
-    from xerxes.llms.base import LLMConfig
-    config = LLMConfig(model="qwen-max")
-    llm = OpenAICompatLLM(config=config, provider="qwen")
-"""
+Exports:
+    - OpenAICompatLLM
+    - DeepSeekLLM
+    - MiniMaxLLM
+    - KimiLLM
+    - QwenLLM
+    - ZhipuLLM
+    - LMStudioLLM
+    - CustomLLM"""
 
 from __future__ import annotations
 
@@ -59,24 +38,9 @@ from .registry import (
 
 
 class OpenAICompatLLM(OpenAILLM):
-    """OpenAI-compatible LLM provider for third-party backends.
+    """Open aicompat llm.
 
-    Extends :class:`OpenAILLM` by auto-resolving the ``base_url`` and
-    ``api_key`` from the provider registry. The provider can be specified
-    explicitly or inferred from the model name.
-
-    This allows a single class to handle DeepSeek, Kimi, Qwen, Zhipu,
-    LM Studio, and any custom OpenAI-compatible endpoint without
-    requiring separate implementations.
-
-    Attributes:
-        provider_name: The resolved provider name (e.g. ``"deepseek"``).
-
-    Example:
-        >>> llm = OpenAICompatLLM(model="deepseek-chat")
-        >>> llm.provider_name
-        'deepseek'
-        >>> response = await llm.generate_completion("Hello!")
+    Inherits from: OpenAILLM
     """
 
     def __init__(
@@ -87,17 +51,18 @@ class OpenAICompatLLM(OpenAILLM):
         async_client: Any | None = None,
         **kwargs,
     ):
-        """Initialize the OpenAI-compatible LLM provider.
+        """Initialize the instance.
 
         Args:
-            config: Optional LLMConfig. If ``base_url`` and ``api_key`` are
-                not set, they are resolved from the provider registry.
-            provider: Explicit provider name. If None, auto-detected from
-                the model name via :func:`detect_provider`.
-            client: Optional pre-configured OpenAI client.
-            async_client: Optional pre-configured AsyncOpenAI client.
-            **kwargs: Passed through to :class:`OpenAILLM`.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            provider (str | None, optional): IN: provider. Defaults to None. OUT: Consumed during execution.
+            client (Any | None, optional): IN: client. Defaults to None. OUT: Consumed during execution.
+            async_client (Any | None, optional): IN: async client. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         model = config.model if config else kwargs.get("model", "")
         self.provider_name = provider or detect_provider(model)
 
@@ -121,12 +86,24 @@ class OpenAICompatLLM(OpenAILLM):
         super().__init__(config=config, client=client, async_client=async_client)
 
     def get_model_info(self) -> dict[str, Any]:
-        """Return model info with the resolved provider name."""
+        """Retrieve the model info.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, Any]: OUT: Result of the operation."""
+
         info = super().get_model_info()
         info["provider"] = self.provider_name.capitalize()
         return info
 
     def __repr__(self) -> str:
+        """Dunder method for repr.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
         return (
             f"OpenAICompatLLM(provider='{self.provider_name}', "
             f"model='{self.config.model}', "
@@ -135,51 +112,128 @@ class OpenAICompatLLM(OpenAILLM):
 
 
 class DeepSeekLLM(OpenAICompatLLM):
-    """DeepSeek provider (deepseek-chat, deepseek-reasoner)."""
+    """Deep seek llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="deepseek", **kwargs)
 
 
 class MiniMaxLLM(OpenAICompatLLM):
-    """MiniMax provider (MiniMax-M2.7-highspeed, MiniMax-Text-01, abab6.5s-chat, etc.)."""
+    """Mini max llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="minimax", **kwargs)
 
 
 class KimiLLM(OpenAICompatLLM):
-    """Kimi / Moonshot provider (moonshot-v1-*, kimi-latest)."""
+    """Kimi llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="kimi", **kwargs)
 
 
 class QwenLLM(OpenAICompatLLM):
-    """Qwen / DashScope provider (qwen-max, qwen-plus, qwen-turbo)."""
+    """Qwen llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="qwen", **kwargs)
 
 
 class ZhipuLLM(OpenAICompatLLM):
-    """Zhipu / GLM provider (glm-4-plus, glm-4-flash)."""
+    """Zhipu llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="zhipu", **kwargs)
 
 
 class LMStudioLLM(OpenAICompatLLM):
-    """LM Studio local provider."""
+    """Lmstudio llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         super().__init__(config=config, provider="lmstudio", **kwargs)
 
 
 class CustomLLM(OpenAICompatLLM):
-    """Custom OpenAI-compatible endpoint provider."""
+    """Custom llm.
+
+    Inherits from: OpenAICompatLLM
+    """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
         if config and not config.base_url and "base_url" not in kwargs:
             raise ValueError("CustomLLM requires a base_url. Pass it via LLMConfig or as a kwarg.")
         super().__init__(config=config, provider="custom", **kwargs)

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Loop debug module for Xerxes.
 
-
-"""Generator-based streaming agent loop.
-
-Inspired by the nano-claude-code agent loop, this module implements a
-multi-turn agent loop as a Python generator. The loop:
-
-"""
+Exports:
+    - logger
+    - MAX_TOOL_TURNS
+    - run
+    - arun"""
 
 from __future__ import annotations
 
@@ -29,15 +30,35 @@ from collections.abc import AsyncGenerator, Callable, Generator
 from dataclasses import dataclass
 from typing import Any
 
+from .events import (
+    AgentState,
+    PermissionRequest,
+    SkillSuggestion,
+    StreamEvent,
+    TextChunk,
+    ThinkingChunk,
+    ToolEnd,
+    ToolStart,
+    TurnDone,
+)
+from .messages import messages_to_anthropic, messages_to_openai
+from .permissions import (
+    PermissionMode,
+    check_permission,
+    format_permission_description,
+)
+
 
 @dataclass
 class _ThinkingParser:
-    """Stateful parser that splits text chunks on <think> XML tags.
+    """Thinking parser.
 
-    Models that emit <think> ... </think> as plain text (e.g. DeepSeek)
-    rather than as a dedicated reasoning_content field need this to separate
-    thinking from the visible response.
-    """
+    Attributes:
+        _open_tag (str): open tag.
+        _close_tag (str): close tag.
+        _buffer (str): buffer.
+        _in_thinking (bool): in thinking.
+        _thinking_buf (str): thinking buf."""
 
     _open_tag: str = "<think>"
     _close_tag: str = "</think>"
@@ -46,10 +67,14 @@ class _ThinkingParser:
     _thinking_buf: str = ""
 
     def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
-        """Parse a text fragment and return a list of (is_thinking, text) tuples.
+        """Process.
 
-        Each emitted item is either a TextChunk or ThinkingChunk.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            chunk_text (str): IN: chunk text. OUT: Consumed during execution.
+        Returns:
+            list[TextChunk | ThinkingChunk]: OUT: Result of the operation."""
+
         events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
 
@@ -95,35 +120,19 @@ class _ThinkingParser:
 def _parse_thinking_tags(
     text: str,
 ) -> tuple[str, str]:
-    """Split a complete text block into (visible_text, thinking_text).
+    """Internal helper to parse thinking tags.
 
-    Both segments are stripped of the XML tags. If no thinking tags are
-    found, thinking_text is empty.
-    """
+    Args:
+        text (str): IN: text. OUT: Consumed during execution.
+    Returns:
+        tuple[str, str]: OUT: Result of the operation."""
+
     thinking_pattern = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
     thinking_parts = thinking_pattern.findall(text)
     thinking_text = "".join(thinking_parts).strip()
     visible_text = thinking_pattern.sub("", text).strip()
     return visible_text, thinking_text
 
-
-from .events import (  # noqa: E402
-    AgentState,
-    PermissionRequest,
-    SkillSuggestion,
-    StreamEvent,
-    TextChunk,
-    ThinkingChunk,
-    ToolEnd,
-    ToolStart,
-    TurnDone,
-)
-from .messages import messages_to_anthropic, messages_to_openai  # noqa: E402
-from .permissions import (  # noqa: E402
-    PermissionMode,
-    check_permission,
-    format_permission_description,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -141,35 +150,21 @@ def run(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> Generator[StreamEvent, None, None]:
-    """Multi-turn streaming agent loop (synchronous generator).
-
-    Yields :data:`StreamEvent` instances as the agent processes the
-    user message, calls tools, and produces responses.
+    """Run.
 
     Args:
-        user_message: The user's input message.
-        state: Mutable :class:`AgentState` tracking conversation history
-            and token counts.
-        config: Configuration dict. Expected keys:
+        user_message (str): IN: user message. OUT: Consumed during execution.
+        state (AgentState): IN: state. OUT: Consumed during execution.
+        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
+        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
+        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
+        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
+        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
+        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
+        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Generator[StreamEvent, None, None]: OUT: Result of the operation."""
 
-            - ``model`` (str): Model name for the LLM.
-            - ``permission_mode`` (str): One of ``"auto"``, ``"accept-all"``,
-              ``"manual"``. Defaults to ``"auto"``.
-            - ``max_tokens`` (int): Max tokens per LLM turn.
-            - ``thinking`` (bool): Enable extended thinking.
-            - ``thinking_budget`` (int): Token budget for thinking.
-
-        system_prompt: System prompt for the LLM.
-        tool_executor: Callable ``(tool_name, tool_input) -> result_string``.
-            If None, tool calls are acknowledged but not executed.
-        tool_schemas: List of tool schemas (Anthropic format) to send to
-            the LLM. If None, no tools are available.
-        depth: Sub-agent nesting depth (0 for top-level).
-        cancel_check: Optional callable returning ``True`` to abort early.
-
-    Yields:
-        :data:`StreamEvent` instances.
-    """
     from xerxes.llms.registry import detect_provider, get_provider_config
 
     state.messages.append({"role": "user", "content": user_message})
@@ -350,11 +345,21 @@ async def arun(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> AsyncGenerator[StreamEvent, None]:
-    """Async variant of :func:`run`.
+    """Asynchronously Arun.
 
-    Same interface as :func:`run` but yields events asynchronously.
-    The tool executor can be sync or async.
-    """
+    Args:
+        user_message (str): IN: user message. OUT: Consumed during execution.
+        state (AgentState): IN: state. OUT: Consumed during execution.
+        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
+        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
+        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
+        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
+        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
+        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
+        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        AsyncGenerator[StreamEvent, None]: OUT: Result of the operation."""
+
     loop = asyncio.get_event_loop()
 
     gen = run(
@@ -370,6 +375,8 @@ async def arun(
     )
 
     class _Sentinel:
+        """Sentinel."""
+
         pass
 
     _sentinel = _Sentinel()
@@ -388,12 +395,18 @@ def _stream_llm(
     tool_schemas: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Stream from the appropriate LLM provider.
+    """Internal helper to stream llm.
 
-    Yields :class:`TextChunk` and :class:`ThinkingChunk` events during
-    streaming, and a final dict with ``tool_calls``, ``in_tokens``,
-    ``out_tokens`` at the end.
-    """
+    Args:
+        model (str): IN: model. OUT: Consumed during execution.
+        provider_type (str): IN: provider type. OUT: Consumed during execution.
+        system (str): IN: system. OUT: Consumed during execution.
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
+        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
+    Returns:
+        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+
     from xerxes.llms.registry import PROVIDERS, bare_model, detect_provider
 
     has_explicit_base = bool(config.get("base_url") or config.get("custom_base_url"))
@@ -419,7 +432,18 @@ def _stream_anthropic(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Stream from the Anthropic API."""
+    """Internal helper to stream anthropic.
+
+    Args:
+        model (str): IN: model. OUT: Consumed during execution.
+        system (str): IN: system. OUT: Consumed during execution.
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
+        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
+        provider_name (str): IN: provider name. OUT: Consumed during execution.
+    Returns:
+        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+
     try:
         import anthropic
     except ImportError:
@@ -517,7 +541,18 @@ def _stream_openai_compat(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Stream from any OpenAI-compatible API."""
+    """Internal helper to stream openai compat.
+
+    Args:
+        model (str): IN: model. OUT: Consumed during execution.
+        system (str): IN: system. OUT: Consumed during execution.
+        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
+        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
+        provider_name (str): IN: provider name. OUT: Consumed during execution.
+    Returns:
+        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+
     try:
         from openai import BadRequestError, OpenAI
     except ImportError:
@@ -694,7 +729,13 @@ def _stream_openai_compat(
 
 
 def _tools_to_openai(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert Anthropic-style tool schemas to OpenAI function-calling format."""
+    """Internal helper to tools to openai.
+
+    Args:
+        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, Any]]: OUT: Result of the operation."""
+
     return [
         {
             "type": "function",

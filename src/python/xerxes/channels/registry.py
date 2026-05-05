@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,19 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Channel registry and lifecycle management.
 
-"""Channel registry — discovery + lifecycle for messaging adapters.
-
-Higher-level wrapper around :class:`PluginRegistry` that adds:
-
-- Bulk start/stop of all registered channels.
-- A per-channel inbound dispatcher that fans :class:`ChannelMessage`
-  events from any adapter to a single user-facing handler.
-- Optional Python entry-point discovery via the ``xerxes.channels``
-  group (``pyproject.toml`` :code:`[project.entry-points."xerxes.channels"]`).
+Provides ``ChannelRegistry`` for collecting, starting, and stopping multiple
+channels, plus ``gather_inbound`` for starting several registries concurrently.
 """
 
 from __future__ import annotations
@@ -35,54 +31,74 @@ InboundHandler = tp.Callable[[ChannelMessage], tp.Awaitable[None]]
 
 
 class ChannelRegistry:
-    """Manage the lifecycle of all attached :class:`Channel` adapters.
-
-    Intended to be created once per process. Adapters are registered
-    by name, started together via :meth:`start_all`, and stopped via
-    :meth:`stop_all`.
-
-    Example:
-        >>> r = ChannelRegistry()
-        >>> r.register("telegram", TelegramChannel(token="..."))
-        >>> r.set_handler(my_inbound_handler)
-        >>> await r.start_all()
-        >>> ...
-        >>> await r.stop_all()
-    """
+    """Holds a collection of named channels and manages their lifecycle."""
 
     def __init__(self) -> None:
-        """Initialise an empty registry with no handler and nothing started."""
+        """Initialize an empty registry."""
         self._channels: dict[str, Channel] = {}
         self._handler: InboundHandler | None = None
         self._started: set[str] = set()
 
     def register(self, name: str, channel: Channel) -> None:
-        """Add a channel under *name* (replaces any existing entry)."""
+        """Add a channel to the registry.
+
+        Args:
+            name (str): IN: unique identifier for the channel.
+            channel (Channel): IN: channel instance to register.
+        """
         self._channels[name] = channel
 
     def unregister(self, name: str) -> None:
-        """Remove the channel ``name`` and forget whether it was started."""
+        """Remove a channel from the registry.
+
+        Args:
+            name (str): IN: identifier of the channel to remove.
+        """
         self._channels.pop(name, None)
         self._started.discard(name)
 
     def get(self, name: str) -> Channel | None:
-        """Return the registered channel ``name`` or ``None`` if missing."""
+        """Retrieve a channel by name.
+
+        Args:
+            name (str): IN: channel identifier.
+
+        Returns:
+            Channel | None: OUT: the channel if registered.
+        """
         return self._channels.get(name)
 
     def all(self) -> dict[str, Channel]:
-        """Return a shallow copy of the name-to-channel mapping."""
+        """Return all registered channels.
+
+        Returns:
+            dict[str, Channel]: OUT: shallow copy of the internal mapping.
+        """
         return dict(self._channels)
 
     def names(self) -> list[str]:
-        """Return the list of currently registered channel names."""
+        """Return the names of all registered channels.
+
+        Returns:
+            list[str]: OUT: list of registered channel names.
+        """
         return list(self._channels.keys())
 
     def set_handler(self, handler: InboundHandler) -> None:
-        """Single coroutine that receives every inbound :class:`ChannelMessage`."""
+        """Set the global inbound handler for all channels.
+
+        Args:
+            handler (InboundHandler): IN: async callback invoked for each
+                inbound message.
+        """
         self._handler = handler
 
     async def start_all(self) -> None:
-        """Start every registered channel, dispatching inbound to the handler."""
+        """Start all registered channels that are not already running.
+
+        Raises:
+            RuntimeError: If ``set_handler`` has not been called.
+        """
         if self._handler is None:
             raise RuntimeError("ChannelRegistry.set_handler must be called before start_all()")
         for name, channel in list(self._channels.items()):
@@ -96,7 +112,7 @@ class ChannelRegistry:
                 logger.warning("Failed to start channel %s", name, exc_info=True)
 
     async def stop_all(self) -> None:
-        """Stop every channel that was started by this registry."""
+        """Stop all currently running channels."""
         for name in list(self._started):
             channel = self._channels.get(name)
             if channel is None:
@@ -109,16 +125,30 @@ class ChannelRegistry:
             self._started.discard(name)
 
     async def send(self, message: ChannelMessage) -> None:
-        """Route an outbound message to the channel named in ``message.channel``."""
+        """Send a message through its designated channel.
+
+        Args:
+            message (ChannelMessage): IN: message whose ``channel`` field
+                determines the target.
+
+        Raises:
+            KeyError: If the target channel is not registered.
+        """
         chan = self._channels.get(message.channel)
         if chan is None:
             raise KeyError(f"unknown channel {message.channel!r}")
         await chan.send(message)
 
     def discover_entry_points(self, group: str = "xerxes.channels") -> list[str]:
-        """Optional: load channel adapters via Python entry points.
+        """Discover and auto-register channels from package entry points.
 
-        Returns the list of newly registered channel names.
+        Args:
+            group (str): IN: entry-point group to scan. Defaults to
+                ``"xerxes.channels"``.
+
+        Returns:
+            list[str]: OUT: names of channels that were successfully loaded
+            and registered.
         """
         try:
             from importlib.metadata import entry_points
@@ -142,11 +172,30 @@ class ChannelRegistry:
 
 
 def gather_inbound(*registries: ChannelRegistry) -> tp.Awaitable[None]:
-    """Convenience: start every registry's channels in parallel."""
+    """Start all supplied registries concurrently.
+
+    Args:
+        *registries (ChannelRegistry): IN: one or more registries to start.
+
+    Returns:
+        Awaitable[None]: OUT: coroutine that awaits ``start_all`` on every
+        registry.
+    """
 
     async def _run():
-        """Await :meth:`ChannelRegistry.start_all` on every supplied registry."""
+        """Asynchronously Internal helper to run.
+
+        Returns:
+            Any: OUT: Result of the operation."""
         await asyncio.gather(*(r.start_all() for r in registries))
+        """Asynchronously Internal helper to run.
+
+        Returns:
+            Any: OUT: Result of the operation."""
+        """Asynchronously Internal helper to run.
+
+        Returns:
+            Any: OUT: Result of the operation."""
 
     return _run()
 

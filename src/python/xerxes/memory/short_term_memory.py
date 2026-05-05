@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,12 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Short term memory module for Xerxes.
 
-
-"""Short-term memory implementation."""
+Exports:
+    - ShortTermMemory"""
 
 from collections import deque
 from datetime import datetime
@@ -21,26 +24,9 @@ from .base import Memory, MemoryItem
 
 
 class ShortTermMemory(Memory):
-    """Short-term memory with FIFO eviction and recent-context tracking.
+    """Short term memory.
 
-    Uses a bounded :class:`collections.deque` to enforce a fixed capacity.
-    When the capacity is reached, the oldest item is silently discarded as
-    new items are appended. Ideal for maintaining conversation context and
-    recent interaction history.
-
-    Attributes:
-        storage: Optional :class:`MemoryStorage` backend for persistence.
-        max_items: Maximum capacity (mirrors the deque ``maxlen``).
-        enable_embeddings: Whether dense vector embeddings are enabled.
-        _items: Bounded deque holding :class:`MemoryItem` instances.
-        _index: Dictionary mapping memory IDs to items for O(1) lookup.
-
-    Example:
-        >>> from xerxes.memory import ShortTermMemory
-        >>> stm = ShortTermMemory(capacity=10)
-        >>> item = stm.save("User asked about weather")
-        >>> stm.get_recent(3)
-        [MemoryItem(...)]
+    Inherits from: Memory
     """
 
     def __init__(
@@ -49,17 +35,14 @@ class ShortTermMemory(Memory):
         storage: Any | None = None,
         enable_embeddings: bool = False,
     ) -> None:
-        """Initialize short-term memory with a fixed FIFO capacity.
+        """Initialize the instance.
 
         Args:
-            capacity: Maximum number of items to retain. When this limit
-                is reached, the oldest item is automatically evicted on
-                the next :meth:`save` call.
-            storage: Optional :class:`MemoryStorage` backend for
-                persisting items beyond the process lifetime.
-            enable_embeddings: Whether to compute dense vector embeddings
-                for semantic search. Defaults to ``False``.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            capacity (int, optional): IN: capacity. Defaults to 20. OUT: Consumed during execution.
+            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
+            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to False. OUT: Consumed during execution."""
+
         super().__init__(storage=storage, max_items=capacity, enable_embeddings=enable_embeddings)
         self._items = deque(maxlen=capacity)
 
@@ -72,22 +55,19 @@ class ShortTermMemory(Memory):
         conversation_id: str | None = None,
         **kwargs,
     ) -> MemoryItem:
-        """
-        Save to short-term memory.
-
-        Oldest items are automatically removed when capacity is reached (FIFO behavior).
+        """Save.
 
         Args:
-            content: The content to store in memory
-            metadata: Additional metadata to attach to the memory item
-            agent_id: Identifier of the agent creating this memory
-            user_id: Identifier of the user associated with this memory
-            conversation_id: Identifier of the conversation context
-            **kwargs: Additional fields to include in metadata
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            user_id (str | None, optional): IN: user id. Defaults to None. OUT: Consumed during execution.
+            conversation_id (str | None, optional): IN: conversation id. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The created MemoryItem instance
-        """
+            MemoryItem: OUT: Result of the operation."""
+
         metadata = metadata or {}
         metadata.update(kwargs)
 
@@ -111,22 +91,18 @@ class ShortTermMemory(Memory):
     def search(
         self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, min_relevance: float = 0.0, **kwargs
     ) -> list[MemoryItem]:
-        """
-        Search short-term memory using keyword matching and filters.
-
-        Performs case-insensitive keyword matching and returns most recent matches first.
-        Supports filtering by agent_id, user_id, and conversation_id.
+        """Search.
 
         Args:
-            query: Search query string for keyword matching
-            limit: Maximum number of results to return
-            filters: Filter criteria (supports agent_id, user_id, conversation_id)
-            min_relevance: Minimum relevance score threshold (0.0 to 1.0)
-            **kwargs: Additional search parameters (unused)
-
+            self: IN: The instance. OUT: Used for attribute access.
+            query (str): IN: query. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
+            min_relevance (float, optional): IN: min relevance. Defaults to 0.0. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            List of matching MemoryItem instances sorted by relevance and timestamp
-        """
+            list[MemoryItem]: OUT: Result of the operation."""
+
         query_lower = query.lower()
         matches = []
 
@@ -168,21 +144,16 @@ class ShortTermMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """
-        Retrieve specific memories by ID or filter criteria.
-
-        When memory_id is provided, returns the specific item. Otherwise,
-        filters through memories and returns matching items (most recent first).
+        """Retrieve.
 
         Args:
-            memory_id: Specific memory ID to retrieve
-            filters: Filter criteria to match against memory attributes
-            limit: Maximum number of items to return when using filters
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
         Returns:
-            Single MemoryItem if memory_id provided, list of MemoryItem if filters used,
-            or None if memory_id not found
-        """
+            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+
         if memory_id:
             item = self._index.get(memory_id)
             if item:
@@ -211,16 +182,15 @@ class ShortTermMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """
-        Update a memory item with new values.
+        """Update.
 
         Args:
-            memory_id: ID of the memory item to update
-            updates: Dictionary of field names and new values to apply
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str): IN: memory id. OUT: Consumed during execution.
+            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
         Returns:
-            True if the update was successful, False if memory_id not found
-        """
+            bool: OUT: Result of the operation."""
+
         if memory_id not in self._index:
             return False
 
@@ -235,16 +205,15 @@ class ShortTermMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """
-        Delete memory items by ID or filter criteria.
+        """Delete.
 
         Args:
-            memory_id: Specific memory ID to delete
-            filters: Filter criteria to match items for deletion
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Number of items deleted
-        """
+            int: OUT: Result of the operation."""
+
         count = 0
 
         if memory_id:
@@ -276,11 +245,11 @@ class ShortTermMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """
-        Clear all short-term memories.
+        """Clear.
 
-        Removes all items from memory and storage backend if configured.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if self.storage:
             for item in self._items:
                 self.storage.delete(f"stm_{item.memory_id}")
@@ -289,28 +258,25 @@ class ShortTermMemory(Memory):
         self._index.clear()
 
     def get_recent(self, n: int = 5) -> list[MemoryItem]:
-        """
-        Get the most recent memory items.
+        """Retrieve the recent.
 
         Args:
-            n: Number of recent items to retrieve
-
+            self: IN: The instance. OUT: Used for attribute access.
+            n (int, optional): IN: n. Defaults to 5. OUT: Consumed during execution.
         Returns:
-            List of the n most recent MemoryItem instances
-        """
+            list[MemoryItem]: OUT: Result of the operation."""
+
         items = list(self._items)
         return items[-n:] if len(items) > n else items
 
     def summarize(self) -> str:
-        """
-        Create a summary of short-term memory.
+        """Summarize.
 
-        Groups memories by conversation and produces a human-readable summary
-        of recent activity.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Formatted string summary of recent memory contents
-        """
+            str: OUT: Result of the operation."""
+
         if not self._items:
             return "No recent memories."
 

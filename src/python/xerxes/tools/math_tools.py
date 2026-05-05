@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,29 +6,19 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Math tools module for Xerxes.
 
-
-"""Mathematical and statistical tools for calculations and analysis.
-
-This module provides a comprehensive set of mathematical tools
-for the Xerxes framework. It includes:
-- Advanced calculator with expression evaluation and basic operations
-- Statistical analysis with descriptive statistics and correlation
-- Mathematical functions including trigonometric, logarithmic, and more
-- Number theory operations like prime checking, factorization, GCD, and LCM
-- Unit conversion between different measurement systems
-
-Each tool is implemented as a class inheriting from AgentBaseFn,
-making them directly usable as agent tools for mathematical computations.
-
-Example:
-    >>> calc = Calculator()
-    >>> result = calc(expression="sqrt(16) + pow(2, 3)")
-    >>> print(result["result"])
-"""
+Exports:
+    - Calculator
+    - StatisticalAnalyzer
+    - MathematicalFunctions
+    - NumberTheory
+    - UnitConverter"""
 
 from __future__ import annotations
 
@@ -66,14 +56,22 @@ _ALLOWED_UNARYOPS: dict[type, Callable[..., Any]] = {ast.USub: operator.neg, ast
 
 
 def _safe_eval(expression: str) -> float:
-    """Evaluate a math expression using an AST walk over a strict whitelist.
+    """Internal helper to safe eval.
 
-    Replaces the CPython ``eval()`` sandbox pattern (``{"__builtins__": {}}``)
-    which is trivially escaped via ``().__class__.__bases__[0].__subclasses__()``.
-    """
+    Args:
+        expression (str): IN: expression. OUT: Consumed during execution.
+    Returns:
+        float: OUT: Result of the operation."""
+
     tree = ast.parse(expression, mode="eval")
 
     def _eval(node: ast.AST) -> float:
+        """Internal helper to eval.
+
+        Args:
+            node (ast.AST): IN: node. OUT: Consumed during execution.
+        Returns:
+            float: OUT: Result of the operation."""
         if isinstance(node, ast.Expression):
             return _eval(node.body)
         if isinstance(node, ast.Constant):
@@ -107,18 +105,9 @@ def _safe_eval(expression: str) -> float:
 
 
 class Calculator(AgentBaseFn):
-    """Advanced calculator with various mathematical operations.
+    """Calculator.
 
-    Provides two modes of operation: expression evaluation using
-    a safe subset of mathematical functions, and named operations
-    on lists of operands. Supports configurable decimal precision.
-
-    Expression mode supports:
-        sin, cos, tan, log, sqrt, abs, pow, exp and basic arithmetic.
-
-    Operation mode supports:
-        add, multiply, mean, median, mode, stdev, variance, min, max,
-        range, sum_of_squares, root_mean_square, geometric_mean, harmonic_mean.
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -129,56 +118,17 @@ class Calculator(AgentBaseFn):
         precision: int = 10,
         **context_variables,
     ) -> dict[str, Any]:
-        """Perform mathematical calculations.
-
-        Supports two modes: expression evaluation and named operations.
-        In expression mode, evaluates a mathematical expression string
-        using a safe subset of math functions. In operation mode, applies
-        a named operation to a list of numeric operands.
+        """Static call.
 
         Args:
-            expression: Mathematical expression to evaluate. Supports
-                basic arithmetic (+, -, *, /, **, %) and the following
-                functions: sin, cos, tan, log, sqrt, abs, pow, exp.
-                Mutually exclusive with ``operation``/``operands``.
-            operation: Named operation to perform on ``operands``. Options:
-                - "add": Sum of all operands.
-                - "multiply": Product of all operands.
-                - "mean": Arithmetic mean.
-                - "median": Median value.
-                - "mode": Most common value.
-                - "stdev": Sample standard deviation.
-                - "variance": Sample variance.
-                - "min": Minimum value.
-                - "max": Maximum value.
-                - "range": Difference between max and min.
-                - "sum_of_squares": Sum of squared values.
-                - "root_mean_square": Root mean square.
-                - "geometric_mean": Geometric mean (positive numbers only).
-                - "harmonic_mean": Harmonic mean.
-            operands: List of numbers for the named ``operation``.
-            precision: Decimal precision for calculations. Defaults to 10.
-            **context_variables: Runtime context from the agent (unused).
-
+            expression (str | None, optional): IN: expression. Defaults to None. OUT: Consumed during execution.
+            operation (str | None, optional): IN: operation. Defaults to None. OUT: Consumed during execution.
+            operands (list[float] | None, optional): IN: operands. Defaults to None. OUT: Consumed during execution.
+            precision (int, optional): IN: precision. Defaults to 10. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A dictionary containing:
-                For expression mode:
-                    - expression (str): The original expression.
-                    - result (float): Computed result.
-                    - decimal_result (str): High-precision decimal representation.
-                For operation mode:
-                    - operation (str): The operation performed.
-                    - operands (list[float]): The input operands.
-                    - result (float): Computed result.
-                    - count (int): Number of operands.
-                    - note (str): Additional info (e.g., for mode with no unique value).
-                - error (str): Error message if the calculation failed.
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> result = Calculator.static_call(expression="sqrt(16) + pow(2, 3)")
-            >>> print(result["result"])
-            12.0
-        """
         result: dict[str, Any] = {}
         getcontext().prec = precision
 
@@ -252,16 +202,9 @@ class Calculator(AgentBaseFn):
 
 
 class StatisticalAnalyzer(AgentBaseFn):
-    """Statistical analysis and descriptive statistics tool.
+    """Statistical analyzer.
 
-    Provides comprehensive statistical analysis including descriptive
-    statistics, distribution analysis, and correlation calculations.
-    Automatically calculates quartiles, outliers, and confidence intervals.
-
-    Supported analysis types:
-        descriptive: Mean, median, mode, std dev, quartiles, outliers.
-        distribution: Skewness, kurtosis, frequency distribution.
-        correlation: Pearson correlation for paired data.
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -271,53 +214,16 @@ class StatisticalAnalyzer(AgentBaseFn):
         confidence_level: float = 0.95,
         **context_variables,
     ) -> dict[str, Any]:
-        """Perform statistical analysis on numerical data.
-
-        Computes comprehensive statistics based on the selected analysis
-        type. Supports descriptive statistics with outlier detection,
-        distribution analysis with skewness and kurtosis, and Pearson
-        correlation for paired data.
+        """Static call.
 
         Args:
-            data: List of numerical values to analyze. Must not be empty.
-                For "correlation" analysis, must have an even number of
-                elements (first half = x values, second half = y values).
-            analysis_type: Type of statistical analysis. Options:
-                - "descriptive": Mean, median, mode, std dev, variance,
-                  range, sum, quartiles (Q1/Q2/Q3/IQR), and outlier
-                  detection using the 1.5*IQR method.
-                - "distribution": Skewness, kurtosis (excess), and
-                  frequency distribution histogram with configurable bins.
-                  Requires at least 3 data points.
-                - "correlation": Pearson correlation coefficient for paired
-                  data. Returns r, r-squared, strength label, and direction.
-                  Requires an even number of data points.
-            confidence_level: Confidence level for statistical intervals.
-                Defaults to 0.95. Currently reserved for future use.
-            **context_variables: Runtime context from the agent (unused).
-
+            data (list[float]): IN: data. OUT: Consumed during execution.
+            analysis_type (str, optional): IN: analysis type. Defaults to 'descriptive'. OUT: Consumed during execution.
+            confidence_level (float, optional): IN: confidence level. Defaults to 0.95. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A dictionary containing:
-                - data_points (int): Number of data values.
-                For "descriptive":
-                    - statistics: count, mean, median, min, max, range, sum,
-                      std_dev, variance, mode.
-                    - quartiles: Q1, Q2, Q3, IQR.
-                    - outliers: count, values, lower_bound, upper_bound.
-                For "distribution":
-                    - skewness (float): Measure of distribution asymmetry.
-                    - kurtosis (float): Excess kurtosis.
-                    - frequency_distribution: List of bin dicts with range,
-                      count, and frequency.
-                For "correlation":
-                    - correlation: pearson_r, r_squared, strength, direction.
-                - error (str): Error message if the analysis failed.
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> result = StatisticalAnalyzer.static_call([1, 2, 3, 4, 5])
-            >>> print(result["statistics"]["mean"])
-            3
-        """
         if not data:
             return {"error": "Data cannot be empty"}
 
@@ -430,18 +336,9 @@ class StatisticalAnalyzer(AgentBaseFn):
 
 
 class MathematicalFunctions(AgentBaseFn):
-    """Advanced mathematical functions and operations.
+    """Mathematical functions.
 
-    Provides a wide range of mathematical function evaluations
-    including trigonometric, logarithmic, exponential, and rounding
-    functions. Supports additional parameters for certain functions.
-
-    Supported functions:
-        Trigonometric: sin, cos, tan, asin, acos, atan, sinh, cosh, tanh.
-        Logarithmic: log (with custom base), log10.
-        Exponential: exp, pow (with custom exponent).
-        Rounding: floor, ceil, round (with decimal places).
-        Other: sqrt, abs, factorial.
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -451,46 +348,16 @@ class MathematicalFunctions(AgentBaseFn):
         parameters: dict[str, float] | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Evaluate a mathematical function on a single input value.
-
-        Computes the result of the specified mathematical function applied
-        to the input value. Some functions accept additional parameters
-        via the ``parameters`` dictionary.
+        """Static call.
 
         Args:
-            function: Name of the mathematical function to evaluate. Options:
-                - Trigonometric: "sin", "cos", "tan", "asin", "acos", "atan",
-                  "sinh", "cosh", "tanh".
-                - Logarithmic: "log" (natural log; use parameters["base"]
-                  for custom base), "log10".
-                - Exponential: "exp", "pow" (uses parameters["exponent"],
-                  default 2).
-                - Rounding: "floor", "ceil", "round" (uses
-                  parameters["decimals"], default 0).
-                - Other: "sqrt", "abs", "factorial" (non-negative integers only).
-            input_value: The numeric input to the function. Required for all
-                functions. Must satisfy domain constraints (e.g., positive
-                for log, [-1, 1] for asin/acos, non-negative for sqrt,
-                non-negative integer for factorial).
-            parameters: Additional parameters for functions that need them:
-                - "base" (float): Logarithm base for "log" (default: e).
-                - "exponent" (float): Exponent for "pow" (default: 2).
-                - "decimals" (int): Decimal places for "round" (default: 0).
-            **context_variables: Runtime context from the agent (unused).
-
+            function (str): IN: function. OUT: Consumed during execution.
+            input_value (float | None, optional): IN: input value. Defaults to None. OUT: Consumed during execution.
+            parameters (dict[str, float] | None, optional): IN: parameters. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A dictionary containing:
-                - function (str): The function that was evaluated.
-                - input (float): The input value.
-                - result (float|int): The computed result.
-                - parameters (dict): Additional parameters used (if any).
-                - error (str): Error message if evaluation failed.
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> result = MathematicalFunctions.static_call("log", 100, {"base": 10})
-            >>> print(result["result"])
-            2.0
-        """
         result: dict[str, Any] = {}
 
         if input_value is None:
@@ -576,19 +443,9 @@ class MathematicalFunctions(AgentBaseFn):
 
 
 class NumberTheory(AgentBaseFn):
-    """Number theory and discrete mathematics functions.
+    """Number theory.
 
-    Provides operations for prime number checking, factorization,
-    greatest common divisor, least common multiple, and mathematical
-    sequences like Fibonacci and Collatz.
-
-    Supported operations:
-        prime: Check if a number is prime.
-        factors: Get all factors and prime factorization.
-        gcd: Calculate greatest common divisor of multiple numbers.
-        lcm: Calculate least common multiple of multiple numbers.
-        fibonacci: Generate Fibonacci sequence up to n terms.
-        collatz: Generate Collatz sequence starting from n.
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -598,48 +455,16 @@ class NumberTheory(AgentBaseFn):
         numbers: list[int] | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Perform number theory and discrete mathematics operations.
-
-        Provides primality testing, factorization, GCD/LCM computation,
-        and mathematical sequence generation.
+        """Static call.
 
         Args:
-            operation: The number theory operation to perform. Options:
-                - "prime": Check if ``number`` is prime. Returns the
-                  primality status and classification (prime/composite/neither).
-                - "factors": Get all factors and the prime factorization
-                  of ``number``.
-                - "gcd": Compute the greatest common divisor of two or
-                  more ``numbers``.
-                - "lcm": Compute the least common multiple of two or
-                  more ``numbers``.
-                - "fibonacci": Generate the first ``number`` terms of the
-                  Fibonacci sequence.
-                - "collatz": Generate the Collatz sequence starting from
-                  ``number`` (capped at 1000 steps for safety).
-            number: A single integer for operations that require one number
-                (prime, factors, fibonacci, collatz).
-            numbers: A list of integers for operations that require multiple
-                numbers (gcd, lcm). Must contain at least 2 elements.
-            **context_variables: Runtime context from the agent (unused).
-
+            operation (str): IN: operation. OUT: Consumed during execution.
+            number (int | None, optional): IN: number. Defaults to None. OUT: Consumed during execution.
+            numbers (list[int] | None, optional): IN: numbers. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A dictionary containing operation-specific results:
-                For "prime": number, is_prime (bool), type (str).
-                For "factors": number, factors (list), prime_factors (list),
-                    factor_count (int).
-                For "gcd": numbers (list), gcd (int).
-                For "lcm": numbers (list), lcm (int).
-                For "fibonacci": length, sequence (list), nth_fibonacci (int).
-                For "collatz": starting_number, sequence (list), steps (int),
-                    max_value (int).
-                - error (str): Error message if the operation failed.
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> result = NumberTheory.static_call("prime", number=17)
-            >>> print(result["is_prime"])
-            True
-        """
         result: dict[str, Any] = {}
 
         if operation == "prime":
@@ -647,6 +472,12 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "number required for prime check"}
 
             def is_prime(n):
+                """Check whether prime.
+
+                Args:
+                    n (Any): IN: n. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 if n < 2:
                     return False
                 if n == 2:
@@ -671,6 +502,12 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "number required for factorization"}
 
             def get_factors(n):
+                """Retrieve the factors.
+
+                Args:
+                    n (Any): IN: n. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 factors = []
                 for i in range(1, int(math.sqrt(abs(n))) + 1):
                     if n % i == 0:
@@ -680,6 +517,12 @@ class NumberTheory(AgentBaseFn):
                 return sorted(factors)
 
             def prime_factors(n):
+                """Prime factors.
+
+                Args:
+                    n (Any): IN: n. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 factors = []
                 d = 2
                 while d * d <= n:
@@ -701,11 +544,24 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "At least 2 numbers required for GCD"}
 
             def gcd(a, b):
+                """Gcd.
+
+                Args:
+                    a (Any): IN: a. OUT: Consumed during execution.
+                    b (Any): IN: b. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 while b:
                     a, b = b, a % b
                 return a
 
             def gcd_multiple(nums):
+                """Gcd multiple.
+
+                Args:
+                    nums (Any): IN: nums. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 result = nums[0]
                 for i in range(1, len(nums)):
                     result = gcd(result, nums[i])
@@ -719,14 +575,34 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "At least 2 numbers required for LCM"}
 
             def gcd(a, b):
+                """Gcd.
+
+                Args:
+                    a (Any): IN: a. OUT: Consumed during execution.
+                    b (Any): IN: b. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 while b:
                     a, b = b, a % b
                 return a
 
             def lcm(a, b):
+                """Lcm.
+
+                Args:
+                    a (Any): IN: a. OUT: Consumed during execution.
+                    b (Any): IN: b. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 return abs(a * b) // gcd(a, b)
 
             def lcm_multiple(nums):
+                """Lcm multiple.
+
+                Args:
+                    nums (Any): IN: nums. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 result = nums[0]
                 for i in range(1, len(nums)):
                     result = lcm(result, nums[i])
@@ -740,6 +616,12 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "number required for Fibonacci sequence"}
 
             def fibonacci_sequence(n):
+                """Fibonacci sequence.
+
+                Args:
+                    n (Any): IN: n. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 if n <= 0:
                     return []
                 elif n == 1:
@@ -763,6 +645,12 @@ class NumberTheory(AgentBaseFn):
                 return {"error": "number required for Collatz sequence"}
 
             def collatz_sequence(n):
+                """Collatz sequence.
+
+                Args:
+                    n (Any): IN: n. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 sequence = [n]
                 while n != 1:
                     if n % 2 == 0:
@@ -787,19 +675,9 @@ class NumberTheory(AgentBaseFn):
 
 
 class UnitConverter(AgentBaseFn):
-    """Convert between different units of measurement.
+    """Unit converter.
 
-    Provides conversion between units across multiple measurement
-    categories. Automatically detects the category based on units
-    when not explicitly specified. Special handling for temperature.
-
-    Supported categories:
-        length: meter, centimeter, millimeter, kilometer, inch, foot, yard, mile.
-        weight: gram, kilogram, pound, ounce, stone, ton.
-        volume: liter, milliliter, gallon, quart, pint, cup, fluid_ounce.
-        area: square_meter, square_centimeter, square_kilometer, square_foot, acre, hectare.
-        speed: meter_per_second, kilometer_per_hour, mile_per_hour, knot.
-        temperature: celsius, fahrenheit, kelvin.
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -810,44 +688,17 @@ class UnitConverter(AgentBaseFn):
         category: str | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Convert a value between different units of measurement.
-
-        Performs unit conversion using predefined conversion factors.
-        Automatically detects the measurement category when not specified.
-        Temperature conversions are handled with dedicated formulas rather
-        than simple multiplication.
+        """Static call.
 
         Args:
-            value: The numeric value to convert.
-            from_unit: Source unit name or abbreviation. Accepts both full
-                names (e.g., "kilometer") and abbreviations (e.g., "km").
-                Case-insensitive.
-            to_unit: Target unit name or abbreviation. Same format as
-                ``from_unit``.
-            category: Measurement category to use. If None, the category
-                is auto-detected from the unit names. Options:
-                - "length": meter, cm, mm, km, inch, foot, yard, mile.
-                - "weight": gram, kg, pound, ounce, stone, ton.
-                - "volume": liter, ml, gallon, quart, pint, cup, fluid_ounce.
-                - "area": square_meter, cm2, km2, square_foot, acre, hectare.
-                - "speed": meter_per_second, kmh, mph, knot.
-                - "temperature": celsius, fahrenheit, kelvin (auto-detected).
-            **context_variables: Runtime context from the agent (unused).
-
+            value (float): IN: value. OUT: Consumed during execution.
+            from_unit (str): IN: from unit. OUT: Consumed during execution.
+            to_unit (str): IN: to unit. OUT: Consumed during execution.
+            category (str | None, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A dictionary containing:
-                - value (float): The original input value.
-                - from_unit (str): The source unit.
-                - to_unit (str): The target unit.
-                - result (float): The converted value.
-                - category (str): The measurement category used.
-                - error (str): Error message if the conversion failed.
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Example:
-            >>> result = UnitConverter.static_call(100, "celsius", "fahrenheit")
-            >>> print(result["result"])
-            212.0
-        """
         result: dict[str, Any] = {}
 
         conversions = {
@@ -924,6 +775,14 @@ class UnitConverter(AgentBaseFn):
         if from_unit.lower() in ["celsius", "c", "fahrenheit", "f", "kelvin", "k"]:
 
             def convert_temperature(val, from_u, to_u):
+                """Convert temperature.
+
+                Args:
+                    val (Any): IN: val. OUT: Consumed during execution.
+                    from_u (Any): IN: from u. OUT: Consumed during execution.
+                    to_u (Any): IN: to u. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
                 from_u = from_u.lower()
                 to_u = to_u.lower()
 

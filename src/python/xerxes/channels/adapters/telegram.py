@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Telegram channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Telegram Bot API adapter (webhook + sendMessage)."""
+Connects to the Telegram Bot API for sending and receiving messages.
+"""
 
 from __future__ import annotations
 
@@ -12,20 +25,18 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class TelegramChannel(WebhookChannel):
-    """Telegram Bot adapter using the official ``Bot API`` HTTPS endpoint.
-
-    Inbound payload spec: https://core.telegram.org/bots/api
-    Outbound: ``POST https://api.telegram.org/bot<TOKEN>/sendMessage``.
-    """
+    """Channel implementation for Telegram."""
 
     name = "telegram"
 
     def __init__(self, token: str, *, http_client: tp.Any = None) -> None:
-        """Bind the adapter to a Telegram bot token.
+        """Initialize the Telegram channel.
 
         Args:
-            token: Bot token from @BotFather, embedded in the API URL.
-            http_client: Optional injected HTTP callable for tests.
+            token (str): IN: Telegram bot token.
+                OUT: used to build the Bot API base URL.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.token = token
@@ -33,10 +44,14 @@ class TelegramChannel(WebhookChannel):
         self._base = f"https://api.telegram.org/bot{token}"
 
     def _parse_inbound(self, headers, body):
-        """Extract ``message`` (or ``edited_message``) text, sender and chat.
+        """Parse a Telegram webhook payload into ``ChannelMessage``.
 
-        Falls back to ``caption`` when the update has no ``text`` (e.g.
-        photo captions). Retains ``username`` + ``chat_type`` in metadata.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         message = data.get("message") or data.get("edited_message") or {}
@@ -58,7 +73,13 @@ class TelegramChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Call ``sendMessage``; sets ``reply_to_message_id`` when threading."""
+        """Send a text message via the Telegram Bot API.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` or
+                ``channel_user_id`` is the target chat, ``text`` the content,
+                and ``reply_to`` (if set) the message ID to reply to.
+        """
         body = {
             "chat_id": message.room_id or message.channel_user_id,
             "text": message.text,

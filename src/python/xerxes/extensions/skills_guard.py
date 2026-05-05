@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Security scanning and quarantine utilities for skills.
 
-
-"""Skill security scanner — quarantine, hash verification, trusted repos.
-
-Before a skill from an external source is activated, it passes through
-``skills_guard`` for:
-
-1. **Content hash** verification against a trusted-repo allowlist.
-2. **Prompt-injection** scanning (reuses ``xerxes.security.prompt_scanner``).
-3. **Quarantine** — untrusted skills are staged in ``~/.xerxes/skills/.hub/quarantine/``
-   until explicitly approved.
-
-Usage::
-
-    from xerxes.extensions.skills_guard import ScanResult, scan_skill
-
-    result = scan_skill(skill_path)
-    if result.is_safe:
-        activate_skill(skill_path)
-    else:
-        print(result.reasons)
+``scan_skill`` checks a skill directory for prompt injection, hash mismatch,
+and untrusted sources. ``quarantine_skill`` and ``approve_skill`` move skills
+between the active directory and quarantine.
 """
 
 from __future__ import annotations
@@ -45,7 +31,6 @@ from xerxes.security.prompt_scanner import scan_context_content
 
 logger = logging.getLogger(__name__)
 
-
 TRUSTED_REPOS: set[str] = {
     "NousResearch/hermes-agent",
     "erfanzar/xerxes",
@@ -55,11 +40,13 @@ _TRUSTED_HASHES_PATH = xerxes_subdir("skills", ".hub", "trusted_hashes.json")
 
 
 def _load_trusted_hashes() -> dict[str, str]:
-    """Load known-good SHA-256 hashes for skill files.
+    """Load the trusted hash database.
 
     Returns:
-        Mapping of ``filepath → sha256_hex``.
+        dict[str, str]: OUT: Mapping from file path to SHA-256 hex digest.
+        Empty if the file does not exist or is unreadable.
     """
+
     if not _TRUSTED_HASHES_PATH.exists():
         return {}
     try:
@@ -69,13 +56,35 @@ def _load_trusted_hashes() -> dict[str, str]:
 
 
 def _save_trusted_hashes(data: dict[str, str]) -> None:
+    """Persist the trusted hash database to disk.
+
+    Args:
+        data (dict[str, str]): IN: Mapping from file path to SHA-256 digest.
+            OUT: Serialized as JSON to ``_TRUSTED_HASHES_PATH``.
+
+    Returns:
+        None: OUT: File is written (parent directories created as needed).
+    """
     _TRUSTED_HASHES_PATH.parent.mkdir(parents=True, exist_ok=True)
     _TRUSTED_HASHES_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 @dataclass
 class ScanResult:
-    """Outcome of a skill security scan."""
+    """Outcome of a security scan on a skill.
+
+    Attributes:
+        is_safe (bool): IN: Computed flag. OUT: ``True`` only if ``reasons``
+            is empty.
+        reasons (list[str]): IN: Empty initially. OUT: Populated with
+            human-readable failure descriptions.
+        hash_mismatch (bool): IN: ``False`` initially. OUT: Set when the file
+            hash differs from the trusted database.
+        injection_detected (bool): IN: ``False`` initially. OUT: Set when the
+            scanner blocks the content.
+        untrusted_source (bool): IN: ``False`` initially. OUT: Set when the
+            source repo is not in ``TRUSTED_REPOS``.
+    """
 
     is_safe: bool
     reasons: list[str] = field(default_factory=list)
@@ -85,20 +94,42 @@ class ScanResult:
 
     @property
     def summary(self) -> str:
+        """Return a one-line summary of the scan.
+
+        Returns:
+            str: OUT: ``"Safe"`` or a semicolon-separated reason string.
+        """
         if self.is_safe:
             return "Safe"
         return "; ".join(self.reasons) if self.reasons else "Unsafe"
 
 
 def _hash_file(path: Path) -> str:
-    """Return SHA-256 hex digest of *path* contents."""
+    """Compute the SHA-256 digest of a single file.
+
+    Args:
+        path (Path): IN: File to hash. OUT: Read in full.
+
+    Returns:
+        str: OUT: Lowercase hex digest.
+    """
+
     h = hashlib.sha256()
     h.update(path.read_bytes())
     return h.hexdigest()
 
 
 def _hash_directory(dir_path: Path) -> str:
-    """Return a deterministic SHA-256 of all files under *dir_path*."""
+    """Compute a deterministic SHA-256 digest of an entire directory tree.
+
+    Args:
+        dir_path (Path): IN: Root directory to hash. OUT: Recursively
+            enumerated for files.
+
+    Returns:
+        str: OUT: Lowercase hex digest covering relative paths and contents.
+    """
+
     h = hashlib.sha256()
     for path in sorted(dir_path.rglob("*")):
         if path.is_file():
@@ -114,22 +145,20 @@ def scan_skill(
     source_repo: str | None = None,
     trusted_hashes: dict[str, str] | None = None,
 ) -> ScanResult:
-    """Run a full security scan on a skill directory or SKILL.md file.
-
-    Checks:
-    1. SKILL.md exists and is readable.
-    2. No prompt-injection patterns in SKILL.md.
-    3. Content hash matches known-good hash (if provided).
-    4. Source repo is in the trusted allowlist (if provided).
+    """Run security checks on a skill file or directory.
 
     Args:
-        skill_path: Path to the skill directory or SKILL.md file.
-        source_repo: Optional ``owner/repo`` string for trust checking.
-        trusted_hashes: Optional mapping of known-good hashes.
+        skill_path (Path): IN: Path to ``SKILL.md`` or the skill directory.
+            OUT: Used to locate the markdown file.
+        source_repo (str | None): IN: Origin repository identifier. OUT:
+            Compared against ``TRUSTED_REPOS``.
+        trusted_hashes (dict[str, str] | None): IN: Known-good SHA-256
+            digests. OUT: Used to detect tampering.
 
     Returns:
-        A :class:`ScanResult` with ``is_safe`` and detailed flags.
+        ScanResult: OUT: Detailed scan outcome.
     """
+
     reasons: list[str] = []
     injection = False
     hash_mismatch = False
@@ -185,11 +214,13 @@ def quarantine_skill(skill_path: Path) -> Path:
     """Move a skill into the quarantine directory.
 
     Args:
-        skill_path: Path to the skill directory.
+        skill_path (Path): IN: Path to the skill directory. OUT: Moved to
+            ``QUARANTINE_DIR``.
 
     Returns:
-        The new quarantine path.
+        Path: OUT: Destination path in quarantine.
     """
+
     from xerxes.extensions.skills_hub import QUARANTINE_DIR
 
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
@@ -204,14 +235,16 @@ def quarantine_skill(skill_path: Path) -> Path:
 
 
 def approve_skill(skill_name: str) -> str:
-    """Approve a quarantined skill and move it to the active skills dir.
+    """Move a quarantined skill back into the active skills directory.
 
     Args:
-        skill_name: Name of the quarantined skill.
+        skill_name (str): IN: Name of the quarantined skill directory. OUT:
+            Looked up in ``QUARANTINE_DIR``.
 
     Returns:
-        Status message.
+        str: OUT: Human-readable result message.
     """
+
     from xerxes.extensions.skills_hub import QUARANTINE_DIR, SKILLS_DIR
 
     quarantined = QUARANTINE_DIR / skill_name
