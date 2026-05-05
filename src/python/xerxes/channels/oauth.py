@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,21 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""OAuth 2.0 client for channel integrations.
 
-"""OAuth helper for channel adapters.
-
-A small framework around the OAuth 2.0 *authorization code* flow that
-Slack / Discord / Microsoft Teams etc. all use. The helper intentionally
-covers only the spec-shaped bits — building the authorization URL,
-exchanging codes for tokens, refreshing them, and persisting the tokens
-to a :class:`MemoryStorage`.
-
-Each provider passes its endpoints + scopes to :class:`OAuthClient`;
-the result is a simple ``authorize_url`` / ``exchange_code`` /
-``get_valid_token`` API the adapter can call.
+Manages authorization URLs, state validation, token exchange, refresh, and
+persistent token storage.
 """
 
 from __future__ import annotations
@@ -36,24 +30,13 @@ from dataclasses import dataclass
 
 if tp.TYPE_CHECKING:
     from ..memory.storage import MemoryStorage
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class OAuthProvider:
-    """OAuth2 endpoints + scopes for a single provider.
-
-    Attributes:
-        name: Stable identifier (e.g. ``"slack"``, ``"discord"``).
-        client_id: OAuth client identifier.
-        client_secret: OAuth client secret.
-        authorize_url: Authorization endpoint URL.
-        token_url: Token exchange endpoint URL.
-        scopes: List of scopes to request.
-        redirect_uri: Configured callback URL.
-        extra_authorize_params: Optional extra query params for the
-            authorize step (e.g. ``user_scope`` for Slack).
-    """
+    """Configuration for an OAuth 2.0 identity provider."""
 
     name: str
     client_id: str
@@ -67,16 +50,7 @@ class OAuthProvider:
 
 @dataclass
 class OAuthToken:
-    """Decoded OAuth access token bundle.
-
-    Attributes:
-        provider: Provider name from :class:`OAuthProvider`.
-        access_token: Bearer token.
-        refresh_token: Refresh token (when issued).
-        expires_at: Epoch seconds at which ``access_token`` expires.
-        scopes: Granted scopes.
-        raw: Original JSON body returned by the token endpoint.
-    """
+    """OAuth 2.0 access token with metadata."""
 
     provider: str
     access_token: str
@@ -86,21 +60,33 @@ class OAuthToken:
     raw: dict[str, tp.Any] | None = None
 
     def __post_init__(self) -> None:
-        """Normalise ``scopes`` and ``raw`` to empty containers when ``None``."""
+        """Ensure ``scopes`` and ``raw`` are initialized to empty collections."""
         if self.scopes is None:
             self.scopes = []
         if self.raw is None:
             self.raw = {}
 
     def is_expired(self, *, now: float | None = None) -> bool:
-        """Whether the token has expired (or expires within 60 s)."""
+        """Check whether the token is expired (with a 60-second buffer).
+
+        Args:
+            now (float | None): IN: optional Unix timestamp. Defaults to the
+                current time.
+
+        Returns:
+            bool: OUT: ``True`` if expired or about to expire.
+        """
         now = time.time() if now is None else now
         if self.expires_at == 0.0:
             return False
         return now + 60.0 >= self.expires_at
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialise to a dict suitable for :class:`MemoryStorage` persistence."""
+        """Serialize the token to a plain dictionary.
+
+        Returns:
+            dict[str, Any]: OUT: field names mapped to their values.
+        """
         return {
             "provider": self.provider,
             "access_token": self.access_token,
@@ -112,7 +98,14 @@ class OAuthToken:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> OAuthToken:
-        """Rebuild an :class:`OAuthToken` from its :meth:`to_dict` form."""
+        """Deserialize a token from a plain dictionary.
+
+        Args:
+            data (dict[str, Any]): IN: dictionary produced by ``to_dict``.
+
+        Returns:
+            OAuthToken: OUT: reconstructed token instance.
+        """
         return cls(
             provider=data["provider"],
             access_token=data["access_token"],
@@ -124,21 +117,7 @@ class OAuthToken:
 
 
 class OAuthClient:
-    """OAuth2 helper bound to one provider.
-
-    Storage layout (when a :class:`MemoryStorage` is supplied):
-    ``_oauth_<provider>_<install_id>`` → JSON of :class:`OAuthToken`.
-
-    HTTP work is performed via ``httpx`` lazily; the constructor does
-    no network I/O.
-
-    Example:
-        >>> p = OAuthProvider(name="slack", ...)
-        >>> client = OAuthClient(p, storage=mem)
-        >>> url, state = client.authorize_url()
-        >>>
-        >>> tok = client.exchange_code(code="abc", state_received=state, expected_state=state)
-    """
+    """OAuth 2.0 authorization-code flow client with token persistence."""
 
     STATE_TTL_SECONDS = 600.0
 
@@ -149,13 +128,15 @@ class OAuthClient:
         storage: MemoryStorage | None = None,
         http_client: tp.Any | None = None,
     ) -> None:
-        """Bind the client to one provider.
+        """Initialize the OAuth client.
 
         Args:
-            provider: OAuth2 endpoints + credentials for a single service.
-            storage: Optional persistence for issued tokens.
-            http_client: Optional callable ``(url, data=...)`` used instead
-                of ``httpx`` (primarily for tests).
+            provider (OAuthProvider): IN: provider configuration.
+                OUT: stored for building authorization and token requests.
+            storage (MemoryStorage | None): IN: optional storage backend for
+                persisting tokens.
+            http_client (Any | None): IN: optional HTTP client callable used
+                for token endpoint requests. OUT: forwarded to ``_post_form``.
         """
         self.provider = provider
         self.storage = storage
@@ -164,7 +145,12 @@ class OAuthClient:
         self._states: dict[str, float] = {}
 
     def authorize_url(self) -> tuple[str, str]:
-        """Build the authorization URL plus a fresh ``state`` token."""
+        """Build the provider authorization URL and a CSRF state token.
+
+        Returns:
+            tuple[str, str]: OUT: ``(full_authorize_url, state)``. The state
+            is tracked internally for later validation.
+        """
         state = secrets.token_urlsafe(24)
         with self._lock:
             self._states[state] = time.time()
@@ -181,7 +167,14 @@ class OAuthClient:
         return f"{self.provider.authorize_url}?{urllib.parse.urlencode(params)}", state
 
     def consume_state(self, state: str) -> bool:
-        """Validate + remove a previously issued state token."""
+        """Validate and consume a CSRF state token.
+
+        Args:
+            state (str): IN: state value received from the OAuth callback.
+
+        Returns:
+            bool: OUT: ``True`` if the state exists and has not expired.
+        """
         with self._lock:
             ts = self._states.pop(state, None)
             self._gc_states()
@@ -190,7 +183,7 @@ class OAuthClient:
         return (time.time() - ts) <= self.STATE_TTL_SECONDS
 
     def _gc_states(self) -> None:
-        """Drop issued state tokens older than :attr:`STATE_TTL_SECONDS`."""
+        """Remove expired state entries."""
         cutoff = time.time() - self.STATE_TTL_SECONDS
         for s, ts in list(self._states.items()):
             if ts < cutoff:
@@ -204,7 +197,22 @@ class OAuthClient:
         state_received: str | None = None,
         expected_state: str | None = None,
     ) -> OAuthToken:
-        """Exchange the authorization code for an access token bundle."""
+        """Exchange an authorization code for an access token.
+
+        Args:
+            code (str): IN: authorization code from the OAuth callback.
+            install_id (str): IN: installation identifier for token storage.
+                Defaults to "default".
+            state_received (str | None): IN: state received with the callback.
+            expected_state (str | None): IN: state originally issued. OUT:
+                compared against ``state_received`` when both are provided.
+
+        Returns:
+            OAuthToken: OUT: newly obtained token, persisted to storage.
+
+        Raises:
+            ValueError: If the received state does not match the expected state.
+        """
         if expected_state is not None and state_received != expected_state:
             raise ValueError("OAuth state mismatch — refusing token exchange")
         body = {
@@ -220,7 +228,18 @@ class OAuthClient:
         return token
 
     def refresh(self, install_id: str = "default") -> OAuthToken:
-        """Refresh the stored token in-place."""
+        """Refresh the access token for an installation.
+
+        Args:
+            install_id (str): IN: installation identifier. Defaults to
+                "default".
+
+        Returns:
+            OAuthToken: OUT: newly refreshed token, persisted to storage.
+
+        Raises:
+            RuntimeError: If no stored token or refresh token is available.
+        """
         token = self.get_token(install_id)
         if token is None or not token.refresh_token:
             raise RuntimeError("No refresh_token available — re-authorise")
@@ -238,7 +257,16 @@ class OAuthClient:
         return new_token
 
     def get_valid_token(self, install_id: str = "default") -> OAuthToken | None:
-        """Return a non-expired token, refreshing it when needed."""
+        """Retrieve a non-expired token, refreshing if necessary.
+
+        Args:
+            install_id (str): IN: installation identifier. Defaults to
+                "default".
+
+        Returns:
+            OAuthToken | None: OUT: valid token, or ``None`` if unavailable
+            or refresh failed.
+        """
         token = self.get_token(install_id)
         if token is None:
             return None
@@ -251,19 +279,25 @@ class OAuthClient:
             return None
 
     def _store_key(self, install_id: str) -> str:
-        """Storage key used for tokens belonging to ``install_id``."""
+        """Build the storage key for an installation's token.
+
+        Args:
+            install_id (str): IN: installation identifier.
+
+        Returns:
+            str: OUT: prefixed storage key.
+        """
         return f"_oauth_{self.provider.name}_{install_id}"
 
     def get_token(self, install_id: str = "default") -> OAuthToken | None:
-        """Load the persisted token for ``install_id``, or ``None`` if absent.
+        """Load a token from storage.
 
         Args:
-            install_id: Tenant / installation identifier; defaults to the
-                single-tenant ``"default"`` slot.
+            install_id (str): IN: installation identifier. Defaults to
+                "default".
 
         Returns:
-            The stored :class:`OAuthToken`, or ``None`` when no storage is
-            configured, nothing is saved, or the record is unreadable.
+            OAuthToken | None: OUT: deserialized token, or ``None``.
         """
         if self.storage is None:
             return None
@@ -279,7 +313,12 @@ class OAuthClient:
             return None
 
     def _save_token(self, install_id: str, token: OAuthToken) -> None:
-        """Best-effort persist of ``token`` under the slot for ``install_id``."""
+        """Persist a token to storage.
+
+        Args:
+            install_id (str): IN: installation identifier.
+            token (OAuthToken): IN: token to save.
+        """
         if self.storage is None:
             return
         try:
@@ -288,15 +327,17 @@ class OAuthClient:
             logger.warning("Failed to persist OAuth token", exc_info=True)
 
     def _post_form(self, url: str, data: dict[str, tp.Any]) -> dict[str, tp.Any]:
-        """Submit ``data`` as ``application/x-www-form-urlencoded`` to ``url``.
+        """POST form data to a URL and return the JSON response.
 
         Args:
-            url: Target token endpoint.
-            data: Form fields (client credentials, code, grant_type, ...).
+            url (str): IN: target URL.
+            data (dict[str, Any]): IN: form fields.
 
         Returns:
-            The parsed JSON response (or ``parse_qsl`` dict when the server
-            returns form-encoded bodies, as legacy providers sometimes do).
+            dict[str, Any]: OUT: parsed JSON response.
+
+        Raises:
+            RuntimeError: If ``httpx`` is required but not installed.
         """
         if self._http is not None:
             response = self._http(url, data=data)
@@ -313,11 +354,16 @@ class OAuthClient:
             return dict(urllib.parse.parse_qsl(resp.text))
 
     def _token_from_payload(self, payload: dict[str, tp.Any]) -> OAuthToken:
-        """Translate a token-endpoint JSON payload into :class:`OAuthToken`.
+        """Build an ``OAuthToken`` from a token-endpoint response.
 
-        Handles provider-specific quirks — Slack nests its user token under
-        ``authed_user``, ``expires_in`` is optional, and ``scope`` may be a
-        space-delimited string or a list.
+        Args:
+            payload (dict[str, Any]): IN: raw JSON response from the token URL.
+
+        Returns:
+            OAuthToken: OUT: populated token instance.
+
+        Raises:
+            RuntimeError: If the payload lacks an ``access_token``.
         """
         access = payload.get("access_token") or payload.get("authed_user", {}).get("access_token", "")
         if not access:

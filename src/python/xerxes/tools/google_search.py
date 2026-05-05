@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,32 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Google search module for Xerxes.
 
-"""Google web-search agent tool.
-
-Two-mode resolution per call:
-
-1. **Custom Search JSON API** — used when ``GOOGLE_API_KEY`` and
-   ``GOOGLE_CSE_ID`` are set. Quota: 100 free queries/day. Returns
-   structured JSON, never blocked. This is the recommended mode.
-2. **HTML scrape fallback** — straight ``GET https://www.google.com/search``
-   with a browser User-Agent. No key required, but Google rate-limits
-   anonymous scraping aggressively (HTTP 429, sometimes a CAPTCHA).
-   Use this for quick local development or tests; not for production.
-
-The tool always returns the same envelope shape so the agent can
-chain it the same way regardless of which path was taken.
-
-Example::
-
-    from xerxes.tools.google_search import GoogleSearch
-    out = GoogleSearch.static_call("ai news 2026", n_results=5)
-    for hit in out["results"]:
-        print(hit["title"], hit["url"])
-"""
+Exports:
+    - logger
+    - SCRAPE_USER_AGENT
+    - GoogleSearchConfig
+    - configure_google_search
+    - get_google_search_config
+    - set_google_search_client
+    - GoogleSearch"""
 
 from __future__ import annotations
 
@@ -52,7 +41,15 @@ SCRAPE_USER_AGENT = (
 
 @dataclass
 class GoogleSearchConfig:
-    """Endpoint + auth used by the Google search tool."""
+    """Google search config.
+
+    Attributes:
+        api_key (str): api key.
+        cse_id (str): cse id.
+        api_base (str): api base.
+        scrape_base (str): scrape base.
+        safe (str): safe.
+        user_agent (str): user agent."""
 
     api_key: str = ""
     cse_id: str = ""
@@ -76,7 +73,16 @@ def configure_google_search(
     safe: str | None = None,
     user_agent: str | None = None,
 ) -> GoogleSearchConfig:
-    """Update the process-wide Google search configuration."""
+    """Configure google search.
+
+    Args:
+        api_key (str | None, optional): IN: api key. Defaults to None. OUT: Consumed during execution.
+        cse_id (str | None, optional): IN: cse id. Defaults to None. OUT: Consumed during execution.
+        safe (str | None, optional): IN: safe. Defaults to None. OUT: Consumed during execution.
+        user_agent (str | None, optional): IN: user agent. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        GoogleSearchConfig: OUT: Result of the operation."""
+
     global _config
     if api_key is not None:
         _config.api_key = api_key
@@ -90,22 +96,34 @@ def configure_google_search(
 
 
 def get_google_search_config() -> GoogleSearchConfig:
-    """Return the currently active Google search configuration."""
+    """Retrieve the google search config.
+
+    Returns:
+        GoogleSearchConfig: OUT: Result of the operation."""
+
     return _config
 
 
 def set_google_search_client(client: tp.Any | None) -> None:
-    """Install (or clear) an injected HTTP client for tests.
+    """Set the google search client.
 
-    The client must expose ``get(url, headers=None, params=None)`` and
-    return either an object with ``.text`` and ``.json()``, or a dict.
-    """
+    Args:
+        client (tp.Any | None): IN: client. OUT: Consumed during execution."""
+
     global _http_client
     _http_client = client
 
 
 def _http_get(url: str, *, headers: dict[str, str] | None = None, params: dict[str, str] | None = None) -> tp.Any:
-    """Issue a GET using the injected test client or fall back to ``httpx``."""
+    """Internal helper to http get.
+
+    Args:
+        url (str): IN: url. OUT: Consumed during execution.
+        headers (dict[str, str] | None, optional): IN: headers. Defaults to None. OUT: Consumed during execution.
+        params (dict[str, str] | None, optional): IN: params. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        tp.Any: OUT: Result of the operation."""
+
     if _http_client is not None:
         return _http_client.get(url, headers=headers, params=params)
     try:
@@ -116,7 +134,13 @@ def _http_get(url: str, *, headers: dict[str, str] | None = None, params: dict[s
 
 
 def _resp_text(resp: tp.Any) -> str:
-    """Extract the response body as text, accepting both ``.text`` and ``.body``."""
+    """Internal helper to resp text.
+
+    Args:
+        resp (tp.Any): IN: resp. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     text = getattr(resp, "text", None)
     if isinstance(text, str):
         return text
@@ -127,7 +151,13 @@ def _resp_text(resp: tp.Any) -> str:
 
 
 def _resp_json(resp: tp.Any) -> dict[str, tp.Any]:
-    """Decode the response as JSON, trying ``resp.json()`` then raw text parsing."""
+    """Internal helper to resp json.
+
+    Args:
+        resp (tp.Any): IN: resp. OUT: Consumed during execution.
+    Returns:
+        dict[str, tp.Any]: OUT: Result of the operation."""
+
     if hasattr(resp, "json") and callable(resp.json):
         try:
             return resp.json()
@@ -143,7 +173,13 @@ def _resp_json(resp: tp.Any) -> dict[str, tp.Any]:
 
 
 def _resp_status(resp: tp.Any) -> int:
-    """Return the HTTP status code, or ``0`` when the response lacks one."""
+    """Internal helper to resp status.
+
+    Args:
+        resp (tp.Any): IN: resp. OUT: Consumed during execution.
+    Returns:
+        int: OUT: Result of the operation."""
+
     return int(getattr(resp, "status_code", 0) or 0)
 
 
@@ -155,19 +191,17 @@ def _search_via_api(
     site: str | None,
     time_range: str | None,
 ) -> dict[str, tp.Any]:
-    """Execute the search against the Google Custom Search JSON API.
+    """Internal helper to search via api.
 
     Args:
-        query: Free-text query.
-        n_results: Number of hits to return (clamped to 1-10 by the API).
-        cfg: Resolved configuration carrying the API key and CSE id.
-        site: Optional ``site:`` restriction prepended to the query.
-        time_range: Optional ``dateRestrict`` filter (e.g. ``"d1"``, ``"w"``).
-
+        query (str): IN: query. OUT: Consumed during execution.
+        n_results (int): IN: n results. OUT: Consumed during execution.
+        cfg (GoogleSearchConfig): IN: cfg. OUT: Consumed during execution.
+        site (str | None): IN: site. OUT: Consumed during execution.
+        time_range (str | None): IN: time range. OUT: Consumed during execution.
     Returns:
-        Normalised result dict with ``engine="google_api"`` and a list of
-        ``{title, url, snippet, displayed_url}`` entries.
-    """
+        dict[str, tp.Any]: OUT: Result of the operation."""
+
     params: dict[str, str] = {
         "key": cfg.api_key,
         "cx": cfg.cse_id,
@@ -216,7 +250,13 @@ _RESULT_RE = re.compile(
 
 
 def _strip_tags(html: str) -> str:
-    """Remove HTML tags from *html* and return the stripped inner text."""
+    """Internal helper to strip tags.
+
+    Args:
+        html (str): IN: html. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     return re.sub(r"<[^>]+>", "", html or "").strip()
 
 
@@ -228,23 +268,17 @@ def _search_via_scrape(
     site: str | None,
     time_range: str | None,
 ) -> dict[str, tp.Any]:
-    """Execute the search by fetching and parsing ``google.com/search`` HTML.
-
-    This path is used when no API credentials are configured; it is
-    aggressively rate-limited by Google. When BeautifulSoup is
-    unavailable, a regex fallback on ``<a>`` / ``<h3>`` is used.
+    """Internal helper to search via scrape.
 
     Args:
-        query: Free-text query.
-        n_results: Maximum number of hits to return.
-        cfg: Resolved configuration (user-agent, safe-search, base URL).
-        site: Optional ``site:`` restriction prepended to the query.
-        time_range: Optional recency filter — first letter maps to Google's
-            ``tbs=qdr:`` parameter (e.g. ``"d"`` → ``qdr:d``).
-
+        query (str): IN: query. OUT: Consumed during execution.
+        n_results (int): IN: n results. OUT: Consumed during execution.
+        cfg (GoogleSearchConfig): IN: cfg. OUT: Consumed during execution.
+        site (str | None): IN: site. OUT: Consumed during execution.
+        time_range (str | None): IN: time range. OUT: Consumed during execution.
     Returns:
-        Normalised result dict with ``engine="google_scrape"``.
-    """
+        dict[str, tp.Any]: OUT: Result of the operation."""
+
     q = (f"site:{site} " if site else "") + query
     params: dict[str, str] = {
         "q": q,
@@ -332,7 +366,10 @@ def _search_via_scrape(
 
 
 class GoogleSearch(AgentBaseFn):
-    """Search Google and return ranked results."""
+    """Google search.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -342,17 +379,16 @@ class GoogleSearch(AgentBaseFn):
         time_range: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Run a Google web search and return up to *n_results* hits.
+        """Static call.
 
         Args:
-            query: Free-text search phrase.
-            n_results: Max number of results (1-10 in API mode, 1-30 in scrape mode).
-            site: Optional ``site:`` restriction.
-            time_range: Optional recency filter.
-
+            query (str): IN: query. OUT: Consumed during execution.
+            n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
+            site (str | None, optional): IN: site. Defaults to None. OUT: Consumed during execution.
+            time_range (str | None, optional): IN: time range. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Result dict with ``engine``, ``query``, ``count``, ``results``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
         if isinstance(n_results, str):
             try:
@@ -368,20 +404,16 @@ class GoogleSearch(AgentBaseFn):
         site: str | None = None,
         time_range: str | None = None,
     ) -> dict[str, tp.Any]:
-        """Internal implementation.
+        """Internal helper to execute.
 
         Args:
-            query: Free-text search phrase.
-            n_results: Max number of results (1-10 in API mode, 1-30
-                in scrape mode).
-            site: Optional ``site:`` restriction (e.g. ``"github.com"``).
-            time_range: Optional recency filter — one of ``"d"`` (day),
-                ``"w"`` (week), ``"m"`` (month), ``"y"`` (year).
-
+            query (str): IN: query. OUT: Consumed during execution.
+            n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
+            site (str | None, optional): IN: site. Defaults to None. OUT: Consumed during execution.
+            time_range (str | None, optional): IN: time range. Defaults to None. OUT: Consumed during execution.
         Returns:
-            ``{"engine", "query", "count", "results": [{"title", "url",
-            "snippet"}], "warning"|"error"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         cfg = get_google_search_config()
         if cfg.api_key and cfg.cse_id:
             return _search_via_api(query, n_results=n_results, cfg=cfg, site=site, time_range=time_range)

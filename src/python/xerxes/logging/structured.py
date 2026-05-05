@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,24 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Structured module for Xerxes.
 
-
-"""Structured logging configuration for Xerxes.
-
-This module provides an advanced logging configuration system for the
-Xerxes framework with support for:
-- Structured logging via structlog (when available)
-- OpenTelemetry distributed tracing integration
-- Prometheus metrics for observability
-- JSON logging format support
-- Rotating file handlers for log persistence
-
-The module gracefully degrades when optional dependencies are not installed,
-providing fallback implementations where necessary.
-
-Example:
-    >>> from xerxes.logging.structured import get_logger, configure_logging
-    >>> configure_logging(level="DEBUG", enable_json=True)
-    >>> logger = get_logger()
-    >>> logger.log_function_call("agent1", "search", {"query": "test"})
-"""
+Exports:
+    - FUNCTION_CALLS
+    - FUNCTION_DURATION
+    - AGENT_SWITCHES
+    - MEMORY_USAGE
+    - LLM_REQUESTS
+    - LLM_TOKENS
+    - ERROR_COUNTER
+    - XerxesLogger
+    - get_logger
+    - configure_logging"""
 
 import logging
 import logging.handlers
@@ -62,6 +56,10 @@ except ImportError:
 
 
 def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
+    """Internal helper to get prometheus.
+
+    Returns:
+        tuple[bool, Any, Any, Any, Callable[..., bytes]]: OUT: Result of the operation."""
     try:
         from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
@@ -69,75 +67,61 @@ def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
     except ImportError:
 
         class DummyMetric:
-            """No-op metric implementation for when prometheus_client is not installed.
-
-            Provides the same interface as Prometheus ``Counter``, ``Gauge``, and
-            ``Histogram`` metrics but performs no actual operations, allowing code
-            to function without the ``prometheus_client`` dependency.
-
-            All methods are intentionally no-ops and return ``self`` where
-            appropriate to support fluent method chaining (e.g.,
-            ``metric.labels(foo="bar").inc()``).
-
-            Attributes:
-                None. This class carries no state.
-            """
+            """Dummy metric."""
 
             def labels(self, **kwargs):
-                """Return self for method chaining compatibility.
-
-                Mimics the Prometheus ``labels()`` method which returns a
-                child metric filtered by the given label values.
+                """Labels.
 
                 Args:
-                    **kwargs: Label key-value pairs (ignored).
-
+                    self: IN: The instance. OUT: Used for attribute access.
+                    **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
                 Returns:
-                    ``self``, allowing subsequent calls to ``inc``, ``dec``,
-                    or ``observe`` to succeed silently.
-                """
+                    Any: OUT: Result of the operation."""
+
                 return self
 
             def inc(self, amount=1):
-                """No-op increment operation.
-
-                Mimics the Prometheus ``Counter.inc`` / ``Gauge.inc`` method.
+                """Inc.
 
                 Args:
-                    amount: The amount to increment by (ignored). Defaults to 1.
-                """
+                    self: IN: The instance. OUT: Used for attribute access.
+                    amount (Any, optional): IN: amount. Defaults to 1. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
+
                 pass
 
             def dec(self, amount=1):
-                """No-op decrement operation.
-
-                Mimics the Prometheus ``Gauge.dec`` method.
+                """Dec.
 
                 Args:
-                    amount: The amount to decrement by (ignored). Defaults to 1.
-                """
+                    self: IN: The instance. OUT: Used for attribute access.
+                    amount (Any, optional): IN: amount. Defaults to 1. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
+
                 pass
 
             def observe(self, value):
-                """No-op observation operation.
-
-                Mimics the Prometheus ``Histogram.observe`` method.
+                """Observe.
 
                 Args:
-                    value: The observed value (ignored).
-                """
+                    self: IN: The instance. OUT: Used for attribute access.
+                    value (Any): IN: value. OUT: Consumed during execution.
+                Returns:
+                    Any: OUT: Result of the operation."""
+
                 pass
 
         def _generate_latest(*args, **kwargs) -> bytes:
-            """Return empty bytes when prometheus_client is not installed.
+            """Internal helper to generate latest.
 
-            This is a fallback replacement for
-            ``prometheus_client.generate_latest`` that returns an empty byte
-            string when the Prometheus client library is unavailable.
-
+            Args:
+                *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+                **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
             Returns:
-                An empty ``bytes`` object (``b""``).
-            """
+                bytes: OUT: Result of the operation."""
+
             return b""
 
         return (
@@ -151,7 +135,6 @@ def _get_prometheus() -> tuple[bool, Any, Any, Any, Callable[..., bytes]]:
 
 HAS_PROMETHEUS, Counter, Gauge, Histogram, generate_latest = _get_prometheus()
 
-
 jsonlogger: Any = None
 try:
     from pythonjsonlogger import jsonlogger
@@ -159,7 +142,6 @@ try:
     HAS_JSON_LOGGER = True
 except ImportError:
     HAS_JSON_LOGGER = False
-
 
 FUNCTION_CALLS = Counter(
     "xerxes_function_calls_total", "Total number of function calls", ["agent_id", "function_name", "status"]
@@ -185,23 +167,7 @@ ERROR_COUNTER = Counter("xerxes_errors_total", "Total number of errors", ["error
 
 
 class XerxesLogger:
-    """Enhanced logger with structured logging and tracing.
-
-    Provides a comprehensive logging solution that integrates with
-    structlog for structured logging, OpenTelemetry for distributed
-    tracing, and Prometheus for metrics collection.
-
-    Attributes:
-        name: Logger name identifier.
-        level: Numeric logging level.
-        log_file: Optional path to log file for persistence.
-        enable_json: Whether JSON output format is enabled.
-        enable_tracing: Whether OpenTelemetry tracing is enabled.
-        logger: The underlying logger instance (structlog or standard).
-
-    Note:
-        Falls back to standard Python logging if structlog is not installed.
-    """
+    """Xerxes logger."""
 
     def __init__(
         self,
@@ -212,16 +178,19 @@ class XerxesLogger:
         enable_tracing: bool = False,
         trace_endpoint: str | None = None,
     ):
-        """Initialize the XerxesLogger with the specified configuration.
+        """Initialize the instance.
 
         Args:
-            name: Logger name for identification in logs.
-            level: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
-            log_file: Optional path for file-based log persistence.
-            enable_json: Whether to format logs as JSON.
-            enable_tracing: Whether to enable OpenTelemetry tracing.
-            trace_endpoint: OTLP endpoint for trace export.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str, optional): IN: name. Defaults to 'xerxes'. OUT: Consumed during execution.
+            level (str, optional): IN: level. Defaults to 'INFO'. OUT: Consumed during execution.
+            log_file (Path | None, optional): IN: log file. Defaults to None. OUT: Consumed during execution.
+            enable_json (bool, optional): IN: enable json. Defaults to True. OUT: Consumed during execution.
+            enable_tracing (bool, optional): IN: enable tracing. Defaults to False. OUT: Consumed during execution.
+            trace_endpoint (str | None, optional): IN: trace endpoint. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.name = name
         self.level = getattr(logging, level.upper())
         self.log_file = log_file
@@ -243,15 +212,13 @@ class XerxesLogger:
             self._use_structlog = False
 
     def _setup_structlog(self):
-        """Configure structlog for structured logging output.
+        """Internal helper to setup structlog.
 
-        Sets up the structlog processor chain including log level filtering,
-        timestamp formatting, stack info rendering, and output formatting
-        (JSON or console-friendly).
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
 
-        Note:
-            This method is a no-op if structlog is not installed.
-        """
         if not HAS_STRUCTLOG:
             return
 
@@ -280,12 +247,13 @@ class XerxesLogger:
         )
 
     def _setup_standard_logging(self):
-        """Configure standard Python logging with console and optional file handlers.
+        """Internal helper to setup standard logging.
 
-        Sets up the root logger with appropriate formatters based on
-        configuration. Includes support for JSON formatting and rotating
-        file handlers for log persistence.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         root_logger = logging.getLogger()
         root_logger.setLevel(self.level)
 
@@ -319,18 +287,14 @@ class XerxesLogger:
             root_logger.addHandler(file_handler)
 
     def _setup_tracing(self, endpoint: str | None):
-        """Configure OpenTelemetry distributed tracing.
-
-        Sets up a TracerProvider with OTLP export capabilities for
-        distributed tracing across service boundaries.
+        """Internal helper to setup tracing.
 
         Args:
-            endpoint: OTLP endpoint URL for trace export. If None,
-                tracing is set up without an exporter.
+            self: IN: The instance. OUT: Used for attribute access.
+            endpoint (str | None): IN: endpoint. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
 
-        Note:
-            This method is a no-op if OpenTelemetry is not installed.
-        """
         if not HAS_OTEL:
             return
 
@@ -354,19 +318,15 @@ class XerxesLogger:
 
     @staticmethod
     def _add_context_processor(logger, log_method, event_dict):
-        """Add contextual information to log events.
-
-        Structlog processor that enriches log events with timestamps
-        and OpenTelemetry trace context for correlation.
+        """Internal helper to add context processor.
 
         Args:
-            logger: The structlog logger instance.
-            log_method: The log method being called.
-            event_dict: The event dictionary to enrich.
-
+            logger (Any): IN: logger. OUT: Consumed during execution.
+            log_method (Any): IN: log method. OUT: Consumed during execution.
+            event_dict (Any): IN: event dict. OUT: Consumed during execution.
         Returns:
-            The enriched event dictionary with timestamp and trace IDs.
-        """
+            Any: OUT: Result of the operation."""
+
         if "timestamp" not in event_dict:
             event_dict["timestamp"] = datetime.utcnow().isoformat()
 
@@ -388,19 +348,19 @@ class XerxesLogger:
         error: Exception | None = None,
         duration: float = 0.0,
     ):
-        """Log a function call with metrics and structured data.
-
-        Records function execution details including arguments, results,
-        and timing. Updates Prometheus metrics for monitoring.
+        """Log function call.
 
         Args:
-            agent_id: Identifier of the agent executing the function.
-            function_name: Name of the function being called.
-            arguments: Dictionary of function arguments.
-            result: Optional function result (truncated to 200 chars in logs).
-            error: Optional exception if the function failed.
-            duration: Execution duration in seconds.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
+            function_name (str): IN: function name. OUT: Consumed during execution.
+            arguments (dict[str, Any]): IN: arguments. OUT: Consumed during execution.
+            result (Any, optional): IN: result. Defaults to None. OUT: Consumed during execution.
+            error (Exception | None, optional): IN: error. Defaults to None. OUT: Consumed during execution.
+            duration (float, optional): IN: duration. Defaults to 0.0. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         status = "success" if error is None else "error"
 
         FUNCTION_CALLS.labels(agent_id=agent_id, function_name=function_name, status=status).inc()
@@ -438,16 +398,16 @@ class XerxesLogger:
         to_agent: str,
         reason: str | None = None,
     ):
-        """Log an agent switch event with metrics.
-
-        Records when control transfers from one agent to another,
-        updating the agent switch counter for monitoring.
+        """Log agent switch.
 
         Args:
-            from_agent: Name of the agent relinquishing control.
-            to_agent: Name of the agent receiving control.
-            reason: Optional reason for the switch.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            from_agent (str): IN: from agent. OUT: Consumed during execution.
+            to_agent (str): IN: to agent. OUT: Consumed during execution.
+            reason (str | None, optional): IN: reason. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         AGENT_SWITCHES.labels(from_agent=from_agent, to_agent=to_agent).inc()
 
         if self._use_structlog:
@@ -470,19 +430,19 @@ class XerxesLogger:
         duration: float,
         error: Exception | None = None,
     ):
-        """Log an LLM API request with token and timing metrics.
-
-        Records LLM request details for monitoring and cost tracking,
-        updating Prometheus counters for requests and tokens.
+        """Log llm request.
 
         Args:
-            provider: LLM provider name (e.g., 'openai', 'anthropic').
-            model: Model identifier (e.g., 'gpt-4', 'claude-3').
-            prompt_tokens: Number of tokens in the prompt.
-            completion_tokens: Number of tokens in the completion.
-            duration: Request duration in seconds.
-            error: Optional exception if the request failed.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            provider (str): IN: provider. OUT: Consumed during execution.
+            model (str): IN: model. OUT: Consumed during execution.
+            prompt_tokens (int): IN: prompt tokens. OUT: Consumed during execution.
+            completion_tokens (int): IN: completion tokens. OUT: Consumed during execution.
+            duration (float): IN: duration. OUT: Consumed during execution.
+            error (Exception | None, optional): IN: error. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         status = "success" if error is None else "error"
 
         LLM_REQUESTS.labels(provider=provider, model=model, status=status).inc()
@@ -525,18 +485,18 @@ class XerxesLogger:
         entry_count: int = 1,
         error: Exception | None = None,
     ):
-        """Log a memory store operation with metrics.
-
-        Records memory operations (add, remove) and updates the
-        memory usage gauge for monitoring.
+        """Log memory operation.
 
         Args:
-            operation: Type of operation ('add' or 'remove').
-            memory_type: Type of memory (e.g., 'short_term', 'long_term').
-            agent_id: Identifier of the agent performing the operation.
-            entry_count: Number of entries affected by the operation.
-            error: Optional exception if the operation failed.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            operation (str): IN: operation. OUT: Consumed during execution.
+            memory_type (str): IN: memory type. OUT: Consumed during execution.
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
+            entry_count (int, optional): IN: entry count. Defaults to 1. OUT: Consumed during execution.
+            error (Exception | None, optional): IN: error. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         if operation == "add":
             MEMORY_USAGE.labels(memory_type=memory_type, agent_id=agent_id).inc(entry_count)
         elif operation == "remove":
@@ -565,22 +525,15 @@ class XerxesLogger:
 
     @contextmanager
     def span(self, name: str, **attributes):
-        """Create a tracing span context manager.
-
-        Creates an OpenTelemetry span for distributed tracing. The span
-        automatically records exceptions and sets error status on failure.
+        """Span.
 
         Args:
-            name: Name for the span.
-            **attributes: Additional attributes to attach to the span.
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            **attributes: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
 
-        Yields:
-            The created span object, or None if tracing is disabled.
-
-        Example:
-            >>> with logger.span("process_request", user_id="123"):
-            ...     process_data()
-        """
         if self.enable_tracing and HAS_OTEL:
             tracer = trace.get_tracer(self.name)
             with tracer.start_as_current_span(name, attributes=attributes) as span:
@@ -594,11 +547,13 @@ class XerxesLogger:
             yield None
 
     def get_metrics(self) -> bytes:
-        """Get Prometheus metrics in text format.
+        """Retrieve the metrics.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Prometheus metrics formatted for HTTP exposition.
-        """
+            bytes: OUT: Result of the operation."""
+
         return generate_latest()
 
 
@@ -606,22 +561,14 @@ _logger: XerxesLogger | None = None
 
 
 def get_logger(name: str | None = None, **kwargs) -> XerxesLogger:
-    """Get or create the global XerxesLogger instance.
-
-    Lazily initializes the logger using configuration from the global
-    Xerxes config. Subsequent calls return the same instance.
+    """Retrieve the logger.
 
     Args:
-        name: Optional logger name (used only on first initialization).
-        **kwargs: Additional keyword arguments (currently unused).
-
+        name (str | None, optional): IN: name. Defaults to None. OUT: Consumed during execution.
+        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
     Returns:
-        The global XerxesLogger instance.
+        XerxesLogger: OUT: Result of the operation."""
 
-    Example:
-        >>> logger = get_logger()
-        >>> logger.log_function_call("agent1", "search", {"q": "test"})
-    """
     global _logger
 
     if _logger is None:
@@ -642,22 +589,12 @@ def get_logger(name: str | None = None, **kwargs) -> XerxesLogger:
 
 
 def configure_logging(**kwargs):
-    """Configure global logging settings with custom parameters.
-
-    Creates a new XerxesLogger with the specified settings and sets
-    it as the global logger instance.
+    """Configure logging.
 
     Args:
-        **kwargs: Configuration options passed to XerxesLogger:
-            - name: Logger name identifier.
-            - level: Log level string.
-            - log_file: Optional Path for log file.
-            - enable_json: Whether to use JSON format.
-            - enable_tracing: Whether to enable tracing.
-            - trace_endpoint: OTLP endpoint for traces.
+        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+    Returns:
+        Any: OUT: Result of the operation."""
 
-    Example:
-        >>> configure_logging(level="DEBUG", enable_json=False)
-    """
     global _logger
     _logger = XerxesLogger(**kwargs)

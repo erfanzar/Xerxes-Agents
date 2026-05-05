@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,19 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""System service integration for the Xerxes daemon.
 
-
-"""System service installer for the Xerxes daemon.
-
-Generates and manages platform-specific service definitions:
-
-- **macOS**: ``~/Library/LaunchAgents/com.xerxes.daemon.plist`` via ``launchctl``
-- **Linux**: ``~/.config/systemd/user/xerxes-daemon.service`` via ``systemctl --user``
-
-The installed service starts the daemon at login and restarts it on failure.
+Provides ``install``, ``uninstall``, and ``status`` helpers that create
+launchd (macOS) or systemd (Linux) service definitions and manage their
+lifecycle.
 """
 
 from __future__ import annotations
@@ -31,10 +28,20 @@ from pathlib import Path
 
 
 def _python_path() -> str:
+    """Return the path of the current Python interpreter.
+
+    Returns:
+        str: OUT: ``sys.executable``.
+    """
     return sys.executable
 
 
 def _daemon_command() -> str:
+    """Return the CLI command used to start the daemon.
+
+    Returns:
+        str: OUT: ``"{python} -m xerxes.daemon"``.
+    """
     return f"{_python_path()} -m xerxes.daemon"
 
 
@@ -68,7 +75,6 @@ PLIST_TEMPLATE = """\
 </plist>
 """
 
-
 SYSTEMD_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_PATH = SYSTEMD_DIR / "xerxes-daemon.service"
 
@@ -90,7 +96,20 @@ WantedBy=default.target
 
 
 def install(project_dir: str = "", log_dir: str = "") -> str:
-    """Install the daemon as a system service."""
+    """Install and start the daemon as a system service.
+
+    On macOS creates a launchd plist; on Linux creates a systemd user unit.
+
+    Args:
+        project_dir (str): IN: Working directory for the service. OUT:
+            Defaults to ``os.getcwd()`` and inserted into the service file.
+        log_dir (str): IN: Directory for stdout/stderr logs. OUT: Defaults to
+            the daemon logs subdirectory and created if missing.
+
+    Returns:
+        str: OUT: Human-readable result message.
+    """
+
     cwd = project_dir or os.getcwd()
     if not log_dir:
         from xerxes.core.paths import xerxes_subdir
@@ -128,7 +147,12 @@ def install(project_dir: str = "", log_dir: str = "") -> str:
 
 
 def uninstall() -> str:
-    """Remove the system service."""
+    """Stop and remove the daemon system service.
+
+    Returns:
+        str: OUT: Human-readable result message.
+    """
+
     system = platform.system()
 
     if system == "Darwin":
@@ -151,7 +175,12 @@ def uninstall() -> str:
 
 
 def status() -> str:
-    """Check if the daemon service is running."""
+    """Query whether the daemon service is currently running.
+
+    Returns:
+        str: OUT: Human-readable status description.
+    """
+
     system = platform.system()
 
     if system == "Darwin":

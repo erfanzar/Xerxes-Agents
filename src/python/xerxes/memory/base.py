@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,12 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Base module for Xerxes.
 
-
-"""Base memory classes for Xerxes memory system."""
+Exports:
+    - MemoryItem
+    - Memory"""
 
 from abc import ABC, abstractmethod
 from collections.abc import MutableSequence
@@ -23,23 +27,22 @@ from uuid import uuid4
 
 @dataclass
 class MemoryItem:
-    """Individual memory item with comprehensive metadata.
+    """Memory item.
 
     Attributes:
-        content: The text content stored in this memory item.
-        memory_type: Category label for the memory (e.g., "general", "short_term").
-        timestamp: When the memory was created.
-        metadata: Arbitrary key-value data attached to this item.
-        agent_id: Identifier of the agent that created this memory.
-        task_id: Identifier of the task associated with this memory.
-        conversation_id: Identifier of the conversation this memory belongs to.
-        user_id: Identifier of the user associated with this memory.
-        relevance_score: Search relevance score (0.0-1.0).
-        access_count: Number of times this item has been retrieved.
-        last_accessed: Timestamp of the most recent access.
-        embedding: Optional dense vector embedding for semantic search.
-        memory_id: Unique UUID string for this memory item.
-    """
+        content (str): content.
+        memory_type (str): memory type.
+        timestamp (datetime): timestamp.
+        metadata (dict[str, Any]): metadata.
+        agent_id (str | None): agent id.
+        task_id (str | None): task id.
+        conversation_id (str | None): conversation id.
+        user_id (str | None): user id.
+        relevance_score (float): relevance score.
+        access_count (int): access count.
+        last_accessed (datetime | None): last accessed.
+        embedding (list[float] | None): embedding.
+        memory_id (str): memory id."""
 
     content: str
     memory_type: str = "general"
@@ -56,12 +59,13 @@ class MemoryItem:
     memory_id: str = field(default_factory=lambda: str(uuid4()))
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this memory item to a JSON-serialisable dictionary.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary representation with all fields, converting datetimes
-            to ISO 8601 strings.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         return {
             "memory_id": self.memory_id,
             "content": self.content,
@@ -79,14 +83,14 @@ class MemoryItem:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
-        """Create a MemoryItem from a dictionary, converting ISO strings to datetimes.
+        """From dict.
 
         Args:
-            data: Dictionary as produced by :meth:`to_dict`.
-
+            cls: IN: The class. OUT: Used for class-level operations.
+            data (dict[str, Any]): IN: data. OUT: Consumed during execution.
         Returns:
-            A new MemoryItem populated from the supplied data.
-        """
+            'MemoryItem': OUT: Result of the operation."""
+
         data = data.copy()
         if "timestamp" in data and isinstance(data["timestamp"], str):
             data["timestamp"] = datetime.fromisoformat(data["timestamp"])
@@ -96,13 +100,9 @@ class MemoryItem:
 
 
 class Memory(ABC):
-    """Abstract base class for all Xerxes memory implementations.
+    """Memory.
 
-    Subclasses must implement :meth:`save`, :meth:`search`, :meth:`retrieve`,
-    :meth:`update`, :meth:`delete`, and :meth:`clear`. The base class provides
-    shared infrastructure: an ordered ``_items`` list, an ``_index`` mapping
-    memory IDs to items, and the :meth:`get_context` / :meth:`get_statistics`
-    convenience methods.
+    Inherits from: ABC
     """
 
     def __init__(
@@ -111,13 +111,14 @@ class Memory(ABC):
         max_items: int | None = None,
         enable_embeddings: bool = False,
     ) -> None:
-        """Initialize memory.
+        """Initialize the instance.
 
         Args:
-            storage: Storage backend for persistence.
-            max_items: Maximum number of items to store before eviction.
-            enable_embeddings: Whether to compute embeddings for semantic search.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
+            max_items (int | None, optional): IN: max items. Defaults to None. OUT: Consumed during execution.
+            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to False. OUT: Consumed during execution."""
+
         self.storage = storage
         self.max_items = max_items
         self.enable_embeddings = enable_embeddings
@@ -126,31 +127,31 @@ class Memory(ABC):
 
     @abstractmethod
     def save(self, content: str, metadata: dict[str, Any] | None = None, **kwargs) -> MemoryItem:
-        """Save a memory item.
+        """Save.
 
         Args:
-            content: Text content to store.
-            metadata: Optional key-value metadata to attach.
-            **kwargs: Additional implementation-specific fields.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The newly created MemoryItem.
-        """
+            MemoryItem: OUT: Result of the operation."""
+
         pass
 
     @abstractmethod
     def search(self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, **kwargs) -> list[MemoryItem]:
-        """Search for relevant memories matching a query.
+        """Search.
 
         Args:
-            query: Natural-language or keyword query string.
-            limit: Maximum number of results to return.
-            filters: Optional key-value criteria to narrow results.
-            **kwargs: Additional implementation-specific parameters.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            query (str): IN: query. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            List of matching MemoryItem instances, ordered by relevance.
-        """
+            list[MemoryItem]: OUT: Result of the operation."""
+
         pass
 
     @abstractmethod
@@ -160,61 +161,63 @@ class Memory(ABC):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve specific memory items by ID or filter criteria.
+        """Retrieve.
 
         Args:
-            memory_id: Specific memory UUID to retrieve.
-            filters: Optional key-value criteria for bulk retrieval.
-            limit: Maximum number of items to return when using filters.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
         Returns:
-            Single MemoryItem if memory_id is provided and found,
-            list of MemoryItem when using filters, or None if not found.
-        """
+            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+
         pass
 
     @abstractmethod
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update an existing memory item with new field values.
+        """Update.
 
         Args:
-            memory_id: UUID of the memory item to update.
-            updates: Dictionary of attribute names and new values.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str): IN: memory id. OUT: Consumed during execution.
+            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
         Returns:
-            True if the update succeeded, False if the item was not found.
-        """
+            bool: OUT: Result of the operation."""
+
         pass
 
     @abstractmethod
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete memory items by ID or filter criteria.
+        """Delete.
 
         Args:
-            memory_id: Specific memory UUID to delete.
-            filters: Optional key-value criteria for bulk deletion.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
+            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Number of items deleted.
-        """
+            int: OUT: Result of the operation."""
+
         pass
 
     @abstractmethod
     def clear(self) -> None:
-        """Remove all memory items from this store."""
+        """Clear.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         pass
 
     def get_context(self, limit: int = 10, format_type: str = "text") -> str:
-        """
-        Get formatted context from memories.
+        """Retrieve the context.
 
         Args:
-            limit: Number of recent items to include
-            format_type: Format type (text, json, markdown)
-
+            self: IN: The instance. OUT: Used for attribute access.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+            format_type (str, optional): IN: format type. Defaults to 'text'. OUT: Consumed during execution.
         Returns:
-            Formatted context string
-        """
+            str: OUT: Result of the operation."""
+
         items = self._items[-limit:] if len(self._items) > limit else self._items
 
         if format_type == "json":
@@ -238,12 +241,13 @@ class Memory(ABC):
             return "\n".join(lines)
 
     def get_statistics(self) -> dict[str, Any]:
-        """Return aggregate statistics about stored memory items.
+        """Retrieve the statistics.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary with keys: total_items, max_items, memory_types (counts
-            per type), unique_agents, unique_users, and unique_conversations.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         stats: dict[str, Any] = {
             "total_items": len(self._items),
             "max_items": self.max_items,
@@ -271,9 +275,21 @@ class Memory(ABC):
         return stats
 
     def __len__(self) -> int:
-        """Return the number of memory items currently stored."""
+        """Dunder method for len.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            int: OUT: Result of the operation."""
+
         return len(self._items)
 
     def __repr__(self) -> str:
-        """Return a concise string representation of this memory store."""
+        """Dunder method for repr.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         return f"{self.__class__.__name__}(items={len(self._items)}, max={self.max_items})"

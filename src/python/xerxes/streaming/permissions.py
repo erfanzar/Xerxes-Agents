@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,39 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Permissions module for Xerxes.
 
-
-"""Permission modes for tool execution in the streaming agent loop.
-
-Inspired by the nano-claude-code permission gate, this module implements a
-three-mode permission system that determines whether a tool invocation
-should be auto-approved or requires user confirmation.
-
-Modes:
-
-- ``auto`` (default): Read-only and safe tools are auto-approved.
-  Write operations (Write, Edit), destructive Bash commands, and
-  unknown tools require user permission.
-- ``accept-all``: All tools are auto-approved without asking.
-- ``manual``: Every tool invocation requires explicit user permission.
-
-The :func:`check_permission` function is the main entry point. It takes
-a tool call dict and returns ``True`` if auto-approved.
-
-Usage::
-
-    from xerxes.streaming.permissions import PermissionMode, check_permission
-
-
-    assert check_permission({"name": "Read", "input": {}}, PermissionMode.AUTO)
-    assert not check_permission({"name": "Edit", "input": {}}, PermissionMode.AUTO)
-
-
-    assert check_permission({"name": "Edit", "input": {}}, PermissionMode.ACCEPT_ALL)
-"""
+Exports:
+    - PermissionMode
+    - is_safe_bash
+    - check_permission
+    - format_permission_description"""
 
 from __future__ import annotations
 
@@ -48,12 +27,9 @@ from typing import Any
 
 
 class PermissionMode(Enum):
-    """Permission mode controlling tool execution approval.
+    """Permission mode.
 
-    Attributes:
-        AUTO: Smart auto-approve for safe tools, ask for writes/destructive ops.
-        ACCEPT_ALL: Approve everything without asking.
-        MANUAL: Always ask for permission.
+    Inherits from: Enum
     """
 
     AUTO = "auto"
@@ -115,17 +91,13 @@ _DANGEROUS_BASH_PATTERNS: list[re.Pattern[str]] = [
 
 
 def is_safe_bash(command: str) -> bool:
-    """Check if a Bash command is safe to auto-approve.
-
-    A command is safe if it matches at least one safe pattern and
-    does not match any dangerous pattern.
+    """Check whether safe bash.
 
     Args:
-        command: The shell command string.
-
+        command (str): IN: command. OUT: Consumed during execution.
     Returns:
-        ``True`` if the command is considered safe.
-    """
+        bool: OUT: Result of the operation."""
+
     for pattern in _DANGEROUS_BASH_PATTERNS:
         if pattern.search(command):
             return False
@@ -141,16 +113,14 @@ def check_permission(
     tool_call: dict[str, Any],
     mode: PermissionMode = PermissionMode.AUTO,
 ) -> bool:
-    """Check if a tool invocation is auto-approved under the given mode.
+    """Check permission.
 
     Args:
-        tool_call: Dict with ``"name"`` and ``"input"`` keys.
-        mode: The active permission mode.
-
+        tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
+        mode (PermissionMode, optional): IN: mode. Defaults to PermissionMode.AUTO. OUT: Consumed during execution.
     Returns:
-        ``True`` if the tool call is auto-approved (no user prompt needed).
-        ``False`` if user permission is required.
-    """
+        bool: OUT: Result of the operation."""
+
     if mode == PermissionMode.ACCEPT_ALL:
         return True
     if mode == PermissionMode.MANUAL:
@@ -184,14 +154,13 @@ def check_permission(
 
 
 def format_permission_description(tool_call: dict[str, Any]) -> str:
-    """Generate a human-readable description for a permission request.
+    """Format permission description.
 
     Args:
-        tool_call: Dict with ``"name"`` and ``"input"`` keys.
-
+        tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
     Returns:
-        A short description string suitable for display.
-    """
+        str: OUT: Result of the operation."""
+
     name = tool_call.get("name", "")
     inp = tool_call.get("input", {})
 

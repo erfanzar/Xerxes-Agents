@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Webhook dispatcher for routing HTTP callbacks to channel handlers.
 
-"""Generic webhook ingress for channel adapters.
-
-A small dispatcher that adapters can register against — the daemon /
-API server mounts this once and forwards every ``POST /webhooks/<name>``
-request to the matching channel's ``handle_webhook(headers, body)``
-coroutine. Adapters that do not need webhooks (polling adapters like
-Telegram or IMAP IDLE) can simply ignore this dispatcher.
+Provides a lightweight registry that maps channel names to async webhook
+handlers and returns standardized ``WebhookResponse`` objects.
 """
 
 from __future__ import annotations
@@ -31,11 +29,11 @@ WebhookHandler = tp.Callable[[dict[str, str], bytes], tp.Awaitable["WebhookRespo
 
 @dataclass
 class WebhookResponse:
-    """Result of a webhook handler call.
+    """HTTP response returned by a webhook handler.
 
     Attributes:
-        status: HTTP status code to return to the caller.
-        body: Response body (encoded to UTF-8 by the caller).
+        status: HTTP status code.
+        body: Response body string.
         headers: Optional response headers.
     """
 
@@ -45,30 +43,49 @@ class WebhookResponse:
 
 
 class WebhookDispatcher:
-    """Routes ``POST /webhooks/<name>`` to registered handlers."""
+    """Routes incoming webhook requests to the appropriate handler."""
 
     def __init__(self) -> None:
-        """Initialise the dispatcher with no handlers registered."""
+        """Initialize an empty dispatcher."""
         self._handlers: dict[str, WebhookHandler] = {}
 
     def register(self, name: str, handler: WebhookHandler) -> None:
-        """Bind *handler* to webhook path ``/webhooks/<name>``."""
+        """Register a webhook handler for a channel.
+
+        Args:
+            name (str): IN: channel identifier.
+            handler (WebhookHandler): IN: async callable that processes
+                webhook payloads for this channel.
+        """
         self._handlers[name] = handler
 
     def unregister(self, name: str) -> None:
-        """Remove the handler previously bound under ``name``."""
+        """Remove a registered webhook handler.
+
+        Args:
+            name (str): IN: channel identifier to remove.
+        """
         self._handlers.pop(name, None)
 
     def names(self) -> list[str]:
-        """Return the list of webhook paths currently bound."""
+        """Return all registered handler names.
+
+        Returns:
+            list[str]: OUT: list of channel identifiers.
+        """
         return list(self._handlers.keys())
 
     async def dispatch(self, name: str, headers: dict[str, str], body: bytes) -> WebhookResponse:
-        """Invoke the handler registered for *name*.
+        """Dispatch a webhook request to the registered handler.
 
-        Returns a 404 :class:`WebhookResponse` when no handler is bound.
-        Exceptions from handlers are converted to ``500`` responses with
-        an empty body so the request never crashes the ingress server.
+        Args:
+            name (str): IN: channel identifier.
+            headers (dict[str, str]): IN: HTTP request headers.
+            body (bytes): IN: raw request body.
+
+        Returns:
+            WebhookResponse: OUT: 404 if no handler is found, 500 on handler
+            exception, otherwise the handler's response.
         """
         handler = self._handlers.get(name)
         if handler is None:

@@ -1,14 +1,20 @@
-"""Pack a directory into a DOCX, PPTX, or XLSX file.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Pack module for Xerxes.
 
-Validates with auto-repair, condenses XML formatting, and creates the Office file.
-
-Usage:
-    python pack.py <input_directory> <output_file> [--original <file>] [--validate true|false]
-
-Examples:
-    python pack.py unpacked/ output.docx --original input.docx
-    python pack.py unpacked/ output.pptx --validate false
-"""
+Exports:
+    - pack"""
 
 import argparse
 import shutil
@@ -28,6 +34,16 @@ def pack(
     validate: bool = True,
     infer_author_func=None,
 ) -> tuple[None, str]:
+    """Pack.
+
+    Args:
+        input_directory (str): IN: input directory. OUT: Consumed during execution.
+        output_file (str): IN: output file. OUT: Consumed during execution.
+        original_file (str | None, optional): IN: original file. Defaults to None. OUT: Consumed during execution.
+        validate (bool, optional): IN: validate. Defaults to True. OUT: Consumed during execution.
+        infer_author_func (Any, optional): IN: infer author func. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        tuple[None, str]: OUT: Result of the operation."""
     input_dir = Path(input_directory)
     output_path = Path(output_file)
     suffix = output_path.suffix.lower()
@@ -70,6 +86,15 @@ def _run_validation(
     suffix: str,
     infer_author_func=None,
 ) -> tuple[bool, str | None]:
+    """Internal helper to run validation.
+
+    Args:
+        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
+        original_file (Path): IN: original file. OUT: Consumed during execution.
+        suffix (str): IN: suffix. OUT: Consumed during execution.
+        infer_author_func (Any, optional): IN: infer author func. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        tuple[bool, str | None]: OUT: Result of the operation."""
     output_lines = []
     validators = []
 
@@ -104,6 +129,10 @@ def _run_validation(
 
 
 def _condense_xml(xml_file: Path) -> None:
+    """Internal helper to condense xml.
+
+    Args:
+        xml_file (Path): IN: xml file. OUT: Consumed during execution."""
     try:
         with open(xml_file, encoding="utf-8") as f:
             dom = defusedxml.minidom.parse(f)

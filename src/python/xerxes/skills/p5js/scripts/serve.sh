@@ -1,15 +1,17 @@
 #!/bin/bash
-# p5.js Skill — Local Development Server
-# Serves the current directory over HTTP for loading local assets (fonts, images)
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Usage:
-#   bash scripts/serve.sh [port] [directory]
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Examples:
-#   bash scripts/serve.sh                    # serve CWD on port 8080
-#   bash scripts/serve.sh 3000               # serve CWD on port 3000
-#   bash scripts/serve.sh 8080 ./my-project  # serve specific directory
-
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 PORT="${1:-8080}"
 DIR="${2:-.}"
 

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,29 +6,24 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Embedders module for Xerxes.
 
-"""Embedder protocol and built-in providers for semantic memory.
-
-Defines a single :class:`Embedder` protocol that all embedding backends
-implement: ``embed(text)`` returns a dense vector. Providers shipped:
-
-- :class:`HashEmbedder` — zero-dependency 256-dim hashed bag-of-words.
-- :class:`SentenceTransformerEmbedder` — local model via the
-  ``sentence-transformers`` package.
-- :class:`OpenAIEmbedder` — remote OpenAI ``/v1/embeddings``.
-- :class:`OllamaEmbedder` — local Ollama ``/api/embeddings``.
-
-Use :func:`get_default_embedder` to pick the best available backend
-without specifying a model.
-
-The :class:`Embedder` interface is intentionally minimal: a single
-:meth:`Embedder.embed` plus a :meth:`Embedder.embed_batch` for callers
-that need throughput. Providers may override the batch method when the
-underlying API supports it natively.
-"""
+Exports:
+    - logger
+    - Vector
+    - Embedder
+    - HashEmbedder
+    - SentenceTransformerEmbedder
+    - OpenAIEmbedder
+    - OllamaEmbedder
+    - get_default_embedder
+    - reset_default_embedder
+    - cosine_similarity"""
 
 from __future__ import annotations
 
@@ -42,75 +37,66 @@ Vector = list[float]
 
 
 class Embedder(ABC):
-    """Abstract embedder that turns text into a dense vector.
+    """Embedder.
 
-    Implementations must produce vectors of consistent dimension within
-    a single instance. Different instances (e.g. different models) may
-    use different dimensions; downstream stores must not mix them.
+    Inherits from: ABC
 
     Attributes:
-        name: Stable identifier used for logging and storage tagging.
-        dim: Vector dimension produced by :meth:`embed`. Subclasses set
-            this in ``__init__`` (or after the first embed call when the
-            underlying provider is dynamically sized).
-    """
+        name (str): name.
+        dim (int): dim."""
 
     name: str = ""
     dim: int = 0
 
     @abstractmethod
     def embed(self, text: str) -> Vector:
-        """Encode a single text string into a dense vector.
+        """Embed.
 
         Args:
-            text: The text to encode. Empty strings should yield a
-                zero vector of length :attr:`dim` rather than raising.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            text (str): IN: text. OUT: Consumed during execution.
         Returns:
-            A list of floats of length :attr:`dim`.
-        """
+            Vector: OUT: Result of the operation."""
+        ...
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Encode multiple texts. Default implementation calls ``embed`` per item.
-
-        Subclasses should override when the underlying provider supports
-        a batched API (most remote embeddings APIs do).
+        """Embed batch.
 
         Args:
-            texts: The texts to encode.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
         Returns:
-            One vector per input text, in the same order.
-        """
+            list[Vector]: OUT: Result of the operation."""
+
         return [self.embed(t) for t in texts]
 
 
 class HashEmbedder(Embedder):
-    """Zero-dependency hashed bag-of-words embedder (256-dim, L2-normalised).
+    """Hash embedder.
 
-    Tokenises on whitespace, lowercases, hashes each token to a slot,
-    accumulates term frequency, and L2-normalises the result. Cheap and
-    deterministic, but semantically weak: prefer a real embedder for
-    Hermes-grade recall.
-
-    Attributes:
-        name: Always ``"hash"``.
-        dim: Always ``256``.
+    Inherits from: Embedder
     """
 
     name = "hash"
 
     def __init__(self, dim: int = 256) -> None:
-        """Initialise with the target vector dimension.
+        """Initialize the instance.
 
         Args:
-            dim: Number of slots in the hashed vector. Higher reduces
-                collisions at the cost of memory.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            dim (int, optional): IN: dim. Defaults to 256. OUT: Consumed during execution."""
+
         self.dim = dim
 
     def embed(self, text: str) -> Vector:
-        """Hash tokens into a fixed-dim TF vector and L2-normalise."""
+        """Embed.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            text (str): IN: text. OUT: Consumed during execution.
+        Returns:
+            Vector: OUT: Result of the operation."""
+
         tokens = text.lower().split()
         if not tokens:
             return [0.0] * self.dim
@@ -126,32 +112,29 @@ class HashEmbedder(Embedder):
 
 
 class SentenceTransformerEmbedder(Embedder):
-    """Embedder backed by a local ``sentence-transformers`` model.
+    """Sentence transformer embedder.
 
-    Lazily loads the model on first call. The default model is
-    ``all-MiniLM-L6-v2`` (384 dim, ~80 MB) which gives a good
-    quality/size tradeoff for cross-session recall. Raises
-    :class:`ImportError` only if the package is missing **and** the
-    embedder is actually used.
-
-    Attributes:
-        name: ``"sentence-transformers"``.
-        model_name: The model identifier passed to ``SentenceTransformer``.
+    Inherits from: Embedder
     """
 
     name = "sentence-transformers"
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
-        """Defer model loading until first :meth:`embed` call.
+        """Initialize the instance.
 
         Args:
-            model_name: ``sentence-transformers`` model identifier.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            model_name (str, optional): IN: model name. Defaults to 'all-MiniLM-L6-v2'. OUT: Consumed during execution."""
+
         self.model_name = model_name
         self._model: tp.Any = None
 
     def _ensure_loaded(self) -> None:
-        """Load the ``sentence-transformers`` model on first use and cache ``dim``."""
+        """Internal helper to ensure loaded.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if self._model is not None:
             return
         try:
@@ -165,7 +148,14 @@ class SentenceTransformerEmbedder(Embedder):
         self.dim = int(self._model.get_sentence_embedding_dimension())
 
     def embed(self, text: str) -> Vector:
-        """Encode text to a dense vector via the loaded model."""
+        """Embed.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            text (str): IN: text. OUT: Consumed during execution.
+        Returns:
+            Vector: OUT: Result of the operation."""
+
         self._ensure_loaded()
         if not text:
             return [0.0] * self.dim
@@ -173,7 +163,14 @@ class SentenceTransformerEmbedder(Embedder):
         return vec.tolist()
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Batch-encode using the model's native batching."""
+        """Embed batch.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
+        Returns:
+            list[Vector]: OUT: Result of the operation."""
+
         self._ensure_loaded()
         if not texts:
             return []
@@ -182,15 +179,9 @@ class SentenceTransformerEmbedder(Embedder):
 
 
 class OpenAIEmbedder(Embedder):
-    """Embedder backed by the OpenAI ``/v1/embeddings`` API.
+    """Open aiembedder.
 
-    Reads the API key from the constructor or the ``OPENAI_API_KEY``
-    env var. Defaults to ``text-embedding-3-small`` (1536 dim) for the
-    best price/quality tradeoff in 2026.
-
-    Attributes:
-        name: ``"openai"``.
-        model_name: The OpenAI embeddings model identifier.
+    Inherits from: Embedder
     """
 
     name = "openai"
@@ -201,15 +192,14 @@ class OpenAIEmbedder(Embedder):
         api_key: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        """Initialise the OpenAI embeddings client.
+        """Initialize the instance.
 
         Args:
-            model_name: OpenAI embeddings model. ``text-embedding-3-small``
-                is 1536-dim; ``text-embedding-3-large`` is 3072-dim.
-            api_key: Explicit API key. Falls back to ``OPENAI_API_KEY``.
-            base_url: Optional custom base URL (e.g. for an OpenAI-compatible
-                gateway).
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            model_name (str, optional): IN: model name. Defaults to 'text-embedding-3-small'. OUT: Consumed during execution.
+            api_key (str | None, optional): IN: api key. Defaults to None. OUT: Consumed during execution.
+            base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution."""
+
         self.model_name = model_name
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = base_url
@@ -222,7 +212,11 @@ class OpenAIEmbedder(Embedder):
             self.dim = 1536
 
     def _ensure_client(self) -> None:
-        """Build the OpenAI client on first use, requiring a configured API key."""
+        """Internal helper to ensure client.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if self._client is not None:
             return
         try:
@@ -237,7 +231,14 @@ class OpenAIEmbedder(Embedder):
         self._client = OpenAI(**kwargs)
 
     def embed(self, text: str) -> Vector:
-        """Encode a single text via the OpenAI embeddings endpoint."""
+        """Embed.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            text (str): IN: text. OUT: Consumed during execution.
+        Returns:
+            Vector: OUT: Result of the operation."""
+
         self._ensure_client()
         if not text:
             return [0.0] * self.dim
@@ -247,7 +248,14 @@ class OpenAIEmbedder(Embedder):
         return vec
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Batch-encode in a single API request."""
+        """Embed batch.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
+        Returns:
+            list[Vector]: OUT: Result of the operation."""
+
         self._ensure_client()
         if not texts:
             return []
@@ -259,17 +267,9 @@ class OpenAIEmbedder(Embedder):
 
 
 class OllamaEmbedder(Embedder):
-    """Embedder backed by a local Ollama server.
+    """Ollama embedder.
 
-    Calls ``POST {base_url}/api/embeddings``. The base URL defaults to
-    ``http://localhost:11434`` and can be overridden via the
-    ``OLLAMA_HOST`` env var or constructor arg. Default model is
-    ``nomic-embed-text`` (768 dim).
-
-    Attributes:
-        name: ``"ollama"``.
-        model_name: The Ollama model identifier.
-        base_url: Ollama server URL.
+    Inherits from: Embedder
     """
 
     name = "ollama"
@@ -279,20 +279,26 @@ class OllamaEmbedder(Embedder):
         model_name: str = "nomic-embed-text",
         base_url: str | None = None,
     ) -> None:
-        """Initialise the Ollama embedder.
+        """Initialize the instance.
 
         Args:
-            model_name: Ollama model name. ``nomic-embed-text`` is a
-                strong open default; ``mxbai-embed-large`` is also good.
-            base_url: Override Ollama URL. Defaults to ``$OLLAMA_HOST``
-                or ``http://localhost:11434``.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            model_name (str, optional): IN: model name. Defaults to 'nomic-embed-text'. OUT: Consumed during execution.
+            base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution."""
+
         self.model_name = model_name
         self.base_url = (base_url or os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
         self.dim = 768
 
     def embed(self, text: str) -> Vector:
-        """Encode via ``POST /api/embeddings``."""
+        """Embed.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            text (str): IN: text. OUT: Consumed during execution.
+        Returns:
+            Vector: OUT: Result of the operation."""
+
         if not text:
             return [0.0] * self.dim
         try:
@@ -315,22 +321,11 @@ _DEFAULT_CACHE: Embedder | None = None
 
 
 def get_default_embedder() -> Embedder:
-    """Return a process-wide default embedder, picking the best available.
-
-    Resolution order:
-
-    1. ``$XERXES_EMBEDDER`` env var: ``"hash"``, ``"openai"``,
-       ``"sentence-transformers"``, or ``"ollama"``.
-    2. If ``OPENAI_API_KEY`` is set, use :class:`OpenAIEmbedder`.
-    3. If ``sentence-transformers`` importable, use
-       :class:`SentenceTransformerEmbedder`.
-    4. Otherwise fall back to :class:`HashEmbedder`.
-
-    Cached after the first call so subsequent invocations are cheap.
+    """Retrieve the default embedder.
 
     Returns:
-        A ready-to-use :class:`Embedder` instance.
-    """
+        Embedder: OUT: Result of the operation."""
+
     global _DEFAULT_CACHE
     if _DEFAULT_CACHE is not None:
         return _DEFAULT_CACHE
@@ -350,34 +345,31 @@ def get_default_embedder() -> Embedder:
     if os.environ.get("OPENAI_API_KEY"):
         _DEFAULT_CACHE = OpenAIEmbedder()
         return _DEFAULT_CACHE
-    try:
-        import sentence_transformers  # noqa: F401
+    import importlib.util
 
+    if importlib.util.find_spec("sentence_transformers") is not None:
         _DEFAULT_CACHE = SentenceTransformerEmbedder()
         return _DEFAULT_CACHE
-    except ImportError:
-        pass
     _DEFAULT_CACHE = HashEmbedder()
     return _DEFAULT_CACHE
 
 
 def reset_default_embedder() -> None:
-    """Clear the cached default embedder. Mainly for tests."""
+    """Reset default embedder."""
+
     global _DEFAULT_CACHE
     _DEFAULT_CACHE = None
 
 
 def cosine_similarity(a: Vector, b: Vector) -> float:
-    """Return the cosine similarity in ``[-1.0, 1.0]`` between two vectors.
+    """Cosine similarity.
 
     Args:
-        a: First vector.
-        b: Second vector. Must have the same length as ``a``.
-
+        a (Vector): IN: a. OUT: Consumed during execution.
+        b (Vector): IN: b. OUT: Consumed during execution.
     Returns:
-        Cosine similarity. Returns ``0.0`` when either vector has zero
-        norm (avoids divide-by-zero).
-    """
+        float: OUT: Result of the operation."""
+
     if len(a) != len(b):
         return 0.0
     dot = 0.0

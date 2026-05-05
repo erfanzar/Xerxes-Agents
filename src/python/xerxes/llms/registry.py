@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,33 +6,22 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Registry module for Xerxes.
 
-
-"""Provider registry with auto-detection, cost tracking, and multi-provider configs.
-
-Inspired by the nano-claude-code pattern of centralizing provider metadata in a
-single registry that enables:
-
-- **Auto-detection**: Infer provider from a model name string (e.g. ``"gpt-4o"``
-  → ``"openai"``, ``"deepseek-chat"`` → ``"deepseek"``).
-- **Cost tracking**: Per-model pricing tables for input/output token costs.
-- **Unified config**: Every provider's base URL, API key env var, context limit,
-  and known models in one place.
-
-Supported providers:
-    anthropic, openai, gemini, kimi, qwen, zhipu, deepseek, ollama, lmstudio, custom
-
-Usage::
-
-    from xerxes.llms.registry import detect_provider, get_provider_config, calc_cost
-
-    provider = detect_provider("deepseek-chat")
-    config   = get_provider_config("deepseek")
-    cost     = calc_cost("gpt-4o", in_tok=1000, out_tok=500)
-"""
+Exports:
+    - ProviderConfig
+    - detect_provider
+    - bare_model
+    - get_provider_config
+    - get_api_key
+    - calc_cost
+    - list_all_models
+    - get_context_limit"""
 
 from __future__ import annotations
 
@@ -42,20 +31,16 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """Immutable configuration for a single LLM provider.
+    """Provider config.
 
     Attributes:
-        name: Canonical provider name (e.g. ``"deepseek"``).
-        type: Backend type — ``"anthropic"`` uses the Anthropic SDK,
-            ``"openai"`` uses any OpenAI-compatible SDK.
-        api_key_env: Environment variable that holds the API key.
-            ``None`` for local providers that don't need one.
-        base_url: Default base URL for the API endpoint.
-            ``None`` when the URL must come from user config (e.g. custom).
-        context_limit: Default context window size in tokens.
-        models: List of known model identifiers for this provider.
-        default_api_key: Hardcoded API key for local providers (e.g. ``"ollama"``).
-    """
+        name (str): name.
+        type (str): type.
+        api_key_env (str | None): api key env.
+        base_url (str | None): base url.
+        context_limit (int): context limit.
+        models (list[str]): models.
+        default_api_key (str | None): default api key."""
 
     name: str
     type: str
@@ -231,7 +216,6 @@ PROVIDERS: dict[str, ProviderConfig] = {
     ),
 }
 
-
 COSTS: dict[str, tuple[float, float]] = {
     "claude-opus-4-6": (15.0, 75.0),
     "claude-opus-4-5": (15.0, 75.0),
@@ -279,7 +263,6 @@ COSTS: dict[str, tuple[float, float]] = {
     "glm-4-air": (0.14, 0.14),
 }
 
-
 _PREFIX_MAP: list[tuple[str, str]] = sorted(
     [
         ("claude-", "anthropic"),
@@ -309,20 +292,13 @@ _PREFIX_MAP: list[tuple[str, str]] = sorted(
 
 
 def detect_provider(model: str) -> str:
-    """Infer the provider name from a model string.
-
-    Supports two formats:
-    - Explicit: ``"provider/model"`` (e.g. ``"ollama/llama3.3"``)
-    - Auto-detect: prefix matching (e.g. ``"deepseek-chat"`` → ``"deepseek"``)
-
-    Falls back to ``"openai"`` if no prefix matches.
+    """Detect provider.
 
     Args:
-        model: Model name string, optionally prefixed with provider.
-
+        model (str): IN: model. OUT: Consumed during execution.
     Returns:
-        Canonical provider name (key in :data:`PROVIDERS`).
-    """
+        str: OUT: Result of the operation."""
+
     if "/" in model:
         return model.split("/", 1)[0].lower()
     lower = model.lower()
@@ -333,47 +309,36 @@ def detect_provider(model: str) -> str:
 
 
 def bare_model(model: str) -> str:
-    """Strip the ``provider/`` prefix from a model string.
+    """Bare model.
 
     Args:
-        model: Model string, optionally prefixed (e.g. ``"ollama/llama3.3"``).
-
+        model (str): IN: model. OUT: Consumed during execution.
     Returns:
-        The model name without provider prefix.
-    """
+        str: OUT: Result of the operation."""
+
     return model.split("/", 1)[1] if "/" in model else model
 
 
 def get_provider_config(provider_name: str) -> ProviderConfig:
-    """Look up the :class:`ProviderConfig` for a given provider name.
+    """Retrieve the provider config.
 
     Args:
-        provider_name: Canonical provider name (e.g. ``"deepseek"``).
-
+        provider_name (str): IN: provider name. OUT: Consumed during execution.
     Returns:
-        The matching :class:`ProviderConfig`.
+        ProviderConfig: OUT: Result of the operation."""
 
-    Raises:
-        KeyError: If the provider name is not registered.
-    """
     return PROVIDERS[provider_name]
 
 
 def get_api_key(provider_name: str, extra_config: dict | None = None) -> str:
-    """Resolve the API key for a provider.
-
-    Resolution order:
-    1. ``extra_config["{provider}_api_key"]`` if provided.
-    2. Environment variable from :attr:`ProviderConfig.api_key_env`.
-    3. :attr:`ProviderConfig.default_api_key` (for local providers).
+    """Retrieve the api key.
 
     Args:
-        provider_name: Canonical provider name.
-        extra_config: Optional dict with override keys.
-
+        provider_name (str): IN: provider name. OUT: Consumed during execution.
+        extra_config (dict | None, optional): IN: extra config. Defaults to None. OUT: Consumed during execution.
     Returns:
-        The API key string, or ``""`` if none found.
-    """
+        str: OUT: Result of the operation."""
+
     prov = PROVIDERS.get(provider_name)
     if prov is None:
         return ""
@@ -392,35 +357,29 @@ def get_api_key(provider_name: str, extra_config: dict | None = None) -> str:
 
 
 def calc_cost(model: str, in_tok: int, out_tok: int) -> float:
-    """Calculate the estimated API cost for a request.
-
-    Uses per-model pricing from :data:`COSTS`. Returns ``0.0`` for
-    unknown models (e.g. local Ollama models).
+    """Calc cost.
 
     Args:
-        model: Model name (prefix is stripped automatically).
-        in_tok: Number of input tokens.
-        out_tok: Number of output tokens.
-
+        model (str): IN: model. OUT: Consumed during execution.
+        in_tok (int): IN: in tok. OUT: Consumed during execution.
+        out_tok (int): IN: out tok. OUT: Consumed during execution.
     Returns:
-        Estimated cost in USD.
-    """
+        float: OUT: Result of the operation."""
+
     name = bare_model(model)
     ic, oc = COSTS.get(name, (0.0, 0.0))
     return (in_tok * ic + out_tok * oc) / 1_000_000
 
 
 def list_all_models() -> dict[str, list[str]]:
-    """Return all known models grouped by provider.
+    """List all models.
 
     Returns:
-        Dict mapping provider names to their known model lists.
-    """
+        dict[str, list[str]]: OUT: Result of the operation."""
+
     return {name: list(prov.models) for name, prov in PROVIDERS.items() if prov.models}
 
 
-# Per-model context-limit overrides for models whose window differs
-# from their provider default.
 _MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "MiniMax-M2.7-highspeed": 1_024_000,
     "MiniMax-M2.7-flashspeed": 1_024_000,
@@ -430,14 +389,13 @@ _MODEL_CONTEXT_LIMITS: dict[str, int] = {
 
 
 def get_context_limit(model: str) -> int:
-    """Return the context window size for a model.
+    """Retrieve the context limit.
 
     Args:
-        model: Model name string.
-
+        model (str): IN: model. OUT: Consumed during execution.
     Returns:
-        Context limit in tokens.
-    """
+        int: OUT: Result of the operation."""
+
     if model in _MODEL_CONTEXT_LIMITS:
         return _MODEL_CONTEXT_LIMITS[model]
     provider_name = detect_provider(model)

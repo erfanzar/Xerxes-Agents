@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,39 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Message compaction strategies for limiting conversation token usage.
 
-
-"""Context compaction strategies for managing conversation history.
-
-This module provides various strategies for compacting conversation
-history when context length exceeds token limits. Each strategy
-implements a different approach to reducing context size while
-preserving relevant information.
-
-The strategies range from simple truncation to intelligent
-summarization using LLM capabilities, allowing for flexible
-context management based on requirements and available resources.
-
-Key Components:
-    - BaseCompactionStrategy: Abstract base class defining the interface
-    - SummarizationStrategy: LLM-based conversation summarization
-    - SlidingWindowStrategy: Recent message retention with window
-    - PriorityBasedStrategy: Importance-based message selection
-    - SummarizationStrategy: LLM-based summarization
-    - TruncateStrategy: Simple truncation for emergency cases
-
-Example:
-    >>> from xerxes.context import get_compaction_strategy
-    >>> from xerxes.types import CompactionStrategy
-    >>> strategy = get_compaction_strategy(
-    ...     strategy=CompactionStrategy.SLIDING_WINDOW,
-    ...     target_tokens=4000,
-    ...     model="gpt-4"
-    ... )
-    >>> compacted, stats = strategy.compact(messages)
+Provides several implementations of ``BaseCompactionStrategy`` that shrink
+a message list to fit within a target token budget using summarization,
+truncation, sliding windows, priority scoring, or an adaptive smart strategy.
 """
 
 from abc import ABC, abstractmethod
@@ -50,19 +27,7 @@ from .token_counter import SmartTokenCounter
 
 
 class BaseCompactionStrategy(ABC):
-    """Base class for context compaction strategies.
-
-    Provides the foundational interface and common functionality
-    for all compaction strategies. Subclasses must implement the
-    compact() method to define their specific compaction logic.
-
-    Attributes:
-        target_tokens: Target number of tokens after compaction.
-        model: Model name for accurate token counting.
-        preserve_system: Whether to preserve system messages during compaction.
-        preserve_recent: Number of recent messages to always preserve.
-        token_counter: SmartTokenCounter instance for token counting.
-    """
+    """Abstract base for all message compaction strategies."""
 
     def __init__(
         self,
@@ -71,13 +36,17 @@ class BaseCompactionStrategy(ABC):
         preserve_system: bool = True,
         preserve_recent: int = 3,
     ):
-        """Initialize the compaction strategy.
+        """Initialize the strategy.
 
         Args:
-            target_tokens: Target number of tokens after compaction
-            model: Model name for token counting
-            preserve_system: Whether to preserve system messages
-            preserve_recent: Number of recent messages to preserve
+            target_tokens (int): IN: maximum tokens the compacted message list
+                should occupy.
+            model (str): IN: model identifier for token counting.
+                Defaults to "gpt-4".
+            preserve_system (bool): IN: whether to protect system messages.
+                Defaults to ``True``.
+            preserve_recent (int): IN: number of recent messages to protect.
+                Defaults to 3.
         """
         self.target_tokens = target_tokens
         self.model = model
@@ -91,27 +60,30 @@ class BaseCompactionStrategy(ABC):
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact the message history.
+        """Compact a message list.
 
         Args:
-            messages: List of message dictionaries
-            metadata: Optional metadata about messages
+            messages (list[dict[str, str]]): IN: conversation history in
+                OpenAI-style dict format.
+            metadata (dict[str, Any] | None): IN: optional extra context.
 
         Returns:
-            Tuple of (compacted_messages, compaction_stats)
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics dict.
         """
         pass
 
     def _separate_messages(
         self, messages: list[dict[str, str]]
     ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-        """Separate messages into system, preserved, and compactable.
+        """Split messages into system, preserved recent, and compactable groups.
 
         Args:
-            messages: List of all messages
+            messages (list[dict[str, str]]): IN: full message list.
 
         Returns:
-            Tuple of (system_messages, preserved_messages, compactable_messages)
+            tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+            OUT: ``(system_messages, preserved_messages, compactable_messages)``.
         """
         system_messages = []
         preserved_messages = []
@@ -135,24 +107,15 @@ class BaseCompactionStrategy(ABC):
 
 
 class SummarizationStrategy(BaseCompactionStrategy):
-    """Compaction strategy that uses LLM to summarize older messages.
-
-    This strategy leverages an LLM client to intelligently summarize
-    older portions of conversation history, creating a condensed
-    representation that preserves key information while reducing
-    token count significantly.
-
-    Attributes:
-        llm_client: LLM client instance for generating summaries.
-        compaction_agent: Optional compaction agent for advanced summarization.
-    """
+    """Compaction strategy that replaces old messages with an LLM summary."""
 
     def __init__(self, llm_client: Any | None = None, **kwargs):
-        """Initialize summarization strategy.
+        """Initialize the summarization strategy.
 
         Args:
-            llm_client: LLM client for generating summaries
-            **kwargs: Arguments for base class
+            llm_client (Any | None): IN: optional LLM client for generating
+                summaries. OUT: forwarded to ``create_compaction_agent``.
+            **kwargs: IN: forwarded to ``BaseCompactionStrategy.__init__``.
         """
         super().__init__(**kwargs)
         self.llm_client = llm_client
@@ -168,14 +131,15 @@ class SummarizationStrategy(BaseCompactionStrategy):
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact messages using summarization.
+        """Compact messages by generating a summary of older turns.
 
         Args:
-            messages: List of message dictionaries
-            metadata: Optional metadata
+            messages (list[dict[str, str]]): IN: conversation history.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
 
         Returns:
-            Compacted messages and statistics
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics.
         """
         system_msgs, preserved_msgs, compactable_msgs = self._separate_messages(messages)
 
@@ -225,13 +189,13 @@ class SummarizationStrategy(BaseCompactionStrategy):
         return compacted, stats
 
     def _format_conversation(self, messages: list[dict[str, str]]) -> str:
-        """Format messages as conversation text for summarization.
+        """Format a list of messages as human-readable conversation text.
 
         Args:
-            messages: List of message dictionaries to format.
+            messages (list[dict[str, str]]): IN: messages to format.
 
         Returns:
-            Formatted conversation text with role prefixes.
+            str: OUT: formatted conversation string.
         """
         lines = []
         for msg in messages:
@@ -241,16 +205,13 @@ class SummarizationStrategy(BaseCompactionStrategy):
         return "\n\n".join(lines)
 
     def _generate_summary(self, conversation: str) -> str:
-        """Generate summary using LLM or fallback method.
-
-        Falls back to a simple truncation-based summary if no LLM
-        client is available.
+        """Generate a summary of the conversation text.
 
         Args:
-            conversation: Formatted conversation text to summarize.
+            conversation (str): IN: formatted conversation text.
 
         Returns:
-            Summarized version of the conversation.
+            str: OUT: summary string (LLM-generated or fallback).
         """
         if self.llm_client:
             try:
@@ -306,29 +267,22 @@ class SummarizationStrategy(BaseCompactionStrategy):
 
 
 class SlidingWindowStrategy(BaseCompactionStrategy):
-    """Compaction strategy that keeps only recent messages.
-
-    Implements a sliding window approach where older messages are
-    progressively removed to stay within token limits, while always
-    preserving the most recent messages for context continuity.
-
-    This strategy is efficient and doesn't require an LLM client,
-    making it suitable for cost-sensitive applications.
-    """
+    """Compaction strategy that keeps a sliding window of recent messages."""
 
     def compact(
         self,
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact messages using sliding window.
+        """Compact messages by truncating older content and keeping recent ones.
 
         Args:
-            messages: List of message dictionaries
-            metadata: Optional metadata
+            messages (list[dict[str, str]]): IN: conversation history.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
 
         Returns:
-            Compacted messages and statistics
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics.
         """
         stats = {
             "original_count": len(messages),
@@ -387,22 +341,16 @@ class SlidingWindowStrategy(BaseCompactionStrategy):
 
 
 class PriorityBasedStrategy(BaseCompactionStrategy):
-    """Compaction strategy based on message priority and importance.
-
-    Scores messages based on their importance and retains high-priority
-    messages while removing lower-priority ones. This allows for more
-    intelligent compaction that preserves critical conversation elements.
-
-    Attributes:
-        priority_scorer: Callable that scores message priority (0-1).
-    """
+    """Compaction strategy that keeps highest-priority messages."""
 
     def __init__(self, priority_scorer: Callable | None = None, **kwargs):
-        """Initialize priority-based strategy.
+        """Initialize the priority-based strategy.
 
         Args:
-            priority_scorer: Function to score message priority
-            **kwargs: Arguments for base class
+            priority_scorer (Callable | None): IN: optional scoring function
+                ``(message, index, metadata) -> float``. OUT: defaults to
+                ``_default_scorer`` when not provided.
+            **kwargs: IN: forwarded to ``BaseCompactionStrategy.__init__``.
         """
         super().__init__(**kwargs)
         self.priority_scorer = priority_scorer or self._default_scorer
@@ -412,14 +360,16 @@ class PriorityBasedStrategy(BaseCompactionStrategy):
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact messages based on priority.
+        """Compact messages by scoring and keeping the most important ones.
 
         Args:
-            messages: List of message dictionaries
-            metadata: Optional metadata with priority info
+            messages (list[dict[str, str]]): IN: conversation history.
+            metadata (dict[str, Any] | None): IN: optional metadata passed to
+                the priority scorer.
 
         Returns:
-            Compacted messages and statistics
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics.
         """
         stats = {
             "original_count": len(messages),
@@ -459,15 +409,15 @@ class PriorityBasedStrategy(BaseCompactionStrategy):
         return compacted, stats
 
     def _default_scorer(self, message: dict[str, str], index: int, metadata: dict[str, Any] | None) -> float:
-        """Default message priority scorer.
+        """Compute a default priority score for a message.
 
         Args:
-            message: Message to score
-            index: Message index
-            metadata: Optional metadata
+            message (dict[str, str]): IN: the message dict.
+            index (int): IN: position in the compactable list.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
 
         Returns:
-            Priority score (0-1)
+            float: OUT: priority score in the range ``[0.0, 1.0]``.
         """
         score = 0.5
 
@@ -488,30 +438,22 @@ class PriorityBasedStrategy(BaseCompactionStrategy):
 
 
 class TruncateStrategy(BaseCompactionStrategy):
-    """Simple truncation strategy for emergency compaction.
-
-    Provides a straightforward truncation approach that removes
-    older messages and truncates long message content. This is
-    the simplest and fastest strategy, suitable when more
-    sophisticated approaches are not needed or available.
-
-    Does not require an LLM client and has minimal computational
-    overhead, making it ideal for resource-constrained situations.
-    """
+    """Compaction strategy that truncates or drops old messages."""
 
     def compact(
         self,
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact messages using simple truncation.
+        """Compact messages by truncating long content and dropping old turns.
 
         Args:
-            messages: List of message dictionaries
-            metadata: Optional metadata
+            messages (list[dict[str, str]]): IN: conversation history.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
 
         Returns:
-            Compacted messages and statistics
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics.
         """
         stats = {
             "original_count": len(messages),
@@ -558,10 +500,16 @@ class TruncateStrategy(BaseCompactionStrategy):
 
 
 class SmartCompactionStrategy(BaseCompactionStrategy):
-    """Choose a concrete compaction strategy from the current token pressure."""
+    """Adaptive compaction strategy that selects a sub-strategy dynamically."""
 
     def __init__(self, llm_client: Any | None = None, **kwargs):
-        """Initialise the smart strategy with an optional summarisation client."""
+        """Initialize the smart compaction strategy.
+
+        Args:
+            llm_client (Any | None): IN: optional LLM client passed to
+                sub-strategies that require summarization.
+            **kwargs: IN: forwarded to ``BaseCompactionStrategy.__init__``.
+        """
         super().__init__(**kwargs)
         self.llm_client = llm_client
 
@@ -570,7 +518,16 @@ class SmartCompactionStrategy(BaseCompactionStrategy):
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Dispatch to the most suitable compaction strategy for *messages*."""
+        """Compact messages using an automatically chosen sub-strategy.
+
+        Args:
+            messages (list[dict[str, str]]): IN: conversation history.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
+
+        Returns:
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics including ``substrategy``.
+        """
         current_tokens = self.token_counter.count_tokens(messages)
 
         if current_tokens <= self.target_tokens:
@@ -620,17 +577,20 @@ class SmartCompactionStrategy(BaseCompactionStrategy):
 def get_compaction_strategy(
     strategy: CompactionStrategy, target_tokens: int, model: str = "gpt-4", llm_client: Any | None = None, **kwargs
 ) -> BaseCompactionStrategy:
-    """Factory function to get a compaction strategy.
+    """Factory that returns a concrete compaction strategy instance.
 
     Args:
-        strategy: The compaction strategy enum
-        target_tokens: Target number of tokens
-        model: Model name for token counting
-        llm_client: Optional LLM client
-        **kwargs: Additional strategy-specific arguments
+        strategy (CompactionStrategy): IN: enum value selecting the strategy.
+        target_tokens (int): IN: maximum token budget.
+        model (str): IN: model identifier for token counting.
+            Defaults to "gpt-4".
+        llm_client (Any | None): IN: optional LLM client for strategies that
+            require summarization.
+        **kwargs: IN: additional keyword arguments forwarded to the strategy
+            constructor.
 
     Returns:
-        Compaction strategy instance
+        BaseCompactionStrategy: OUT: configured strategy instance.
     """
     strategy_map = {
         CompactionStrategy.SUMMARIZE: SummarizationStrategy,

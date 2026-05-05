@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,23 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Cortex-backed completion service for the Xerxes API server.
 
-
-"""Cortex completion service for handling multi-agent orchestration via API.
-
-This module provides the Cortex-based completion service infrastructure,
-including:
-- Multi-agent orchestration for complex task execution
-- Task mode with dynamic task creation and agent assignment
-- Instruction mode for direct prompt execution
-- Streaming and non-streaming response generation
-- Integration with DynamicCortex for sophisticated agent workflows
-
-The service supports both sequential and parallel execution strategies,
-with configurable process types and real-time streaming of execution events.
+This module provides :class:`CortexCompletionService`, which uses the Cortex
+multi-agent framework to fulfill OpenAI-compatible chat completion requests
+in both task and instruction modes, with streaming support.
 """
 
 from __future__ import annotations
@@ -65,37 +58,14 @@ if typing.TYPE_CHECKING:
     from ..llms.base import BaseLLM
 
 DONE_TAG = '/["DONE"]/'
-"""Sentinel tag used to signal the end of a Cortex streaming response."""
 
 
 class CortexCompletionService:
-    """Service for handling Cortex-based chat completions with multi-agent orchestration.
+    """Completion backend powered by the Cortex multi-agent framework.
 
-    Provides advanced multi-agent orchestration capabilities through the Cortex
-    system. Supports two primary execution modes:
-
-    - **Task mode**: Uses ``TaskCreator`` to dynamically decompose prompts into
-      discrete tasks, assign agents to each task, and execute them through
-      ``DynamicCortex``. Activated when the model name contains ``"task"``.
-    - **Instruction mode**: Directly executes prompts through ``DynamicCortex``
-      without task decomposition. Used as the default mode.
-
-    Both modes support sequential, parallel, and hierarchical process types,
-    as well as streaming and non-streaming response generation.
-
-    Attributes:
-        llm: The ``BaseLLM`` instance used for agent interactions.
-        verbose: Flag indicating whether verbose logging is enabled.
-        logger: Logger instance for verbose output (``None`` if disabled).
-        agents: List of ``CortexAgent`` instances available for task execution.
-        universal_agent: ``UniversalAgent`` instance for fallback handling, or
-            ``None`` if disabled.
-        task_creator: ``TaskCreator`` instance for dynamic task generation with
-            automatic agent assignment.
-
-    Example:
-        >>> from xerxes.api_server.cortex_completion_service import CortexCompletionService
-        >>> service = CortexCompletionService(llm=my_llm, agents=[agent1, agent2])
+    Supports task-mode (plan + execute) and instruction-mode execution, with
+    automatic model name parsing to determine process types (sequential,
+    parallel, hierarchical).
     """
 
     def __init__(
@@ -107,22 +77,15 @@ class CortexCompletionService:
     ):
         """Initialize the Cortex completion service.
 
-        Sets up the agent pool, optional ``UniversalAgent`` fallback, and
-        the ``TaskCreator`` for dynamic task generation. If
-        ``use_universal_agent`` is ``True``, a ``UniversalAgent`` is created
-        and appended to the agents list (if not already present).
-
         Args:
-            llm: The ``BaseLLM`` instance to use for powering all agents
-                and the task creator.
-            agents: Optional list of specialized ``CortexAgent`` instances
-                for task handling. Defaults to an empty list if ``None``.
-            use_universal_agent: Whether to include a ``UniversalAgent`` as
-                a fallback for tasks that don't match any specialized agent.
-                The universal agent is configured with delegation enabled,
-                temperature 0.7, and max_tokens 4096. Defaults to ``True``.
-            verbose: Whether to enable verbose logging of execution events
-                via the console logger. Defaults to ``True``.
+            llm (BaseLLM): IN: Language model backend. OUT: Passed to agents and
+                the task creator.
+            agents (list[CortexAgent] | None): IN: Optional list of specialized
+                agents. OUT: Defaults to an empty list; universal agent may be added.
+            use_universal_agent (bool): IN: Whether to instantiate a
+                :class:`UniversalAgent`. OUT: Controls agent list composition.
+            verbose (bool): IN: Whether to enable verbose logging. OUT: Controls
+                logger creation.
         """
         self.llm = llm
         self.verbose = verbose
@@ -149,41 +112,15 @@ class CortexCompletionService:
         )
 
     def _extract_task_config(self, request: ChatCompletionRequest) -> dict:
-        """Extract task configuration from the request model name and metadata.
-
-        Parses the request model name and optional metadata to determine the
-        execution configuration. The model name is checked for keywords to
-        infer the mode and process type:
-
-        - Contains ``"task"`` -> enables task mode
-        - Contains ``"parallel"`` -> ``ProcessType.PARALLEL``
-        - Contains ``"hierarchical"`` -> ``ProcessType.HIERARCHICAL``
-        - Otherwise -> ``ProcessType.SEQUENTIAL`` (default)
-
-        If the request has a ``metadata`` attribute with a dictionary value,
-        it can override these inferred values via ``task_mode``,
-        ``process_type``, and ``background`` keys.
+        """Extract task mode and process type from the request model name/metadata.
 
         Args:
-            request: The ``ChatCompletionRequest`` containing the model name
-                string and optional metadata dictionary.
+            request (ChatCompletionRequest): IN: Chat completion request. OUT:
+                Model name and metadata are inspected for keywords.
 
         Returns:
-            A dictionary with the following keys:
-
-            - ``task_mode`` (bool): Whether to use task mode with dynamic
-              task creation and agent assignment.
-            - ``process_type`` (``ProcessType``): The execution strategy enum
-              value (``SEQUENTIAL``, ``PARALLEL``, or ``HIERARCHICAL``).
-            - ``background`` (str or None): Optional background/approach
-              context string for task creation.
-
-        Example:
-            >>> config = service._extract_task_config(request)
-            >>> config["task_mode"]
-            True
-            >>> config["process_type"]
-            <ProcessType.PARALLEL: ...>
+            dict: OUT: Configuration with ``task_mode``, ``process_type``, and
+                ``background`` keys.
         """
         task_mode = False
         process_type = ProcessType.SEQUENTIAL
@@ -216,26 +153,15 @@ class CortexCompletionService:
         }
 
     def _extract_prompt_from_messages(self, messages: MessagesHistory) -> str:
-        """Extract the latest user prompt from the message history.
-
-        Iterates through the message history in reverse chronological order
-        to find the most recent user message. Detection uses both the
-        ``role`` attribute (checking for ``"user"``) and the class name
-        (checking for ``"UserMessage"``) to handle different message formats.
-
-        If no user message is found, all messages are concatenated with
-        newline separators as a fallback.
+        """Extract the latest user message content as a prompt string.
 
         Args:
-            messages: The ``MessagesHistory`` instance containing user,
-                assistant, and system messages.
+            messages (MessagesHistory): IN: Message history. OUT: Scanned for the
+                most recent user message.
 
         Returns:
-            The content string of the most recent user message, or a
-            newline-joined concatenation of all message contents if no
-            user message exists in the history.
+            str: OUT: The extracted prompt text.
         """
-
         for msg in reversed(messages.messages):
             if hasattr(msg, "role") and msg.role == "user":
                 content = msg.content
@@ -253,24 +179,14 @@ class CortexCompletionService:
     ) -> ChatCompletionResponse:
         """Create a non-streaming Cortex completion.
 
-        Extracts the task configuration from the request, determines the
-        latest user prompt, and executes either task mode or instruction
-        mode accordingly. The result is wrapped in a
-        ``ChatCompletionResponse`` with word-count-based usage estimates.
-
         Args:
-            messages: The ``MessagesHistory`` containing the conversation
-                context to process.
-            request: The ``ChatCompletionRequest`` containing the model
-                name (used to determine execution mode) and optional
-                metadata for fine-grained configuration.
+            messages (MessagesHistory): IN: Conversation history. OUT: Used to
+                extract the prompt.
+            request (ChatCompletionRequest): IN: Request metadata. OUT: Used for
+                model name and to determine task mode.
 
         Returns:
-            A ``ChatCompletionResponse`` with a single choice containing
-            the Cortex execution result as assistant content, estimated
-            usage information (based on word counts), and finish reason
-            ``"stop"``. The model field defaults to ``"cortex"`` if no
-            model name is specified in the request.
+            ChatCompletionResponse: OUT: Assistant response with token usage.
         """
         config = self._extract_task_config(request)
         prompt = self._extract_prompt_from_messages(messages)
@@ -312,37 +228,16 @@ class CortexCompletionService:
         messages: MessagesHistory,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[str]:
-        """Create a streaming Cortex completion with real-time event updates.
-
-        Executes the Cortex system in a background daemon thread, reading
-        events from a ``StreamerBuffer`` and yielding them as SSE-formatted
-        strings. The stream includes multiple event types:
-
-        - ``StreamChunk``: Content delta with optional tool call information.
-        - ``FunctionDetection``: Notification that functions are being detected.
-        - ``FunctionCallsExtracted``: List of functions identified for execution.
-        - ``FunctionExecutionStart``: Start signal for a specific function.
-        - ``FunctionExecutionComplete``: Completion signal with result or error.
-        - ``AgentSwitch``: Notification of agent delegation with reason.
-        - ``ReinvokeSignal``: Signal that the agent is being reinvoked.
-        - ``Completion``: Final task completion signal with execution stats.
-
-        Each event is serialized as a ``ChatCompletionStreamResponse`` JSON
-        object with optional metadata. The stream terminates with a final
-        ``finish_reason="stop"`` chunk followed by ``"data: [DONE]"``.
+        """Create a streaming Cortex completion.
 
         Args:
-            messages: The ``MessagesHistory`` containing the conversation
-                context to process.
-            request: The ``ChatCompletionRequest`` containing the model
-                name (used to determine execution mode) and optional
-                metadata for fine-grained configuration.
+            messages (MessagesHistory): IN: Conversation history. OUT: Used to
+                extract the prompt.
+            request (ChatCompletionRequest): IN: Request metadata. OUT: Used for
+                model name and task mode.
 
         Yields:
-            SSE-formatted strings (``"data: {json}\\n\\n"``) containing
-            streaming response chunks. Each chunk may include content
-            deltas and metadata about execution events. The stream ends
-            with a ``"data: [DONE]\\n\\n"`` sentinel.
+            str: OUT: SSE-formatted JSON chunks and the final ``[DONE]`` marker.
         """
         config = self._extract_task_config(request)
         prompt = self._extract_prompt_from_messages(messages)
@@ -473,28 +368,19 @@ class CortexCompletionService:
         process_type: ProcessType,
         stream: bool,
     ) -> str | tuple[StreamerBuffer, threading.Thread]:
-        """Execute in task mode with dynamic task creation (async wrapper).
-
-        Offloads ``_execute_task_mode_sync`` to a thread executor via
-        ``loop.run_in_executor`` to avoid blocking the async event loop.
-        The synchronous method uses ``TaskCreator`` to decompose the prompt
-        into discrete tasks, assigns agents to each task, and executes them
-        using ``DynamicCortex``.
+        """Async wrapper for task-mode execution.
 
         Args:
-            prompt: The user prompt to decompose into tasks and execute.
-            background: Optional background/approach information providing
-                additional context to the ``TaskCreator`` for better task
-                decomposition.
-            process_type: The ``ProcessType`` enum value determining the
-                execution strategy (``SEQUENTIAL``, ``PARALLEL``, or
-                ``HIERARCHICAL``).
-            stream: Whether to stream results during execution. Currently
-                a fresh ``StreamerBuffer`` is always created internally.
+            prompt (str): IN: User prompt. OUT: Passed to the sync execution method.
+            background (str | None): IN: Optional background context. OUT: Passed
+                to the sync execution method.
+            process_type (ProcessType): IN: Task process type. OUT: Passed to the
+                sync execution method.
+            stream (bool): IN: Whether streaming is enabled. OUT: Currently ignored
+                in favor of the sync path.
 
         Returns:
-            The result from ``_execute_task_mode_sync``, typically a string
-            containing the execution output or an error message.
+            str | tuple[StreamerBuffer, threading.Thread]: OUT: Task execution result.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -513,36 +399,19 @@ class CortexCompletionService:
         process_type: ProcessType,
         streamer_buffer: StreamerBuffer,
     ) -> str:
-        """Synchronously execute in task mode with dynamic task creation.
-
-        Performs the following steps:
-
-        1. Uses ``TaskCreator.create_tasks_from_prompt`` to decompose the
-           prompt into a plan and a list of tasks, streaming progress into
-           the provided buffer.
-        2. Creates a ``DynamicCortex`` instance with the available agents,
-           generated tasks, and specified process type.
-        3. Kicks off execution with streaming enabled, writing events to
-           the ``StreamerBuffer``, and blocks until the execution thread
-           completes.
-
-        If any exception occurs, the error message is logged (when verbose),
-        written to the streamer buffer, and the buffer is closed.
+        """Synchronous task-mode execution.
 
         Args:
-            prompt: The user prompt to decompose into tasks.
-            background: Optional background/approach information providing
-                additional context to ``TaskCreator`` for more accurate
-                task decomposition.
-            process_type: The ``ProcessType`` enum value determining the
-                execution strategy (``SEQUENTIAL``, ``PARALLEL``, or
-                ``HIERARCHICAL``).
-            streamer_buffer: The ``StreamerBuffer`` instance for streaming
-                execution events and results back to the caller.
+            prompt (str): IN: User prompt. OUT: Passed to the task creator.
+            background (str | None): IN: Optional background context. OUT: Passed
+                to the task creator.
+            process_type (ProcessType): IN: Task process type. OUT: Passed to
+                :class:`DynamicCortex`.
+            streamer_buffer (StreamerBuffer): IN: Buffer for streaming events. OUT:
+                Consumed by Cortex.
 
         Returns:
-            ``None`` on success (results are streamed to the buffer), or
-            an error message string if execution fails.
+            str: OUT: Empty string on success, or an error message.
         """
         try:
             _plan, tasks = self.task_creator.create_tasks_from_prompt(
@@ -581,27 +450,17 @@ class CortexCompletionService:
         process_type: ProcessType,
         stream: bool,
     ) -> str | tuple[StreamerBuffer, threading.Thread]:
-        """Execute in instruction mode with direct prompt execution (async wrapper).
-
-        Offloads ``_execute_instruction_mode_sync`` to a thread executor via
-        ``loop.run_in_executor`` to avoid blocking the async event loop.
-        The synchronous method directly executes the prompt through
-        ``DynamicCortex`` without task decomposition, using the first
-        available agent.
+        """Async wrapper for instruction-mode execution.
 
         Args:
-            prompt: The user prompt to execute directly without task
-                decomposition.
-            process_type: The ``ProcessType`` enum value determining the
-                execution strategy (``SEQUENTIAL``, ``PARALLEL``, or
-                ``HIERARCHICAL``).
-            stream: Whether to create a ``StreamerBuffer`` for streaming
-                results. If ``False``, ``None`` is passed as the streamer
-                buffer to the synchronous method.
+            prompt (str): IN: User prompt. OUT: Passed to the sync execution method.
+            process_type (ProcessType): IN: Execution process type. OUT: Passed to
+                the sync execution method.
+            stream (bool): IN: Whether streaming is enabled. OUT: Controls whether
+                a :class:`StreamerBuffer` is created.
 
         Returns:
-            The result from ``_execute_instruction_mode_sync``, typically
-            a string containing the execution output or an error message.
+            str | tuple[StreamerBuffer, threading.Thread]: OUT: Execution result.
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
@@ -618,33 +477,17 @@ class CortexCompletionService:
         process_type: ProcessType,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> str:
-        """Synchronously execute in instruction mode without task decomposition.
-
-        Performs the following steps:
-
-        1. Creates a ``DynamicCortex`` instance with available agents, an
-           empty task list, and the specified process type.
-        2. Calls ``cortex.execute_prompt`` with the first available agent
-           (or ``None`` if no agents are registered), streaming results to
-           the provided buffer.
-        3. Blocks until the execution thread completes.
-
-        If any exception occurs, the error message is logged (when verbose),
-        written to the streamer buffer (if provided), and the buffer is closed.
+        """Synchronous instruction-mode execution.
 
         Args:
-            prompt: The user prompt to execute directly without task
-                decomposition or agent assignment.
-            process_type: The ``ProcessType`` enum value determining the
-                execution strategy (``SEQUENTIAL``, ``PARALLEL``, or
-                ``HIERARCHICAL``).
-            streamer_buffer: Optional ``StreamerBuffer`` instance for
-                streaming execution events and results back to the caller.
-                If ``None``, results are not streamed.
+            prompt (str): IN: User prompt. OUT: Passed to Cortex.
+            process_type (ProcessType): IN: Execution process type. OUT: Passed to
+                :class:`DynamicCortex`.
+            streamer_buffer (StreamerBuffer | None): IN: Optional buffer for
+                streaming. OUT: Consumed by Cortex if provided.
 
         Returns:
-            ``None`` on success (results are streamed to the buffer), or
-            an error message string if execution fails.
+            str: OUT: Empty string on success, or an error message.
         """
         try:
             cortex = DynamicCortex(

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Integration module for Xerxes.
 
-
-"""Integration helpers for MCP with Xerxes agents.
-
-This module provides utilities for integrating Model Context Protocol (MCP)
-tools with Xerxes agents, enabling seamless use of external MCP servers
-and their tools within the Xerxes framework.
-
-Key features:
-- Convert MCP tools to Xerxes-compatible functions
-- Add MCP tools to existing agents dynamically
-- Create MCP-enabled agents with automatic tool integration
-- Handle synchronous/asynchronous execution transparently
-
-The integration preserves the MCP tool's input schema, allowing Xerxes's
-function introspection to properly extract parameter signatures for
-LLM function calling.
-"""
+Exports:
+    - logger
+    - mcp_tool_to_xerxes_function
+    - add_mcp_tools_to_agent
+    - create_mcp_enabled_agent"""
 
 from collections.abc import Callable
 from typing import Any, cast
@@ -40,31 +31,14 @@ logger = get_logger()
 
 
 def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
-    """Convert an MCP tool to a Xerxes-compatible function.
-
-    Creates a synchronous wrapper function with explicit parameters based on
-    the MCP tool's input schema, enabling Xerxes's function_to_json to properly
-    extract the signature for LLM function calling.
-
-    The generated function:
-    - Has a dynamic signature matching the MCP tool's input schema
-    - Includes proper type annotations for all parameters
-    - Contains a docstring with parameter descriptions and server info
-    - Handles async-to-sync conversion transparently
+    """Mcp tool to xerxes function.
 
     Args:
-        tool: The MCP tool to convert, containing name, description,
-            and input schema.
-        manager: The MCP manager instance responsible for executing
-            the tool on its server.
-
+        tool (MCPTool): IN: tool. OUT: Consumed during execution.
+        manager (MCPManager): IN: manager. OUT: Consumed during execution.
     Returns:
-        A callable function compatible with Xerxes agents that wraps
-        the MCP tool execution.
+        Callable: OUT: Result of the operation."""
 
-    Raises:
-        Exception: Re-raised from MCP tool execution failures after logging.
-    """
     import inspect
 
     properties = tool.input_schema.get("properties", {}) if tool.input_schema else {}
@@ -100,20 +74,13 @@ def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
             param_docs.append(f"{param_name}: {param_info['description']}")
 
     def sync_wrapper(**kwargs) -> Any:
-        """Synchronous wrapper for MCP tool execution.
-
-        Executes the MCP tool call synchronously by wrapping the async
-        manager.call_tool method with run_sync.
+        """Sync wrapper.
 
         Args:
-            **kwargs: Arguments to pass to the MCP tool.
-
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The result from the MCP tool execution.
+            Any: OUT: Result of the operation."""
 
-        Raises:
-            Exception: Re-raised after logging if tool execution fails.
-        """
         try:
             return run_sync(manager.call_tool(tool.name, kwargs))
         except Exception as e:
@@ -138,18 +105,13 @@ def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
 
 
 def _map_schema_type(json_type: str) -> type:
-    """Map JSON schema type to Python type.
-
-    Converts JSON Schema type strings to their corresponding Python type
-    objects for use in function signatures and type annotations.
+    """Internal helper to map schema type.
 
     Args:
-        json_type: JSON Schema type string (e.g., "string", "number",
-            "integer", "boolean", "array", "object").
-
+        json_type (str): IN: json type. OUT: Consumed during execution.
     Returns:
-        The corresponding Python type. Defaults to str for unknown types.
-    """
+        type: OUT: Result of the operation."""
+
     type_mapping = {
         "string": str,
         "number": float,
@@ -162,30 +124,13 @@ def _map_schema_type(json_type: str) -> type:
 
 
 async def add_mcp_tools_to_agent(agent: Any, manager: MCPManager, server_names: list[str] | None = None) -> None:
-    """Add MCP tools to a Xerxes agent.
-
-    Dynamically extends an agent's function list with tools from MCP servers.
-    Supports both direct Agent instances and CortexAgent wrappers that use
-    an internal agent.
-
-    The function converts each MCP tool to a Xerxes-compatible function and
-    appends it to the agent's functions list.
+    """Asynchronously Add mcp tools to agent.
 
     Args:
-        agent: A CortexAgent or Xerxes Agent instance. Must have either
-            a 'functions' attribute or an '_internal_agent' with 'functions'.
-        manager: The MCP manager instance containing connected servers
-            and their available tools.
-        server_names: Optional list of server names to filter tools from.
-            If None, adds tools from all connected servers.
+        agent (Any): IN: agent. OUT: Consumed during execution.
+        manager (MCPManager): IN: manager. OUT: Consumed during execution.
+        server_names (list[str] | None, optional): IN: server names. Defaults to None. OUT: Consumed during execution."""
 
-    Returns:
-        None. The agent is modified in-place.
-
-    Note:
-        If the agent does not support adding functions (missing expected
-        attributes), a warning is logged and no tools are added.
-    """
     logger = get_logger()
 
     all_tools = manager.get_all_tools()
@@ -221,36 +166,15 @@ def create_mcp_enabled_agent(
     server_names: list[str] | None = None,
     **agent_kwargs,
 ) -> Any:
-    """Create an agent with MCP tools automatically added.
-
-    Factory function that instantiates an agent and automatically adds
-    MCP tools from the specified servers. This provides a convenient
-    one-step method for creating MCP-enabled agents.
+    """Create mcp enabled agent.
 
     Args:
-        agent_class: The agent class to instantiate. Should be either
-            CortexAgent or Agent, or any compatible class.
-        manager: The MCP manager instance containing connected servers
-            and their available tools.
-        server_names: Optional list of server names to filter tools from.
-            If None, adds tools from all connected servers.
-        **agent_kwargs: Additional keyword arguments passed directly to
-            the agent class constructor.
-
+        agent_class (type): IN: agent class. OUT: Consumed during execution.
+        manager (MCPManager): IN: manager. OUT: Consumed during execution.
+        server_names (list[str] | None, optional): IN: server names. Defaults to None. OUT: Consumed during execution.
+        **agent_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
     Returns:
-        An instantiated agent with MCP tools added to its functions list.
-
-    Example:
-        >>> manager = MCPManager()
-        >>> await manager.connect_server("my-server", server_config)
-        >>> agent = create_mcp_enabled_agent(
-        ...     Agent,
-        ...     manager,
-        ...     server_names=["my-server"],
-        ...     name="MyAgent",
-        ...     model="gpt-4",
-        ... )
-    """
+        Any: OUT: Result of the operation."""
 
     agent = agent_class(**agent_kwargs)
 

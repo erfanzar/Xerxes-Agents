@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Signal channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Signal adapter — bridges to a local ``signal-cli`` REST daemon."""
+Connects to a Signal REST API (e.g. signal-cli-rest-api) for messaging.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class SignalChannel(WebhookChannel):
-    """Signal adapter via ``bbernhard/signal-cli-rest-api`` (or compatible).
-
-    Inbound: REST daemon long-polls and POSTs new envelopes to
-    ``/webhooks/signal``.
-    Outbound: ``POST {base}/v2/send``.
-    """
+    """Channel implementation for Signal."""
 
     name = "signal"
 
@@ -28,13 +36,15 @@ class SignalChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Bind the adapter to a local ``signal-cli-rest-api`` daemon.
+        """Initialize the Signal channel.
 
         Args:
-            rest_base: Base URL of the REST daemon.
-            sender_number: Registered Signal phone number (E.164) used
-                as the ``From``.
-            http_client: Optional injected HTTP callable for tests.
+            rest_base (str): IN: base URL of the Signal REST API.
+                OUT: stored with trailing slash removed.
+            sender_number (str): IN: phone number of the sending account.
+                OUT: used as the ``from`` field on outbound messages.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.rest_base = rest_base.rstrip("/")
@@ -42,10 +52,14 @@ class SignalChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Unwrap a Signal envelope, extracting ``dataMessage.message`` text.
+        """Parse a Signal webhook payload into ``ChannelMessage``.
 
-        Falls back to ``message.message`` (older daemons) and uses the
-        source phone number as both sender id and ``room_id``.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -68,7 +82,13 @@ class SignalChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST a ``/v2/send`` payload with this sender and a single recipient."""
+        """Send a text message via the Signal REST API.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` or
+                ``channel_user_id`` is used as the recipient list, and
+                ``text`` as the message body.
+        """
         body = {
             "number": self.sender_number,
             "recipients": [message.room_id or message.channel_user_id],

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,23 +6,20 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Home assistant tools module for Xerxes.
 
-"""Home Assistant agent tools.
-
-Four ``ha_*`` tools that bridge agents to a Home Assistant instance:
-
-- :class:`ha_list_entities` — list entities by domain/area
-- :class:`ha_list_services` — list available service actions
-- :class:`ha_get_state`     — read entity attributes + state
-- :class:`ha_call_service`  — invoke a service (turn lights on, etc.)
-
-Each tool reads ``HASS_BASE_URL`` and ``HASS_TOKEN`` from the
-environment by default; tests inject a fake HTTP client through
-:class:`HomeAssistantClient.install_for_test`.
-"""
+Exports:
+    - logger
+    - HomeAssistantClient
+    - ha_list_entities
+    - ha_list_services
+    - ha_get_state
+    - ha_call_service"""
 
 from __future__ import annotations
 
@@ -38,17 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 class HomeAssistantClient:
-    """Singleton HTTP client wrapping the Home Assistant REST API.
+    """Home assistant client.
 
-    Reads ``HASS_BASE_URL`` (e.g. ``http://homeassistant.local:8123``)
-    and ``HASS_TOKEN`` (long-lived access token) at construction
-    time. Tests inject a fake transport via
-    :meth:`install_for_test` to avoid any network I/O.
-
-    Example:
-        >>> client = HomeAssistantClient.instance()
-        >>> client.list_states()
-    """
+    Attributes:
+        _instance (HomeAssistantClient | None): instance."""
 
     _instance: HomeAssistantClient | None = None
     _lock = threading.Lock()
@@ -59,14 +49,27 @@ class HomeAssistantClient:
         token: str | None = None,
         http_client: tp.Any | None = None,
     ) -> None:
-        """Initialise with an explicit base URL / token, or read them from env vars."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution.
+            token (str | None, optional): IN: token. Defaults to None. OUT: Consumed during execution.
+            http_client (tp.Any | None, optional): IN: http client. Defaults to None. OUT: Consumed during execution."""
+
         self.base_url = (base_url or os.environ.get("HASS_BASE_URL", "")).rstrip("/")
         self.token = token or os.environ.get("HASS_TOKEN", "")
         self._http = http_client
 
     @classmethod
     def instance(cls) -> HomeAssistantClient:
-        """Return the process-wide singleton, creating it on first use."""
+        """Instance.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+        Returns:
+            HomeAssistantClient: OUT: Result of the operation."""
+
         with cls._lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -80,30 +83,62 @@ class HomeAssistantClient:
         token: str = "tok",
         http_client: tp.Any,
     ) -> HomeAssistantClient:
-        """Replace the singleton with one backed by a fake HTTP client (tests)."""
+        """Install for test.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            base_url (str, optional): IN: base url. Defaults to 'http://hass.test'. OUT: Consumed during execution.
+            token (str, optional): IN: token. Defaults to 'tok'. OUT: Consumed during execution.
+            http_client (tp.Any): IN: http client. OUT: Consumed during execution.
+        Returns:
+            HomeAssistantClient: OUT: Result of the operation."""
+
         with cls._lock:
             cls._instance = cls(base_url=base_url, token=token, http_client=http_client)
             return cls._instance
 
     @classmethod
     def reset(cls) -> None:
-        """Clear the singleton so the next :meth:`instance` call rebuilds it."""
+        """Reset.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations."""
+
         with cls._lock:
             cls._instance = None
 
     def list_states(self) -> list[dict[str, tp.Any]]:
-        """Return every entity state (``GET /api/states``)."""
+        """List states.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+
         return self._get("/api/states")
 
     def get_state(self, entity_id: str) -> dict[str, tp.Any] | None:
-        """Fetch a single entity's state record, or ``None`` on any failure."""
+        """Retrieve the state.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            entity_id (str): IN: entity id. OUT: Consumed during execution.
+        Returns:
+            dict[str, tp.Any] | None: OUT: Result of the operation."""
+
         try:
             return self._get(f"/api/states/{entity_id}")
         except Exception:
             return None
 
     def list_services(self) -> list[dict[str, tp.Any]]:
-        """Return the list of available service domains and their services."""
+        """List services.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+
         return self._get("/api/services")
 
     def call_service(
@@ -112,24 +147,53 @@ class HomeAssistantClient:
         service: str,
         data: dict[str, tp.Any] | None = None,
     ) -> list[dict[str, tp.Any]]:
-        """Invoke ``domain.service`` with optional payload and return affected states."""
+        """Call service.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            domain (str): IN: domain. OUT: Consumed during execution.
+            service (str): IN: service. OUT: Consumed during execution.
+            data (dict[str, tp.Any] | None, optional): IN: data. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+
         return self._post(f"/api/services/{domain}/{service}", json_body=data or {})
 
     def _headers(self) -> dict[str, str]:
-        """Build the JSON content-type and bearer-auth headers for HA requests."""
+        """Internal helper to headers.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, str]: OUT: Result of the operation."""
+
         h = {"Content-Type": "application/json"}
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
     def _url(self, path: str) -> str:
-        """Join *path* onto the configured base URL, raising if unset."""
+        """Internal helper to url.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            path (str): IN: path. OUT: Consumed during execution.
+        Returns:
+            str: OUT: Result of the operation."""
+
         if not self.base_url:
             raise RuntimeError("HomeAssistantClient: HASS_BASE_URL is not configured")
         return f"{self.base_url}{path}"
 
     def _get(self, path: str) -> tp.Any:
-        """GET *path* via the injected client or httpx and return parsed JSON."""
+        """Internal helper to get.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            path (str): IN: path. OUT: Consumed during execution.
+        Returns:
+            tp.Any: OUT: Result of the operation."""
+
         url = self._url(path)
         if self._http is not None:
             resp = self._http.get(url, headers=self._headers())
@@ -143,7 +207,15 @@ class HomeAssistantClient:
         return resp.json()
 
     def _post(self, path: str, json_body: dict[str, tp.Any]) -> tp.Any:
-        """POST JSON to *path* via the injected client or httpx and return parsed JSON."""
+        """Internal helper to post.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            path (str): IN: path. OUT: Consumed during execution.
+            json_body (dict[str, tp.Any]): IN: json body. OUT: Consumed during execution.
+        Returns:
+            tp.Any: OUT: Result of the operation."""
+
         url = self._url(path)
         if self._http is not None:
             resp = self._http.post(url, json=json_body, headers=self._headers())
@@ -158,7 +230,13 @@ class HomeAssistantClient:
 
 
 def _parse(resp: tp.Any) -> tp.Any:
-    """Best-effort JSON decode for both real ``httpx`` and fake responses."""
+    """Internal helper to parse.
+
+    Args:
+        resp (tp.Any): IN: resp. OUT: Consumed during execution.
+    Returns:
+        tp.Any: OUT: Result of the operation."""
+
     if hasattr(resp, "json") and callable(resp.json):
         try:
             return resp.json()
@@ -179,7 +257,15 @@ def _filter_entities(
     domain: str | None = None,
     area: str | None = None,
 ) -> list[dict[str, tp.Any]]:
-    """Filter *states* by entity-id *domain* prefix and/or matching area attribute."""
+    """Internal helper to filter entities.
+
+    Args:
+        states (list[dict[str, tp.Any]]): IN: states. OUT: Consumed during execution.
+        domain (str | None, optional): IN: domain. Defaults to None. OUT: Consumed during execution.
+        area (str | None, optional): IN: area. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        list[dict[str, tp.Any]]: OUT: Result of the operation."""
+
     out = []
     for s in states or []:
         eid = s.get("entity_id", "")
@@ -195,7 +281,10 @@ def _filter_entities(
 
 
 class ha_list_entities(AgentBaseFn):
-    """List Home Assistant entities, optionally filtered by domain/area."""
+    """Ha list entities.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -204,23 +293,16 @@ class ha_list_entities(AgentBaseFn):
         limit: int = 200,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Return the list of entities the connected HA instance exposes.
-
-        Use this to discover what the agent can control before calling
-        :class:`ha_call_service`. Filtering keeps responses small in
-        large installs.
+        """Static call.
 
         Args:
-            domain: Optional domain prefix (``"light"``, ``"switch"``,
-                ``"climate"``, ...). When set, only entities whose
-                ``entity_id`` starts with ``"{domain}."`` are returned.
-            area: Optional area ID (e.g. ``"living_room"``). Matched
-                against ``attributes.area_id`` / ``attributes.area``.
-            limit: Max number of entities to include in the response.
-
+            domain (str | None, optional): IN: domain. Defaults to None. OUT: Consumed during execution.
+            area (str | None, optional): IN: area. Defaults to None. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 200. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"count": int, "entities": [{entity_id, state, attributes}]}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         try:
             limit_n = int(limit) if limit is not None else 200
         except (TypeError, ValueError):
@@ -241,24 +323,24 @@ class ha_list_entities(AgentBaseFn):
 
 
 class ha_list_services(AgentBaseFn):
-    """List available HA service actions per domain."""
+    """Ha list services.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
         domain: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Return the catalog of services the HA instance can perform.
-
-        Helpful before calling :class:`ha_call_service` so the agent
-        can confirm a service exists and inspect its expected fields.
+        """Static call.
 
         Args:
-            domain: Optional domain filter (e.g. ``"light"``).
-
+            domain (str | None, optional): IN: domain. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"domains": [{"domain", "services": {name → {"description","fields"}}}]}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         catalog = HomeAssistantClient.instance().list_services() or []
         if domain:
             catalog = [d for d in catalog if d.get("domain") == domain]
@@ -266,23 +348,24 @@ class ha_list_services(AgentBaseFn):
 
 
 class ha_get_state(AgentBaseFn):
-    """Fetch state + attributes for a single entity."""
+    """Ha get state.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
         entity_id: str,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Return the current state object for ``entity_id``.
+        """Static call.
 
         Args:
-            entity_id: Fully qualified entity id, e.g.
-                ``"light.kitchen_main"``.
-
+            entity_id (str): IN: entity id. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"entity_id", "state", "attributes", "last_changed",
-            "last_updated"}`` or ``{"error": "not_found"}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         state = HomeAssistantClient.instance().get_state(entity_id)
         if not state or not isinstance(state, dict) or not state.get("entity_id"):
             return {"error": "not_found", "entity_id": entity_id}
@@ -296,7 +379,10 @@ class ha_get_state(AgentBaseFn):
 
 
 class ha_call_service(AgentBaseFn):
-    """Invoke a Home Assistant service action."""
+    """Ha call service.
+
+    Inherits from: AgentBaseFn
+    """
 
     @staticmethod
     def static_call(
@@ -305,24 +391,16 @@ class ha_call_service(AgentBaseFn):
         data: dict[str, tp.Any] | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Call ``{domain}.{service}`` with optional service data.
-
-        Use this when the agent needs to actually change device state
-        (turn lights on/off, set thermostat, run a script). Verify the
-        service exists with :class:`ha_list_services` first.
+        """Static call.
 
         Args:
-            domain: Service domain (``"light"``, ``"switch"``,
-                ``"climate"``, ``"script"``, ``"automation"``, ...).
-            service: Service name within the domain (``"turn_on"``,
-                ``"turn_off"``, ``"set_temperature"``, ...).
-            data: Service data payload. ``entity_id`` is the most
-                common key (``{"entity_id": "light.kitchen_main"}``).
-
+            domain (str): IN: domain. OUT: Consumed during execution.
+            service (str): IN: service. OUT: Consumed during execution.
+            data (dict[str, tp.Any] | None, optional): IN: data. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            ``{"ok": True, "changed": [...]}`` listing entities the
-            service modified, or ``{"ok": False, "error": ...}``.
-        """
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         try:
             changed = HomeAssistantClient.instance().call_service(domain, service, data or {})
             return {"ok": True, "domain": domain, "service": service, "changed": changed}

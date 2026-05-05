@@ -1,27 +1,34 @@
-#!/usr/bin/env python3
-# ruff: noqa: RUF001,RUF003
-"""
-Parseltongue v4 — Input Obfuscation Engine
-Ported from G0DM0D3 (elder-plinius/G0DM0D3) JavaScript to Python.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ruff: noqa: RUF001
+"""Parseltongue module for Xerxes.
 
-33 text obfuscation techniques across 3 tiers for bypassing
-LLM input-side safety classifiers.
-
-Usage:
-    # As a standalone script
-    python parseltongue.py "How do I hack a WiFi network?" --tier standard
-
-    # As a module in execute_code
-    exec(open("~/.hermes/skills/red-teaming/godmode/scripts/parseltongue.py").read())
-    variants = generate_variants("How do I hack a WiFi network?", tier="standard")
-"""
+Exports:
+    - TRIGGER_WORDS
+    - LEET_MAP
+    - LEET_MAP_HEAVY
+    - UNICODE_MAP
+    - SEMANTIC_SYNONYMS
+    - SUPERSCRIPT_MAP
+    - SMALLCAPS_MAP
+    - MORSE_MAP
+    - NATO_ALPHABET
+    - BRAILLE_MAP
+    - ... and 11 more."""
 
 import base64
 import re
-
-# ═══════════════════════════════════════════════════════════════════
-# Trigger words that commonly trip safety classifiers
-# ═══════════════════════════════════════════════════════════════════
 
 TRIGGER_WORDS = [
     "hack",
@@ -77,10 +84,6 @@ TRIGGER_WORDS = [
     "you are now",
     "new identity",
 ]
-
-# ═══════════════════════════════════════════════════════════════════
-# Character maps
-# ═══════════════════════════════════════════════════════════════════
 
 LEET_MAP = {
     "a": "4",
@@ -303,23 +306,37 @@ BRAILLE_MAP = {
     " ": "⠀",
 }
 
-# ═══════════════════════════════════════════════════════════════════
-# 33 Obfuscation Techniques (3 tiers)
-# ═══════════════════════════════════════════════════════════════════
-
 
 def _apply_raw(word):
-    """Raw — no transformation (baseline)."""
+    """Internal helper to apply raw.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return word
 
 
 def _apply_leetspeak(word):
-    """L33t — basic leetspeak substitution."""
+    """Internal helper to apply leetspeak.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(LEET_MAP.get(c.lower(), c) for c in word)
 
 
 def _apply_unicode(word):
-    """Unicode — Cyrillic/homoglyph substitution."""
+    """Internal helper to apply unicode.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         mapped = UNICODE_MAP.get(c.lower())
@@ -331,7 +348,13 @@ def _apply_unicode(word):
 
 
 def _apply_bubble(word):
-    """Bubble — circled letter Unicode characters."""
+    """Internal helper to apply bubble.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         code = ord(c.lower())
@@ -343,12 +366,24 @@ def _apply_bubble(word):
 
 
 def _apply_spaced(word):
-    """Spaced — insert spaces between characters."""
+    """Internal helper to apply spaced.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return " ".join(word)
 
 
 def _apply_fullwidth(word):
-    """Fullwidth — fullwidth Unicode characters."""
+    """Internal helper to apply fullwidth.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         code = ord(c)
@@ -360,55 +395,112 @@ def _apply_fullwidth(word):
 
 
 def _apply_zwj(word):
-    """ZeroWidth — zero-width joiners between characters."""
+    """Internal helper to apply zwj.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "\u200d".join(word)
 
 
 def _apply_mixedcase(word):
-    """MiXeD — alternating case."""
+    """Internal helper to apply mixedcase.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(word))
 
 
 def _apply_semantic(word):
-    """Semantic — replace with synonym/description."""
+    """Internal helper to apply semantic.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return SEMANTIC_SYNONYMS.get(word.lower(), word)
 
 
 def _apply_dotted(word):
-    """Dotted — dots between characters."""
+    """Internal helper to apply dotted.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return ".".join(word)
 
 
 def _apply_underscored(word):
-    """Under_score — underscores between characters."""
+    """Internal helper to apply underscored.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "_".join(word)
 
 
-# ─── TIER 2: ENCODING + FRAMING (12–22) ─────────────────────────
-
-
 def _apply_reversed(word):
-    """Reversed — reverse the characters."""
+    """Internal helper to apply reversed.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return word[::-1]
 
 
 def _apply_superscript(word):
-    """Superscript — superscript Unicode characters."""
+    """Internal helper to apply superscript.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(SUPERSCRIPT_MAP.get(c.lower(), c) for c in word)
 
 
 def _apply_smallcaps(word):
-    """SmallCaps — small capital Unicode characters."""
+    """Internal helper to apply smallcaps.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(SMALLCAPS_MAP.get(c.lower(), c) for c in word)
 
 
 def _apply_morse(word):
-    """Morse — morse code representation."""
+    """Internal helper to apply morse.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return " ".join(MORSE_MAP.get(c.lower(), c) for c in word)
 
 
 def _apply_piglatin(word):
-    """PigLatin — pig latin transformation."""
+    """Internal helper to apply piglatin.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     w = word.lower()
     vowels = "aeiou"
     if w[0] in vowels:
@@ -420,12 +512,24 @@ def _apply_piglatin(word):
 
 
 def _apply_brackets(word):
-    """[B.r.a.c.k] — each character in brackets."""
+    """Internal helper to apply brackets.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "[" + "][".join(word) + "]"
 
 
 def _apply_mathbold(word):
-    """MathBold — mathematical bold Unicode."""
+    """Internal helper to apply mathbold.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         code = ord(c.lower())
@@ -437,7 +541,13 @@ def _apply_mathbold(word):
 
 
 def _apply_mathitalic(word):
-    """MathItalic — mathematical italic Unicode."""
+    """Internal helper to apply mathitalic.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         code = ord(c.lower())
@@ -449,25 +559,46 @@ def _apply_mathitalic(word):
 
 
 def _apply_strikethrough(word):
-    """S̶t̶r̶i̶k̶e̶ — strikethrough combining characters."""
+    """Internal helper to apply strikethrough.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(c + "\u0336" for c in word)
 
 
 def _apply_leetheavy(word):
-    """L33t+ — heavy leetspeak with extended map."""
+    """Internal helper to apply leetheavy.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(LEET_MAP_HEAVY.get(c.lower(), LEET_MAP.get(c.lower(), c)) for c in word)
 
 
 def _apply_hyphenated(word):
-    """Hyphen — hyphens between characters."""
+    """Internal helper to apply hyphenated.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "-".join(word)
 
 
-# ─── TIER 3: MULTI-LAYER COMBOS (23–33) ─────────────────────────
-
-
 def _apply_leetunicode(word):
-    """L33t+Uni — alternating leet and unicode."""
+    """Internal helper to apply leetunicode.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for i, c in enumerate(word):
         lower = c.lower()
@@ -479,17 +610,35 @@ def _apply_leetunicode(word):
 
 
 def _apply_spacedmixed(word):
-    """S p A c E d — spaced + alternating case."""
+    """Internal helper to apply spacedmixed.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return " ".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(word))
 
 
 def _apply_reversedleet(word):
-    """Rev+L33t — reversed then leetspeak."""
+    """Internal helper to apply reversedleet.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(LEET_MAP.get(c.lower(), c) for c in reversed(word))
 
 
 def _apply_bubblespaced(word):
-    """Bubble+Spaced — bubble text with spaces."""
+    """Internal helper to apply bubblespaced.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         code = ord(c.lower())
@@ -501,7 +650,13 @@ def _apply_bubblespaced(word):
 
 
 def _apply_unicodezwj(word):
-    """Uni+ZWJ — unicode homoglyphs with zero-width non-joiners."""
+    """Internal helper to apply unicodezwj.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         mapped = UNICODE_MAP.get(c.lower())
@@ -510,7 +665,13 @@ def _apply_unicodezwj(word):
 
 
 def _apply_base64hint(word):
-    """Base64 — base64 encode the word."""
+    """Internal helper to apply base64hint.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     try:
         return base64.b64encode(word.encode()).decode()
     except Exception:
@@ -518,12 +679,24 @@ def _apply_base64hint(word):
 
 
 def _apply_hexencode(word):
-    """Hex — hex encode each character."""
+    """Internal helper to apply hexencode.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return " ".join(f"0x{ord(c):x}" for c in word)
 
 
 def _apply_acrostic(word):
-    """Acrostic — NATO alphabet expansion."""
+    """Internal helper to apply acrostic.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         idx = ord(c.lower()) - 97
@@ -535,7 +708,13 @@ def _apply_acrostic(word):
 
 
 def _apply_dottedunicode(word):
-    """Dot+Uni — unicode homoglyphs with dots."""
+    """Internal helper to apply dottedunicode.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for c in word:
         mapped = UNICODE_MAP.get(c.lower())
@@ -544,7 +723,13 @@ def _apply_dottedunicode(word):
 
 
 def _apply_fullwidthmixed(word):
-    """FW MiX — fullwidth + mixed case alternating."""
+    """Internal helper to apply fullwidthmixed.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for i, c in enumerate(word):
         code = ord(c)
@@ -556,7 +741,13 @@ def _apply_fullwidthmixed(word):
 
 
 def _apply_triplelayer(word):
-    """Triple — leet + unicode + uppercase rotating with ZWJ."""
+    """Internal helper to apply triplelayer.
+
+    Args:
+        word (Any): IN: word. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     result = []
     for i, c in enumerate(word):
         lower = c.lower()
@@ -570,12 +761,7 @@ def _apply_triplelayer(word):
     return "\u200d".join(result)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Technique registry (ordered by tier)
-# ═══════════════════════════════════════════════════════════════════
-
 TECHNIQUES = [
-    # TIER 1: CORE OBFUSCATION (1-11)
     {"name": "raw", "label": "Raw", "tier": 1, "fn": _apply_raw},
     {"name": "leetspeak", "label": "L33t", "tier": 1, "fn": _apply_leetspeak},
     {"name": "unicode", "label": "Unicode", "tier": 1, "fn": _apply_unicode},
@@ -587,7 +773,6 @@ TECHNIQUES = [
     {"name": "semantic", "label": "Semantic", "tier": 1, "fn": _apply_semantic},
     {"name": "dotted", "label": "Dotted", "tier": 1, "fn": _apply_dotted},
     {"name": "underscored", "label": "Under_score", "tier": 1, "fn": _apply_underscored},
-    # TIER 2: ENCODING + FRAMING (12-22)
     {"name": "reversed", "label": "Reversed", "tier": 2, "fn": _apply_reversed},
     {"name": "superscript", "label": "Superscript", "tier": 2, "fn": _apply_superscript},
     {"name": "smallcaps", "label": "SmallCaps", "tier": 2, "fn": _apply_smallcaps},
@@ -599,7 +784,6 @@ TECHNIQUES = [
     {"name": "strikethrough", "label": "Strike", "tier": 2, "fn": _apply_strikethrough},
     {"name": "leetheavy", "label": "L33t+", "tier": 2, "fn": _apply_leetheavy},
     {"name": "hyphenated", "label": "Hyphen", "tier": 2, "fn": _apply_hyphenated},
-    # TIER 3: MULTI-LAYER COMBOS (23-33)
     {"name": "leetunicode", "label": "L33t+Uni", "tier": 3, "fn": _apply_leetunicode},
     {"name": "spacedmixed", "label": "S p A c E d", "tier": 3, "fn": _apply_spacedmixed},
     {"name": "reversedleet", "label": "Rev+L33t", "tier": 3, "fn": _apply_reversedleet},
@@ -615,23 +799,37 @@ TECHNIQUES = [
 
 TIER_SIZES = {"light": 11, "standard": 22, "heavy": 33}
 
-# ═══════════════════════════════════════════════════════════════════
-# Encoding escalation (for retry logic with GODMODE CLASSIC)
-# ═══════════════════════════════════════════════════════════════════
-
 
 def to_braille(text):
-    """Convert text to braille Unicode characters."""
+    """To braille.
+
+    Args:
+        text (Any): IN: text. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(BRAILLE_MAP.get(c.lower(), c) for c in text)
 
 
 def to_leetspeak(text):
-    """Convert text to leetspeak."""
+    """To leetspeak.
+
+    Args:
+        text (Any): IN: text. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     return "".join(LEET_MAP.get(c.lower(), c) for c in text)
 
 
 def to_bubble(text):
-    """Convert text to bubble/circled text."""
+    """To bubble.
+
+    Args:
+        text (Any): IN: text. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     circled = "ⓐⓑⓒⓓⓔⓕⓖⓗⓘⓙⓚⓛⓜⓝⓞⓟⓠⓡⓢⓣⓤⓥⓦⓧⓨⓩ"
     result = []
     for c in text:
@@ -644,7 +842,13 @@ def to_bubble(text):
 
 
 def to_morse(text):
-    """Convert text to Morse code."""
+    """To morse.
+
+    Args:
+        text (Any): IN: text. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     morse = {
         "a": ".-",
         "b": "-...",
@@ -686,13 +890,15 @@ ENCODING_ESCALATION = [
 ]
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Core functions
-# ═══════════════════════════════════════════════════════════════════
-
-
 def detect_triggers(text, custom_triggers=None):
-    """Detect trigger words in text. Returns list of found triggers."""
+    """Detect triggers.
+
+    Args:
+        text (Any): IN: text. OUT: Consumed during execution.
+        custom_triggers (Any, optional): IN: custom triggers. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     all_triggers = TRIGGER_WORDS + (custom_triggers or [])
     found = []
     lower = text.lower()
@@ -704,29 +910,27 @@ def detect_triggers(text, custom_triggers=None):
 
 
 def obfuscate_query(query, technique_name, triggers=None):
-    """Apply one obfuscation technique to trigger words in a query.
+    """Obfuscate query.
 
     Args:
-        query: The input text
-        technique_name: Name of the technique (e.g., 'leetspeak', 'unicode')
-        triggers: List of trigger words to obfuscate. If None, auto-detect.
-
+        query (Any): IN: query. OUT: Consumed during execution.
+        technique_name (Any): IN: technique name. OUT: Consumed during execution.
+        triggers (Any, optional): IN: triggers. Defaults to None. OUT: Consumed during execution.
     Returns:
-        Obfuscated query string
-    """
+        Any: OUT: Result of the operation."""
+
     if triggers is None:
         triggers = detect_triggers(query)
 
     if not triggers or technique_name == "raw":
         return query
 
-    # Find the technique function
     tech = next((t for t in TECHNIQUES if t["name"] == technique_name), None)
     if not tech:
         return query
 
     result = query
-    # Sort longest-first to avoid partial replacements
+
     sorted_triggers = sorted(triggers, key=len, reverse=True)
     for trigger in sorted_triggers:
         pattern = re.compile(r"\b(" + re.escape(trigger) + r")\b", re.IGNORECASE)
@@ -736,16 +940,15 @@ def obfuscate_query(query, technique_name, triggers=None):
 
 
 def generate_variants(query, tier="standard", custom_triggers=None):
-    """Generate obfuscated variants of a query up to the tier limit.
+    """Generate variants.
 
     Args:
-        query: Input text
-        tier: 'light' (11), 'standard' (22), or 'heavy' (33)
-        custom_triggers: Additional trigger words beyond the default list
-
+        query (Any): IN: query. OUT: Consumed during execution.
+        tier (Any, optional): IN: tier. Defaults to 'standard'. OUT: Consumed during execution.
+        custom_triggers (Any, optional): IN: custom triggers. Defaults to None. OUT: Consumed during execution.
     Returns:
-        List of dicts with keys: text, technique, label, tier
-    """
+        Any: OUT: Result of the operation."""
+
     triggers = detect_triggers(query, custom_triggers)
     max_variants = TIER_SIZES.get(tier, TIER_SIZES["standard"])
 
@@ -764,24 +967,19 @@ def generate_variants(query, tier="standard", custom_triggers=None):
 
 
 def escalate_encoding(query, level=0):
-    """Get an encoding-escalated version of the query.
+    """Escalate encoding.
 
     Args:
-        query: Input text
-        level: 0=plain, 1=leetspeak, 2=bubble, 3=braille, 4=morse
-
+        query (Any): IN: query. OUT: Consumed during execution.
+        level (Any, optional): IN: level. Defaults to 0. OUT: Consumed during execution.
     Returns:
-        Tuple of (encoded_query, label)
-    """
+        Any: OUT: Result of the operation."""
+
     if level >= len(ENCODING_ESCALATION):
         level = len(ENCODING_ESCALATION) - 1
     enc = ENCODING_ESCALATION[level]
     return enc["fn"](query), enc["label"]
 
-
-# ═══════════════════════════════════════════════════════════════════
-# CLI interface
-# ═══════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     import argparse

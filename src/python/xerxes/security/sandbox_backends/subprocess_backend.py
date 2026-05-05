@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,21 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Subprocess backend module for Xerxes.
 
-
-"""Subprocess-based sandbox backend for Xerxes.
-
-Provides lightweight isolation by running tool functions in a separate
-Python subprocess.  On Unix platforms, :mod:`resource` limits are applied
-to the child process for memory capping.
-
-This backend is always available (no Docker required) and is suitable
-when *some* process-level isolation is acceptable, although it does
-**not** provide filesystem or network sandboxing.
-"""
+Exports:
+    - logger
+    - SubprocessSandboxBackend"""
 
 from __future__ import annotations
 
@@ -37,10 +32,8 @@ from ..sandbox import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
-
 _CHILD_SCRIPT = """\
 import base64, json, os, pickle, sys
-
 
 mem_limit = os.environ.get("_XERXES_MEM_LIMIT_BYTES")
 if mem_limit:
@@ -63,64 +56,28 @@ sys.stdout.write(base64.b64encode(out.encode("utf-8")).decode())
 
 
 class SubprocessSandboxBackend:
-    """Sandbox backend that runs tools in a child Python subprocess.
-
-    This provides process-level isolation: a crash or memory overflow in
-    the child will not bring down the host process.  It does **not**
-    provide filesystem or network isolation.
-
-    On Unix platforms, the :mod:`resource` module is used to apply memory
-    limits (``RLIMIT_AS``) to the child process. On Windows, the memory
-    limit environment variable is set but may not be enforced if the
-    :mod:`resource` module is unavailable.
-
-    The execution flow mirrors :class:`DockerSandboxBackend`:
-
-    1. The callable and arguments are pickle-serialised and base64-encoded.
-    2. The encoded payload is piped as stdin to a child Python process.
-    3. The child deserialises, executes, and writes the result back to
-       stdout as base64-encoded pickle.
-    4. The host deserialises and returns the result.
-
-    Attributes:
-        _config: The :class:`SandboxConfig` governing timeout, memory
-            limits, and working directory for the child process.
-    """
+    """Subprocess sandbox backend."""
 
     def __init__(self, sandbox_config: SandboxConfig) -> None:
-        """Initialise the subprocess sandbox backend.
+        """Initialize the instance.
 
         Args:
-            sandbox_config: The sandbox configuration containing resource
-                limits and working directory settings.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            sandbox_config (SandboxConfig): IN: sandbox config. OUT: Consumed during execution."""
+
         self._config = sandbox_config
 
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
-        """Execute a callable with arguments in a child Python subprocess.
-
-        The function and its arguments are serialised with :mod:`pickle`,
-        base64-encoded, and piped to a child Python process that applies
-        memory limits, executes the function, and returns the result via
-        stdout.
+        """Execute.
 
         Args:
-            tool_name: The name of the tool being executed, used for
-                logging and error messages.
-            func: The callable to execute in the child process. Must be
-                picklable.
-            arguments: Keyword arguments to pass to *func*. All values
-                must be picklable.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            func (tp.Callable): IN: func. OUT: Consumed during execution.
+            arguments (dict): IN: arguments. OUT: Consumed during execution.
         Returns:
-            The return value of ``func(**arguments)`` as produced in the
-            child process.
+            tp.Any: OUT: Result of the operation."""
 
-        Raises:
-            RuntimeError: If the subprocess times out, exits with a
-                non-zero code, the result cannot be deserialised, or the
-                function raised an exception inside the child process.
-        """
         payload = pickle.dumps((func, arguments))
         encoded_payload = base64.b64encode(payload).decode()
 
@@ -168,32 +125,23 @@ class SubprocessSandboxBackend:
         return result_data["value"]
 
     def is_available(self) -> bool:
-        """Check whether the subprocess backend is available.
+        """Check whether available.
 
-        This backend is always available since it only requires the
-        Python interpreter that is already running the host process.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Always ``True``.
-        """
+            bool: OUT: Result of the operation."""
+
         return True
 
     def get_capabilities(self) -> dict[str, tp.Any]:
-        """Return a dictionary describing the subprocess backend's capabilities.
+        """Retrieve the capabilities.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dict with the following keys:
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-            - ``"backend"``: Always ``"subprocess"``.
-            - ``"available"``: Always ``True``.
-            - ``"isolation_level"``: Always ``"process"``.
-            - ``"filesystem_isolation"``: Always ``False`` (no filesystem
-              sandboxing).
-            - ``"network_isolation"``: Always ``False`` (no network
-              sandboxing).
-            - ``"memory_limit_mb"``: Configured memory limit in megabytes.
-            - ``"timeout"``: Configured execution timeout in seconds.
-        """
         return {
             "backend": "subprocess",
             "available": True,

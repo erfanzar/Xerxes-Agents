@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Fts index module for Xerxes.
 
-
-"""FTS5 full-text search index for session transcripts.
-
-Provides fast full-text search across all session turns using SQLite FTS5.
-Falls back to linear scan if FTS5 is unavailable in the SQLite build.
-
-Usage::
-
-    from xerxes.session.fts_index import SessionFTSIndex
-
-    index = SessionFTSIndex("~/.xerxes/sessions/fts.db")
-    index.index_session(session_record)
-    results = index.search("deployment", k=10)
-"""
+Exports:
+    - logger
+    - SessionFTSIndex"""
 
 from __future__ import annotations
 
@@ -39,14 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 class SessionFTSIndex:
-    """FTS5-backed full-text search for session transcripts.
-
-    Each turn's prompt + response is indexed as a single document.
-    Sessions are re-indexed on every call to :meth:`index_session` —
-    existing turns for that session are deleted first, then re-inserted.
-    """
+    """Session ftsindex."""
 
     def __init__(self, db_path: str | Path) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            db_path (str | Path): IN: db path. OUT: Consumed during execution."""
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -55,7 +47,13 @@ class SessionFTSIndex:
             self._ensure_schema()
 
     def _check_fts5(self) -> bool:
-        """Return True if the SQLite build supports FTS5."""
+        """Internal helper to check fts5.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            bool: OUT: Result of the operation."""
+
         try:
             conn = sqlite3.connect(str(self._db_path))
             cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_fts5_test'")
@@ -71,7 +69,11 @@ class SessionFTSIndex:
             return False
 
     def _ensure_schema(self) -> None:
-        """Create FTS5 virtual table if missing."""
+        """Internal helper to ensure schema.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute(
                 """
@@ -86,13 +88,12 @@ class SessionFTSIndex:
             conn.commit()
 
     def index_session(self, session: SessionRecord) -> None:
-        """Index (or re-index) all turns from *session*.
-
-        Deletes existing turns for this session_id, then inserts fresh rows.
+        """Index session.
 
         Args:
-            session: The session record to index.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution."""
+
         if not self._fts_available:
             return
 
@@ -113,11 +114,12 @@ class SessionFTSIndex:
             conn.commit()
 
     def delete_session(self, session_id: str) -> None:
-        """Remove all indexed turns for *session_id*.
+        """Delete session.
 
         Args:
-            session_id: The session to remove from the index.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution."""
+
         if not self._fts_available:
             return
         with sqlite3.connect(str(self._db_path)) as conn:
@@ -135,18 +137,17 @@ class SessionFTSIndex:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search indexed session turns matching *query*.
+        """Search.
 
         Args:
-            query: Free-text search query.
-            k: Maximum number of results.
-            agent_id: Optional agent filter.
-            session_id: Optional session filter.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            query (str): IN: query. OUT: Consumed during execution.
+            k (int, optional): IN: k. Defaults to 10. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            List of result dicts with keys ``session_id``, ``turn_id``,
-            ``agent_id``, ``content``, ``rank``.
-        """
+            list[dict[str, Any]]: OUT: Result of the operation."""
+
         if not self._fts_available or not query.strip():
             return []
 

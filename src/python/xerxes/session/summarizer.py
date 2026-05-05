@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Summarizer module for Xerxes.
 
-"""Session summariser.
-
-Compresses a finished :class:`SessionRecord` into a short structured
-summary that the runtime can show in lists ("recent sessions"), feed
-back into the prompt ("here's what we discussed last time"), or store
-for compliance reporting. A pure heuristic implementation is the
-default; an LLM hook is offered for richer summaries.
-
-The output is intentionally compact:
-
-- ``title``: 5-10 word headline derived from the first user prompt.
-- ``synopsis``: 1-3 sentence recap.
-- ``key_actions``: bulleted list of distinct tools used.
-- ``outcome``: ``"success"`` / ``"mixed"`` / ``"failure"`` based on
-  per-turn statuses.
-- ``tokens``: rough total of all turn-prompt + response chars.
-"""
+Exports:
+    - logger
+    - SessionSummary
+    - SessionSummarizer"""
 
 from __future__ import annotations
 
@@ -41,18 +31,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SessionSummary:
-    """Compressed representation of a session.
+    """Session summary.
 
     Attributes:
-        session_id: Originating session.
-        title: Short headline (5-10 words).
-        synopsis: 1-3 sentence overview.
-        key_actions: Distinct tool names used, in invocation order.
-        outcome: ``"success"`` / ``"mixed"`` / ``"failure"``.
-        turn_count: Number of turns in the session.
-        agent_ids: Distinct agents that participated.
-        char_count: Total characters across prompts + responses.
-    """
+        session_id (str): session id.
+        title (str): title.
+        synopsis (str): synopsis.
+        key_actions (list[str]): key actions.
+        outcome (str): outcome.
+        turn_count (int): turn count.
+        agent_ids (list[str]): agent ids.
+        char_count (int): char count."""
 
     session_id: str
     title: str = ""
@@ -64,33 +53,40 @@ class SessionSummary:
     char_count: int = 0
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Return the summary as a plain ``dict`` suitable for JSON serialisation."""
+        """To dict.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            dict[str, tp.Any]: OUT: Result of the operation."""
+
         return asdict(self)
 
 
 class SessionSummarizer:
-    """Heuristic session summariser with optional LLM enhancement.
-
-    Example:
-        >>> s = SessionSummarizer()
-        >>> summary = s.summarize(session_record)
-        >>> print(summary.title, summary.outcome)
-    """
+    """Session summarizer."""
 
     def __init__(
         self,
         llm_client: tp.Callable[[str], str] | None = None,
     ) -> None:
-        """Initialise the summariser.
+        """Initialize the instance.
 
         Args:
-            llm_client: Optional callable ``(prompt) -> str`` that
-                rewrites the heuristic synopsis into a richer paragraph.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            llm_client (tp.Callable[[str], str] | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution."""
+
         self.llm_client = llm_client
 
     def summarize(self, session: SessionRecord) -> SessionSummary:
-        """Produce a :class:`SessionSummary` for *session*."""
+        """Summarize.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
+        Returns:
+            SessionSummary: OUT: Result of the operation."""
+
         title = self._derive_title(session)
         synopsis = self._derive_synopsis(session)
         key_actions = self._collect_tools(session)
@@ -114,19 +110,14 @@ class SessionSummarizer:
         )
 
     def _derive_title(self, session: SessionRecord) -> str:
-        """Build a short headline from the session's first user prompt.
-
-        Uses the first 10 whitespace-separated words (with an ellipsis
-        when more than 12 exist), trims to 80 characters otherwise, and
-        falls back to ``"Session <id-prefix>"`` when the session or its
-        opening prompt is empty.
+        """Internal helper to derive title.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            A 5-10 word title string.
-        """
+            str: OUT: Result of the operation."""
+
         if not session.turns:
             return f"Session {session.session_id[:8]}"
         first = session.turns[0]
@@ -139,19 +130,14 @@ class SessionSummarizer:
         return prompt[:80]
 
     def _derive_synopsis(self, session: SessionRecord) -> str:
-        """Compose a 1-3 sentence recap from first prompt, tool usage, and last reply.
-
-        Quotes the opening user prompt (truncated to 120 chars), reports
-        the aggregate tool-call count across all turns, and quotes the
-        last non-empty agent response (truncated to 200 chars).
+        """Internal helper to derive synopsis.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            A whitespace-joined synopsis string; ``"Empty session."``
-            when no turns exist.
-        """
+            str: OUT: Result of the operation."""
+
         if not session.turns:
             return "Empty session."
         first_prompt = (session.turns[0].prompt or "").strip()
@@ -173,17 +159,14 @@ class SessionSummarizer:
         return " ".join(sentences)
 
     def _collect_tools(self, session: SessionRecord) -> list[str]:
-        """Return distinct tool names used, preserving first-invocation order.
-
-        Scans each turn's ``tool_calls`` list, reading ``tool_name`` (or
-        the legacy ``name`` attribute) and de-duplicating via a seen set.
+        """Internal helper to collect tools.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            A list of tool-name strings in order of first appearance.
-        """
+            list[str]: OUT: Result of the operation."""
+
         seen: set[str] = set()
         out: list[str] = []
         for turn in session.turns:
@@ -195,18 +178,14 @@ class SessionSummarizer:
         return out
 
     def _derive_outcome(self, session: SessionRecord) -> str:
-        """Collapse per-turn ``status`` values into a single outcome label.
-
-        Returns ``"success"`` only when every turn succeeded,
-        ``"failure"`` when no turn succeeded, ``"mixed"`` when there is
-        at least one of each, and ``"unknown"`` for empty sessions.
+        """Internal helper to derive outcome.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            One of ``"success"``, ``"failure"``, ``"mixed"``, or ``"unknown"``.
-        """
+            str: OUT: Result of the operation."""
+
         if not session.turns:
             return "unknown"
         statuses = [t.status for t in session.turns]
@@ -217,14 +196,14 @@ class SessionSummarizer:
         return "mixed"
 
     def _distinct_agents(self, session: SessionRecord) -> list[str]:
-        """Return unique ``agent_id`` values in first-seen order.
+        """Internal helper to distinct agents.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            A de-duplicated list of agent identifiers, skipping falsy values.
-        """
+            list[str]: OUT: Result of the operation."""
+
         seen: set[str] = set()
         out: list[str] = []
         for turn in session.turns:
@@ -234,20 +213,15 @@ class SessionSummarizer:
         return out
 
     def _refine_with_llm(self, session: SessionRecord, draft: str) -> str:
-        """Ask the optional LLM client to rewrite *draft* into a cleaner synopsis.
-
-        Builds a prompt that includes the heuristic draft plus the last
-        three turns (user prompt and agent response, each truncated to
-        120 chars) and returns the stripped LLM output.
+        """Internal helper to refine with llm.
 
         Args:
-            session: The :class:`SessionRecord` being summarised.
-            draft: Heuristic synopsis to rewrite.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
+            draft (str): IN: draft. OUT: Consumed during execution.
         Returns:
-            The LLM-rewritten synopsis, or an empty string if the client
-            returned something non-string.
-        """
+            str: OUT: Result of the operation."""
+
         prompt = (
             "Rewrite this session synopsis as 1-3 short, neutral sentences. "
             "Preserve all factual claims; do not invent details.\n\n"
@@ -265,18 +239,14 @@ class SessionSummarizer:
 
 
 def _truncate(text: str, n: int) -> str:
-    """Collapse whitespace and cap *text* to at most *n* characters.
-
-    Normalises any run of whitespace to a single space. If the result is
-    longer than *n*, trims to ``n - 1`` characters and appends an ellipsis.
+    """Internal helper to truncate.
 
     Args:
-        text: Input string to shorten.
-        n: Maximum output length (including the ellipsis character).
-
+        text (str): IN: text. OUT: Consumed during execution.
+        n (int): IN: n. OUT: Consumed during execution.
     Returns:
-        A whitespace-normalised, length-bounded string.
-    """
+        str: OUT: Result of the operation."""
+
     text = " ".join(text.split())
     if len(text) <= n:
         return text

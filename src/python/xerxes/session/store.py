@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,16 +6,19 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Store module for Xerxes.
 
-
-"""Session storage backends and high-level session manager.
-
-Provides an abstract SessionStore protocol with two concrete implementations
-(in-memory and file-based) and a SessionManager for session lifecycle management.
-"""
+Exports:
+    - logger
+    - SessionStore
+    - InMemorySessionStore
+    - FileSessionStore
+    - SessionManager"""
 
 from __future__ import annotations
 
@@ -34,54 +37,52 @@ logger = logging.getLogger(__name__)
 
 
 class SessionStore(ABC):
-    """Abstract base class for session storage backends.
+    """Session store.
 
-    All concrete session stores must implement the four CRUD methods defined
-    here: :meth:`save_session`, :meth:`load_session`, :meth:`list_sessions`,
-    and :meth:`delete_session`. Implementations are expected to be
-    thread-safe.
+    Inherits from: ABC
     """
 
     @abstractmethod
     def save_session(self, session: SessionRecord) -> None:
-        """Persist a session record.
+        """Save session.
 
         Args:
-            session: The session record to save.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution."""
+        ...
 
     @abstractmethod
     def load_session(self, session_id: str) -> SessionRecord | None:
-        """Load a session record by ID.
+        """Load session.
 
         Args:
-            session_id: The unique session identifier.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            The session record, or None if not found.
-        """
+            SessionRecord | None: OUT: Result of the operation."""
+        ...
 
     @abstractmethod
     def list_sessions(self, workspace_id: str | None = None) -> list[str]:
-        """List session IDs, optionally filtered by workspace.
+        """List sessions.
 
         Args:
-            workspace_id: If provided, only return sessions in this workspace.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            List of session ID strings.
-        """
+            list[str]: OUT: Result of the operation."""
+        ...
 
     @abstractmethod
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session record.
+        """Delete session.
 
         Args:
-            session_id: The unique session identifier.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            True if a session was deleted, False if not found.
-        """
+            bool: OUT: Result of the operation."""
+        ...
 
     def search(
         self,
@@ -91,21 +92,17 @@ class SessionStore(ABC):
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> list:
-        """Cross-session search across all turns.
-
-        Default implementation does a linear scan over every session
-        loaded from the store. For large stores, attach a
-        :class:`~xerxes.session.index.SessionIndex` and override.
+        """Search.
 
         Args:
-            query: Free-text search.
-            k: Maximum number of results.
-            agent_id: Optional agent filter.
-            session_id: Optional session filter.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            query (str): IN: query. OUT: Consumed during execution.
+            k (int, optional): IN: k. Defaults to 10. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            A list of :class:`~xerxes.session.index.SearchHit` items.
-        """
+            list: OUT: Result of the operation."""
+
         from .index import SearchHit
 
         if not query.strip():
@@ -142,78 +139,65 @@ class SessionStore(ABC):
 
 
 class InMemorySessionStore(SessionStore):
-    """Thread-safe in-memory session store backed by a dictionary.
+    """In memory session store.
 
-    Sessions are kept in a plain ``dict`` protected by a :class:`threading.Lock`.
-    Data does not survive process restarts; use :class:`FileSessionStore` for
-    persistent storage.
-
-    Attributes:
-        _sessions: Internal dictionary mapping session IDs to records.
-        _lock: Threading lock for safe concurrent access.
-
-    Example:
-        >>> store = InMemorySessionStore()
-        >>> store.list_sessions()
-        []
+    Inherits from: SessionStore
     """
 
     def __init__(self) -> None:
-        """Initialise an empty in-memory session store with a threading lock."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = threading.Lock()
 
     def save_session(self, session: SessionRecord) -> None:
-        """Save or overwrite a session record in memory.
-
-        If a session with the same ``session_id`` already exists, it is
-        silently replaced.
+        """Save session.
 
         Args:
-            session: The session record to store.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution."""
+
         with self._lock:
             self._sessions[session.session_id] = session
 
     def load_session(self, session_id: str) -> SessionRecord | None:
-        """Load a session record from memory by its identifier.
+        """Load session.
 
         Args:
-            session_id: The unique session identifier to look up.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            The matching ``SessionRecord``, or ``None`` if no session with
-            the given ID exists.
-        """
+            SessionRecord | None: OUT: Result of the operation."""
+
         with self._lock:
             return self._sessions.get(session_id)
 
     def list_sessions(self, workspace_id: str | None = None) -> list[str]:
-        """List session IDs stored in memory, optionally filtered by workspace.
+        """List sessions.
 
         Args:
-            workspace_id: When provided, only session IDs belonging to this
-                workspace are returned. When ``None``, all session IDs are
-                returned.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            A list of session ID strings.
-        """
+            list[str]: OUT: Result of the operation."""
+
         with self._lock:
             if workspace_id is None:
                 return list(self._sessions.keys())
             return [sid for sid, s in self._sessions.items() if s.workspace_id == workspace_id]
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session record from memory.
+        """Delete session.
 
         Args:
-            session_id: The unique session identifier to delete.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            ``True`` if a session was found and deleted, ``False`` if no
-            session with the given ID existed.
-        """
+            bool: OUT: Result of the operation."""
+
         with self._lock:
             if session_id in self._sessions:
                 del self._sessions[session_id]
@@ -222,57 +206,31 @@ class InMemorySessionStore(SessionStore):
 
 
 class FileSessionStore(SessionStore):
-    """File-backed session store using JSON files.
+    """File session store.
 
-    Each session is persisted as an individual JSON file on disk. The
-    directory layout is determined by whether the session has a workspace ID:
-
-    Directory layout::
-
-        {base_dir}/{session_id}.json                  -- workspace_id is None
-        {base_dir}/{workspace_id}/{session_id}.json   -- workspace_id is set
-
-    Thread-safe via an internal :class:`threading.Lock`.
-
-    Attributes:
-        _base_dir: Root directory for session JSON files.
-        _lock: Threading lock for safe concurrent access.
-
-    Example:
-        >>> import tempfile
-        >>> store = FileSessionStore(tempfile.mkdtemp())
-        >>> store.list_sessions()
-        []
+    Inherits from: SessionStore
     """
 
     def __init__(self, base_dir: str | Path) -> None:
-        """Initialise the file session store.
-
-        Creates the *base_dir* directory (and any parents) if it does not
-        already exist.
+        """Initialize the instance.
 
         Args:
-            base_dir: Root directory path where session JSON files will be
-                stored. Accepts a string or :class:`~pathlib.Path`.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            base_dir (str | Path): IN: base dir. OUT: Consumed during execution."""
+
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
     def _session_path(self, session: SessionRecord) -> Path:
-        """Resolve the file path for a given session record.
-
-        Sessions with a ``workspace_id`` are nested under a workspace
-        subdirectory; sessions without one are stored directly under
-        *base_dir*.
+        """Internal helper to session path.
 
         Args:
-            session: The session record whose file path is needed.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution.
         Returns:
-            The :class:`~pathlib.Path` where the session JSON file should
-            be written.
-        """
+            Path: OUT: Result of the operation."""
+
         if session.workspace_id:
             directory = self._base_dir / session.workspace_id
         else:
@@ -280,18 +238,14 @@ class FileSessionStore(SessionStore):
         return directory / f"{session.session_id}.json"
 
     def _find_session_path(self, session_id: str) -> Path | None:
-        """Find the file path for a session ID by searching the directory tree.
-
-        First checks for a flat file at ``{base_dir}/{session_id}.json``, then
-        searches one level of workspace subdirectories.
+        """Internal helper to find session path.
 
         Args:
-            session_id: The session identifier to locate on disk.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            The :class:`~pathlib.Path` to the JSON file if found, otherwise
-            ``None``.
-        """
+            Path | None: OUT: Result of the operation."""
+
         flat = self._base_dir / f"{session_id}.json"
         if flat.exists():
             return flat
@@ -303,32 +257,26 @@ class FileSessionStore(SessionStore):
         return None
 
     def save_session(self, session: SessionRecord) -> None:
-        """Save a session record as a JSON file on disk.
-
-        Creates the parent directory (including workspace subdirectories)
-        if it does not already exist. Existing files are overwritten.
+        """Save session.
 
         Args:
-            session: The session record to persist.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            session (SessionRecord): IN: session. OUT: Consumed during execution."""
+
         with self._lock:
             path = self._session_path(session)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(session.to_dict(), indent=2), encoding="utf-8")
 
     def load_session(self, session_id: str) -> SessionRecord | None:
-        """Load a session record from a JSON file on disk.
-
-        Searches the directory tree for a matching JSON file, reads it,
-        and deserializes it into a ``SessionRecord``.
+        """Load session.
 
         Args:
-            session_id: The unique session identifier to load.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            The deserialized ``SessionRecord``, or ``None`` if no matching
-            file is found.
-        """
+            SessionRecord | None: OUT: Result of the operation."""
+
         with self._lock:
             path = self._find_session_path(session_id)
             if path is None:
@@ -337,20 +285,14 @@ class FileSessionStore(SessionStore):
             return SessionRecord.from_dict(data)
 
     def list_sessions(self, workspace_id: str | None = None) -> list[str]:
-        """List session IDs by scanning JSON files on disk.
-
-        When *workspace_id* is provided, only the corresponding workspace
-        subdirectory is scanned. Otherwise, both the flat base directory
-        and all workspace subdirectories are scanned.
+        """List sessions.
 
         Args:
-            workspace_id: When provided, restricts the scan to the
-                ``{base_dir}/{workspace_id}/`` subdirectory only. When
-                ``None``, all JSON files across all directories are included.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            A list of session ID strings (JSON file stems).
-        """
+            list[str]: OUT: Result of the operation."""
+
         with self._lock:
             results: list[str] = []
             if workspace_id is not None:
@@ -369,17 +311,14 @@ class FileSessionStore(SessionStore):
             return results
 
     def delete_session(self, session_id: str) -> bool:
-        """Delete a session JSON file from disk.
-
-        Searches the directory tree for the matching file and removes it.
+        """Delete session.
 
         Args:
-            session_id: The unique session identifier to delete.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            ``True`` if the file was found and deleted, ``False`` if no
-            matching file existed.
-        """
+            bool: OUT: Result of the operation."""
+
         with self._lock:
             path = self._find_session_path(session_id)
             if path is None:
@@ -389,36 +328,26 @@ class FileSessionStore(SessionStore):
 
 
 class SessionManager:
-    """High-level API for session lifecycle management.
-
-    Wraps a :class:`SessionStore` to provide convenient methods for creating,
-    recording turns, recording agent transitions, and ending sessions. Each
-    mutation automatically updates the ``updated_at`` timestamp and persists
-    the session back to the store.
-
-    Attributes:
-        _store: The underlying session store backend used for persistence.
-
-    Example:
-        >>> store = InMemorySessionStore()
-        >>> manager = SessionManager(store)
-        >>> session = manager.start_session(agent_id="default")
-        >>> session.agent_id
-        'default'
-    """
+    """Session manager."""
 
     def __init__(self, store: SessionStore) -> None:
-        """Initialise the session manager with a storage backend.
+        """Initialize the instance.
 
         Args:
-            store: The :class:`SessionStore` implementation to delegate
-                persistence operations to.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            store (SessionStore): IN: store. OUT: Consumed during execution."""
+
         self._store = store
 
     @property
     def store(self) -> SessionStore:
-        """The underlying session store."""
+        """Return Store.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            SessionStore: OUT: Result of the operation."""
+
         return self._store
 
     def start_session(
@@ -429,17 +358,17 @@ class SessionManager:
         session_id: str | None = None,
         metadata: dict[str, tp.Any] | None = None,
     ) -> SessionRecord:
-        """Create and persist a new session.
+        """Start session.
 
         Args:
-            workspace_id: Workspace to associate the session with.
-            agent_id: Initial agent for the session.
-            session_id: Explicit session ID; auto-generated if omitted.
-            metadata: Optional metadata dict.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
+            metadata (dict[str, tp.Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
         Returns:
-            The newly created SessionRecord.
-        """
+            SessionRecord: OUT: Result of the operation."""
+
         now = datetime.now(UTC).isoformat()
         session = SessionRecord(
             session_id=session_id or uuid.uuid4().hex,
@@ -454,15 +383,13 @@ class SessionManager:
         return session
 
     def record_turn(self, session_id: str, turn: TurnRecord) -> None:
-        """Append a turn record to an existing session.
+        """Record turn.
 
         Args:
-            session_id: The session to append to.
-            turn: The turn record to add.
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
+            turn (TurnRecord): IN: turn. OUT: Consumed during execution."""
 
-        Raises:
-            ValueError: If the session does not exist.
-        """
         session = self._store.load_session(session_id)
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
@@ -471,15 +398,13 @@ class SessionManager:
         self._store.save_session(session)
 
     def record_agent_transition(self, session_id: str, transition: AgentTransitionRecord) -> None:
-        """Record an agent transition in a session.
+        """Record agent transition.
 
         Args:
-            session_id: The session to record the transition in.
-            transition: The transition record.
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
+            transition (AgentTransitionRecord): IN: transition. OUT: Consumed during execution."""
 
-        Raises:
-            ValueError: If the session does not exist.
-        """
         session = self._store.load_session(session_id)
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
@@ -488,14 +413,12 @@ class SessionManager:
         self._store.save_session(session)
 
     def end_session(self, session_id: str) -> None:
-        """Mark a session as ended by updating its timestamp.
+        """End session.
 
         Args:
-            session_id: The session to end.
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution."""
 
-        Raises:
-            ValueError: If the session does not exist.
-        """
         session = self._store.load_session(session_id)
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
@@ -505,23 +428,23 @@ class SessionManager:
         logger.debug("Ended session %s", session_id)
 
     def get_session(self, session_id: str) -> SessionRecord | None:
-        """Retrieve a session record.
+        """Retrieve the session.
 
         Args:
-            session_id: The session to retrieve.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            session_id (str): IN: session id. OUT: Consumed during execution.
         Returns:
-            The session record, or None if not found.
-        """
+            SessionRecord | None: OUT: Result of the operation."""
+
         return self._store.load_session(session_id)
 
     def list_sessions(self, workspace_id: str | None = None) -> list[str]:
-        """List session IDs.
+        """List sessions.
 
         Args:
-            workspace_id: If provided, filter by workspace.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            List of session ID strings.
-        """
+            list[str]: OUT: Result of the operation."""
+
         return self._store.list_sessions(workspace_id)

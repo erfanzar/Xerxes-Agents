@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Main daemon server orchestrating runtime bootstrap, gateways, and tasks.
 
-
-"""Core daemon server — persistent background agent.
-
-Runs an asyncio event loop that accepts tasks from a WebSocket gateway
-and a Unix domain socket, dispatches them to a thread-pool-based
-:class:`~xerxes.agents.subagent_manager.SubAgentManager`, and streams
-results back to connected clients.
+``DaemonServer`` ties together the WebSocket gateway, Unix socket channel,
+agent runtime, and task execution loop. The ``main`` entry point parses CLI
+arguments and starts the event loop.
 """
 
 from __future__ import annotations
@@ -42,16 +41,30 @@ from .task_runner import Task, create_task, run_task
 
 
 class DaemonServer:
-    """Persistent background agent server.
+    """Background agent server with WebSocket and Unix socket interfaces.
 
-    Runs an asyncio event loop with:
-    - WebSocket gateway for external clients
-    - Unix socket for local `xerxes send` commands
-    - ThreadPoolExecutor for concurrent agent tasks
+    Args:
+        config (DaemonConfig): IN: Fully populated configuration. OUT: Used
+            to initialize logger, gateway, socket channel, and thread pool.
     """
 
     def __init__(self, config: DaemonConfig) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (DaemonConfig): IN: config. OUT: Consumed during execution."""
         self.config = config
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (DaemonConfig): IN: config. OUT: Consumed during execution."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (DaemonConfig): IN: config. OUT: Consumed during execution."""
         self.logger = DaemonLogger(config.log_dir)
         self.tasks: dict[str, Task] = {}
         self._pool = ThreadPoolExecutor(max_workers=config.max_concurrent_tasks)
@@ -66,7 +79,17 @@ class DaemonServer:
         self._socket = SocketChannel(config.socket_path)
 
     def _bootstrap(self) -> None:
-        """Initialize the agent runtime — same pattern as BridgeServer.handle_init()."""
+        """Load profile, verify model, and initialise the agent runtime.
+
+        Returns:
+            None: OUT: Sets ``_runtime_config``, ``_system_prompt``,
+            ``_tool_executor``, and ``_tool_schemas``.
+
+        Raises:
+            SystemExit: OUT: Exits with code 1 if no profile or model is
+                configured.
+        """
+
         self.logger.info("Bootstrapping agent runtime")
 
         profile = profiles.get_active_profile()
@@ -140,7 +163,12 @@ class DaemonServer:
         )
 
     async def run(self) -> None:
-        """Main daemon loop."""
+        """Start gateways and enter the main keep-alive loop.
+
+        Returns:
+            None: OUT: Blocks until ``shutdown()`` sets ``_shutdown``.
+        """
+
         self._bootstrap()
         self._write_pid()
 
@@ -169,7 +197,12 @@ class DaemonServer:
         self.logger.info("Daemon stopped")
 
     async def shutdown(self) -> None:
-        """Graceful shutdown."""
+        """Cancel running tasks, stop channels, and clean up resources.
+
+        Returns:
+            None: OUT: Idempotent; safe to call multiple times.
+        """
+
         if self._shutdown:
             return
         self._shutdown = True
@@ -191,7 +224,19 @@ class DaemonServer:
         source: str,
         on_event: Callable[[str, dict[str, Any]], None],
     ) -> str:
-        """Submit a task from the WebSocket gateway."""
+        """Submit a task from the WebSocket gateway.
+
+        Args:
+            prompt (str): IN: User prompt text. OUT: Passed to ``run_task``.
+            source (str): IN: Source label (e.g. ``"ws:{msg_id}"``). OUT:
+                Stored on the ``Task``.
+            on_event (Callable[[str, dict[str, Any]], None]): IN: Callback for
+                streaming events. OUT: Forwarded to ``run_task``.
+
+        Returns:
+            str: OUT: Task result text.
+        """
+
         task = create_task(prompt, source)
         self.tasks[task.id] = task
         self.logger.info("Task submitted", task_id=task.id, source=source, prompt=prompt[:100])
@@ -212,7 +257,17 @@ class DaemonServer:
         return result
 
     async def _submit_socket(self, prompt: str, source: str) -> str:
-        """Submit a task from the Unix socket (no streaming callback)."""
+        """Submit a task from the Unix socket channel.
+
+        Args:
+            prompt (str): IN: User prompt text. OUT: Passed to ``run_task``.
+            source (str): IN: Source label (e.g. ``"socket"``). OUT: Stored on
+                the ``Task``.
+
+        Returns:
+            str: OUT: Task result text.
+        """
+
         task = create_task(prompt, source)
         self.tasks[task.id] = task
         self.logger.info("Task submitted", task_id=task.id, source=source, prompt=prompt[:100])
@@ -233,6 +288,15 @@ class DaemonServer:
         return result
 
     def _cancel_task(self, task_id: str) -> bool:
+        """Cancel a running task by ID.
+
+        Args:
+            task_id (str): IN: Task identifier. OUT: Looked up in
+                ``self.tasks``.
+
+        Returns:
+            bool: OUT: ``True`` if the task was running and cancelled.
+        """
         task = self.tasks.get(task_id)
         if task and task.status == "running":
             task.cancel()
@@ -240,6 +304,12 @@ class DaemonServer:
         return False
 
     def _list_tasks(self) -> list[dict[str, Any]]:
+        """Return a snapshot of all known tasks.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Dicts with ``id``, truncated ``prompt``,
+            ``source``, ``status``, and ``created_at``.
+        """
         return [
             {
                 "id": t.id,
@@ -252,6 +322,12 @@ class DaemonServer:
         ]
 
     def _status(self) -> dict[str, Any]:
+        """Return daemon health and runtime status.
+
+        Returns:
+            dict[str, Any]: OUT: Dict with ``status``, ``pid``, ``model``,
+            ``active_tasks``, ``total_tasks``, and ``ws`` URI.
+        """
         active = sum(1 for t in self.tasks.values() if t.status == "running")
         return {
             "status": "running",
@@ -263,17 +339,35 @@ class DaemonServer:
         }
 
     def _write_pid(self) -> None:
+        """Persist the current process ID to the configured PID file.
+
+        Returns:
+            None: OUT: File created or overwritten with the current PID.
+        """
         pid_path = Path(self.config.pid_file).expanduser()
         pid_path.parent.mkdir(parents=True, exist_ok=True)
         pid_path.write_text(str(os.getpid()))
 
     def _remove_pid(self) -> None:
+        """Delete the PID file if it exists.
+
+        Returns:
+            None: OUT: PID file is removed; errors are ignored.
+        """
         pid_path = Path(self.config.pid_file).expanduser()
         pid_path.unlink(missing_ok=True)
 
 
 def main() -> None:
-    """CLI entry point for the daemon."""
+    """CLI entry point for the Xerxes daemon.
+
+    Parses ``--project-dir``, ``--host``, and ``--port`` arguments, loads
+    configuration, overrides with CLI values, and starts ``DaemonServer``.
+
+    Returns:
+        None: OUT: Blocks until the daemon shuts down.
+    """
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Xerxes daemon — background agent")

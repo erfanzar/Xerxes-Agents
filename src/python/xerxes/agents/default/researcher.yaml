@@ -15,17 +15,17 @@ agent:
     Use this agent when the parent agent needs to understand the codebase, find relevant files, or answer questions about how things work.
   allowed_tools:
     - ReadFile
-    - Glob
-    - Grep
+    - GlobTool
+    - GrepTool
     - GoogleSearch
     - DuckDuckGoSearch
   exclude_tools:
     - AgentTool
     - SpawnAgents
     - AskUserQuestionTool
-    - Shell
+    - ExecuteShell
     - WriteFile
-    - StrReplaceFile
+    - FileEditTool
     - TodoWriteTool
     - SkillTool
   subagents:

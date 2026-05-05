@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,28 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Session module for Xerxes.
 
-
-"""Runtime session with full state tracking and markdown export.
-
-Captures the complete state of an agent session: context, setup,
-transcript, history, cost tracking, tool executions, and stream events.
-
-Inspired by the claw-code ``RuntimeSession`` pattern.
-
-Usage::
-
-    from xerxes.runtime.session import RuntimeSession
-
-    session = RuntimeSession.create(model="gpt-4o", prompt="Hello")
-    session.record_tool_execution("Read", "/etc/hosts", "127.0.0.1 localhost")
-    session.record_stream_event("text_chunk", text="Hello!")
-    print(session.as_markdown())
-    session.save("./sessions")
-"""
+Exports:
+    - RuntimeContext
+    - RuntimeSession"""
 
 from __future__ import annotations
 
@@ -47,17 +35,16 @@ from .transcript import TranscriptStore
 
 @dataclass
 class RuntimeContext:
-    """Snapshot of the runtime environment.
+    """Runtime context.
 
     Attributes:
-        cwd: Current working directory.
-        python_version: Python version string.
-        platform_name: Platform identifier.
-        git_branch: Current git branch (if in a repo).
-        model: Active model name.
-        provider: Active provider name.
-        timestamp: Session start time.
-    """
+        cwd (str): cwd.
+        python_version (str): python version.
+        platform_name (str): platform name.
+        git_branch (str): git branch.
+        model (str): model.
+        provider (str): provider.
+        timestamp (str): timestamp."""
 
     cwd: str = ""
     python_version: str = ""
@@ -69,7 +56,15 @@ class RuntimeContext:
 
     @classmethod
     def capture(cls, model: str = "", provider: str = "") -> RuntimeContext:
-        """Capture the current runtime context."""
+        """Capture.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
+            provider (str, optional): IN: provider. Defaults to ''. OUT: Consumed during execution.
+        Returns:
+            RuntimeContext: OUT: Result of the operation."""
+
         import subprocess
 
         git_branch = ""
@@ -94,10 +89,18 @@ class RuntimeContext:
 
 @dataclass
 class RuntimeSession:
-    """Complete runtime session state.
+    """Runtime session.
 
-    Tracks everything that happens during an agent session.
-    """
+    Attributes:
+        session_id (str): session id.
+        prompt (str): prompt.
+        context (RuntimeContext): context.
+        transcript (TranscriptStore): transcript.
+        history (HistoryLog): history.
+        cost_tracker (CostTracker): cost tracker.
+        stream_events (list[dict[str, Any]]): stream events.
+        tool_executions (list[dict[str, Any]]): tool executions.
+        metadata (dict[str, Any]): metadata."""
 
     session_id: str = field(default_factory=lambda: uuid4().hex)
     prompt: str = ""
@@ -116,7 +119,16 @@ class RuntimeSession:
         prompt: str = "",
         **metadata: Any,
     ) -> RuntimeSession:
-        """Create a new session with captured context."""
+        """Create.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
+            prompt (str, optional): IN: prompt. Defaults to ''. OUT: Consumed during execution.
+            **metadata: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            RuntimeSession: OUT: Result of the operation."""
+
         from xerxes.llms.registry import detect_provider
 
         provider = detect_provider(model) if model else ""
@@ -134,7 +146,16 @@ class RuntimeSession:
         duration_ms: float = 0.0,
         permitted: bool = True,
     ) -> None:
-        """Record a tool execution."""
+        """Record tool execution.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            inputs (Any, optional): IN: inputs. Defaults to None. OUT: Consumed during execution.
+            result (str, optional): IN: result. Defaults to ''. OUT: Consumed during execution.
+            duration_ms (float, optional): IN: duration ms. Defaults to 0.0. OUT: Consumed during execution.
+            permitted (bool, optional): IN: permitted. Defaults to True. OUT: Consumed during execution."""
+
         self.tool_executions.append(
             {
                 "tool": tool_name,
@@ -148,7 +169,13 @@ class RuntimeSession:
         self.history.add_tool_call(tool_name, str(result)[:100], duration_ms)
 
     def record_stream_event(self, event_type: str, **data: Any) -> None:
-        """Record a raw stream event."""
+        """Record stream event.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            event_type (str): IN: event type. OUT: Consumed during execution.
+            **data: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
+
         self.stream_events.append(
             {
                 "type": event_type,
@@ -158,12 +185,25 @@ class RuntimeSession:
         )
 
     def record_turn(self, model: str, in_tokens: int, out_tokens: int) -> None:
-        """Record an LLM turn completion."""
+        """Record turn.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            model (str): IN: model. OUT: Consumed during execution.
+            in_tokens (int): IN: in tokens. OUT: Consumed during execution.
+            out_tokens (int): IN: out tokens. OUT: Consumed during execution."""
+
         self.cost_tracker.record_turn(model, in_tokens, out_tokens)
         self.history.add_turn(model, in_tokens, out_tokens)
 
     def as_markdown(self) -> str:
-        """Export the full session as markdown."""
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
+
         lines = [
             "# Runtime Session",
             "",
@@ -204,14 +244,14 @@ class RuntimeSession:
         return "\n".join(lines)
 
     def save(self, directory: str | Path = ".xerxes_sessions") -> Path:
-        """Persist the session to a JSON file.
+        """Save.
 
         Args:
-            directory: Directory to save sessions in.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            directory (str | Path, optional): IN: directory. Defaults to '.xerxes_sessions'. OUT: Consumed during execution.
         Returns:
-            Path to the saved session file.
-        """
+            Path: OUT: Result of the operation."""
+
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
         path = target / f"{self.session_id}.json"
@@ -242,7 +282,14 @@ class RuntimeSession:
 
     @classmethod
     def load(cls, path: str | Path) -> RuntimeSession:
-        """Load a session from a JSON file."""
+        """Load.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            path (str | Path): IN: path. OUT: Consumed during execution.
+        Returns:
+            RuntimeSession: OUT: Result of the operation."""
+
         data = json.loads(Path(path).read_text())
         ctx_data = data.get("context", {})
 

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,25 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Circuit breaker module for Xerxes.
 
-"""Per-tool circuit breaker for the Xerxes runtime.
-
-Implements a classic three-state breaker (CLOSED → OPEN → HALF_OPEN)
-so that a misbehaving tool is short-circuited until it has had a
-chance to recover. Threadsafe; entirely in-memory.
-
-States:
-
-- **CLOSED**: normal — calls flow through, failures are counted.
-- **OPEN**: too many failures within the window → calls are rejected
-  immediately for the cooldown period.
-- **HALF_OPEN**: cooldown elapsed → exactly one trial call is allowed.
-  On success the breaker closes; on failure it re-opens with a fresh
-  cooldown.
-"""
+Exports:
+    - CircuitState
+    - CircuitBreakerConfig
+    - CircuitOpenError
+    - CircuitBreakerRegistry"""
 
 from __future__ import annotations
 
@@ -35,7 +28,10 @@ from enum import Enum
 
 
 class CircuitState(Enum):
-    """Three states of a circuit breaker."""
+    """Circuit state.
+
+    Inherits from: Enum
+    """
 
     CLOSED = "closed"
     OPEN = "open"
@@ -44,15 +40,13 @@ class CircuitState(Enum):
 
 @dataclass
 class CircuitBreakerConfig:
-    """Tunable thresholds for a circuit breaker.
+    """Circuit breaker config.
 
     Attributes:
-        failure_threshold: Consecutive failures that trip the breaker.
-        cooldown_seconds: Time the breaker stays OPEN before allowing
-            a HALF_OPEN trial.
-        rolling_window_seconds: Failures older than this are forgotten.
-        success_threshold: Successes (in HALF_OPEN) needed to close.
-    """
+        failure_threshold (int): failure threshold.
+        cooldown_seconds (float): cooldown seconds.
+        rolling_window_seconds (float): rolling window seconds.
+        success_threshold (int): success threshold."""
 
     failure_threshold: int = 5
     cooldown_seconds: float = 30.0
@@ -61,10 +55,19 @@ class CircuitBreakerConfig:
 
 
 class CircuitOpenError(Exception):
-    """Raised when a breaker rejects a call because it is OPEN."""
+    """Circuit open error.
+
+    Inherits from: Exception
+    """
 
     def __init__(self, key: str, opened_at: float) -> None:
-        """Record which breaker rejected the call and when it opened."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+            opened_at (float): IN: opened at. OUT: Consumed during execution."""
+
         self.key = key
         self.opened_at = opened_at
         super().__init__(f"Circuit '{key}' is OPEN since {opened_at:.0f}")
@@ -72,7 +75,13 @@ class CircuitOpenError(Exception):
 
 @dataclass
 class _BreakerState:
-    """Per-key mutable state used internally by :class:`CircuitBreakerRegistry`."""
+    """Breaker state.
+
+    Attributes:
+        state (CircuitState): state.
+        failures (list[float]): failures.
+        consecutive_successes (int): consecutive successes.
+        opened_at (float): opened at."""
 
     state: CircuitState = CircuitState.CLOSED
     failures: list[float] = field(default_factory=list)
@@ -81,31 +90,28 @@ class _BreakerState:
 
 
 class CircuitBreakerRegistry:
-    """Per-tool/per-agent circuit breakers.
-
-    Each unique ``key`` (typically the tool name, optionally suffixed
-    with an agent_id for per-agent isolation) gets its own state.
-
-    Use the :meth:`should_allow` / :meth:`record_success` /
-    :meth:`record_failure` triple from inside the executor, OR wrap a
-    callable with :meth:`call`.
-
-    Example:
-        >>> br = CircuitBreakerRegistry()
-        >>> for _ in range(5):
-        ...     br.record_failure("flaky_tool")
-        >>> br.should_allow("flaky_tool")
-        False
-    """
+    """Circuit breaker registry."""
 
     def __init__(self, config: CircuitBreakerConfig | None = None) -> None:
-        """Create the registry with the supplied config (defaults when omitted)."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            config (CircuitBreakerConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution."""
+
         self.config = config or CircuitBreakerConfig()
         self._states: dict[str, _BreakerState] = {}
         self._lock = threading.Lock()
 
     def _entry(self, key: str) -> _BreakerState:
-        """Return the per-key :class:`_BreakerState`, creating a fresh one on miss."""
+        """Internal helper to entry.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+        Returns:
+            _BreakerState: OUT: Result of the operation."""
+
         s = self._states.get(key)
         if s is None:
             s = _BreakerState()
@@ -113,16 +119,15 @@ class CircuitBreakerRegistry:
         return s
 
     def should_allow(self, key: str, *, now: float | None = None) -> bool:
-        """Return ``True`` when a call to *key* may proceed.
-
-        Side-effect: when the cooldown for an OPEN breaker has elapsed,
-        the state transitions to HALF_OPEN and this call returns
-        ``True`` (allowing the trial).
+        """Determine whether allow.
 
         Args:
-            key: Breaker identity (e.g. tool name).
-            now: Optional override for the current time (for tests).
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            bool: OUT: Result of the operation."""
+
         now = time.monotonic() if now is None else now
         with self._lock:
             s = self._entry(key)
@@ -137,11 +142,13 @@ class CircuitBreakerRegistry:
             return True
 
     def record_success(self, key: str, *, now: float | None = None) -> None:
-        """Record a successful call against *key*.
+        """Record success.
 
-        In HALF_OPEN, ``success_threshold`` consecutive successes close
-        the breaker. In CLOSED, this clears any rolling-window failures.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution."""
+
         now = time.monotonic() if now is None else now
         with self._lock:
             s = self._entry(key)
@@ -155,7 +162,15 @@ class CircuitBreakerRegistry:
                 s.failures.clear()
 
     def record_failure(self, key: str, *, now: float | None = None) -> bool:
-        """Record a failed call. Returns ``True`` when the breaker tripped now."""
+        """Record failure.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            bool: OUT: Result of the operation."""
+
         now = time.monotonic() if now is None else now
         with self._lock:
             s = self._entry(key)
@@ -174,12 +189,24 @@ class CircuitBreakerRegistry:
             return False
 
     def state_of(self, key: str) -> CircuitState:
-        """Return the current state of *key*'s breaker."""
+        """State of.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+        Returns:
+            CircuitState: OUT: Result of the operation."""
+
         with self._lock:
             return self._entry(key).state
 
     def reset(self, key: str | None = None) -> None:
-        """Reset a single breaker, or all when *key* is ``None``."""
+        """Reset.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str | None, optional): IN: key. Defaults to None. OUT: Consumed during execution."""
+
         with self._lock:
             if key is None:
                 self._states.clear()
@@ -187,11 +214,17 @@ class CircuitBreakerRegistry:
                 self._states.pop(key, None)
 
     def call(self, key: str, fn, *args, **kwargs):
-        """Invoke ``fn(*args, **kwargs)`` guarded by the breaker.
+        """Call.
 
-        Raises :class:`CircuitOpenError` when *key* is currently OPEN.
-        Records success or failure based on whether the callable raises.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            key (str): IN: key. OUT: Consumed during execution.
+            fn (Any): IN: fn. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         if not self.should_allow(key):
             raise CircuitOpenError(key, opened_at=self._entry(key).opened_at)
         try:

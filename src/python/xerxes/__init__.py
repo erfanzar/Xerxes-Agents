@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,34 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""Xerxes: An advanced AI agent orchestration framework.
-
-This module provides a comprehensive framework for building and managing AI agents
-with sophisticated capabilities including memory management, task execution, tool
-integration, and multi-agent orchestration. The framework supports multiple LLM
-providers and offers both synchronous and asynchronous execution modes.
-
-Key Features:
-    - Multi-agent orchestration with dynamic switching
-    - Advanced memory management (short-term, long-term, contextual)
-    - Tool and function integration
-    - Support for multiple LLM providers (OpenAI, Anthropic, Gemini, Ollama)
-    - Streaming and batch processing capabilities
-    - Cortex system for complex agent workflows
-
-Example:
-    >>> from xerxes import Xerxes, OpenAILLM
-    >>>
-    >>> llm = OpenAILLM(api_key="your-api-key")
-    >>> agent = Xerxes(llm=llm, name="Assistant")
-    >>> response = agent.query("Hello, how can you help me?")
-    >>> print(response.content)
-"""
+"""Init module for Xerxes."""
 
 from .core import PromptTemplate
 from .core.streamer_buffer import StreamerBuffer

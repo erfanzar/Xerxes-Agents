@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,20 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Skill lifecycle management: variants, A/B rollout, and deprecation.
 
-"""Skill lifecycle: A/B variants + auto-deprecation.
-
-Hermes runs continuous experiments on its authored skills:
-
-- Two variants of the same skill (``base``/``variant``) can coexist;
-  :class:`SkillVariantPicker` deterministically routes a given user
-  to one of them.
-- :class:`SkillLifecycleManager` periodically inspects telemetry and
-  marks under-performing skills as deprecated (renames the SKILL.md
-  file to ``SKILL.deprecated.md`` so the registry stops loading it).
+``SkillVariantPicker`` supports canary rollouts. ``SkillLifecycleManager"
+evaluates telemetry to propose and apply deprecation of under-performing
+skills.
 """
 
 from __future__ import annotations
@@ -39,12 +35,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SkillVariant:
-    """Definition of an A/B variant.
+    """A/B variant definition for a skill.
 
     Attributes:
-        base_name: The canonical skill name being varied.
-        variant_name: Identifier of the alternate skill.
-        rollout: Fraction of users in ``[0, 1]`` routed to the variant.
+        base_name (str): IN: Original skill name. OUT: Lookup key.
+        variant_name (str): IN: Alternative skill name. OUT: Returned by
+            ``pick`` for the rollout bucket.
+        rollout (float): IN: Proportion [0.0, 1.0] of users receiving the
+            variant. OUT: Clamped in ``__post_init__``.
     """
 
     base_name: str
@@ -52,56 +50,73 @@ class SkillVariant:
     rollout: float = 0.5
 
     def __post_init__(self) -> None:
-        """Clamp the rollout fraction to the ``[0.0, 1.0]`` interval."""
+        """Clamp ``rollout`` to the [0.0, 1.0] range."""
+
         self.rollout = max(0.0, min(1.0, float(self.rollout)))
 
 
 class SkillVariantPicker:
-    """Deterministic per-user variant routing.
-
-    Hashes ``(user_id, base_name)`` and compares to the rollout
-    threshold so the same user always sees the same variant.
-
-    Example:
-        >>> p = SkillVariantPicker()
-        >>> p.add(SkillVariant("ci-setup", "ci-setup-v2", rollout=0.5))
-        >>> p.pick("ci-setup", user_id="alice")
-        'ci-setup-v2'
-    """
+    """Deterministically assigns users to skill variants via hash bucketing."""
 
     def __init__(self) -> None:
-        """Initialise an empty variant registry."""
+        """Initialize an empty variant index."""
+
         self._variants: dict[str, SkillVariant] = {}
 
     def add(self, variant: SkillVariant) -> None:
-        """Register *variant*, replacing any existing entry for its base name.
+        """Register a variant.
 
         Args:
-            variant: The :class:`SkillVariant` to install.
+            variant (SkillVariant): IN: Variant definition. OUT: Stored by
+                ``base_name``.
+
+        Returns:
+            None: OUT: Overwrites any existing variant for the same base.
         """
+
         self._variants[variant.base_name] = variant
 
     def remove(self, base_name: str) -> None:
-        """Drop any variant registered under *base_name*.
+        """Remove a variant entry.
 
         Args:
-            base_name: Canonical skill name whose variant should be cleared.
+            base_name (str): IN: Skill base name. OUT: Key removed from the
+                index.
+
+        Returns:
+            None: OUT: Variant is no longer tracked.
         """
+
         self._variants.pop(base_name, None)
 
     def get(self, base_name: str) -> SkillVariant | None:
-        """Return the variant registered for *base_name*, or ``None``.
+        """Retrieve a variant definition.
 
         Args:
-            base_name: Canonical skill name to look up.
+            base_name (str): IN: Skill base name. OUT: Looked up in the
+                index.
 
         Returns:
-            The matching :class:`SkillVariant`, or ``None`` if absent.
+            SkillVariant | None: OUT: Variant record or ``None``.
         """
+
         return self._variants.get(base_name)
 
     def pick(self, base_name: str, user_id: str = "") -> str:
-        """Return either ``base_name`` or the configured ``variant_name``."""
+        """Select either the base skill or the variant based on rollout.
+
+        Bucketing is deterministic given ``user_id`` and ``base_name``.
+
+        Args:
+            base_name (str): IN: Skill name to resolve. OUT: Looked up in the
+                variant index.
+            user_id (str): IN: User identifier for consistent bucketing. OUT:
+                Hashed together with ``base_name``.
+
+        Returns:
+            str: OUT: ``variant_name`` or ``base_name`` depending on bucket.
+        """
+
         variant = self._variants.get(base_name)
         if variant is None or variant.rollout <= 0.0:
             return base_name
@@ -112,19 +127,26 @@ class SkillVariantPicker:
         return variant.variant_name if bucket < variant.rollout else base_name
 
     def all(self) -> dict[str, SkillVariant]:
-        """Return a snapshot of the ``base_name -> SkillVariant`` mapping."""
+        """Return a snapshot of all registered variants.
+
+        Returns:
+            dict[str, SkillVariant]: OUT: Copy of the internal mapping.
+        """
+
         return dict(self._variants)
 
 
 @dataclass
 class DeprecationDecision:
-    """Outcome of one auto-deprecation pass.
+    """Outcome of a single skill deprecation evaluation.
 
     Attributes:
-        skill_name: Skill that was evaluated.
-        action: ``"deprecated"`` / ``"kept"`` / ``"missing"``.
-        reason: Why the action was taken.
-        deprecated_path: New filename when ``action == "deprecated"``.
+        skill_name (str): IN: Skill identifier. OUT: Stored.
+        action (str): IN: Decision label (proposed, deprecated, kept, missing).
+            OUT: Stored.
+        reason (str): IN: Human-readable rationale. OUT: Stored.
+        deprecated_path (Path | None): IN: New path after rename. OUT: Set
+            when deprecation is applied.
     """
 
     skill_name: str
@@ -134,14 +156,19 @@ class DeprecationDecision:
 
 
 class SkillLifecycleManager:
-    """Periodic skill deprecation based on telemetry.
+    """Evaluate telemetry and deprecate under-performing skills.
 
-    Inspect :class:`SkillTelemetry` for skills below
-    :attr:`telemetry_threshold_success_rate` over at least
-    :attr:`min_invocations` invocations and, if a corresponding SKILL.md
-    file is found, rename it to ``SKILL.deprecated.md``. The registry
-    discovery routine is taught to skip ``*.deprecated.md`` so the
-    skill is no longer loaded into prompts.
+    Args:
+        telemetry (SkillTelemetry): IN: Telemetry backend. OUT: Queried for
+            success rates and invocation counts.
+        registry (SkillRegistry | None): IN: Skill registry. OUT: Used to
+            remove deprecated skills.
+        skills_dir (str | Path | None): IN: Directory containing skills.
+            OUT: Used as fallback when registry lookup fails.
+        min_invocations (int): IN: Minimum invocations before a skill is
+            eligible for deprecation. OUT: Passed to telemetry queries.
+        max_success_rate (float): IN: Success rate threshold. OUT: Skills
+            at or below this rate are flagged.
     """
 
     DEPRECATED_SUFFIX = ".deprecated.md"
@@ -155,27 +182,46 @@ class SkillLifecycleManager:
         min_invocations: int = 10,
         max_success_rate: float = 0.4,
     ) -> None:
-        """Configure the lifecycle manager.
+        """Initialize the instance.
 
         Args:
-            telemetry: Source of skill invocation statistics.
-            registry: Optional :class:`SkillRegistry` to drop deprecated
-                skills from in-memory.
-            skills_dir: Root directory searched for SKILL.md files when
-                the registry cannot locate one.
-            min_invocations: Minimum invocation count before a skill is
-                eligible for auto-deprecation.
-            max_success_rate: Deprecate skills whose success rate is at
-                or below this threshold.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            telemetry (SkillTelemetry): IN: telemetry. OUT: Consumed during execution.
+            registry (SkillRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+            skills_dir (str | Path | None, optional): IN: skills dir. Defaults to None. OUT: Consumed during execution.
+            min_invocations (int, optional): IN: min invocations. Defaults to 10. OUT: Consumed during execution.
+            max_success_rate (float, optional): IN: max success rate. Defaults to 0.4. OUT: Consumed during execution."""
         self.telemetry = telemetry
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            telemetry (SkillTelemetry): IN: telemetry. OUT: Consumed during execution.
+            registry (SkillRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+            skills_dir (str | Path | None, optional): IN: skills dir. Defaults to None. OUT: Consumed during execution.
+            min_invocations (int, optional): IN: min invocations. Defaults to 10. OUT: Consumed during execution.
+            max_success_rate (float, optional): IN: max success rate. Defaults to 0.4. OUT: Consumed during execution."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            telemetry (SkillTelemetry): IN: telemetry. OUT: Consumed during execution.
+            registry (SkillRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
+            skills_dir (str | Path | None, optional): IN: skills dir. Defaults to None. OUT: Consumed during execution.
+            min_invocations (int, optional): IN: min invocations. Defaults to 10. OUT: Consumed during execution.
+            max_success_rate (float, optional): IN: max success rate. Defaults to 0.4. OUT: Consumed during execution."""
         self.registry = registry
         self.skills_dir = Path(skills_dir).expanduser() if skills_dir else None
         self.min_invocations = int(min_invocations)
         self.max_success_rate = float(max_success_rate)
 
     def evaluate(self) -> list[DeprecationDecision]:
-        """Inspect telemetry and produce decisions (no side effects)."""
+        """Identify skills that qualify for deprecation.
+
+        Returns:
+            list[DeprecationDecision]: OUT: Proposed decisions with reasons.
+        """
+
         decisions: list[DeprecationDecision] = []
         candidates = self.telemetry.candidates_for_deprecation(
             min_invocations=self.min_invocations,
@@ -192,7 +238,13 @@ class SkillLifecycleManager:
         return decisions
 
     def apply(self) -> list[DeprecationDecision]:
-        """Evaluate AND deprecate matching skills (renames the SKILL.md)."""
+        """Rename qualifying skills to ``.deprecated.md`` and unregister them.
+
+        Returns:
+            list[DeprecationDecision]: OUT: Applied decisions reflecting the
+            actual filesystem outcome.
+        """
+
         decisions = self.evaluate()
         applied: list[DeprecationDecision] = []
         for d in decisions:
@@ -227,18 +279,16 @@ class SkillLifecycleManager:
         return applied
 
     def _locate_skill(self, skill_name: str) -> Path | None:
-        """Resolve the SKILL.md path for *skill_name*.
-
-        Consults the registry's ``source_path`` first, then falls back to
-        a filename match under :attr:`skills_dir`, and finally scans
-        nested SKILL.md files for a matching ``name:`` field.
+        """Find the ``SKILL.md`` path for a skill by name.
 
         Args:
-            skill_name: Canonical name of the skill to locate.
+            skill_name (str): IN: Skill identifier. OUT: Looked up in the
+                registry, then on disk.
 
         Returns:
-            Path to the SKILL.md file, or ``None`` if no match is found.
+            Path | None: OUT: File path or ``None`` if not found.
         """
+
         if self.registry is not None:
             try:
                 skill = self.registry.get(skill_name)

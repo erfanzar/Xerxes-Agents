@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,25 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Client module for Xerxes.
 
-
-"""MCP client implementation for connecting to MCP servers.
-
-This module provides the core MCP client functionality for Xerxes,
-including:
-- Connection management for multiple transport types (STDIO, SSE, Streamable HTTP)
-- JSON-RPC 2.0 message handling for the MCP protocol
-- Tool discovery and invocation
-- Resource reading and prompt fetching
-- Session lifecycle management
-
-The client supports both subprocess-based (STDIO) communication for local
-MCP servers and HTTP-based transports for remote servers. SSE and Streamable
-HTTP transports require the optional `mcp` SDK package.
-"""
+Exports:
+    - MCPClient"""
 
 import asyncio
 import json
@@ -39,63 +29,36 @@ _MCP_SDK_AVAILABLE: bool | None = None
 
 
 def _check_mcp_sdk() -> bool:
-    """Check if the MCP SDK is installed.
-
-    This function lazily checks for the presence of the `mcp` package,
-    caching the result for subsequent calls.
+    """Internal helper to check mcp sdk.
 
     Returns:
-        True if the MCP SDK is installed, False otherwise.
-    """
+        bool: OUT: Result of the operation."""
+
     global _MCP_SDK_AVAILABLE
     if _MCP_SDK_AVAILABLE is None:
-        try:
-            import mcp  # noqa: F401
+        import importlib.util
 
-            _MCP_SDK_AVAILABLE = True
-        except ImportError:
-            _MCP_SDK_AVAILABLE = False
+        _MCP_SDK_AVAILABLE = importlib.util.find_spec("mcp") is not None
     return _MCP_SDK_AVAILABLE
 
 
 class MCPClient:
-    """Client for connecting to and interacting with MCP servers.
-
-    This client supports multiple transports for communicating with MCP servers:
-    - STDIO: Local subprocess communication (for npx, uvx style servers)
-    - SSE: Server-Sent Events over HTTP (legacy 2024-11-05 protocol)
-    - STREAMABLE_HTTP: Streamable HTTP transport (recommended for 2025+)
-
-    Note: SSE and STREAMABLE_HTTP transports require the optional `mcp` package.
-    Install with: pip install xerxes[mcp]
+    """Mcpclient.
 
     Attributes:
-        config: MCP server configuration
-        process: Subprocess for stdio transport (if applicable)
-        session_id: Session identifier for this connection
-        tools: Available tools from the server
-        resources: Available resources from the server
-        prompts: Available prompts from the server
-    """
+        _request_id_counter (int): request id counter."""
 
     _request_id_counter: int = 0
 
     def __init__(self, config: MCPServerConfig):
-        """Initialize MCP client with server configuration.
-
-        Sets up the client in a disconnected state with empty capability lists.
-        Call ``connect()`` to establish a connection to the MCP server and
-        discover its capabilities.
+        """Initialize the instance.
 
         Args:
-            config: Configuration for the MCP server, specifying the transport
-                type, command/URL, and optional environment variables or headers.
+            self: IN: The instance. OUT: Used for attribute access.
+            config (MCPServerConfig): IN: config. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
 
-        Example:
-            >>> config = MCPServerConfig(name="fs", command="npx", args=["-y", "@mcp/server-fs"])
-            >>> client = MCPClient(config)
-            >>> connected = await client.connect()
-        """
         self.config = config
         self.process: subprocess.Popen | None = None
         self.session_id: str | None = None
@@ -110,30 +73,24 @@ class MCPClient:
         self._exit_stack: AsyncExitStack | None = None
 
     def _next_request_id(self) -> int:
-        """Generate unique JSON-RPC request ID.
+        """Internal helper to next request id.
 
-        Uses a class-level counter that is thread-safe via Python's GIL.
-        Each call returns a monotonically increasing integer.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A unique integer ID for the JSON-RPC request.
-        """
+            int: OUT: Result of the operation."""
+
         MCPClient._request_id_counter += 1
         return MCPClient._request_id_counter
 
     async def connect(self) -> bool:
-        """Connect to the MCP server.
+        """Asynchronously Connect.
 
-        Establishes a connection using the transport type specified in the
-        configuration. Handles deprecated transport aliases (HTTP -> SSE,
-        WEBSOCKET -> STREAMABLE_HTTP) for backward compatibility.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            True if connection successful, False otherwise.
+            bool: OUT: Result of the operation."""
 
-        Note:
-            After successful connection, use `disconnect()` to clean up resources.
-        """
         try:
             transport = self.config.transport
             if self.config.url and self.config.url.startswith(("ws://", "wss://")):
@@ -158,22 +115,13 @@ class MCPClient:
             return False
 
     async def _connect_stdio(self) -> bool:
-        """Connect using stdio transport.
+        """Asynchronously Internal helper to connect stdio.
 
-        Spawns the MCP server as a subprocess and communicates via stdin/stdout.
-        This is the standard transport for local MCP servers invoked via npx, uvx,
-        or similar package runners.
-
-        The connection process:
-        1. Spawns the subprocess with configured command and arguments
-        2. Sends JSON-RPC initialize request
-        3. Waits for and validates the server response
-        4. Sends initialized notification
-        5. Discovers server capabilities (tools, resources, prompts)
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            True if connection successful, False otherwise.
-        """
+            bool: OUT: Result of the operation."""
+
         if not self.config.command:
             self.logger.error(f"No command specified for stdio MCP server {self.config.name}")
             return False
@@ -247,21 +195,13 @@ class MCPClient:
             return False
 
     async def _connect_sse(self) -> bool:
-        """Connect using SSE transport (legacy HTTP+SSE protocol).
+        """Asynchronously Internal helper to connect sse.
 
-        This transport uses Server-Sent Events over HTTP, which was the standard
-        for MCP protocol version 2024-11-05. For newer deployments, prefer
-        STREAMABLE_HTTP transport.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            True if connection successful, False otherwise.
+            bool: OUT: Result of the operation."""
 
-        Raises:
-            ImportError: If the MCP SDK is not installed.
-
-        Note:
-            Requires the optional `mcp` package: pip install xerxes[mcp]
-        """
         if not _check_mcp_sdk():
             raise ImportError("SSE transport requires the MCP SDK. Install with: pip install xerxes[mcp]")
 
@@ -305,20 +245,13 @@ class MCPClient:
             return False
 
     async def _connect_streamable_http(self) -> bool:
-        """Connect using Streamable HTTP transport (recommended for 2025+).
+        """Asynchronously Internal helper to connect streamable http.
 
-        This is the recommended transport for new MCP deployments. It uses
-        standard HTTP with streaming support for bidirectional communication.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            True if connection successful, False otherwise.
+            bool: OUT: Result of the operation."""
 
-        Raises:
-            ImportError: If the MCP SDK is not installed.
-
-        Note:
-            Requires the optional `mcp` package: pip install xerxes[mcp]
-        """
         if not _check_mcp_sdk():
             raise ImportError("Streamable HTTP transport requires the MCP SDK. Install with: pip install xerxes[mcp]")
 
@@ -362,15 +295,11 @@ class MCPClient:
             return False
 
     async def _discover_capabilities_sdk(self) -> None:
-        """Discover tools, resources, and prompts using the SDK session.
+        """Asynchronously Internal helper to discover capabilities sdk.
 
-        Queries the MCP server for available capabilities and populates
-        the `tools`, `resources`, and `prompts` attributes. This method
-        is used for SSE and Streamable HTTP transports that use the MCP SDK.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
 
-        Failures in discovering individual capability types are logged but
-        do not cause the entire operation to fail.
-        """
         if not self._session:
             return
 
@@ -421,17 +350,12 @@ class MCPClient:
             self.logger.debug(f"Failed to list prompts: {e}")
 
     def _write_message(self, message: dict[str, Any]) -> None:
-        """Write a message to the MCP server via stdio.
-
-        Serializes the message to JSON and writes it to the subprocess stdin,
-        followed by a newline character.
+        """Internal helper to write message.
 
         Args:
-            message: Dictionary containing the JSON-RPC message to send.
+            self: IN: The instance. OUT: Used for attribute access.
+            message (dict[str, Any]): IN: message. OUT: Consumed during execution."""
 
-        Raises:
-            RuntimeError: If the MCP server process is not available.
-        """
         if not self.process or not self.process.stdin:
             raise RuntimeError("MCP server process not available")
 
@@ -440,15 +364,13 @@ class MCPClient:
         self.process.stdin.flush()
 
     async def _read_message(self) -> dict[str, Any] | None:
-        """Read a message from the MCP server via stdio.
+        """Asynchronously Internal helper to read message.
 
-        Reads a line from the subprocess stdout and parses it as JSON.
-        Uses asyncio to avoid blocking the event loop while waiting.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Parsed JSON message as a dictionary, or None if no message
-            was received or parsing failed.
-        """
+            dict[str, Any] | None: OUT: Result of the operation."""
+
         if not self.process or not self.process.stdout:
             return None
 
@@ -478,14 +400,11 @@ class MCPClient:
             return None
 
     async def _discover_capabilities(self) -> None:
-        """Discover tools, resources, and prompts from the server.
+        """Asynchronously Internal helper to discover capabilities.
 
-        Sends JSON-RPC requests to list available tools, resources, and prompts
-        from the MCP server. Populates the `tools`, `resources`, and `prompts`
-        attributes with the discovered capabilities.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
 
-        This method is used for STDIO transport connections.
-        """
         tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": self._next_request_id()}
         self._write_message(tools_request)
         tools_response = await self._read_message()
@@ -539,21 +458,15 @@ class MCPClient:
             self.logger.info(f"Discovered {len(self.prompts)} prompts from {self.config.name}")
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Call a tool on the MCP server.
-
-        Invokes a tool by name with the provided arguments. Uses the SDK session
-        for SSE/Streamable HTTP transports or JSON-RPC for STDIO transport.
+        """Asynchronously Call tool.
 
         Args:
-            tool_name: Name of the tool to call.
-            arguments: Dictionary of arguments to pass to the tool.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            tool_name (str): IN: tool name. OUT: Consumed during execution.
+            arguments (dict[str, Any]): IN: arguments. OUT: Consumed during execution.
         Returns:
-            Tool execution result content.
+            Any: OUT: Result of the operation."""
 
-        Raises:
-            RuntimeError: If not connected to the server or tool call fails.
-        """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
@@ -579,20 +492,14 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def read_resource(self, uri: str) -> Any:
-        """Read a resource from the MCP server.
-
-        Fetches the content of a resource identified by its URI. Uses the SDK
-        session for SSE/Streamable HTTP transports or JSON-RPC for STDIO transport.
+        """Asynchronously Read resource.
 
         Args:
-            uri: Resource URI to read.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            uri (str): IN: uri. OUT: Consumed during execution.
         Returns:
-            Resource content as returned by the server.
+            Any: OUT: Result of the operation."""
 
-        Raises:
-            RuntimeError: If not connected to the server or resource read fails.
-        """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
@@ -613,22 +520,15 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
-        """Get a prompt from the MCP server.
-
-        Retrieves and renders a prompt template with the provided arguments.
-        Uses the SDK session for SSE/Streamable HTTP transports or JSON-RPC
-        for STDIO transport.
+        """Asynchronously Retrieve the prompt.
 
         Args:
-            name: Name of the prompt to retrieve.
-            arguments: Optional dictionary of arguments for prompt rendering.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            name (str): IN: name. OUT: Consumed during execution.
+            arguments (dict[str, Any] | None, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Rendered prompt text as a string.
+            str: OUT: Result of the operation."""
 
-        Raises:
-            RuntimeError: If not connected to the server or prompt fetch fails.
-        """
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
 
@@ -663,14 +563,11 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server.
+        """Asynchronously Disconnect.
 
-        Gracefully closes the connection and cleans up resources. For SDK-based
-        transports (SSE, Streamable HTTP), closes the async exit stack. For
-        STDIO transport, terminates the subprocess.
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
 
-        This method is safe to call multiple times.
-        """
         if self._exit_stack:
             try:
                 await self._exit_stack.__aexit__(None, None, None)
@@ -693,12 +590,13 @@ class MCPClient:
         self.logger.info(f"Disconnected from MCP server {self.config.name}")
 
     def __del__(self):
-        """Cleanup subprocess on object deletion.
+        """Dunder method for del.
 
-        Ensures the subprocess is terminated if still running when the
-        client object is garbage collected. This is a fallback; prefer
-        using `disconnect()` for explicit cleanup.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         if self.process and self.process.poll() is None:
             try:
                 self.process.terminate()

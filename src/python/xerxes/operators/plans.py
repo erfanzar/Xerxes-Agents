@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,18 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Plans module for Xerxes.
 
-
-"""Plan-state manager for operator tooling.
-
-Provides :class:`PlanStateManager`, a thin wrapper around
-:class:`~xerxes.operators.types.OperatorPlanState` that exposes
-convenience methods for updating and summarising the current execution
-plan.
-"""
+Exports:
+    - PlanStateManager"""
 
 from __future__ import annotations
 
@@ -25,59 +22,47 @@ from .types import OperatorPlanState
 
 
 class PlanStateManager:
-    """Manage per-runtime operator plan state.
-
-    Owns a single :class:`OperatorPlanState` instance and provides
-    methods to replace its contents and generate compact summaries
-    suitable for the TUI status bar.
-
-    Attributes:
-        _state: The underlying :class:`OperatorPlanState` that holds
-            the current plan steps, explanation, and revision counter.
-    """
+    """Plan state manager."""
 
     def __init__(self) -> None:
-        """Initialise the manager with an empty plan state."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self._state = OperatorPlanState()
 
     @property
     def state(self) -> OperatorPlanState:
-        """Return the current plan state.
+        """Return State.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            The underlying :class:`OperatorPlanState` instance.
-        """
+            OperatorPlanState: OUT: Result of the operation."""
+
         return self._state
 
     def update(self, explanation: str | None, plan: list[dict[str, str]]) -> dict:
-        """Replace the current plan contents.
-
-        Delegates to :meth:`OperatorPlanState.update` to atomically
-        swap the explanation and step list.
+        """Update.
 
         Args:
-            explanation: Optional short note describing the plan change
-                or current situation.
-            plan: List of step dictionaries.  Each dictionary should
-                contain at least a ``"step"`` key and an optional
-                ``"status"`` key (defaults to ``"pending"``).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            explanation (str | None): IN: explanation. OUT: Consumed during execution.
+            plan (list[dict[str, str]]): IN: plan. OUT: Consumed during execution.
         Returns:
-            The serialised plan state dictionary produced by
-            :meth:`OperatorPlanState.to_dict`.
-        """
+            dict: OUT: Result of the operation."""
+
         return self._state.update(explanation, plan)
 
     def summary(self) -> str:
-        """Return a compact plan summary string for the TUI.
+        """Summary.
 
-        Produces a comma-separated list of the first three steps in
-        ``status:step`` format.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A human-readable summary string.  Returns ``"No plan"``
-            when no steps have been recorded.
-        """
+            str: OUT: Result of the operation."""
+
         if not self._state.steps:
             return "No plan"
         return ", ".join(f"{step.status}:{step.step}" for step in self._state.steps[:3])

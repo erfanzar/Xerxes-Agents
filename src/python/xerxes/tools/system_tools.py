@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,28 +6,19 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""System tools module for Xerxes.
 
-
-"""System and environment tools for interacting with the operating system.
-
-This module provides a collection of system tools for agents to interact
-with the operating system and environment. It includes:
-- System information retrieval (OS, CPU, memory, disk, network)
-- Process management and monitoring
-- File system operations (copy, move, delete, search)
-- Environment variable management
-- Temporary file and directory handling
-
-All tools provide comprehensive error handling and return structured
-dictionaries with operation results and error information.
-
-Example:
-    >>> info = SystemInfo.static_call(info_type="cpu")
-    >>> print(f"CPU cores: {info['cpu']['logical_cores']}")
-"""
+Exports:
+    - SystemInfo
+    - ProcessManager
+    - FileSystemTools
+    - EnvironmentManager
+    - TempFileManager"""
 
 from __future__ import annotations
 
@@ -45,21 +36,9 @@ from ..types import AgentBaseFn
 
 
 class SystemInfo(AgentBaseFn):
-    """Get system and environment information.
+    """System info.
 
-    Provides comprehensive system information retrieval capabilities
-    including operating system details, CPU metrics, memory usage,
-    disk space, and network interface information.
-
-    Uses the psutil library for cross-platform system monitoring
-    and the platform module for OS-level information.
-
-    Attributes:
-        Inherits from AgentBaseFn for agent integration.
-
-    Example:
-        >>> result = SystemInfo.static_call(info_type="memory")
-        >>> print(f"Available: {result['memory']['available_gb']} GB")
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -67,30 +46,14 @@ class SystemInfo(AgentBaseFn):
         info_type: str = "all",
         **context_variables,
     ) -> dict[str, Any]:
-        """Get system information.
-
-        Retrieves various types of system information based on the
-        requested info_type. Can retrieve all categories or specific
-        subsets for efficiency.
+        """Static call.
 
         Args:
-            info_type: Type of information to retrieve. Options:
-                - "all": All available system information
-                - "os": Operating system and Python version
-                - "cpu": CPU cores, usage, and frequency
-                - "memory": RAM usage and availability
-                - "disk": Disk usage and partitions
-                - "network": Network interfaces and addresses
-            **context_variables: Additional context passed from the agent.
-
+            info_type (str, optional): IN: info type. Defaults to 'all'. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Dictionary containing requested system information:
-                - os: System, release, version, machine, processor, python_version
-                - cpu: Physical/logical cores, usage_percent, frequency
-                - memory: Total, available, used, percent (in bytes and GB)
-                - disk: Total, used, free, percent, partitions list
-                - network: Hostname, interfaces with addresses
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         result: dict[str, Any] = {}
 
         if info_type in ["all", "os"]:
@@ -173,24 +136,9 @@ class SystemInfo(AgentBaseFn):
 
 
 class ProcessManager(AgentBaseFn):
-    """Manage and monitor system processes.
+    """Process manager.
 
-    Provides process management capabilities including listing,
-    finding, inspecting, running commands, and terminating processes.
-    Uses psutil for cross-platform process management.
-
-    Supports graceful termination with fallback to force kill,
-    and provides detailed process information including resource usage.
-
-    Attributes:
-        Inherits from AgentBaseFn for agent integration.
-
-    Example:
-        >>> result = ProcessManager.static_call(
-        ...     operation="find",
-        ...     process_name="python"
-        ... )
-        >>> print(f"Found {result['count']} Python processes")
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -202,33 +150,18 @@ class ProcessManager(AgentBaseFn):
         limit: int = 20,
         **context_variables,
     ) -> dict[str, Any]:
-        """Manage system processes.
-
-        Performs various process management operations including listing,
-        finding, getting detailed info, killing, and running processes.
+        """Static call.
 
         Args:
-            operation: Operation to perform:
-                - "list": List top processes by CPU usage
-                - "find": Find processes by name
-                - "info": Get detailed process information by PID
-                - "kill": Terminate a process by PID
-                - "run": Execute a shell command
-            process_name: Name of process to find (for find operation).
-            pid: Process ID (for info and kill operations).
-            command: Shell command to run (for run operation).
-            limit: Maximum number of processes to return (default: 20).
-            **context_variables: Additional context passed from the agent.
-
+            operation (str): IN: operation. OUT: Consumed during execution.
+            process_name (str | None, optional): IN: process name. Defaults to None. OUT: Consumed during execution.
+            pid (int | None, optional): IN: pid. Defaults to None. OUT: Consumed during execution.
+            command (str | None, optional): IN: command. Defaults to None. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 20. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Dictionary containing operation-specific results:
-                - list: processes list with pid, name, cpu_percent, memory_percent
-                - find: found list with matching processes
-                - info: detailed process info including memory, threads, cmdline
-                - kill: status, pid, name, message
-                - run: completed, returncode, stdout, stderr
-                - error: Error message if operation failed
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         result: dict[str, Any] = {}
 
         if operation == "list":
@@ -347,26 +280,9 @@ class ProcessManager(AgentBaseFn):
 
 
 class FileSystemTools(AgentBaseFn):
-    """Advanced file system operations.
+    """File system tools.
 
-    Provides comprehensive file system operations including copying,
-    moving, deleting files and directories, searching with patterns,
-    getting detailed file information, and generating directory trees.
-
-    Supports recursive operations and pattern-based file searching
-    using glob patterns.
-
-    Attributes:
-        Inherits from AgentBaseFn for agent integration.
-
-    Example:
-        >>> result = FileSystemTools.static_call(
-        ...     operation="search",
-        ...     path="./src",
-        ...     pattern="*.py",
-        ...     recursive=True
-        ... )
-        >>> print(f"Found {result['count']} Python files")
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -378,34 +294,18 @@ class FileSystemTools(AgentBaseFn):
         recursive: bool = False,
         **context_variables,
     ) -> dict[str, Any]:
-        """Perform file system operations.
-
-        Executes various file system operations with support for
-        recursive operations and pattern matching.
+        """Static call.
 
         Args:
-            operation: Operation to perform:
-                - "copy": Copy file or directory
-                - "move": Move file or directory
-                - "delete": Delete file or directory
-                - "search": Search for files matching pattern
-                - "info": Get detailed file/directory information
-                - "tree": Generate directory tree structure
-            path: Source path (required for most operations).
-            destination: Destination path (for copy/move operations).
-            pattern: Glob pattern for search (e.g., "*.py", "**/*.txt").
-            recursive: Whether to operate recursively (default: False).
-            **context_variables: Additional context passed from the agent.
-
+            operation (str): IN: operation. OUT: Consumed during execution.
+            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
+            destination (str | None, optional): IN: destination. Defaults to None. OUT: Consumed during execution.
+            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
+            recursive (bool, optional): IN: recursive. Defaults to False. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Dictionary containing operation-specific results:
-                - copy/move: success, source, destination
-                - delete: success, deleted path
-                - search: matches list, count
-                - info: path, exists, is_file, is_dir, size, timestamps
-                - tree: nested directory tree structure
-                - error: Error message if operation failed
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         result: dict[str, Any] = {}
 
         if operation == "copy":
@@ -527,6 +427,15 @@ class FileSystemTools(AgentBaseFn):
             try:
 
                 def build_tree(dir_path: Path, prefix: str = "", max_depth: int = 3, current_depth: int = 0):
+                    """Build tree.
+
+                    Args:
+                        dir_path (Path): IN: dir path. OUT: Consumed during execution.
+                        prefix (str, optional): IN: prefix. Defaults to ''. OUT: Consumed during execution.
+                        max_depth (int, optional): IN: max depth. Defaults to 3. OUT: Consumed during execution.
+                        current_depth (int, optional): IN: current depth. Defaults to 0. OUT: Consumed during execution.
+                    Returns:
+                        Any: OUT: Result of the operation."""
                     if current_depth >= max_depth:
                         return []
 
@@ -557,24 +466,9 @@ class FileSystemTools(AgentBaseFn):
 
 
 class EnvironmentManager(AgentBaseFn):
-    """Manage environment variables and settings.
+    """Environment manager.
 
-    Provides operations for getting, setting, listing, and removing
-    environment variables. Includes filtering capabilities and
-    automatic listing of commonly important environment variables.
-
-    Changes to environment variables affect only the current process
-    and its child processes.
-
-    Attributes:
-        Inherits from AgentBaseFn for agent integration.
-
-    Example:
-        >>> result = EnvironmentManager.static_call(
-        ...     operation="get",
-        ...     key="PATH"
-        ... )
-        >>> print(result["value"])
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -584,34 +478,16 @@ class EnvironmentManager(AgentBaseFn):
         value: str | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Manage environment variables.
-
-        Performs operations on environment variables within the
-        current process scope.
+        """Static call.
 
         Args:
-            operation: Operation to perform:
-                - "get": Get value of specific variable
-                - "set": Set a variable to a value
-                - "list": List environment variables (filtered or common)
-                - "remove": Remove an environment variable
-            key: Environment variable name (required for get/set/remove).
-                For list, used as prefix filter.
-            value: Value to set (required for set operation).
-            **context_variables: Additional context passed from the agent.
-
+            operation (str): IN: operation. OUT: Consumed during execution.
+            key (str | None, optional): IN: key. Defaults to None. OUT: Consumed during execution.
+            value (str | None, optional): IN: value. Defaults to None. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Dictionary containing operation-specific results:
-                - get: key, value, exists
-                - set: success, key, value
-                - list: environment dict, count
-                - remove: success, removed key
-                - error: Error message if operation failed
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Note:
-            Environment changes are process-scoped and do not persist
-            after the program exits.
-        """
         result: dict[str, Any] = {}
 
         if operation == "get":
@@ -680,25 +556,9 @@ class EnvironmentManager(AgentBaseFn):
 
 
 class TempFileManager(AgentBaseFn):
-    """Create and manage temporary files and directories.
+    """Temp file manager.
 
-    Provides functionality for creating temporary files and directories
-    with optional content, custom prefixes/suffixes, and cleanup
-    operations for Xerxes-created temporary files.
-
-    Uses the system's default temporary directory and provides
-    options for automatic or manual cleanup.
-
-    Attributes:
-        Inherits from AgentBaseFn for agent integration.
-
-    Example:
-        >>> result = TempFileManager.static_call(
-        ...     operation="create_file",
-        ...     content="temporary data",
-        ...     suffix=".txt"
-        ... )
-        >>> print(result["path"])
+    Inherits from: AgentBaseFn
     """
 
     @staticmethod
@@ -710,33 +570,18 @@ class TempFileManager(AgentBaseFn):
         cleanup: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Manage temporary files and directories.
-
-        Creates temporary files or directories in the system temp
-        directory, or cleans up previously created Xerxes temp files.
+        """Static call.
 
         Args:
-            operation: Operation to perform:
-                - "create_file": Create a temporary file
-                - "create_dir": Create a temporary directory
-                - "cleanup": Remove all Xerxes temp files/directories
-            content: Content to write to temporary file (optional).
-            suffix: File extension/suffix (e.g., ".txt", ".json").
-            prefix: Filename prefix (default: "xerxes_").
-            cleanup: Whether to mark for automatic cleanup (default: True).
-            **context_variables: Additional context passed from the agent.
-
+            operation (str): IN: operation. OUT: Consumed during execution.
+            content (str | None, optional): IN: content. Defaults to None. OUT: Consumed during execution.
+            suffix (str | None, optional): IN: suffix. Defaults to None. OUT: Consumed during execution.
+            prefix (str | None, optional): IN: prefix. Defaults to None. OUT: Consumed during execution.
+            cleanup (bool, optional): IN: cleanup. Defaults to True. OUT: Consumed during execution.
+            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            Dictionary containing operation-specific results:
-                - create_file: path, exists, size
-                - create_dir: path, exists
-                - cleanup: temp_dir, found, deleted, failed, deleted_count
-                - error: Error message if operation failed
+            dict[str, Any]: OUT: Result of the operation."""
 
-        Note:
-            Files created with cleanup=False will persist after program exit.
-            The cleanup operation only removes files with "xerxes_" prefix.
-        """
         result: dict[str, Any] = {}
 
         if operation == "create_file":

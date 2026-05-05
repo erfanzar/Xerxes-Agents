@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,7 +6,9 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
@@ -63,32 +65,15 @@ if TYPE_CHECKING:
 
 @dataclass
 class PlanStep:
-    """A single step in the execution plan.
-
-    PlanStep represents an atomic unit of work within an ExecutionPlan.
-    Each step is assigned to a specific agent and defines an action to
-    perform along with any required arguments and dependencies on other steps.
+    """A single step within an execution plan.
 
     Attributes:
-        step_id: Unique integer identifier for this step within the plan.
-        agent: The role name of the agent assigned to execute this step.
-        action: The action verb describing what the step does (e.g., "research",
-            "write", "analyze").
-        arguments: Dictionary of key-value pairs providing input parameters
-            for the action. May include references to results from previous steps.
-        dependencies: List of step IDs that must complete before this step
-            can execute. Empty list means the step can run immediately.
-        description: Human-readable description of what this step accomplishes.
-
-    Example:
-        step = PlanStep(
-            step_id=2,
-            agent="Writer",
-            action="write_draft",
-            arguments={"topic": "AI trends", "input": "result_from_step_1"},
-            dependencies=[1],
-            description="Write initial draft based on research findings"
-        )
+        step_id (int): Unique identifier for the step.
+        agent (str): The role name of the agent assigned to this step.
+        action (str): The action to perform in this step.
+        arguments (dict): Key-value arguments for the action.
+        dependencies (list[int]): IDs of steps that must complete before this one.
+        description (str): Human-readable description of the step.
     """
 
     step_id: int
@@ -99,48 +84,26 @@ class PlanStep:
     description: str = ""
 
     def __str__(self) -> str:
-        """Return string representation of the step.
+        """Return a concise string representation of the step.
 
         Returns:
-            str: Formatted string showing step ID, agent, and action.
+            str: Formatted as ``"Step {id}: {agent} -> {action}"``.
+                OUT: Used for logging and display.
         """
+
         return f"Step {self.step_id}: {self.agent} -> {self.action}"
 
 
 @dataclass
 class ExecutionPlan:
-    """Complete execution plan with steps and metadata.
-
-    ExecutionPlan represents a complete plan for achieving an objective,
-    consisting of multiple PlanStep instances with their dependencies.
-    It provides methods for managing steps and determining execution order
-    based on dependency resolution.
-
-    The plan tracks metadata like complexity and estimated time to help
-    with resource allocation and progress estimation.
+    """A structured plan composed of ordered steps to achieve an objective.
 
     Attributes:
-        plan_id: Unique identifier for this plan, typically derived from
-            the objective hash.
-        objective: The high-level goal this plan is designed to achieve.
-        steps: List of PlanStep instances that make up the plan.
-        estimated_time: Estimated execution time in minutes. Used for
-            planning and progress tracking.
-        complexity: Plan complexity rating ("low", "medium", or "high").
-            Affects resource allocation and timeout settings.
-
-    Example:
-        plan = ExecutionPlan(
-            plan_id="plan_1234",
-            objective="Create a comprehensive market analysis",
-            complexity="high",
-            estimated_time=30.0
-        )
-        plan.add_step(research_step)
-        plan.add_step(analysis_step)
-
-
-        ready_steps = plan.get_next_steps(completed_steps=set())
+        plan_id (str): Unique identifier for the plan.
+        objective (str): The goal the plan addresses.
+        steps (list[PlanStep]): Ordered list of plan steps.
+        estimated_time (float): Estimated execution time in minutes.
+        complexity (Literal["low", "medium", "high"]): Estimated complexity.
     """
 
     plan_id: str
@@ -150,48 +113,47 @@ class ExecutionPlan:
     complexity: Literal["low", "medium", "high"] = "medium"
 
     def add_step(self, step: PlanStep):
-        """Add a step to the plan.
-
-        Appends a new PlanStep to the end of the steps list.
+        """Append a step to the plan.
 
         Args:
-            step: The PlanStep instance to add to the plan.
+            step (PlanStep): The step to add.
+                IN: A fully configured ``PlanStep`` instance.
+                OUT: Appended to ``self.steps``.
         """
+
         self.steps.append(step)
 
     def get_step(self, step_id: int) -> PlanStep | None:
-        """Get step by ID.
-
-        Searches through the plan's steps to find one with the matching ID.
+        """Retrieve a step by its ID.
 
         Args:
-            step_id: The unique identifier of the step to retrieve.
+            step_id (int): The step identifier to search for.
+                IN: Matched against ``step.step_id``.
+                OUT: Used for lookup in the step list.
 
         Returns:
-            PlanStep: The step with the matching ID, or None if not found.
+            PlanStep | None: The matching step, or ``None`` if not found.
+                OUT: Direct reference from ``self.steps``.
         """
+
         for step in self.steps:
             if step.step_id == step_id:
                 return step
         return None
 
     def get_next_steps(self, completed_steps: set[int]) -> list[PlanStep]:
-        """Get steps that can be executed next based on dependencies.
-
-        Analyzes the plan to find all steps whose dependencies have been
-        satisfied (all dependent steps are in the completed set). This
-        enables parallel execution of independent steps.
+        """Return steps whose dependencies are fully satisfied.
 
         Args:
-            completed_steps: Set of step IDs that have already completed
-                execution successfully.
+            completed_steps (set[int]): IDs of steps already completed.
+                IN: Represents the current execution progress.
+                OUT: Compared against each step's ``dependencies``.
 
         Returns:
-            list[PlanStep]: List of steps that are ready to execute. These
-                steps have not yet been completed and have all their
-                dependencies satisfied. May return multiple steps if they
-                can be executed in parallel.
+            list[PlanStep]: Steps ready for execution.
+                OUT: Empty if no steps are eligible or if circular dependencies exist.
         """
+
         next_steps = []
         for step in self.steps:
             if step.step_id not in completed_steps:
@@ -201,38 +163,10 @@ class ExecutionPlan:
 
 
 class CortexPlanner:
-    """XML-based planner agent for task orchestration.
+    """Generates and executes structured execution plans for complex objectives.
 
-    CortexPlanner uses an LLM-powered agent to analyze objectives and create
-    structured execution plans in XML format. The planner understands agent
-    capabilities and creates efficient plans with proper dependency ordering.
-
-    The planner operates in two phases:
-    1. Plan Creation: Generates an ExecutionPlan from a natural language objective
-    2. Plan Execution: Executes the plan step by step, respecting dependencies
-
-    Attributes:
-        cortex_instance: Reference to the parent Cortex instance for access
-            to agents and execution context.
-        verbose: Whether to output detailed logging information.
-        planning_model: Optional model identifier for the planner agent.
-        logger: Logger instance for verbose output (None if verbose=False).
-        template_engine: PromptTemplate instance for generating planning prompts.
-        planner_agent: CortexAgent configured as a strategic planner.
-
-    Example:
-        planner = CortexPlanner(
-            cortex_instance=cortex,
-            verbose=True,
-            planning_model="gpt-4"
-        )
-
-        plan = planner.create_plan(
-            objective="Build a data pipeline",
-            available_agents=[analyst, engineer]
-        )
-
-        results = planner.execute_plan(plan)
+    Uses a dedicated ``CortexAgent`` as a strategic planner to create XML-based
+    execution plans, then executes them step-by-step against a ``Cortex`` instance.
     """
 
     def __init__(
@@ -241,18 +175,20 @@ class CortexPlanner:
         verbose: bool = True,
         planning_model: str | None = None,
     ):
-        """Initialize the CortexPlanner with configuration.
-
-        Creates a new planner instance with an internal planner agent
-        configured for strategic planning tasks.
+        """Initialize the planner with a planning agent.
 
         Args:
-            cortex_instance: Optional reference to the parent Cortex instance.
-                Required for plan execution but optional for plan creation.
-            verbose: Whether to enable detailed logging output. Defaults to True.
-            planning_model: Optional model identifier for the planner agent
-                (e.g., "gpt-4"). If None, uses the agent's default.
+            cortex_instance (Cortex | None): The parent ``Cortex`` instance.
+                IN: Provides agents and execution context for plan execution.
+                OUT: Stored for later use in ``execute_plan``.
+            verbose (bool): Whether to log planning activity.
+                IN: Controls verbosity of planner output.
+                OUT: Passed to the internal planner agent and logger.
+            planning_model (str | None): Model identifier for the planner agent.
+                IN: Overrides the default model for the planner agent.
+                OUT: Set as the ``model`` field of the planner agent.
         """
+
         self.cortex_instance = cortex_instance
         self.verbose = verbose
         self.planning_model = planning_model
@@ -278,26 +214,28 @@ class CortexPlanner:
         streamer_buffer: StreamerBuffer | None = None,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> ExecutionPlan:
-        """Create an execution plan for the given objective.
-
-        Uses the planner agent to analyze the objective and available agents,
-        then generates a structured ExecutionPlan with properly ordered steps.
-        Supports streaming for real-time feedback during plan creation.
+        """Generate an execution plan for the given objective.
 
         Args:
-            objective: The high-level goal to create a plan for.
-            available_agents: List of CortexAgent instances that can be
-                assigned to plan steps.
-            context: Optional additional context to guide plan creation.
-            streamer_buffer: Optional StreamerBuffer for streaming output.
-            stream_callback: Optional callback function for streaming chunks.
+            objective (str): The high-level goal to plan for.
+                IN: Passed to the planner agent as the primary objective.
+                OUT: Drives the content of the generated plan.
+            available_agents (list[CortexAgent]): Agents that can be assigned to steps.
+                IN: Their roles and goals are rendered into the planner prompt.
+                OUT: Used by the planner agent to choose appropriate agents per step.
+            context (str): Additional context for planning.
+                IN: Appended to the planner prompt to guide strategy.
+                OUT: Included in the rendered planning prompt.
+            streamer_buffer (StreamerBuffer | None): Optional buffer for streaming.
+                IN: Passed to the planner agent's ``execute`` method.
+                OUT: Receives streaming chunks during plan generation.
+            stream_callback (Callable | None): Optional callback for streaming.
+                IN: Called with each chunk during planner execution.
+                OUT: Enables real-time observation of plan creation.
 
         Returns:
-            ExecutionPlan: A complete plan with steps, dependencies, and
-                metadata. Returns a fallback plan if XML parsing fails.
-
-        Raises:
-            No exceptions are raised; failures result in fallback plans.
+            ExecutionPlan: A structured plan with steps, dependencies, and assignments.
+                OUT: Parsed from the planner agent's XML response.
         """
 
         if self.verbose and self.logger:
@@ -370,24 +308,24 @@ class CortexPlanner:
             return self._create_fallback_plan(objective, available_agents)
 
     def execute_plan(self, plan: ExecutionPlan, tasks: list["CortexTask"] | None = None) -> dict:
-        """Execute the plan step by step.
-
-        Iterates through plan steps, respecting dependencies, and executes
-        each step using the assigned agent. Results from previous steps are
-        passed as context to dependent steps.
+        """Execute an ``ExecutionPlan`` against the associated ``Cortex`` instance.
 
         Args:
-            plan: The ExecutionPlan to execute.
-            tasks: Optional list of original CortexTask objects to provide
-                additional context during execution.
+            plan (ExecutionPlan): The plan to execute.
+                IN: Contains steps with agents, actions, and dependencies.
+                OUT: Iterated to dispatch work to the appropriate agents.
+            tasks (list | None): Optional original tasks for context.
+                IN: Descriptions and expected outputs are included in step context.
+                OUT: Rendered into the task context string.
 
         Returns:
-            dict: Dictionary mapping step IDs to their execution results.
-                Each key is a step_id (int) and value is the result string.
+            dict: Mapping from step ID to result string.
+                OUT: Contains outputs for every step attempted.
 
         Raises:
-            ValueError: If cortex_instance is not set (required for execution).
+            ValueError: If no ``Cortex`` instance is associated with the planner.
         """
+
         if not self.cortex_instance:
             raise ValueError("Cortex instance required for plan execution")
 
@@ -439,17 +377,18 @@ class CortexPlanner:
         return step_results
 
     def _format_agents_info(self, agents: list[CortexAgent]) -> str:
-        """Format agent information for planning prompt.
-
-        Creates a formatted string describing all available agents and
-        their capabilities for inclusion in the planning prompt.
+        """Format agent roles, goals, and tools into a summary string.
 
         Args:
-            agents: List of CortexAgent instances to format.
+            agents (list[CortexAgent]): The agents to summarize.
+                IN: Each agent should have ``role``, ``goal``, and optionally ``tools``.
+                OUT: Iterated to produce a bulleted summary.
 
         Returns:
-            str: Newline-separated string with agent roles, goals, and tools.
+            str: A newline-separated summary of agent capabilities.
+                OUT: Suitable for inclusion in planning prompts.
         """
+
         agents_info = []
         for agent in agents:
             info = f"- {agent.role}: {agent.goal}"
@@ -460,19 +399,24 @@ class CortexPlanner:
         return "\n".join(agents_info)
 
     def _build_planning_prompt(self, objective: str, agents_info: str, context: str) -> str:
-        """Build the planning prompt with XML format requirements.
-
-        Constructs a detailed prompt that instructs the planner agent to
-        create an execution plan in the expected XML format.
+        """Build a raw planning prompt string (fallback implementation).
 
         Args:
-            objective: The goal to plan for.
-            agents_info: Formatted string describing available agents.
-            context: Additional context to include in the prompt.
+            objective (str): The goal to plan for.
+                IN: Inserted into the prompt template.
+                OUT: Becomes the OBJECTIVE section of the prompt.
+            agents_info (str): Pre-formatted agent summary.
+                IN: Inserted under AVAILABLE AGENTS.
+                OUT: Provides context on assignable agents.
+            context (str): Additional planning context.
+                IN: Inserted under CONTEXT.
+                OUT: Defaults to ``"No additional context provided"`` if empty.
 
         Returns:
-            str: Complete planning prompt with XML template and instructions.
+            str: The complete planning prompt string.
+                OUT: Ready to send to a planner agent.
         """
+
         return f"""
 You are a strategic planner. Create a detailed execution plan for the following objective.
 
@@ -524,24 +468,24 @@ Respond ONLY with the XML plan, no additional text.
 """
 
     def _parse_xml_plan(self, xml_response: str, objective: str) -> ExecutionPlan:
-        """Parse XML plan response into ExecutionPlan object.
-
-        Extracts the XML plan from the LLM response and converts it into
-        an ExecutionPlan with PlanStep instances. Handles extraction of
-        the plan from mixed text/XML responses.
+        """Parse an XML plan response into an ``ExecutionPlan``.
 
         Args:
-            xml_response: The raw response from the planner agent,
-                potentially containing XML within other text.
-            objective: The original objective, used as fallback if not
-                found in the XML.
+            xml_response (str): Raw XML or text containing a ``<plan>`` element.
+                IN: Extracted and parsed as XML.
+                OUT: Transformed into structured ``PlanStep`` objects.
+            objective (str): The original objective (fallback if not in XML).
+                IN: Used when the XML lacks an ``<objective>`` tag.
+                OUT: Becomes the plan's objective.
 
         Returns:
-            ExecutionPlan: Parsed plan with all steps and metadata.
+            ExecutionPlan: The parsed plan with steps and metadata.
+                OUT: Ready for execution.
 
         Raises:
             ValueError: If the XML is malformed or cannot be parsed.
         """
+
         try:
             xml_match = re.search(r"<plan>.*?</plan>", xml_response, re.DOTALL)
             if xml_match:
@@ -607,19 +551,21 @@ Respond ONLY with the XML plan, no additional text.
             raise ValueError(f"Invalid XML plan format: {e}") from e
 
     def _create_fallback_plan(self, objective: str, agents: list[CortexAgent]) -> ExecutionPlan:
-        """Create a simple fallback plan if XML parsing fails.
-
-        Generates a minimal plan with a single step when the normal
-        planning process fails. Uses the first available agent to
-        execute the objective directly.
+        """Create a minimal fallback plan when planning fails.
 
         Args:
-            objective: The original objective that couldn't be planned.
-            agents: List of available agents; first one will be used.
+            objective (str): The goal to fall back on.
+                IN: Becomes the fallback plan's objective.
+                OUT: Stored in the generated plan.
+            agents (list[CortexAgent]): Available agents.
+                IN: The first agent is assigned the single fallback step.
+                OUT: Used to populate the fallback step's agent and description.
 
         Returns:
-            ExecutionPlan: Simple plan with one step using the first agent.
+            ExecutionPlan: A simple one-step fallback plan.
+                OUT: Ensures the system can still attempt execution.
         """
+
         plan = ExecutionPlan(
             plan_id=f"fallback_{hash(objective) % 10000}", objective=objective, complexity="low", estimated_time=5.0
         )
@@ -637,24 +583,28 @@ Respond ONLY with the XML plan, no additional text.
         return plan
 
     def _execute_step(self, step: PlanStep, previous_results: dict, task_context: str = "") -> str:
-        """Execute a single plan step.
-
-        Finds the appropriate agent and executes the step's action with
-        the specified arguments. Resolves references to previous step
-        results in the arguments.
+        """Execute a single plan step through the associated ``Cortex``.
 
         Args:
-            step: The PlanStep to execute.
-            previous_results: Dictionary mapping step IDs to their results,
-                used to resolve references like "result_from_step_1".
-            task_context: Optional context string from original tasks.
+            step (PlanStep): The step to execute.
+                IN: Contains agent, action, arguments, and dependencies.
+                OUT: Translated into a task description and dispatched.
+            previous_results (dict): Mapping from step ID to output string.
+                IN: Results from already-completed steps.
+                OUT: Referenced to resolve argument placeholders like
+                ``"result_from_step_N"``.
+            task_context (str): Additional task-level context.
+                IN: Prepended to the step's execution context.
+                OUT: Included in the prompt sent to the agent.
 
         Returns:
-            str: The result of executing the step.
+            str: The output produced by the assigned agent.
+                OUT: The result of executing the step's action.
 
         Raises:
-            ValueError: If cortex_instance is not set or agent not found.
+            ValueError: If the assigned agent is not found in the ``Cortex``.
         """
+
         if not self.cortex_instance:
             raise ValueError("Cortex instance required")
 
@@ -704,17 +654,14 @@ Respond ONLY with the XML plan, no additional text.
         return executed
 
     def _log_plan_summary(self, plan: ExecutionPlan):
-        """Log a summary of the execution plan.
-
-        Outputs a formatted summary of the plan including its objective,
-        step count, complexity, estimated time, and each step's details.
+        """Log a summary of the plan to the internal logger.
 
         Args:
-            plan: The ExecutionPlan to summarize.
-
-        Note:
-            Only logs if a logger is available (verbose mode enabled).
+            plan (ExecutionPlan): The plan to summarize.
+                IN: Provides objective, steps, complexity, and estimated time.
+                OUT: Iterated to produce log lines.
         """
+
         if self.logger:
             self.logger.info("📋 Plan Summary:")
             self.logger.info(f"  • Objective: {plan.objective}")

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,58 +6,24 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Agent definition registry and loader.
 
+This module manages built-in and user-defined agent definitions, loading them
+from YAML files, Markdown files with frontmatter, and project-level
+``agents.yaml`` configurations.
 
-"""Agent definitions with built-in types and file-based loading.
-
-Inspired by the nano-claude-code ``AgentDefinition`` pattern, this module
-provides:
-
-- **Built-in agent types**: general-purpose, coder, reviewer, researcher,
-  tester, planner, data-analyst — ready to use out of the box.
-- **File-based definitions**: Load agent definitions from ``.md`` files
-  with YAML frontmatter, supporting user-level (``~/.xerxes/agents/``)
-  and project-level (``.xerxes/agents/``) overrides.
-- **YAML agent specs**: ``agent.yaml`` files with inheritance (Kimi-style).
-- **Registry**: A unified lookup for all agent definitions.
-
-File format::
-
-    ---
-    description: "Short description"
-    model: claude-sonnet-4-6
-    tools: [Read, Write, Edit, Bash]
-    ---
-
-    System prompt body goes here...
-
-Or as a YAML spec (``agent.yaml``)::
-
-    version: 1
-    agent:
-      name: coder
-      extend: default
-      system_prompt_path: ./system.md
-      allowed_tools:
-        - ReadFile
-        - WriteFile
-
-Usage::
-
-    from xerxes.agents.definitions import (
-        get_agent_definition,
-        load_agent_definitions,
-        BUILTIN_AGENTS,
-    )
-
-
-    coder = get_agent_definition("coder")
-
-
-    all_defs = load_agent_definitions()
+Main exports:
+    - AgentDefinition: Dataclass representing a loaded agent definition.
+    - BUILTIN_AGENTS: Dictionary of built-in agent definitions.
+    - load_agent_definitions: Load all available agent definitions.
+    - get_agent_definition: Retrieve a single definition by name.
+    - list_agent_definitions: List all loaded definitions sorted by name.
+    - list_agent_definition_load_errors: Retrieve load-time errors.
 """
 
 from __future__ import annotations
@@ -72,19 +38,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentDefinition:
-    """Definition for a specialized agent type.
+    """A loaded agent definition with metadata and configuration.
 
     Attributes:
-        name: Canonical agent name (e.g. ``"coder"``, ``"reviewer"``).
-        description: Human-readable description of the agent's purpose.
-        system_prompt: Extra instructions prepended to the base system prompt.
-        model: Model override. Empty string means inherit from parent.
-        tools: Tool name whitelist. Empty list means all tools allowed.
-        allowed_tools: Like ``tools`` but intended for additive filtering.
-        exclude_tools: Tool names to explicitly remove from the available set.
-        source: Origin — ``"built-in"``, ``"user"``, ``"project"``, or ``"yaml"``.
-        max_depth: Maximum nesting depth for sub-agent spawning.
-        isolation: Default isolation mode (``""`` or ``"worktree"``).
+        name (str): Unique agent identifier.
+        description (str): Human-readable description.
+        system_prompt (str): System prompt text.
+        model (str): Default model identifier.
+        tools (list[str]): Tool names this agent uses.
+        allowed_tools (list[str] | None): Whitelist of allowed tools.
+        exclude_tools (list[str]): Tools explicitly excluded.
+        source (str): Origin (e.g., ``"built-in"``, ``"user"``, ``"project"``).
+        max_depth (int): Maximum sub-agent delegation depth.
+        isolation (str): Isolation strategy string.
     """
 
     name: str
@@ -99,12 +65,17 @@ class AgentDefinition:
     isolation: str = ""
 
 
-# Directory where built-in YAML agent specs live.
 BUILTIN_AGENTS_DIR = Path(__file__).parent / "default"
 
 
 def _load_builtin_agents() -> dict[str, AgentDefinition]:
-    """Load built-in agents from YAML specs if available, else fall back to hard-coded."""
+    """Load built-in agent definitions from the ``default/`` directory.
+
+    Falls back to hardcoded definitions if no YAML specs are found.
+
+    Returns:
+        dict[str, AgentDefinition]: OUT: Mapping of agent name to definition.
+    """
     defs: dict[str, AgentDefinition] = {}
     if BUILTIN_AGENTS_DIR.is_dir():
         for yaml_path in sorted(BUILTIN_AGENTS_DIR.glob("*.yaml")):
@@ -127,16 +98,14 @@ def _load_builtin_agents() -> dict[str, AgentDefinition]:
             except Exception as exc:
                 logger.debug("Failed to load built-in agent spec %s: %s", yaml_path, exc)
 
-    # Fallback hard-coded definitions if YAML loading fails or dir is missing
     if not defs:
         defs = _HARDCODED_BUILTIN_AGENTS
     return defs
 
 
-# Module-level constant: populated once at import time.
 BUILTIN_AGENTS: dict[str, AgentDefinition] = {}
+_LAST_LOAD_ERRORS: list[str] = []
 
-# Hard-coded fallback definitions (used when YAML specs are not present).
 _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
     "general-purpose": AgentDefinition(
         name="general-purpose",
@@ -170,7 +139,7 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Code quality and maintainability\n"
             "Be concise and specific. Categorize findings as: Critical | Warning | Suggestion.\n"
         ),
-        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir"],
+        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir"],
         source="built-in",
     ),
     "researcher": AgentDefinition(
@@ -183,7 +152,7 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Cite specific file paths and line numbers\n"
             "- Be concise and focused\n"
         ),
-        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir", "GoogleSearch"],
+        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir", "GoogleSearch"],
         source="built-in",
     ),
     "tester": AgentDefinition(
@@ -208,7 +177,7 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Consider trade-offs and alternatives\n"
             "- Produce structured plans, not code\n"
         ),
-        allowed_tools=["ReadFile", "Glob", "Grep", "ListDir"],
+        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir"],
         source="built-in",
     ),
     "data-analyst": AgentDefinition(
@@ -225,24 +194,19 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
     ),
 }
 
-# Populate built-in agents from YAML specs (falls back to hard-coded above).
 BUILTIN_AGENTS = _load_builtin_agents()
 
 
 def _parse_agent_md(path: Path, source: str = "user") -> AgentDefinition:
-    """Parse a ``.md`` file with optional YAML frontmatter into an AgentDefinition.
+    """Parse an agent definition from a Markdown file with optional YAML frontmatter.
 
-    File format::
+    Args:
+        path (Path): IN: Path to the ``.md`` file. OUT: Read as text.
+        source (str): IN: Source label (e.g., ``"user"`` or ``"project"``). OUT:
+            Stored in the returned definition.
 
-        ---
-        description: "Short description"
-        model: claude-sonnet-4-6
-        tools: [Read, Write, Edit, Bash]
-        max_depth: 3
-        isolation: worktree
-        ---
-
-        System prompt body goes here...
+    Returns:
+        AgentDefinition: OUT: Parsed definition.
     """
     content = path.read_text()
     name = path.stem
@@ -285,7 +249,15 @@ def _parse_agent_md(path: Path, source: str = "user") -> AgentDefinition:
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
-    """Parse YAML frontmatter, falling back to manual key:value parsing."""
+    """Parse simple YAML or key-value frontmatter.
+
+    Args:
+        text (str): IN: Raw frontmatter text. OUT: Parsed line by line if PyYAML
+            is unavailable.
+
+    Returns:
+        dict[str, Any]: OUT: Parsed frontmatter dictionary.
+    """
     try:
         import yaml
 
@@ -311,21 +283,19 @@ def load_agent_definitions(
     user_dir: Path | None = None,
     project_dir: Path | None = None,
 ) -> dict[str, AgentDefinition]:
-    """Load all agent definitions: built-ins, then user-level, then project-level.
-
-    Search paths:
-
-    - Built-in definitions (always loaded first).
-    - ``~/.xerxes/agents/*.yaml`` and ``*.md`` (user-level, overrides built-ins).
-    - ``.xerxes/agents/*.yaml`` and ``*.md`` (project-level, overrides user).
+    """Load all agent definitions from built-in, user, and project sources.
 
     Args:
-        user_dir: Override user-level directory.
-        project_dir: Override project-level directory.
+        user_dir (Path | None): IN: Directory containing user ``*.yaml``/``*.md``
+            agent files. OUT: Defaults to the xerxes user agents subdirectory.
+        project_dir (Path | None): IN: Directory for project-level agent files.
+            OUT: Defaults to ``.xerxes/agents`` under the current working directory.
 
     Returns:
-        Dict mapping agent names to their definitions.
+        dict[str, AgentDefinition]: OUT: Merged mapping of all loaded definitions.
     """
+    global _LAST_LOAD_ERRORS
+    _LAST_LOAD_ERRORS = []
     defs: dict[str, AgentDefinition] = dict(BUILTIN_AGENTS)
 
     if user_dir is None:
@@ -340,14 +310,14 @@ def load_agent_definitions(
                 d = _parse_agent_yaml(p, source="user")
                 if d:
                     defs[d.name] = d
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_load_error(p, exc)
         for p in sorted(udir.glob("*.md")):
             try:
                 d = _parse_agent_md(p, source="user")
                 defs[d.name] = d
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_load_error(p, exc)
 
     pdir = project_dir or Path.cwd() / ".xerxes" / "agents"
     if pdir.is_dir():
@@ -356,23 +326,143 @@ def load_agent_definitions(
                 d = _parse_agent_yaml(p, source="project")
                 if d:
                     defs[d.name] = d
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_load_error(p, exc)
         for p in sorted(pdir.glob("*.md")):
             try:
                 d = _parse_agent_md(p, source="project")
                 defs[d.name] = d
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_load_error(p, exc)
+
+    for p, source in _project_agent_candidates(Path.cwd()):
+        try:
+            for d in _parse_project_agent_file(p, source=source):
+                defs[d.name] = d
+        except Exception as exc:
+            _record_load_error(p, exc)
 
     return defs
 
 
-def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | None:
-    """Parse an ``agent.yaml`` file into an :class:`AgentDefinition`."""
-    from .agentspec import load_agent_spec
+def _record_load_error(path: Path, exc: Exception) -> None:
+    """Record an agent definition load error.
 
-    spec = load_agent_spec(path)
+    Args:
+        path (Path): IN: The file that failed to load. OUT: Included in the error
+            message.
+        exc (Exception): IN: The exception raised. OUT: Logged and recorded.
+    """
+    message = f"{path}: {type(exc).__name__}: {exc}"
+    _LAST_LOAD_ERRORS.append(message)
+    logger.warning("Failed to load agent definition %s: %s", path, exc)
+
+
+def _project_agent_candidates(cwd: Path) -> list[tuple[Path, str]]:
+    """Enumerate candidate project-level agent spec files.
+
+    Args:
+        cwd (Path): IN: Current working directory. OUT: Used to resolve candidate
+            file paths.
+
+    Returns:
+        list[tuple[Path, str]]: OUT: Existing candidate files with their source label.
+    """
+    candidates = [
+        (cwd / ".kimi" / "agent.yaml", "project"),
+        (cwd / ".kimi" / "agents.yaml", "project"),
+        (cwd / "agent.yaml", "project"),
+        (cwd / "agents.yaml", "project"),
+    ]
+    return [(path, source) for path, source in candidates if path.is_file()]
+
+
+def _parse_project_agent_file(path: Path, source: str) -> list[AgentDefinition]:
+    """Parse a project-level agent file (single or multi-agent ``agents.yaml``).
+
+    Args:
+        path (Path): IN: Path to the agent YAML file. OUT: Read and parsed.
+        source (str): IN: Source label for definitions. OUT: Stored in results.
+
+    Returns:
+        list[AgentDefinition]: OUT: Parsed definitions.
+
+    Raises:
+        RuntimeError: If PyYAML is not installed.
+        ValueError: If the YAML structure is invalid.
+    """
+    if path.name != "agents.yaml":
+        parsed = _parse_agent_yaml(path, source=source)
+        return [parsed] if parsed else []
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to load agents.yaml files") from exc
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if "agents" not in raw:
+        parsed = _parse_agent_yaml(path, source=source)
+        return [parsed] if parsed else []
+
+    if not isinstance(raw["agents"], dict):
+        raise ValueError("agents.yaml field 'agents' must be a mapping")
+
+    defs: list[AgentDefinition] = []
+    for name, body in raw["agents"].items():
+        if not isinstance(body, dict):
+            raise ValueError(f"agents.{name} must be a mapping")
+        normalized = {
+            "version": str(raw.get("version", "1")),
+            "agent": {"name": str(name), **body},
+        }
+        temp_path = path.with_name(f".{path.stem}.{name}.yaml")
+        spec = _load_agent_spec_from_data(temp_path, normalized)
+        defs.append(_agent_definition_from_spec(spec, source))
+    return defs
+
+
+def _load_agent_spec_from_data(path: Path, data: dict[str, Any]):
+    """Serialize data to a temporary YAML and load it as an agent spec.
+
+    Args:
+        path (Path): IN: Base path used to determine the temp file directory. OUT:
+            Parent directory hosts the temporary file.
+        data (dict[str, Any]): IN: Normalized agent spec data. OUT: Serialized to
+            YAML and loaded.
+
+    Returns:
+        ResolvedAgentSpec: OUT: The loaded agent specification.
+    """
+    import tempfile
+
+    import yaml
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", dir=path.parent, delete=False) as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+        temp_path = Path(f.name)
+    try:
+        from .agentspec import load_agent_spec
+
+        return load_agent_spec(temp_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+
+
+def _agent_definition_from_spec(spec: Any, source: str) -> AgentDefinition:
+    """Convert a ResolvedAgentSpec into an AgentDefinition.
+
+    Args:
+        spec (Any): IN: Resolved spec object (duck-typed). OUT: Field values
+            extracted and mapped.
+        source (str): IN: Source label. OUT: Stored in the definition.
+
+    Returns:
+        AgentDefinition: OUT: The mapped definition.
+    """
     return AgentDefinition(
         name=spec.name,
         description=spec.when_to_use,
@@ -387,20 +477,53 @@ def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | Non
     )
 
 
-def get_agent_definition(name: str) -> AgentDefinition | None:
-    """Look up an agent definition by name.
+def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | None:
+    """Parse a single agent YAML file into an AgentDefinition.
 
     Args:
-        name: Agent definition name (e.g. ``"coder"``, ``"reviewer"``).
+        path (Path): IN: Path to the YAML file. OUT: Loaded via ``load_agent_spec``.
+        source (str): IN: Source label. OUT: Passed to the mapper.
 
     Returns:
-        The :class:`AgentDefinition`, or ``None`` if not found.
+        AgentDefinition | None: OUT: The definition, or ``None`` if loading fails.
+    """
+    from .agentspec import load_agent_spec
+
+    spec = load_agent_spec(path)
+    return _agent_definition_from_spec(spec, source)
+
+
+def list_agent_definition_load_errors() -> list[str]:
+    """Return the list of errors encountered during the last load.
+
+    Forces a reload if no errors have been recorded yet.
+
+    Returns:
+        list[str]: OUT: Error messages from the most recent load.
+    """
+    if not _LAST_LOAD_ERRORS:
+        load_agent_definitions()
+    return list(_LAST_LOAD_ERRORS)
+
+
+def get_agent_definition(name: str) -> AgentDefinition | None:
+    """Retrieve a single agent definition by name.
+
+    Args:
+        name (str): IN: Agent name to look up. OUT: Used as a dictionary key.
+
+    Returns:
+        AgentDefinition | None: OUT: The matching definition, or ``None``.
     """
     return load_agent_definitions().get(name)
 
 
 def list_agent_definitions() -> list[AgentDefinition]:
-    """Return all available agent definitions sorted by name."""
+    """List all loaded agent definitions sorted by name.
+
+    Returns:
+        list[AgentDefinition]: OUT: Sorted list of definitions.
+    """
     return sorted(load_agent_definitions().values(), key=lambda d: d.name)
 
 
@@ -408,6 +531,7 @@ __all__ = [
     "BUILTIN_AGENTS",
     "AgentDefinition",
     "get_agent_definition",
+    "list_agent_definition_load_errors",
     "list_agent_definitions",
     "load_agent_definitions",
 ]

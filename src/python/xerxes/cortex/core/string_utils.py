@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,40 +6,12 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-"""String utility functions for template interpolation.
-
-This module provides utilities for working with template strings that use
-simple placeholder syntax (e.g., {variable_name}). It includes:
-- Template variable interpolation with type-safe value substitution
-- Template variable extraction for validation
-- Input validation against template requirements
-
-Unlike the Jinja2-based PromptTemplate class, these utilities use a simpler
-placeholder syntax that is compatible with Python's str.format() but with
-additional type safety and validation features.
-
-Example:
-    >>> from xerxes.cortex.string_utils import interpolate_inputs
-    >>> result = interpolate_inputs(
-    ...     "Hello {name}, you have {count} messages.",
-    ...     {"name": "Alice", "count": 5}
-    ... )
-    >>> print(result)
-    Hello Alice, you have 5 messages.
-
-    >>> from xerxes.cortex.string_utils import validate_inputs_for_template
-    >>> is_valid, errors = validate_inputs_for_template(
-    ...     "Hello {name}",
-    ...     {"name": "World"}
-    ... )
-    >>> print(is_valid)
-    True
-"""
+"""String interpolation and template validation utilities."""
 
 import re
 from typing import Any
@@ -49,51 +21,44 @@ def interpolate_inputs(
     input_string: str | None,
     inputs: dict[str, str | int | float | dict[str, Any] | list[Any]],
 ) -> str:
-    """
-    Interpolate placeholders (e.g., {key}) in a string with provided values.
+    """Interpolate template variables into a string.
 
-    Only interpolates placeholders that follow the pattern {variable_name} where
-    variable_name starts with a letter/underscore and contains only letters, numbers, and underscores.
+    Replaces ``{variable_name}`` placeholders in *input_string* with values
+    from *inputs*. Supports scalar values, dicts, and lists (serialized as JSON).
 
     Args:
-        input_string: The string containing template variables to interpolate.
-                     Can be None or empty, in which case an empty string is returned.
-        inputs: Dictionary mapping template variables to their values.
-               Supported value types are strings, integers, floats, and dicts/lists
-               containing only these types and other nested dicts/lists.
+        input_string (str | None): The template string containing ``{var}``
+            placeholders. IN: A template with named placeholders or ``None``.
+            OUT: Parsed to extract placeholder keys for substitution.
+        inputs (dict): Mapping of variable names to replacement values.
+            IN: Keys must match placeholders in *input_string*; values may be
+            ``str``, ``int``, ``float``, ``bool``, ``dict``, or ``list``.
+            OUT: Values are converted to strings and substituted into the template.
 
     Returns:
-        The interpolated string with all template variables replaced with their values.
-        Empty string if input_string is None or empty.
+        str: The interpolated string with all placeholders replaced.
+            OUT: A fully resolved string ready for use.
 
     Raises:
-        KeyError: If a template variable is missing from inputs
-        ValueError: If a value contains unsupported types
-
-    Examples:
-        >>> interpolate_inputs("Hello {name}!", {"name": "World"})
-        "Hello World!"
-
-        >>> interpolate_inputs("Year: {year}, Topic: {topic}", {"year": 2025, "topic": "AI"})
-        "Year: 2025, Topic: AI"
+        KeyError: If a placeholder key is missing from *inputs*.
+        ValueError: If a value has an unsupported type.
     """
+
     if not input_string:
         return ""
 
     pattern = r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}"
 
     def replacer(match) -> str:
-        """Replace a single regex match with its corresponding input value.
+        """Replace a single regex match with the corresponding input value.
 
         Args:
-            match: A regex match object whose group(1) is the placeholder name.
+            match: A regex ``Match`` object for a ``{key}`` placeholder.
+                IN: Contains the placeholder key as group 1.
+                OUT: Used to look up the key in *inputs* and return its string form.
 
         Returns:
-            String representation of the input value for the matched key.
-
-        Raises:
-            KeyError: If the matched key is not present in inputs.
-            ValueError: If the value type is not supported for serialization.
+            str: The string representation of the matched input value.
         """
         key = match.group(1)
         if key not in inputs:
@@ -121,27 +86,16 @@ def interpolate_inputs(
 def extract_template_variables(input_string: str) -> set[str]:
     """Extract all template variable names from a string.
 
-    Scans the input string for placeholders following the ``{variable_name}``
-    pattern and returns a set of all unique variable names found. Variable
-    names must start with a letter or underscore and contain only alphanumeric
-    characters and underscores.
-
     Args:
-        input_string: String potentially containing ``{variable}`` placeholders.
-            If None or empty, returns an empty set.
+        input_string (str): The template string to scan.
+            IN: A string potentially containing ``{var}`` placeholders.
+            OUT: Parsed to identify all unique placeholder keys.
 
     Returns:
-        Set of unique variable name strings found in the template. Returns
-        an empty set if no placeholders are found or input is empty.
-
-    Example:
-        >>> extract_template_variables("Hello {name}, year {year}")
-        {'name', 'year'}
-        >>> extract_template_variables("No placeholders here")
-        set()
-        >>> extract_template_variables("")
-        set()
+        set[str]: A set of unique variable names found in the template.
+            OUT: Empty set if no placeholders exist.
     """
+
     if not input_string:
         return set()
 
@@ -152,37 +106,25 @@ def extract_template_variables(input_string: str) -> set[str]:
 def validate_inputs_for_template(
     template_string: str, inputs: dict[str, Any], allow_extra: bool = True
 ) -> tuple[bool, list[str]]:
-    """Validate that all required template variables are present in inputs.
-
-    Checks whether the provided inputs dictionary contains values for every
-    template variable found in the template string. Optionally validates
-    that no extra (unused) keys exist in the inputs.
+    """Validate that inputs satisfy the requirements of a template.
 
     Args:
-        template_string: String containing ``{variable}`` template placeholders
-            to validate against.
-        inputs: Dictionary of provided input values. Keys should correspond
-            to template variable names.
-        allow_extra: Whether to allow extra keys in inputs that are not
-            referenced in the template. When False, extra keys generate
-            error messages. Defaults to True.
+        template_string (str): The template string to validate against.
+            IN: Contains ``{var}`` placeholders defining required variables.
+            OUT: Scanned to determine required variable names.
+        inputs (dict): The candidate inputs to check.
+            IN: Mapping of variable names to values provided by the caller.
+            OUT: Compared against required variables to detect missing or extra keys.
+        allow_extra (bool): Whether extra keys in *inputs* are permitted.
+            IN: ``True`` to ignore extra keys; ``False`` to treat them as errors.
+            OUT: Controls whether unexpected variables generate validation errors.
 
     Returns:
-        Tuple of (is_valid, errors) where:
-        - is_valid: True if all required variables are present and no
-          disallowed extra keys exist.
-        - errors: List of error message strings. Empty list if valid.
-          Messages follow the format "Missing required variable: {name}"
-          or "Unexpected variable: {name}".
-
-    Example:
-        >>> validate_inputs_for_template("Hello {name}", {"name": "World"})
-        (True, [])
-        >>> validate_inputs_for_template("Hello {name}", {})
-        (False, ["Missing required variable: name"])
-        >>> validate_inputs_for_template("{x}", {"x": 1, "y": 2}, allow_extra=False)
-        (False, ["Unexpected variable: y"])
+        tuple[bool, list[str]]: A boolean indicating overall validity and a list
+            of error messages. OUT: ``(True, [])`` when valid; otherwise
+            ``(False, [error1, ...])``.
     """
+
     required_vars = extract_template_variables(template_string)
     provided_keys = set(inputs.keys())
 

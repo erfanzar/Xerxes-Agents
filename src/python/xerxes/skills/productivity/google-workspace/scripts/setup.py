@@ -1,25 +1,30 @@
-#!/usr/bin/env python3
-"""Google Workspace OAuth2 setup for Hermes Agent.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Setup module for Xerxes.
 
-Fully non-interactive — designed to be driven by the agent via terminal commands.
-The agent mediates between this script and the user (works on CLI, Telegram, Discord, etc.)
-
-Commands:
-  setup.py --check                          # Is auth valid? Exit 0 = yes, 1 = no
-  setup.py --client-secret /path/to.json    # Store OAuth client credentials
-  setup.py --auth-url                       # Print the OAuth URL for user to visit
-  setup.py --auth-code CODE                 # Exchange auth code for token
-  setup.py --revoke                         # Revoke and delete stored token
-  setup.py --install-deps                   # Install Python dependencies only
-
-Agent workflow:
-  1. Run --check. If exit 0, auth is good — skip setup.
-  2. Ask user for client_secret.json path. Run --client-secret PATH.
-  3. Run --auth-url. Send the printed URL to the user.
-  4. User opens URL, authorizes, gets redirected to a page with a code.
-  5. User pastes the code. Agent runs --auth-code CODE.
-  6. Run --check to verify. Done.
-"""
+Exports:
+    - HERMES_HOME
+    - TOKEN_PATH
+    - CLIENT_SECRET_PATH
+    - PENDING_AUTH_PATH
+    - SCOPES
+    - REQUIRED_PACKAGES
+    - REDIRECT_URI
+    - install_deps
+    - check_auth
+    - store_client_secret
+    - ... and 4 more."""
 
 import argparse
 import json
@@ -54,13 +59,16 @@ SCOPES = [
 
 REQUIRED_PACKAGES = ["google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2"]
 
-# OAuth redirect for "out of band" manual code copy flow.
-# Google deprecated OOB, so we use a localhost redirect and tell the user to
-# copy the code from the browser's URL bar (or the page body).
 REDIRECT_URI = "http://localhost:1"
 
 
 def _load_token_payload(path: Path = TOKEN_PATH) -> dict:
+    """Internal helper to load token payload.
+
+    Args:
+        path (Path, optional): IN: path. Defaults to TOKEN_PATH. OUT: Consumed during execution.
+    Returns:
+        dict: OUT: Result of the operation."""
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -68,6 +76,12 @@ def _load_token_payload(path: Path = TOKEN_PATH) -> dict:
 
 
 def _missing_scopes_from_payload(payload: dict) -> list[str]:
+    """Internal helper to missing scopes from payload.
+
+    Args:
+        payload (dict): IN: payload. OUT: Consumed during execution.
+    Returns:
+        list[str]: OUT: Result of the operation."""
     raw = payload.get("scopes") or payload.get("scope")
     if not raw:
         return []
@@ -76,6 +90,12 @@ def _missing_scopes_from_payload(payload: dict) -> list[str]:
 
 
 def _format_missing_scopes(missing_scopes: list[str]) -> str:
+    """Internal helper to format missing scopes.
+
+    Args:
+        missing_scopes (list[str]): IN: missing scopes. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
     bullets = "\n".join(f"  - {scope}" for scope in missing_scopes)
     return (
         "Token is valid but missing required Google Workspace scopes:\n"
@@ -85,15 +105,19 @@ def _format_missing_scopes(missing_scopes: list[str]) -> str:
 
 
 def install_deps():
-    """Install Google API packages if missing. Returns True on success."""
-    try:
-        import google_auth_oauthlib  # noqa: F401
-        import googleapiclient  # noqa: F401
+    """Install deps.
 
+    Returns:
+        Any: OUT: Result of the operation."""
+
+    import importlib.util
+
+    if (
+        importlib.util.find_spec("google_auth_oauthlib") is not None
+        and importlib.util.find_spec("googleapiclient") is not None
+    ):
         print("Dependencies already installed.")
         return True
-    except ImportError:
-        pass
 
     print("Installing Google API dependencies...")
     try:
@@ -110,17 +134,27 @@ def install_deps():
 
 
 def _ensure_deps():
-    """Check deps are available, install if not, exit on failure."""
-    try:
-        import google_auth_oauthlib  # noqa: F401
-        import googleapiclient  # noqa: F401
-    except ImportError:
+    """Internal helper to ensure deps.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+
+    import importlib.util
+
+    if (
+        importlib.util.find_spec("google_auth_oauthlib") is None
+        or importlib.util.find_spec("googleapiclient") is None
+    ):
         if not install_deps():
             sys.exit(1)
 
 
 def check_auth():
-    """Check if stored credentials are valid. Prints status, exits 0 or 1."""
+    """Check auth.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+
     if not TOKEN_PATH.exists():
         print(f"NOT_AUTHENTICATED: No token at {TOKEN_PATH}")
         return False
@@ -130,10 +164,6 @@ def check_auth():
     from google.oauth2.credentials import Credentials
 
     try:
-        # Don't pass scopes — user may have authorized only a subset.
-        # Passing scopes forces google-auth to validate them on refresh,
-        # which fails with invalid_scope if the token has fewer scopes
-        # than requested.
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
     except Exception as e:
         print(f"TOKEN_CORRUPT: {e}")
@@ -169,7 +199,13 @@ def check_auth():
 
 
 def store_client_secret(path: str):
-    """Copy and validate client_secret.json to Hermes home."""
+    """Store client secret.
+
+    Args:
+        path (str): IN: path. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     src = Path(path).expanduser().resolve()
     if not src.exists():
         print(f"ERROR: File not found: {src}")
@@ -191,7 +227,14 @@ def store_client_secret(path: str):
 
 
 def _save_pending_auth(*, state: str, code_verifier: str):
-    """Persist the OAuth session bits needed for a later token exchange."""
+    """Internal helper to save pending auth.
+
+    Args:
+        state (str): IN: state. OUT: Consumed during execution.
+        code_verifier (str): IN: code verifier. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     PENDING_AUTH_PATH.write_text(
         json.dumps(
             {
@@ -205,7 +248,11 @@ def _save_pending_auth(*, state: str, code_verifier: str):
 
 
 def _load_pending_auth() -> dict:
-    """Load the pending OAuth session created by get_auth_url()."""
+    """Internal helper to load pending auth.
+
+    Returns:
+        dict: OUT: Result of the operation."""
+
     if not PENDING_AUTH_PATH.exists():
         print("ERROR: No pending OAuth session found. Run --auth-url first.")
         sys.exit(1)
@@ -226,7 +273,13 @@ def _load_pending_auth() -> dict:
 
 
 def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
-    """Accept either a raw auth code or the full redirect URL pasted by the user."""
+    """Internal helper to extract code and state.
+
+    Args:
+        code_or_url (str): IN: code or url. OUT: Consumed during execution.
+    Returns:
+        tuple[str, str | None]: OUT: Result of the operation."""
+
     if not code_or_url.startswith("http"):
         return code_or_url, None
 
@@ -243,7 +296,11 @@ def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
 
 
 def get_auth_url():
-    """Print the OAuth authorization URL. User visits this in a browser."""
+    """Retrieve the auth url.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
         sys.exit(1)
@@ -262,12 +319,18 @@ def get_auth_url():
         prompt="consent",
     )
     _save_pending_auth(state=state, code_verifier=flow.code_verifier)
-    # Print just the URL so the agent can extract it cleanly
+
     print(auth_url)
 
 
 def exchange_auth_code(code: str):
-    """Exchange the authorization code for a token and save it."""
+    """Exchange auth code.
+
+    Args:
+        code (str): IN: code. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
         sys.exit(1)
@@ -283,13 +346,11 @@ def exchange_auth_code(code: str):
 
     from google_auth_oauthlib.flow import Flow
 
-    # Extract granted scopes from the callback URL if present
     if returned_state and "scope" in parse_qs(
         urlparse(code).query if isinstance(code, str) and code.startswith("http") else {}
     ):
         granted_scopes = parse_qs(urlparse(code).query)["scope"][0].split()
     else:
-        # Try to extract from code_or_url parameter
         if isinstance(code, str) and code.startswith("http"):
             params = parse_qs(urlparse(code).query)
             if "scope" in params:
@@ -308,7 +369,6 @@ def exchange_auth_code(code: str):
     )
 
     try:
-        # Accept partial scopes — user may deselect some permissions in the consent screen
         os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
         flow.fetch_token(code=code)
     except Exception as e:
@@ -319,16 +379,12 @@ def exchange_auth_code(code: str):
     creds = flow.credentials
     token_payload = json.loads(creds.to_json())
 
-    # Store only the scopes actually granted by the user, not what was requested.
-    # creds.to_json() writes the requested scopes, which causes refresh to fail
-    # with invalid_scope if the user only authorized a subset.
     actually_granted = (
         list(creds.granted_scopes or []) if hasattr(creds, "granted_scopes") and creds.granted_scopes else []
     )
     if actually_granted:
         token_payload["scopes"] = actually_granted
     elif granted_scopes != SCOPES:
-        # granted_scopes was extracted from the callback URL
         token_payload["scopes"] = granted_scopes
 
     missing_scopes = _missing_scopes_from_payload(token_payload)
@@ -343,7 +399,11 @@ def exchange_auth_code(code: str):
 
 
 def revoke():
-    """Revoke stored token and delete it."""
+    """Revoke.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+
     if not TOKEN_PATH.exists():
         print("No token to revoke.")
         return
@@ -376,6 +436,10 @@ def revoke():
 
 
 def main():
+    """Main.
+
+    Returns:
+        Any: OUT: Result of the operation."""
     parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="Check if auth is valid (exit 0=yes, 1=no)")

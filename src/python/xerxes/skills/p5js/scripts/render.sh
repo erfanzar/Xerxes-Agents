@@ -1,23 +1,17 @@
 #!/bin/bash
-# p5.js Skill — Headless Render Pipeline
-# Renders a p5.js sketch to MP4 video via Puppeteer + ffmpeg
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
-# Usage:
-#   bash scripts/render.sh sketch.html output.mp4 [options]
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Options:
-#   --width    Canvas width (default: 1920)
-#   --height   Canvas height (default: 1080)
-#   --fps      Frames per second (default: 30)
-#   --duration Duration in seconds (default: 10)
-#   --quality  CRF value 0-51 (default: 18, lower = better)
-#   --frames-only  Only export frames, skip MP4 encoding
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
-# Examples:
-#   bash scripts/render.sh sketch.html output.mp4
-#   bash scripts/render.sh sketch.html output.mp4 --duration 30 --fps 60
-#   bash scripts/render.sh sketch.html output.mp4 --width 3840 --height 2160
-
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 set -euo pipefail
 
 # Defaults

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Bootstrap module for Xerxes.
 
-
-"""Bootstrap graph and system initialization for the Xerxes runtime.
-
-Manages the startup sequence: environment detection, tool registration,
-context building, and system prompt assembly.
-
-Inspired by the claw-code ``bootstrap_graph``, ``setup``, and
-``system_init`` patterns.
-
-Usage::
-
-    from xerxes.runtime.bootstrap import bootstrap, BootstrapResult
-
-    result = bootstrap(model="gpt-4o", cwd="/path/to/project")
-    print(result.system_prompt)
-    print(result.registry.summary())
-"""
+Exports:
+    - BootstrapStage
+    - BootstrapResult
+    - bootstrap"""
 
 from __future__ import annotations
 
@@ -43,14 +33,13 @@ from .execution_registry import ExecutionRegistry
 
 @dataclass
 class BootstrapStage:
-    """A single stage in the bootstrap sequence.
+    """Bootstrap stage.
 
     Attributes:
-        name: Stage name.
-        status: ``"ok"``, ``"skipped"``, ``"failed"``.
-        detail: Description of what happened.
-        duration_ms: Time taken in milliseconds.
-    """
+        name (str): name.
+        status (str): status.
+        detail (str): detail.
+        duration_ms (float): duration ms."""
 
     name: str
     status: str = "ok"
@@ -60,14 +49,13 @@ class BootstrapStage:
 
 @dataclass
 class BootstrapResult:
-    """Result of the full bootstrap sequence.
+    """Bootstrap result.
 
     Attributes:
-        stages: List of completed stages.
-        registry: The assembled execution registry.
-        system_prompt: The built system initialization prompt.
-        context: Runtime context information.
-    """
+        stages (list[BootstrapStage]): stages.
+        registry (ExecutionRegistry): registry.
+        system_prompt (str): system prompt.
+        context (dict[str, Any]): context."""
 
     stages: list[BootstrapStage] = field(default_factory=list)
     registry: ExecutionRegistry = field(default_factory=ExecutionRegistry)
@@ -76,9 +64,21 @@ class BootstrapResult:
 
     @property
     def ok(self) -> bool:
+        """Return Ok.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            bool: OUT: Result of the operation."""
         return all(s.status != "failed" for s in self.stages)
 
     def as_markdown(self) -> str:
+        """As markdown.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            str: OUT: Result of the operation."""
         lines = [
             "# Bootstrap Report",
             "",
@@ -101,28 +101,19 @@ def bootstrap(
     include_xerxes_md: bool = True,
     extra_context: str = "",
 ) -> BootstrapResult:
-    """Run the full bootstrap sequence.
-
-    Stages:
-    1. Detect environment (Python, platform, CWD).
-    2. Detect git repository info.
-    3. Load XERXES.md project context.
-    4. Register built-in commands.
-    5. Register tools.
-    6. Build system initialization prompt.
+    """Bootstrap.
 
     Args:
-        model: Active model name.
-        cwd: Working directory (defaults to current).
-        tools: Optional list of tools to register.
-        commands: Optional dict of command_name -> handler.
-        include_git_info: Whether to include git info in context.
-        include_xerxes_md: Whether to load XERXES.md files.
-        extra_context: Additional context to include in system prompt.
-
+        model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
+        cwd (str | Path | None, optional): IN: cwd. Defaults to None. OUT: Consumed during execution.
+        tools (list[Any] | None, optional): IN: tools. Defaults to None. OUT: Consumed during execution.
+        commands (dict[str, Any] | None, optional): IN: commands. Defaults to None. OUT: Consumed during execution.
+        include_git_info (bool, optional): IN: include git info. Defaults to True. OUT: Consumed during execution.
+        include_xerxes_md (bool, optional): IN: include xerxes md. Defaults to True. OUT: Consumed during execution.
+        extra_context (str, optional): IN: extra context. Defaults to ''. OUT: Consumed during execution.
     Returns:
-        :class:`BootstrapResult` with registry and system prompt.
-    """
+        BootstrapResult: OUT: Result of the operation."""
+
     import time
 
     result = BootstrapResult()
@@ -225,7 +216,13 @@ def bootstrap(
 
 
 def _get_git_info(cwd: Path) -> str:
-    """Get git branch, status, and recent commits."""
+    """Internal helper to get git info.
+
+    Args:
+        cwd (Path): IN: cwd. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     try:
         branch = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -257,11 +254,13 @@ def _get_git_info(cwd: Path) -> str:
 
 
 def _load_xerxes_md(cwd: Path) -> str:
-    """Load XERXES.md from cwd/parents and ~/.xerxes/XERXES.md.
+    """Internal helper to load xerxes md.
 
-    Each file is scanned for prompt-injection threats before being
-    included in the system prompt.
-    """
+    Args:
+        cwd (Path): IN: cwd. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     from xerxes.core.paths import xerxes_subdir
     from xerxes.security.prompt_scanner import scan_context_content
 
@@ -296,7 +295,14 @@ def _load_xerxes_md(cwd: Path) -> str:
 
 
 def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
-    """Build the system initialization prompt."""
+    """Internal helper to build system prompt.
+
+    Args:
+        context (dict[str, Any]): IN: context. OUT: Consumed during execution.
+        extra (str, optional): IN: extra. Defaults to ''. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     parts = [
         "You are Xerxes, an AI coding assistant with access to tools via function calling.",
         "",

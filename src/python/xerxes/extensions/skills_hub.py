@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,27 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Skill installation, uninstallation, and search hub.
 
-
-"""Skills Hub — install, manage, and discover skills from multiple sources.
-
-The hub provides a unified interface for skills from:
-- **Local** — ``~/.xerxes/skills/`` (the default skill directory)
-- **GitHub** — any public GitHub repo via the Contents API
-- **Official** — skills bundled with the Xerxes package
-
-Usage::
-
-    from xerxes.extensions.skills_hub import SkillsHub
-
-    hub = SkillsHub()
-    hub.install("github:NousResearch/hermes-agent/skills/web-search")
-    hub.install("official:web_research")
-    hub.uninstall("web_search")
-    results = hub.search("research")
+``SkillsHub`` coordinates multiple ``SkillSource`` backends (local, GitHub,
+official) so users can install reusable agent skills from a URI like
+``github:owner/repo/path``.
 """
 
 from __future__ import annotations
@@ -45,7 +34,6 @@ from xerxes.core.paths import xerxes_subdir
 
 logger = logging.getLogger(__name__)
 
-
 SKILLS_DIR = xerxes_subdir("skills")
 HUB_DIR = SKILLS_DIR / ".hub"
 LOCK_FILE = HUB_DIR / "lock.json"
@@ -55,7 +43,17 @@ AUDIT_LOG = HUB_DIR / "audit.log"
 
 @dataclass
 class SkillHubEntry:
-    """A skill entry tracked by the hub."""
+    """Record of an installed skill in the hub lock file.
+
+    Attributes:
+        name (str): IN: Skill identifier. OUT: Lock key.
+        source (str): IN: Backend name (local, github, official). OUT:
+            Stored.
+        identifier (str): IN: Backend-specific lookup string. OUT: Stored.
+        installed_at (float): IN: Unix timestamp. OUT: Stored.
+        path (Path): IN: Filesystem location. OUT: Stored.
+        metadata (dict[str, Any]): IN: Extra backend metadata. OUT: Stored.
+    """
 
     name: str
     source: str
@@ -66,35 +64,67 @@ class SkillHubEntry:
 
 
 class SkillSource(ABC):
-    """Abstract base for skill providers."""
+    """Abstract backend that can fetch and search for skills."""
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Human-readable source name."""
+        """Return the backend identifier.
+
+        Returns:
+            str: OUT: Unique source name (e.g. ``"local"``).
+        """
 
     @abstractmethod
     def fetch(self, identifier: str) -> dict[str, Any]:
-        """Fetch a skill bundle by identifier.
+        """Retrieve a skill bundle from this source.
+
+        Args:
+            identifier (str): IN: Source-specific locator. OUT: Used to look
+                up the skill.
 
         Returns:
-            A dict with keys ``name``, ``content``, ``files`` (optional),
+            dict[str, Any]: OUT: Bundle with ``name``, ``content``, ``files``,
             and ``metadata``.
         """
 
     @abstractmethod
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Search for skills matching *query*."""
+        """Search this source for skills matching ``query``.
+
+        Args:
+            query (str): IN: Free-text query. OUT: Used for matching.
+            limit (int): IN: Maximum results. OUT: Passed to the search
+                implementation.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Result dicts with ``name``, ``source``,
+            and ``identifier``.
+        """
 
 
 class LocalSkillSource(SkillSource):
-    """Source that reads skills from the local filesystem."""
+    """Skill source backed by the local filesystem."""
 
     @property
     def name(self) -> str:
+        """Return ``"local"``."""
         return "local"
 
     def fetch(self, identifier: str) -> dict[str, Any]:
+        """Read a local ``SKILL.md`` file.
+
+        Args:
+            identifier (str): IN: Path to the skill directory or file. OUT:
+                Expanded and read.
+
+        Returns:
+            dict[str, Any]: OUT: Skill bundle.
+
+        Raises:
+            FileNotFoundError: OUT: If the path or ``SKILL.md`` does not
+                exist.
+        """
         path = Path(identifier).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"Local skill not found: {identifier}")
@@ -114,6 +144,15 @@ class LocalSkillSource(SkillSource):
         }
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search installed local skills by text content.
+
+        Args:
+            query (str): IN: Substring to match. OUT: Case-insensitive search.
+            limit (int): IN: Max results. OUT: Early-exit when reached.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Matching skill summaries.
+        """
         results = []
         if SKILLS_DIR.exists():
             for skill_md in SKILLS_DIR.rglob("SKILL.md"):
@@ -135,17 +174,20 @@ class LocalSkillSource(SkillSource):
 
 
 class GitHubSkillSource(SkillSource):
-    """Source that fetches skills from GitHub repositories.
-
-    Identifier format: ``owner/repo/path/to/skill``
-    """
+    """Skill source that fetches from GitHub repositories."""
 
     @property
     def name(self) -> str:
+        """Return ``"github"``."""
         return "github"
 
     def _resolve_token(self) -> str | None:
-        """Try to get a GitHub token from env or gh CLI."""
+        """Find a GitHub API token from environment or ``gh`` CLI.
+
+        Returns:
+            str | None: OUT: Token string or ``None`` if unavailable.
+        """
+
         token = __import__("os").environ.get("GITHUB_TOKEN") or __import__("os").environ.get("GH_TOKEN")
         if token:
             return token
@@ -163,6 +205,11 @@ class GitHubSkillSource(SkillSource):
         return None
 
     def _api_headers(self) -> dict[str, str]:
+        """Build request headers for the GitHub REST API.
+
+        Returns:
+            dict[str, str]: OUT: Headers with optional ``Authorization``.
+        """
         headers = {"Accept": "application/vnd.github.v3+json"}
         token = self._resolve_token()
         if token:
@@ -170,6 +217,19 @@ class GitHubSkillSource(SkillSource):
         return headers
 
     def fetch(self, identifier: str) -> dict[str, Any]:
+        """Fetch a ``SKILL.md`` from a GitHub repo via the Contents API.
+
+        Args:
+            identifier (str): IN: ``owner/repo/path`` string. OUT: Split and
+                used to build the API URL.
+
+        Returns:
+            dict[str, Any]: OUT: Skill bundle.
+
+        Raises:
+            ValueError: OUT: If ``identifier`` is malformed or points to a
+                directory.
+        """
         import urllib.request
 
         parts = identifier.split("/")
@@ -201,6 +261,18 @@ class GitHubSkillSource(SkillSource):
         }
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search GitHub code for ``SKILL.md`` files matching ``query``.
+
+        Args:
+            query (str): IN: Free-text query. OUT: URL-encoded and sent to the
+                Search Code API.
+            limit (int): IN: Max results per page. OUT: Passed as
+                ``per_page``.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Matching skill summaries; empty on
+            failure.
+        """
         import urllib.parse
         import urllib.request
 
@@ -225,13 +297,19 @@ class GitHubSkillSource(SkillSource):
 
 
 class OfficialSkillSource(SkillSource):
-    """Source for official skills bundled with Xerxes."""
+    """Skill source that reads skills bundled with the Xerxes package."""
 
     @property
     def name(self) -> str:
+        """Return ``"official"``."""
         return "official"
 
     def _official_dir(self) -> Path | None:
+        """Locate the ``skills`` directory inside the installed package.
+
+        Returns:
+            Path | None: OUT: Directory path if it exists, else ``None``.
+        """
         import xerxes
 
         pkg_dir = Path(xerxes.__file__).parent
@@ -239,6 +317,19 @@ class OfficialSkillSource(SkillSource):
         return official if official.exists() else None
 
     def fetch(self, identifier: str) -> dict[str, Any]:
+        """Read an official skill by its directory name.
+
+        Args:
+            identifier (str): IN: Skill folder name under the official
+                directory. OUT: Used to locate ``SKILL.md``.
+
+        Returns:
+            dict[str, Any]: OUT: Skill bundle.
+
+        Raises:
+            FileNotFoundError: OUT: If the official directory or skill is
+                missing.
+        """
         official = self._official_dir()
         if official is None:
             raise FileNotFoundError("No official skills directory found")
@@ -255,6 +346,15 @@ class OfficialSkillSource(SkillSource):
         }
 
     def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search official skills by text content.
+
+        Args:
+            query (str): IN: Substring to match. OUT: Case-insensitive search.
+            limit (int): IN: Max results. OUT: Early-exit when reached.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Matching skill summaries.
+        """
         official = self._official_dir()
         if official is None:
             return []
@@ -278,11 +378,22 @@ class OfficialSkillSource(SkillSource):
 
 
 def _ensure_hub_dirs() -> None:
+    """Create hub and quarantine directories if absent.
+
+    Returns:
+        None: OUT: ``HUB_DIR`` and ``QUARANTINE_DIR`` are guaranteed to exist.
+    """
     HUB_DIR.mkdir(parents=True, exist_ok=True)
     QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_lock() -> dict[str, dict[str, Any]]:
+    """Read the installation lock file.
+
+    Returns:
+        dict[str, dict[str, Any]]: OUT: Mapping from skill name to lock
+        entry; empty if missing or unreadable.
+    """
     if not LOCK_FILE.exists():
         return {}
     try:
@@ -292,11 +403,29 @@ def _load_lock() -> dict[str, dict[str, Any]]:
 
 
 def _save_lock(data: dict[str, dict[str, Any]]) -> None:
+    """Persist the installation lock file.
+
+    Args:
+        data (dict[str, dict[str, Any]]): IN: Lock contents. OUT: Serialized
+            as JSON.
+
+    Returns:
+        None: OUT: File is written.
+    """
     _ensure_hub_dirs()
     LOCK_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 def _audit(event: str, detail: str) -> None:
+    """Append a line to the hub audit log.
+
+    Args:
+        event (str): IN: Short event label. OUT: Written to the log.
+        detail (str): IN: Human-readable detail. OUT: Written to the log.
+
+    Returns:
+        None: OUT: Line is appended to ``AUDIT_LOG``.
+    """
     _ensure_hub_dirs()
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     line = f"{timestamp}  {event:12s}  {detail}\n"
@@ -305,14 +434,16 @@ def _audit(event: str, detail: str) -> None:
 
 
 class SkillsHub:
-    """Unified interface for discovering, installing, and managing skills.
-
-    Args:
-        sources: Optional mapping of source name → :class:`SkillSource`
-            instance.  Defaults to built-in sources (local, github, official).
-    """
+    """Coordinates skill sources and manages on-disk installation state."""
 
     def __init__(self, sources: dict[str, SkillSource] | None = None):
+        """Initialize with default or custom skill sources.
+
+        Args:
+            sources (dict[str, SkillSource] | None): IN: Mapping from source
+                name to backend. OUT: Defaults to local, GitHub, and official
+                sources.
+        """
         self._sources = sources or {
             "local": LocalSkillSource(),
             "github": GitHubSkillSource(),
@@ -321,21 +452,18 @@ class SkillsHub:
         _ensure_hub_dirs()
 
     def install(self, uri: str, *, force: bool = False) -> str:
-        """Install a skill from a URI.
-
-        URI formats::
-
-            github:owner/repo/path/to/skill
-            official:skill_name
-            local:/absolute/path/to/skill_dir
+        """Fetch and install a skill from a source URI.
 
         Args:
-            uri: The skill URI.
-            force: If True, overwrite an existing skill with the same name.
+            uri (str): IN: ``source:identifier`` or plain identifier (defaults
+                to local). OUT: Parsed and routed to the correct backend.
+            force (bool): IN: Overwrite if already installed. OUT: Determines
+                whether an existing directory is replaced.
 
         Returns:
-            A human-readable status message.
+            str: OUT: Human-readable result message.
         """
+
         if ":" in uri:
             source_name, identifier = uri.split(":", 1)
         else:
@@ -373,14 +501,16 @@ class SkillsHub:
         return f"Installed skill '{skill_name}' from {source_name}:{identifier}"
 
     def uninstall(self, skill_name: str) -> str:
-        """Remove an installed skill.
+        """Remove an installed skill from disk and the lock file.
 
         Args:
-            skill_name: The name of the skill to remove.
+            skill_name (str): IN: Skill identifier. OUT: Used to locate the
+                directory and lock entry.
 
         Returns:
-            A human-readable status message.
+            str: OUT: Human-readable result message.
         """
+
         target_dir = SKILLS_DIR / skill_name
         if not target_dir.exists():
             return f"[Error] Skill '{skill_name}' is not installed."
@@ -394,7 +524,13 @@ class SkillsHub:
         return f"Uninstalled skill '{skill_name}'"
 
     def list_installed(self) -> list[dict[str, Any]]:
-        """Return a list of installed skills with metadata."""
+        """Return metadata for every skill recorded in the lock file.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Dicts with ``name``, ``source``,
+            ``identifier``, and ``installed_at``.
+        """
+
         lock = _load_lock()
         results = []
         for skill_name, entry in lock.items():
@@ -409,16 +545,17 @@ class SkillsHub:
         return results
 
     def search(self, query: str = "", limit: int = 10) -> list[dict[str, Any]]:
-        """Search all sources for skills matching *query*.
+        """Search all configured sources for skills matching ``query``.
 
         Args:
-            query: Free-text search string.
-            limit: Max results per source.
+            query (str): IN: Free-text query. OUT: Forwarded to each source.
+            limit (int): IN: Max results per source. OUT: Forwarded to each
+                source.
 
         Returns:
-            Flat list of result dicts with keys ``name``, ``source``,
-            ``identifier``.
+            list[dict[str, Any]]: OUT: Aggregated results from all sources.
         """
+
         results: list[dict[str, Any]] = []
         for source_name, source in self._sources.items():
             try:
@@ -431,5 +568,13 @@ class SkillsHub:
         return results
 
     def get_source(self, name: str) -> SkillSource | None:
-        """Return a source by name."""
+        """Retrieve a source backend by name.
+
+        Args:
+            name (str): IN: Source identifier. OUT: Looked up in ``_sources``.
+
+        Returns:
+            SkillSource | None: OUT: Backend instance or ``None``.
+        """
+
         return self._sources.get(name)

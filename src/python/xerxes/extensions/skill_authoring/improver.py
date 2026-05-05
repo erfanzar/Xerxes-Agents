@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Incremental skill improvement from new tool sequences.
 
-"""Skill improver — bumps version & rewrites SKILL.md from a fresh candidate.
-
-Triggered when telemetry shows a skill is failing too often. The improver
-takes the original SKILL.md path and a recent (better) :class:`SkillCandidate`,
-re-renders the body, bumps the patch version, and writes the result back
-in-place. A backup of the previous version is left as ``SKILL.md.<old>.bak``
-so improvements remain reviewable.
+``SkillImprover`` bumps the patch version of an existing ``SKILL.md`` and
+rewrites it using a newer ``SkillCandidate``.
 """
 
 from __future__ import annotations
@@ -34,15 +32,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ImprovementResult:
-    """Outcome of a single improvement attempt.
+    """Outcome of a skill improvement attempt.
 
     Attributes:
-        improved: Whether a new version was written.
-        old_version: Version before the rewrite.
-        new_version: Version after the rewrite.
-        backup_path: Path to the ``.bak`` of the prior SKILL.md.
-        skill_path: Path to the rewritten SKILL.md.
-        reason: Explanation when ``improved=False``.
+        improved (bool): IN: Success flag. OUT: ``True`` if the file was
+            updated.
+        old_version (str): IN: Previous version. OUT: Extracted from existing
+            file.
+        new_version (str): IN: Bumped version. OUT: Computed by
+            ``_bump_patch``.
+        backup_path (Path | None): IN: Path to backup. OUT: Set if a backup
+            was created.
+        skill_path (Path | None): IN: Updated file path. OUT: Set on success.
+        reason (str): IN: Empty on success. OUT: Error description on failure.
     """
 
     improved: bool
@@ -56,8 +58,14 @@ class ImprovementResult:
 def _bump_patch(version: str) -> str:
     """Increment the patch component of a semver string.
 
-    Falls back to ``0.1.1`` when the version is unparseable.
+    Args:
+        version (str): IN: Semver-like string. OUT: Parsed and incremented.
+
+    Returns:
+        str: OUT: New version string (defaults to ``"0.1.1"`` if parsing
+        fails).
     """
+
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)", version.strip())
     if not m:
         return "0.1.1"
@@ -66,18 +74,7 @@ def _bump_patch(version: str) -> str:
 
 
 class SkillImprover:
-    """Re-draft a SKILL.md from a higher-quality candidate.
-
-    Use when telemetry flags a skill (e.g. via
-    :meth:`SkillTelemetry.candidates_for_deprecation`) and the agent has
-    since produced a successful run of the same procedure.
-
-    Example:
-        >>> imp = SkillImprover()
-        >>> result = imp.improve(skill_path, fresh_candidate)
-        >>> if result.improved:
-        ...     print(f"{result.old_version} → {result.new_version}")
-    """
+    """Rewrite an existing skill with an improved tool sequence."""
 
     def improve(
         self,
@@ -86,17 +83,20 @@ class SkillImprover:
         *,
         max_age_attempts: int = 5,
     ) -> ImprovementResult:
-        """Re-render ``skill_path`` with content derived from *candidate*.
+        """Update an existing ``SKILL.md`` from a new candidate.
 
         Args:
-            skill_path: Existing SKILL.md to rewrite.
-            candidate: Fresh, successful tool sequence.
-            max_age_attempts: Max number of retained ``.bak`` files
-                before we start overwriting the oldest one.
+            skill_path (str | Path): IN: Path to the existing file. OUT: Read
+                and overwritten.
+            candidate (SkillCandidate): IN: New observed sequence. OUT: Passed
+                to ``render_skill_template``.
+            max_age_attempts (int): IN: Max backups to retain. OUT: Passed to
+                ``_make_backup``.
 
         Returns:
-            An :class:`ImprovementResult` describing the outcome.
+            ImprovementResult: OUT: Detailed result of the operation.
         """
+
         path = Path(skill_path).expanduser()
         if not path.exists():
             return ImprovementResult(improved=False, reason=f"missing skill at {path}")
@@ -135,14 +135,15 @@ class SkillImprover:
 
     @staticmethod
     def _extract_version(text: str) -> str | None:
-        """Return the ``version:`` value from a SKILL.md front-matter block.
+        """Parse the ``version`` field from YAML frontmatter.
 
         Args:
-            text: Raw contents of a SKILL.md file.
+            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
 
         Returns:
-            The unquoted version string, or ``None`` if no version line is found.
+            str | None: OUT: Version string or ``None``.
         """
+
         for line in text.splitlines():
             if line.strip().startswith("version:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")
@@ -150,14 +151,15 @@ class SkillImprover:
 
     @staticmethod
     def _extract_name(text: str) -> str | None:
-        """Return the ``name:`` value from a SKILL.md front-matter block.
+        """Parse the ``name`` field from YAML frontmatter.
 
         Args:
-            text: Raw contents of a SKILL.md file.
+            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
 
         Returns:
-            The unquoted skill name, or ``None`` if no name line is found.
+            str | None: OUT: Name string or ``None``.
         """
+
         for line in text.splitlines():
             if line.strip().startswith("name:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")
@@ -165,7 +167,19 @@ class SkillImprover:
 
     @staticmethod
     def _make_backup(path: Path, old_version: str, max_keep: int) -> Path:
-        """Write ``SKILL.md.<old_version>.bak`` next to *path*; prune oldest."""
+        """Create a versioned backup and prune old ones.
+
+        Args:
+            path (Path): IN: File to back up. OUT: Copied.
+            old_version (str): IN: Version for the backup filename. OUT: Used
+                in suffix.
+            max_keep (int): IN: Maximum backups to retain. OUT: Older backups
+                are deleted.
+
+        Returns:
+            Path: OUT: Path to the newly created backup file.
+        """
+
         backup = path.with_name(f"{path.name}.{old_version}.bak")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         backups = sorted(path.parent.glob(f"{path.name}.*.bak"))

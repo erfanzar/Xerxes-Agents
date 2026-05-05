@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,28 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""OpenTelemetry trace exporter for audit events.
 
-"""OpenTelemetry exporter for Xerxes audit events.
-
-Maps the typed event hierarchy from :mod:`xerxes.audit.events` into
-spans + log records. The ``opentelemetry-api`` / ``opentelemetry-sdk``
-packages are imported lazily; tests work without them by using the
-``NoopTracer`` fallback.
-
-The exporter is implemented as an :class:`AuditCollector` so it slots
-into the existing audit fan-out via :class:`CompositeCollector`.
-
-Usage::
-
-    from xerxes.audit import AuditEmitter, CompositeCollector, InMemoryCollector
-    from xerxes.audit.otel_exporter import OTelCollector
-
-    inmem = InMemoryCollector()
-    otel = OTelCollector(service_name="xerxes")
-    emitter = AuditEmitter(collector=CompositeCollector([inmem, otel]))
+This module provides :class:`OTelCollector`, which converts Xerxes audit events
+into OpenTelemetry spans and events when the ``opentelemetry`` package is
+available. Falls back to an in-memory log when OpenTelemetry is not installed.
 """
 
 from __future__ import annotations
@@ -52,7 +40,12 @@ logger = logging.getLogger(__name__)
 
 
 def _try_import_otel() -> tuple[tp.Any, tp.Any] | None:
-    """Lazily import OTel; returns ``(trace_module, tracer)`` or ``None``."""
+    """Attempt to import OpenTelemetry trace components.
+
+    Returns:
+        tuple[Any, Any] | None: OUT: ``(trace_module, tracer)`` if available,
+            otherwise ``None``.
+    """
     try:
         from opentelemetry import trace as _trace
     except ImportError:
@@ -64,24 +57,18 @@ def _try_import_otel() -> tuple[tp.Any, tp.Any] | None:
 
 
 class OTelCollector:
-    """An :class:`AuditCollector` that fans events out to OpenTelemetry.
+    """Collector that exports audit events to OpenTelemetry as spans and events.
 
-    Spans are opened for ``TurnStartEvent`` and closed (with status) on
-    the matching ``TurnEndEvent`` (correlated by ``turn_id``). Tool
-    invocations are emitted as child spans. Other event types are
-    recorded as span events on the active turn span when available, or
-    as log records otherwise.
-
-    When OpenTelemetry is not installed, the exporter degrades to a
-    structured logger sink so audit fan-out still works (the
-    :class:`AuditCollector` protocol is satisfied either way).
-
-    Attributes:
-        service_name: Logical service name used for the tracer.
+    Falls back to an in-memory noop log when OpenTelemetry is unavailable.
     """
 
     def __init__(self, service_name: str = "xerxes") -> None:
-        """Create the collector, lazily probing for the ``opentelemetry`` package."""
+        """Initialize the OTel collector.
+
+        Args:
+            service_name (str): IN: Service name for span attributes. OUT: Stored
+                and used in span attributes.
+        """
         self.service_name = service_name
         otel = _try_import_otel()
         if otel is None:
@@ -94,7 +81,12 @@ class OTelCollector:
         self._noop_log: list[dict[str, tp.Any]] = []
 
     def emit(self, event: AuditEvent) -> None:
-        """Convert *event* to spans / span events / logs."""
+        """Route an audit event to the appropriate OTel handler.
+
+        Args:
+            event (AuditEvent): IN: The event to export. OUT: Dispatched to a
+                typed handler or generic recorder.
+        """
         try:
             if isinstance(event, TurnStartEvent):
                 self._on_turn_start(event)
@@ -116,7 +108,7 @@ class OTelCollector:
             logger.warning("OTelCollector failed to handle %s", event.event_type, exc_info=True)
 
     def flush(self) -> None:
-        """Force-close any orphan spans (best-effort)."""
+        """End all open turn spans and clear the tracking dictionary."""
         for span in list(self._open_turn_spans.values()):
             try:
                 span.end()
@@ -126,17 +118,34 @@ class OTelCollector:
 
     @property
     def has_otel(self) -> bool:
-        """Whether a real OpenTelemetry tracer was successfully imported."""
+        """Check whether OpenTelemetry is available.
+
+        Returns:
+            bool: OUT: ``True`` if a tracer was successfully created.
+        """
         return self._tracer is not None
 
     @property
     def fallback_log(self) -> list[dict[str, tp.Any]]:
-        """Read-only view of log records when OTel is not installed."""
+        """Return the fallback noop log.
+
+        Returns:
+            list[dict[str, Any]]: OUT: Copy of in-memory log entries.
+        """
         return list(self._noop_log)
 
     @contextmanager
     def _span(self, name: str, attributes: dict[str, tp.Any]):
-        """Start a standalone span (or log a fallback record) and end it on exit."""
+        """Context manager for creating an OTel span or noop fallback.
+
+        Args:
+            name (str): IN: Span name. OUT: Used for the OTel span or log entry.
+            attributes (dict[str, Any]): IN: Span attributes. OUT: Cleaned and
+                attached to the span or log.
+
+        Yields:
+            Any | None: OUT: The active span, or ``None`` in fallback mode.
+        """
         if self._tracer is None:
             self._noop_log.append({"name": name, "attributes": dict(attributes)})
             yield None
@@ -151,7 +160,12 @@ class OTelCollector:
                 pass
 
     def _record_event(self, name: str, event: AuditEvent) -> None:
-        """Attach *event* as a span event on the active turn span, else as a standalone span/log."""
+        """Record a generic event as an OTel span event or standalone span.
+
+        Args:
+            name (str): IN: Event name. OUT: Used as the span event name.
+            event (AuditEvent): IN: The audit event. OUT: Serialized to attributes.
+        """
         attrs = _clean_attrs(event.to_dict())
         turn_id = getattr(event, "turn_id", None)
         if turn_id and turn_id in self._open_turn_spans and self._tracer is not None:
@@ -167,7 +181,11 @@ class OTelCollector:
                 pass
 
     def _on_turn_start(self, event: TurnStartEvent) -> None:
-        """Open a ``xerxes.turn`` span and index it by ``turn_id`` for later close."""
+        """Handle a TurnStartEvent by creating an OTel span.
+
+        Args:
+            event (TurnStartEvent): IN: Turn start event. OUT: Converted to a span.
+        """
         if self._tracer is None or not event.turn_id:
             self._noop_log.append({"name": "turn", "attributes": _clean_attrs(event.to_dict())})
             return
@@ -186,7 +204,11 @@ class OTelCollector:
         self._open_turn_spans[event.turn_id] = span
 
     def _on_turn_end(self, event: TurnEndEvent) -> None:
-        """Set ``xerxes.function_calls_count`` and close the matching turn span."""
+        """Handle a TurnEndEvent by ending the associated turn span.
+
+        Args:
+            event (TurnEndEvent): IN: Turn end event. OUT: Used to close the span.
+        """
         if not event.turn_id:
             return
         span = self._open_turn_spans.pop(event.turn_id, None)
@@ -199,28 +221,58 @@ class OTelCollector:
             pass
 
     def _on_tool_attempt(self, event: ToolCallAttemptEvent) -> None:
-        """Emit a ``tool.attempt:<tool>`` span event on the active turn span."""
+        """Handle a ToolCallAttemptEvent.
+
+        Args:
+            event (ToolCallAttemptEvent): IN: Tool attempt event. OUT: Recorded.
+        """
         self._record_event(f"tool.attempt:{event.tool_name}", event)
 
     def _on_tool_complete(self, event: ToolCallCompleteEvent) -> None:
-        """Emit a ``tool.complete:<tool>`` span event carrying the tool's result payload."""
+        """Handle a ToolCallCompleteEvent.
+
+        Args:
+            event (ToolCallCompleteEvent): IN: Tool complete event. OUT: Recorded.
+        """
         self._record_event(f"tool.complete:{event.tool_name}", event)
 
     def _on_tool_failure(self, event: ToolCallFailureEvent) -> None:
-        """Emit a ``tool.failure:<tool>`` span event with the error details."""
+        """Handle a ToolCallFailureEvent.
+
+        Args:
+            event (ToolCallFailureEvent): IN: Tool failure event. OUT: Recorded.
+        """
         self._record_event(f"tool.failure:{event.tool_name}", event)
 
     def _on_skill_used(self, event: SkillUsedEvent) -> None:
-        """Emit a ``skill.used:<skill>`` span event marking skill invocation."""
+        """Handle a SkillUsedEvent.
+
+        Args:
+            event (SkillUsedEvent): IN: Skill used event. OUT: Recorded.
+        """
         self._record_event(f"skill.used:{event.skill_name}", event)
 
     def _on_error(self, event: ErrorEvent) -> None:
-        """Emit an ``error:<type>`` span event capturing an audited error."""
+        """Handle an ErrorEvent.
+
+        Args:
+            event (ErrorEvent): IN: Error event. OUT: Recorded.
+        """
         self._record_event(f"error:{event.error_type}", event)
 
 
 def _clean_attrs(d: dict[str, tp.Any]) -> dict[str, tp.Any]:
-    """Filter ``None`` and coerce non-primitive values to strings."""
+    """Sanitize a dictionary for OpenTelemetry attribute values.
+
+    Removes ``None`` values and converts unsupported types to strings.
+
+    Args:
+        d (dict[str, Any]): IN: Raw attribute dictionary. OUT: Cleaned and
+            truncated where necessary.
+
+    Returns:
+        dict[str, Any]: OUT: OTel-compatible attribute dictionary.
+    """
     out: dict[str, tp.Any] = {}
     for k, v in d.items():
         if v is None:

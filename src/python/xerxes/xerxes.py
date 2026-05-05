@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,55 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Xerxes module for Xerxes.
 
-
-"""Core Xerxes module implementing the main agent orchestration framework.
-
-This module contains the primary Xerxes class that provides sophisticated
-agent management capabilities including:
-- Multi-agent orchestration and switching
-- Function/tool execution with retry logic
-- Memory system integration
-- Streaming response handling
-- Prompt template management
-- Asynchronous and synchronous execution modes
-
-The module also includes prompt templating utilities and helper functions
-for formatting and parsing agent responses.
-
-Key components:
-- Xerxes: Main orchestration class for managing AI agents
-- PromptSection: Enumeration for structured prompt sections
-- PromptTemplate: Configurable template for structuring agent prompts
-
-Typical usage example:
-    from xerxes import Xerxes, Agent
-    from xerxes.llms import OpenAILLM
-
-
-    llm = OpenAILLM(api_key="your-api-key")
-    xerxes = Xerxes(llm=llm, enable_memory=True)
-
-
-    agent = Agent(
-        id="assistant",
-        instructions="You are a helpful assistant.",
-        model="gpt-4"
-    )
-    xerxes.register_agent(agent)
-
-
-    for chunk in xerxes.run(prompt="Hello!"):
-        if chunk.content:
-            print(chunk.content, end="")
-
-
-    result = xerxes.run(prompt="Hello!", stream=False)
-    print(result.content)
-"""
+Exports:
+    - logger
+    - add_depth
+    - Xerxes"""
 
 import asyncio
 import json
@@ -116,6 +78,13 @@ logger = logging.getLogger(__name__)
 
 
 def add_depth(x, add_prefix=False):
+    """Add depth.
+
+    Args:
+        x (Any): IN: x. OUT: Consumed during execution.
+        add_prefix (Any, optional): IN: add prefix. Defaults to False. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     return SEP + x.replace("\n", f"\n{SEP}") if add_prefix else x.replace("\n", f"\n{SEP}")
 
 
@@ -127,7 +96,14 @@ _TOOL_PARAMETER_TAG_RE = re.compile(
 
 @dataclass
 class _RuntimeTurnState:
-    """Tracks one user-visible turn across tool reinvocation cycles."""
+    """Runtime turn state.
+
+    Attributes:
+        turn_id (str): turn id.
+        prompt (str): prompt.
+        started_at (str): started at.
+        tool_calls (list[tp.Any]): tool calls.
+        finalized (bool): finalized."""
 
     turn_id: str
     prompt: str = ""
@@ -137,54 +113,11 @@ class _RuntimeTurnState:
 
 
 class Xerxes:
-    """Main Xerxes orchestration class for managing AI agents.
-
-    This is the primary interface for interacting with the Xerxes framework.
-    It manages agent registration, prompt formatting, function execution,
-    memory integration, and response generation with support for both
-    streaming and non-streaming modes.
-
-    The Xerxes class provides:
-    - Agent registration and orchestration across multiple agents
-    - Automatic function/tool calling with retry logic
-    - Memory system integration for context persistence
-    - Both synchronous (run) and asynchronous (create_response) interfaces
-    - Streaming and non-streaming response modes
-    - Prompt template customization
-    - Agent switching based on capabilities or error recovery
+    """Xerxes.
 
     Attributes:
-        SEP: Class variable defining the separator used for indentation.
-        llm_client: The BaseLLM instance for generating completions.
-        template: PromptTemplate for structuring agent prompts.
-        orchestrator: AgentOrchestrator for managing multi-agent workflows.
-        executor: FunctionExecutor for handling tool/function calls.
-        enable_memory: Whether the memory system is enabled.
-        auto_add_memory_tools: Whether to auto-add memory tools to agents.
-        memory_store: MemoryStore instance for persistent context (if enabled).
-
-    Example:
-        Basic usage with streaming:
-
-        >>> from xerxes import Xerxes, Agent
-        >>> from xerxes.llms import OpenAILLM
-        >>> llm = OpenAILLM(api_key="your-key")
-        >>> xerxes = Xerxes(llm=llm, enable_memory=True)
-        >>> agent = Agent(id="helper", instructions="You are helpful.")
-        >>> xerxes.register_agent(agent)
-        >>> for chunk in xerxes.run(prompt="Hello!"):
-        ...     print(chunk.content, end="")
-
-        Non-streaming usage:
-
-        >>> result = xerxes.run(prompt="Hello!", stream=False)
-        >>> print(result.content)
-
-        Async usage:
-
-        >>> async for chunk in await xerxes.create_response(prompt="Hi"):
-        ...     print(chunk.content, end="")
-    """
+        SEP (tp.ClassVar[str]): sep.
+        REINVOKE_FOLLOWUP_INSTRUCTION (tp.ClassVar[str]): reinvoke followup instruction."""
 
     SEP: tp.ClassVar[str] = SEP
     REINVOKE_FOLLOWUP_INSTRUCTION: tp.ClassVar[str] = (
@@ -205,31 +138,18 @@ class Xerxes:
         auto_add_memory_tools: bool = True,
         runtime_features: RuntimeFeaturesConfig | None = None,
     ):
-        """Initialize Xerxes with an LLM.
+        """Initialize the instance.
 
         Args:
-            llm: A BaseLLM instance for generating completions.
-            template: Optional prompt template for structuring prompts.
-            enable_memory: Whether to enable the memory system.
-            auto_add_memory_tools: Whether to automatically add memory tools to agents when memory is enabled.
-            memory_config: Configuration for MemoryStore with keys:
-                - max_short_term: Maximum short-term memory entries (default: 100)
-                - max_working: Maximum working memory entries (default: 10)
-                - max_long_term: Maximum long-term memory entries (default: 10000)
-                - enable_vector_search: Enable vector similarity search (default: False)
-                - embedding_dimension: Dimension for embeddings (default: 768)
-                - enable_persistence: Enable persistent storage (default: False)
-                - persistence_path: Path for persistent storage
-                - cache_size: Size of memory cache (default: 100)
-
-        Example:
-            >>> llm = OpenAILLM(api_key="key")
-            >>> xerxes = Xerxes(
-            ...     llm=llm,
-            ...     enable_memory=True,
-            ...     memory_config={"max_short_term": 50}
-            ... )
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            llm (BaseLLM | None, optional): IN: llm. Defaults to None. OUT: Consumed during execution.
+            template (PromptTemplate | None, optional): IN: template. Defaults to None. OUT: Consumed during execution.
+            enable_memory (bool, optional): IN: enable memory. Defaults to False. OUT: Consumed during execution.
+            memory_config (dict[str, tp.Any] | None, optional): IN: memory config. Defaults to None. OUT: Consumed during execution.
+            auto_add_memory_tools (bool, optional): IN: auto add memory tools. Defaults to True. OUT: Consumed during execution.
+            runtime_features (RuntimeFeaturesConfig | None, optional): IN: runtime features. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
 
         self.llm_client: BaseLLM | None = llm
 
@@ -275,13 +195,14 @@ class Xerxes:
         runtime_features: RuntimeFeaturesConfig | None,
         workspace_root: str,
     ) -> RuntimeFeaturesConfig:
-        """Ensure Xerxes has operator runtime available by default.
+        """Internal helper to normalize runtime features.
 
-        When no runtime config is supplied, Xerxes starts with runtime features
-        enabled and operator tooling available. When runtime features are explicitly
-        enabled but no operator config is provided, operator tooling is attached with
-        its default allow-by-default policy.
-        """
+        Args:
+            runtime_features (RuntimeFeaturesConfig | None): IN: runtime features. OUT: Consumed during execution.
+            workspace_root (str): IN: workspace root. OUT: Consumed during execution.
+        Returns:
+            RuntimeFeaturesConfig: OUT: Result of the operation."""
+
         if runtime_features is None:
             return RuntimeFeaturesConfig(
                 enabled=True,
@@ -305,30 +226,21 @@ class Xerxes:
         return runtime_features
 
     def _setup_default_triggers(self) -> None:
-        """Setup default agent switching triggers.
+        """Internal helper to setup default triggers.
 
-        Registers default trigger handler functions with the orchestrator for
-        automatic agent switching based on context conditions. These triggers
-        enable intelligent multi-agent orchestration.
-
-        Registered Triggers:
-            - CAPABILITY_BASED: Switches to an agent that has a required
-              capability when 'required_capability' is present in context.
-              Selects the agent with the highest performance score for that
-              capability.
-            - ERROR_RECOVERY: Switches to the current agent's fallback_agent_id
-              when 'execution_error' is present in context, enabling graceful
-              error recovery.
-
-        Returns:
-            None
-
-        Side Effects:
-            Registers two switch trigger handlers with self.orchestrator.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
 
         def capability_based_switch(context, agents, current_agent_id):
-            """Switch to the highest-scoring agent that has the required capability."""
+            """Capability based switch.
+
+            Args:
+                context (Any): IN: context. OUT: Consumed during execution.
+                agents (Any): IN: agents. OUT: Consumed during execution.
+                current_agent_id (Any): IN: current agent id. OUT: Consumed during execution.
+            Returns:
+                Any: OUT: Result of the operation."""
+
             required_capability = context.get("required_capability")
             if not required_capability:
                 return None
@@ -346,7 +258,15 @@ class Xerxes:
             return best_agent
 
         def error_recovery_switch(context, agents, current_agent_id):
-            """Switch to the current agent's fallback when an execution error is present."""
+            """Error recovery switch.
+
+            Args:
+                context (Any): IN: context. OUT: Consumed during execution.
+                agents (Any): IN: agents. OUT: Consumed during execution.
+                current_agent_id (Any): IN: current agent id. OUT: Consumed during execution.
+            Returns:
+                Any: OUT: Result of the operation."""
+
             if context.get("execution_error") and current_agent_id:
                 current_agent = agents[current_agent_id]
                 if current_agent.fallback_agent_id:
@@ -362,24 +282,16 @@ class Xerxes:
         system_prompt: str = "",
         **config_kwargs: tp.Any,
     ):
-        """Create a fully-wired QueryEngine from this Xerxes instance.
-
-        The QueryEngine provides a multi-turn conversation interface with
-        budget control, auto-compaction, cost tracking, and history logging.
+        """Create query engine.
 
         Args:
-            model: Model name override. If empty, uses the current agent's model.
-            system_prompt: System prompt override.
-            **config_kwargs: Additional QueryEngineConfig kwargs.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
+            system_prompt (str, optional): IN: system prompt. Defaults to ''. OUT: Consumed during execution.
+            **config_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            A :class:`QueryEngine` instance.
+            Any: OUT: Result of the operation."""
 
-        Example:
-            >>> engine = xerxes.create_query_engine(model="gpt-4o")
-            >>> result = engine.submit("Hello!")
-            >>> print(result.output)
-        """
         from .runtime.bridge import create_query_engine
 
         agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
@@ -397,14 +309,14 @@ class Xerxes:
         )
 
     def create_runtime_session(self, prompt: str = "") -> RuntimeSession:
-        """Create a new RuntimeSession capturing current context.
+        """Create runtime session.
 
         Args:
-            prompt: Initial prompt or session description.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str, optional): IN: prompt. Defaults to ''. OUT: Consumed during execution.
         Returns:
-            A :class:`RuntimeSession` instance.
-        """
+            RuntimeSession: OUT: Result of the operation."""
+
         from .runtime.session import RuntimeSession
 
         agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
@@ -412,17 +324,14 @@ class Xerxes:
         return RuntimeSession.create(model=model, prompt=prompt)
 
     def bootstrap(self, extra_context: str = ""):
-        """Run the bootstrap sequence for this Xerxes instance.
-
-        Performs environment detection, git info loading, XERXES.md loading,
-        tool registration, and system prompt building.
+        """Bootstrap.
 
         Args:
-            extra_context: Additional context for the system prompt.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            extra_context (str, optional): IN: extra context. Defaults to ''. OUT: Consumed during execution.
         Returns:
-            A :class:`BootstrapResult`.
-        """
+            Any: OUT: Result of the operation."""
+
         from .runtime.bridge import bootstrap_xerxes
 
         agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
@@ -435,21 +344,25 @@ class Xerxes:
         )
 
     def get_execution_registry(self):
-        """Get a populated ExecutionRegistry with all Xerxes tools.
+        """Retrieve the execution registry.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            An :class:`ExecutionRegistry` with all tools registered.
-        """
+            Any: OUT: Result of the operation."""
+
         from .runtime.bridge import populate_registry
 
         return populate_registry()
 
     def get_tool_executor(self):
-        """Get a tool executor callable for the streaming agent loop.
+        """Retrieve the tool executor.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable ``(tool_name: str, tool_input: dict) -> str``.
-        """
+            Any: OUT: Result of the operation."""
+
         from .runtime.bridge import build_tool_executor
 
         agent = self.orchestrator.get_current_agent() if self.orchestrator.current_agent_id else None
@@ -461,31 +374,15 @@ class Xerxes:
         max_concurrent: int = 5,
         max_depth: int = 5,
     ):
-        """Create a SubAgentManager with the streaming agent loop wired up.
-
-        The manager uses a thread pool for concurrent sub-agent execution,
-        supports git worktree isolation, named agents, and inbox queues.
+        """Create subagent manager.
 
         Args:
-            max_concurrent: Maximum number of concurrent sub-agents.
-            max_depth: Maximum nesting depth.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            max_concurrent (int, optional): IN: max concurrent. Defaults to 5. OUT: Consumed during execution.
+            max_depth (int, optional): IN: max depth. Defaults to 5. OUT: Consumed during execution.
         Returns:
-            A :class:`SubAgentManager` instance.
+            Any: OUT: Result of the operation."""
 
-        Example:
-            >>> mgr = xerxes.create_subagent_manager()
-            >>> from xerxes.agents import get_agent_definition
-            >>> task = mgr.spawn(
-            ...     prompt="Review this code",
-            ...     config={"model": "gpt-4o"},
-            ...     system_prompt="You are helpful.",
-            ...     agent_def=get_agent_definition("reviewer"),
-            ...     name="code-review",
-            ... )
-            >>> mgr.wait(task.id)
-            >>> print(task.result)
-        """
         from .agents.subagent_manager import SubAgentManager
         from .runtime.bridge import build_tool_executor, populate_registry
 
@@ -495,6 +392,16 @@ class Xerxes:
         tool_executor = build_tool_executor(xerxes_instance=self, registry=registry)
 
         def runner(prompt, config, system_prompt, depth, cancel_check):
+            """Runner.
+
+            Args:
+                prompt (Any): IN: prompt. OUT: Consumed during execution.
+                config (Any): IN: config. OUT: Consumed during execution.
+                system_prompt (Any): IN: system prompt. OUT: Consumed during execution.
+                depth (Any): IN: depth. OUT: Consumed during execution.
+                cancel_check (Any): IN: cancel check. OUT: Consumed during execution.
+            Returns:
+                Any: OUT: Result of the operation."""
             from .streaming.events import AgentState, TextChunk
             from .streaming.loop import run
 
@@ -503,21 +410,15 @@ class Xerxes:
             eff_tool_executor = tool_executor
             eff_tool_schemas = registry.tool_schemas()
 
-            # Build effective allowed set from whitelist / allowed_tools / exclude_tools
             all_names = {s.get("name") for s in eff_tool_schemas}
-            allowed: set[str] = set()
 
             whitelist = config.get("_tools_whitelist")
             allowed_tools = config.get("_tools_allowed")
             excluded_tools = config.get("_tools_excluded") or []
 
-            if whitelist:
-                allowed = set(whitelist)
-            elif allowed_tools:
-                allowed = set(allowed_tools)
-            else:
-                allowed = all_names.copy()
-
+            allowed = set(whitelist) if whitelist else all_names.copy()
+            if allowed_tools:
+                allowed &= set(allowed_tools)
             if excluded_tools:
                 allowed -= set(excluded_tools)
 
@@ -525,6 +426,13 @@ class Xerxes:
                 eff_tool_schemas = [s for s in eff_tool_schemas if s.get("name") in allowed]
 
                 def _filtered_executor(tool_name: str, tool_input: dict[str, Any]) -> str:
+                    """Internal helper to filtered executor.
+
+                    Args:
+                        tool_name (str): IN: tool name. OUT: Consumed during execution.
+                        tool_input (dict[str, Any]): IN: tool input. OUT: Consumed during execution.
+                    Returns:
+                        str: OUT: Result of the operation."""
                     if tool_name not in allowed:
                         return f"Error: tool '{tool_name}' is not allowed for this agent."
                     return tool_executor(tool_name, tool_input)
@@ -549,21 +457,39 @@ class Xerxes:
         return mgr
 
     def _notify_turn_start(self, agent_id: str | None, messages: MessagesHistory | None = None) -> None:
-        """Fire the ``on_turn_start`` hook if any listeners are registered."""
+        """Internal helper to notify turn start.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution."""
+
         runtime_state = self._runtime_features_state
         if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_turn_start"):
             return
         runtime_state.hook_runner.run("on_turn_start", agent_id=agent_id, messages=messages)
 
     def _notify_turn_end(self, agent_id: str | None, response: str | None = None) -> None:
-        """Fire the ``on_turn_end`` hook if any listeners are registered."""
+        """Internal helper to notify turn end.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            response (str | None, optional): IN: response. Defaults to None. OUT: Consumed during execution."""
+
         runtime_state = self._runtime_features_state
         if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_turn_end"):
             return
         runtime_state.hook_runner.run("on_turn_end", agent_id=agent_id, response=response)
 
     def _notify_runtime_error(self, agent_id: str | None, error: Exception) -> None:
-        """Fire the ``on_error`` hook if any listeners are registered."""
+        """Internal helper to notify runtime error.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            error (Exception): IN: error. OUT: Consumed during execution."""
+
         runtime_state = self._runtime_features_state
         if runtime_state is None or not runtime_state.hook_runner.has_hooks("on_error"):
             return
@@ -571,7 +497,11 @@ class Xerxes:
 
     @staticmethod
     def _new_runtime_turn_id() -> str:
-        """Generate a compact random identifier for a new runtime turn."""
+        """Internal helper to new runtime turn id.
+
+        Returns:
+            str: OUT: Result of the operation."""
+
         return uuid.uuid4().hex[:12]
 
     def _append_turn_tool_results(
@@ -579,7 +509,13 @@ class Xerxes:
         turn_state: _RuntimeTurnState | None,
         results: list[RequestFunctionCall],
     ) -> None:
-        """Append tool-call execution records to the current turn state."""
+        """Internal helper to append turn tool results.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            turn_state (_RuntimeTurnState | None): IN: turn state. OUT: Consumed during execution.
+            results (list[RequestFunctionCall]): IN: results. OUT: Consumed during execution."""
+
         if turn_state is None:
             return
 
@@ -613,7 +549,14 @@ class Xerxes:
         response_content: str,
         turn_state: _RuntimeTurnState | None = None,
     ) -> None:
-        """Close out a turn: fire hooks, emit audit event, and persist the session record."""
+        """Internal helper to finalize runtime turn.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            response_content (str): IN: response content. OUT: Consumed during execution.
+            turn_state (_RuntimeTurnState | None, optional): IN: turn state. Defaults to None. OUT: Consumed during execution."""
+
         self._notify_turn_end(agent_id, response_content)
 
         runtime_state = self._runtime_features_state
@@ -656,7 +599,15 @@ class Xerxes:
         context: str,
         turn_state: _RuntimeTurnState | None = None,
     ) -> None:
-        """Fire error hooks, emit an audit error event, and persist a failed turn record."""
+        """Internal helper to record runtime error.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
+            error (Exception): IN: error. OUT: Consumed during execution.
+            context (str): IN: context. OUT: Consumed during execution.
+            turn_state (_RuntimeTurnState | None, optional): IN: turn state. Defaults to None. OUT: Consumed during execution."""
+
         self._notify_runtime_error(agent_id, error)
 
         runtime_state = self._runtime_features_state
@@ -695,14 +646,27 @@ class Xerxes:
 
     @classmethod
     def _is_reinvoke_followup_message(cls, message: ChatMessage) -> bool:
-        """Return True if the message is the standard reinvoke follow-up instruction."""
+        """Internal helper to is reinvoke followup message.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            message (ChatMessage): IN: message. OUT: Consumed during execution.
+        Returns:
+            bool: OUT: Result of the operation."""
+
         if not isinstance(message, UserMessage) or not isinstance(message.content, str):
             return False
         return message.content.strip() == cls.REINVOKE_FOLLOWUP_INSTRUCTION
 
     @staticmethod
     def _is_operator_reinvoke_attachment(message: ChatMessage) -> bool:
-        """Return True for synthetic user messages injected from operator tool results."""
+        """Internal helper to is operator reinvoke attachment.
+
+        Args:
+            message (ChatMessage): IN: message. OUT: Consumed during execution.
+        Returns:
+            bool: OUT: Result of the operation."""
+
         if not isinstance(message, UserMessage) or isinstance(message.content, str):
             return False
         if not message.content:
@@ -712,7 +676,14 @@ class Xerxes:
 
     @classmethod
     def _compact_reinvoke_history(cls, messages: list[ChatMessage]) -> list[ChatMessage]:
-        """Strip trailing reinvoke cycles (follow-up instruction + tool messages + assistant call) from history."""
+        """Internal helper to compact reinvoke history.
+
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
+            messages (list[ChatMessage]): IN: messages. OUT: Consumed during execution.
+        Returns:
+            list[ChatMessage]: OUT: Result of the operation."""
+
         compacted = messages.copy()
 
         while compacted and cls._is_reinvoke_followup_message(compacted[-1]):
@@ -727,27 +698,12 @@ class Xerxes:
         return compacted
 
     def register_agent(self, agent: Agent) -> None:
-        """Register an agent with the orchestrator.
-
-        Registers the agent for multi-agent orchestration, optionally adding
-        memory tools if memory is enabled and auto_add_memory_tools is True.
-        The first registered agent becomes the default active agent.
+        """Register agent.
 
         Args:
-            agent: The Agent instance to register for orchestration.
+            self: IN: The instance. OUT: Used for attribute access.
+            agent (Agent): IN: agent. OUT: Consumed during execution."""
 
-        Returns:
-            None
-
-        Side Effects:
-            - Adds memory tools to agent if memory is enabled
-            - Updates orchestrator's agent registry
-            - Sets agent as current if it's the first registered
-
-        Example:
-            >>> agent = Agent(id="helper", instructions="Be helpful")
-            >>> xerxes.register_agent(agent)
-        """
         if self.enable_memory and self.auto_add_memory_tools:
             self._add_memory_tools_to_agent(agent)
         if self._runtime_features_state is not None:
@@ -756,26 +712,12 @@ class Xerxes:
         self.orchestrator.register_agent(agent)
 
     def _add_memory_tools_to_agent(self, agent: Agent) -> None:
-        """Add memory tools to an agent if not already present.
-
-        Imports and adds the standard memory tools (store, retrieve, etc.)
-        to the agent's function list, enabling the agent to interact with
-        the memory system during conversations.
+        """Internal helper to add memory tools to agent.
 
         Args:
-            agent: The Agent instance to add memory tools to.
+            self: IN: The instance. OUT: Used for attribute access.
+            agent (Agent): IN: agent. OUT: Consumed during execution."""
 
-        Returns:
-            None
-
-        Side Effects:
-            - Initializes agent.functions to empty list if None
-            - Appends memory tools not already present in agent.functions
-
-        Note:
-            This method checks for existing functions by name to avoid
-            duplicate tool registrations.
-        """
         from .tools.memory_tool import MEMORY_TOOLS
 
         if agent.functions is None:
@@ -794,29 +736,15 @@ class Xerxes:
         context_variables: dict | None = None,
         function_calls: list[RequestFunctionCall] | None = None,
     ) -> None:
-        """Update memory system based on agent response.
-
-        Stores the agent's response and any function calls in the memory
-        system for future context retrieval. Response content is stored
-        as short-term memory, while function calls are stored as working
-        memory with higher importance.
+        """Internal helper to update memory from response.
 
         Args:
-            content: The response content from the agent.
-            agent_id: ID of the agent that generated the response.
-            context_variables: Optional context variables to store with memory.
-            function_calls: Optional list of function calls made in the response.
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            function_calls (list[RequestFunctionCall] | None, optional): IN: function calls. Defaults to None. OUT: Consumed during execution."""
 
-        Returns:
-            None
-
-        Side Effects:
-            - Adds response content to short-term memory (importance: 0.6)
-            - Adds each function call to working memory (importance: 0.7)
-
-        Note:
-            This method is a no-op if memory is not enabled.
-        """
         if not self.enable_memory:
             return
 
@@ -840,25 +768,13 @@ class Xerxes:
                 )
 
     def _update_memory_from_prompt(self, prompt: str, agent_id: str) -> None:
-        """Update memory system from user prompt.
-
-        Stores the user's prompt in short-term memory with high importance
-        for context retrieval in subsequent interactions.
+        """Internal helper to update memory from prompt.
 
         Args:
-            prompt: The user's input prompt text.
-            agent_id: ID of the agent receiving the prompt.
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str): IN: prompt. OUT: Consumed during execution.
+            agent_id (str): IN: agent id. OUT: Consumed during execution."""
 
-        Returns:
-            None
-
-        Side Effects:
-            - Adds user prompt to short-term memory (importance: 0.8)
-            - Tags the memory entry with "user_input"
-
-        Note:
-            This method is a no-op if memory is not enabled.
-        """
         if not self.enable_memory:
             return
 
@@ -876,25 +792,16 @@ class Xerxes:
         content: str | list[str] | None,
         item_prefix: str | None = "- ",
     ) -> str | None:
-        """Format a section of the prompt with a header and indented content.
-
-        Creates a formatted prompt section with proper indentation and
-        optional item prefixes for list content.
+        """Internal helper to format section.
 
         Args:
-            header: The section header text (e.g., "RULES:", "CONTEXT:").
-            content: The section content as a string or list of strings.
-            item_prefix: Optional prefix for list items (default: "- ").
-                Set to None to disable prefixing.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            header (str): IN: header. OUT: Consumed during execution.
+            content (str | list[str] | None): IN: content. OUT: Consumed during execution.
+            item_prefix (str | None, optional): IN: item prefix. Defaults to '- '. OUT: Consumed during execution.
         Returns:
-            Formatted section string with header and indented content,
-            or None if content is empty or None.
+            str | None: OUT: Result of the operation."""
 
-        Example:
-            >>> xerxes._format_section("RULES:", ["Be helpful", "Be concise"])
-            'RULES:\\n  - Be helpful\\n  - Be concise'
-        """
         if not content:
             return None
 
@@ -913,31 +820,27 @@ class Xerxes:
         return f"{header}\n{indented}"
 
     def _extract_from_markdown(self, content: str, field: str) -> list[str]:
-        """Extract content from markdown code blocks with a specific field identifier.
-
-        Searches for all markdown code blocks with the specified field identifier
-        and extracts their raw content as strings.
+        """Internal helper to extract from markdown.
 
         Args:
-            content: The response content to search through.
-            field: The markdown field identifier (e.g., 'tool_call', 'json').
-                This is matched after the opening triple backticks.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            field (str): IN: field. OUT: Consumed during execution.
         Returns:
-            List of extracted content strings from matching markdown blocks.
-            Returns empty list if no matching blocks are found.
+            list[str]: OUT: Result of the operation."""
 
-        Example:
-            >>> content = '```tool_call\\n{"name": "func"}\\n```'
-            >>> xerxes._extract_from_markdown(content, "tool_call")
-            ['{"name": "func"}']
-        """
         pattern = rf"```{field}\s*\n(.*?)\n```"
         return re.findall(pattern, content, re.DOTALL)
 
     @staticmethod
     def _system_message_to_text(message: SystemMessage) -> str | None:
-        """Convert a system message into plain text for prompt deduplication."""
+        """Internal helper to system message to text.
+
+        Args:
+            message (SystemMessage): IN: message. OUT: Consumed during execution.
+        Returns:
+            str | None: OUT: Result of the operation."""
+
         if isinstance(message.content, str):
             content = message.content.strip()
             return content or None
@@ -959,7 +862,15 @@ class Xerxes:
         final_system_content: str,
         messages: MessagesHistory | None,
     ) -> tuple[str, list[ChatMessage]]:
-        """Collapse any prior system messages into one prompt header."""
+        """Internal helper to merge system history.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            final_system_content (str): IN: final system content. OUT: Consumed during execution.
+            messages (MessagesHistory | None): IN: messages. OUT: Consumed during execution.
+        Returns:
+            tuple[str, list[ChatMessage]]: OUT: Result of the operation."""
+
         if not messages or not messages.messages:
             return final_system_content, []
 
@@ -998,32 +909,21 @@ class Xerxes:
         use_chain_of_thought: bool = False,
         require_reflection: bool = False,
     ) -> MessagesHistory:
-        """Generate a structured list of ChatMessage objects for the LLM.
-
-        Constructs a properly formatted message history including system prompts,
-        rules, functions, examples, context, and user messages based on the
-        agent's configuration and provided parameters.
+        """Manage messages.
 
         Args:
-            agent: The agent to generate messages for.
-            prompt: Optional user prompt to include.
-            context_variables: Optional context variables to include.
-            messages: Optional existing message history.
-            include_memory: Whether to include memory context.
-            use_instructed_prompt: Whether to use instructed prompt format.
-            use_chain_of_thought: Whether to add chain-of-thought instructions.
-            require_reflection: Whether to request reflection in response.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            agent (Agent | None): IN: agent. OUT: Consumed during execution.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            include_memory (bool, optional): IN: include memory. Defaults to True. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            use_chain_of_thought (bool, optional): IN: use chain of thought. Defaults to False. OUT: Consumed during execution.
+            require_reflection (bool, optional): IN: require reflection. Defaults to False. OUT: Consumed during execution.
         Returns:
-            MessagesHistory containing the formatted messages.
+            MessagesHistory: OUT: Result of the operation."""
 
-        Example:
-            >>> messages = xerxes.manage_messages(
-            ...     agent=my_agent,
-            ...     prompt="Hello",
-            ...     use_chain_of_thought=True
-            ... )
-        """
         if not agent:
             return MessagesHistory(messages=[UserMessage(content=prompt or "You are a helpful assistant.")])
 
@@ -1163,20 +1063,18 @@ class Xerxes:
         results: list[RequestFunctionCall],
         agent_id: str | None = None,
     ) -> MessagesHistory:
-        """Build message history for reinvocation including function results.
-
-        Constructs a new message history that includes the original messages,
-        the assistant's response with tool calls, and the tool execution results.
+        """Internal helper to build reinvoke messages.
 
         Args:
-            original_messages: The original message history.
-            assistant_content: The assistant's response content.
-            function_calls: List of function calls made by the assistant.
-            results: List of function execution results.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            original_messages (MessagesHistory): IN: original messages. OUT: Consumed during execution.
+            assistant_content (str): IN: assistant content. OUT: Consumed during execution.
+            function_calls (list[RequestFunctionCall]): IN: function calls. OUT: Consumed during execution.
+            results (list[RequestFunctionCall]): IN: results. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Updated MessagesHistory with function calls and results included.
-        """
+            MessagesHistory: OUT: Result of the operation."""
+
         messages = self._compact_reinvoke_history(original_messages.messages)
 
         tool_calls = []
@@ -1227,48 +1125,26 @@ class Xerxes:
 
     @staticmethod
     def extract_md_block(input_string: str) -> list[tuple[str, str]]:
-        """Extract Markdown code blocks from a string.
-
-        This function finds all Markdown code blocks (delimited by triple backticks)
-        in the input string and returns their content along with the optional language
-        specifier (if present).
+        """Extract md block.
 
         Args:
-            input_string: The input string containing one or more Markdown code blocks.
-
+            input_string (str): IN: input string. OUT: Consumed during execution.
         Returns:
-            List of tuples, where each tuple contains:
-                - The language specifier (e.g., 'xml', 'python', or '' if not specified).
-                - The content of the code block.
+            list[tuple[str, str]]: OUT: Result of the operation."""
 
-        Example:
-            >>> text = '''```xml
-            ... <web_research>
-            ...   <arguments>
-            ...     {"query": "quantum computing breakthroughs 2024"}
-            ...   </arguments>
-            ... </web_research>
-            ... ```'''
-            >>> Xerxes.extract_md_block(text)
-            [('xml', '<web_research>\n  <arguments>\n    {"query": "quantum computing breakthroughs 2024"}\n  </arguments>\n</web_research>')]
-        """
         pattern = r"```(\w*)\n(.*?)\n```"
         matches = re.findall(pattern, input_string, re.DOTALL)
         return [(lang, content.strip()) for lang, content in matches]
 
     def _remove_function_calls_from_content(self, content: str) -> str:
-        """Remove function call XML blocks from content.
-
-        Cleans the response content by removing XML-formatted function calls,
-        tagged function-call blocks, and markdown function-call blocks,
-        leaving only the conversational text.
+        """Internal helper to remove function calls from content.
 
         Args:
-            content: The content to clean.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
         Returns:
-            Content with function call blocks removed.
-        """
+            str: OUT: Result of the operation."""
+
         pattern = r"<(\w+)>\s*<arguments>.*?</arguments>\s*</\w+>"
         cleaned = re.sub(pattern, "", content, flags=re.DOTALL)
         pattern = r"<function=[A-Za-z0-9_.:-]+>\s*.*?</function>"
@@ -1279,18 +1155,15 @@ class Xerxes:
         return cleaned.strip()
 
     def _extract_function_calls_from_xml(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
-        """Extract function calls from response content using XML tags.
-
-        Parses XML-formatted function calls from the response content.
-        Expected format: <function_name><arguments>{...}</arguments></function_name>
+        """Internal helper to extract function calls from xml.
 
         Args:
-            content: The response content to parse.
-            agent: The agent context for timeout and retry settings.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
         Returns:
-            List of RequestFunctionCall objects extracted from XML.
-        """
+            list[RequestFunctionCall]: OUT: Result of the operation."""
+
         function_calls: list[RequestFunctionCall] = []
         valid_function_names = set(agent.get_available_functions())
         pattern = r"<(\w+)>\s*<arguments>(.*?)</arguments>\s*</\w+>"
@@ -1318,7 +1191,15 @@ class Xerxes:
         return function_calls
 
     def _extract_function_calls_from_tagged_markup(self, content: str, agent: Agent) -> list[RequestFunctionCall]:
-        """Extract pseudo-XML tool calls such as ``<function=name>`` blocks."""
+        """Internal helper to extract function calls from tagged markup.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
+        Returns:
+            list[RequestFunctionCall]: OUT: Result of the operation."""
+
         function_calls = []
         functions_by_name = {get_callable_public_name(func): func for func in agent.functions}
         valid_function_names = set(functions_by_name)
@@ -1372,15 +1253,15 @@ class Xerxes:
         function_calls_data: list[dict[str, tp.Any]],
         agent: Agent,
     ) -> list[RequestFunctionCall]:
-        """Convert function call data from LLM streaming to RequestFunctionCall objects.
+        """Internal helper to convert function calls.
 
         Args:
-            function_calls_data: Raw function call data from LLM response.
-            agent: The agent context for timeout and retry settings.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            function_calls_data (list[dict[str, tp.Any]]): IN: function calls data. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
         Returns:
-            List of RequestFunctionCall objects.
-        """
+            list[RequestFunctionCall]: OUT: Result of the operation."""
+
         function_calls: list[RequestFunctionCall] = []
         valid_function_names = set(agent.get_available_functions())
         for call_data in function_calls_data:
@@ -1416,19 +1297,15 @@ class Xerxes:
         agent: Agent,
         tool_calls: None | list[tp.Any] = None,
     ) -> list[RequestFunctionCall]:
-        """Extract function calls from response content.
-
-        Attempts multiple extraction methods including tool_calls from LLM,
-        XML format, and markdown blocks.
+        """Internal helper to extract function calls.
 
         Args:
-            content: The response content to parse.
-            agent: The agent context for timeout and retry settings.
-            tool_calls: Optional pre-parsed tool calls from LLM.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
+            tool_calls (None | list[tp.Any], optional): IN: tool calls. Defaults to None. OUT: Consumed during execution.
         Returns:
-            List of RequestFunctionCall objects.
-        """
+            list[RequestFunctionCall]: OUT: Result of the operation."""
 
         if tool_calls is not None:
             function_calls = []
@@ -1494,36 +1371,16 @@ class Xerxes:
         return function_calls
 
     @staticmethod
-    def extract_from_markdown(format: str, string: str) -> str | None | dict:  # noqa: A002
-        """Extract content from a markdown code block with specific format.
-
-        Searches for a markdown code block with the specified format identifier
-        and extracts its content. If the content is valid JSON, it is parsed
-        and returned as a dictionary.
+    def extract_from_markdown(fmt: str, string: str) -> str | None | dict:
+        """Extract from markdown.
 
         Args:
-            format: The markdown format identifier to search for (e.g., 'json',
-                'python', 'xml'). This is matched after the opening triple backticks.
-            string: The string containing the markdown block to search.
-
+            fmt (str): IN: format. OUT: Consumed during execution.
+            string (str): IN: string. OUT: Consumed during execution.
         Returns:
-            - dict: If the block content is valid JSON
-            - str: If the block content is not valid JSON
-            - None: If no matching format block is found
+            str | None | dict: OUT: Result of the operation."""
 
-        Example:
-            >>> content = '```json\\n{"key": "value"}\\n```'
-            >>> Xerxes.extract_from_markdown("json", content)
-            {'key': 'value'}
-
-            >>> content = '```python\\nprint("hello")\\n```'
-            >>> Xerxes.extract_from_markdown("python", content)
-            'print("hello")'
-
-        Note:
-            Only the first matching block is extracted if multiple exist.
-        """
-        pattern = rf"```{re.escape(format)}\s*\n(.*?)\n```"
+        pattern = rf"```{re.escape(fmt)}\s*\n(.*?)\n```"
         m = re.search(pattern, string, re.DOTALL)
         if not m:
             return None
@@ -1534,18 +1391,15 @@ class Xerxes:
             return block
 
     def _detect_function_calls(self, content: str, agent: Agent) -> bool:
-        """Detect if content contains valid function calls.
-
-        Quick check to determine if the response contains function calls
-        without fully parsing them.
+        """Internal helper to detect function calls.
 
         Args:
-            content: The response content to check.
-            agent: The agent with available functions.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
         Returns:
-            True if function calls are detected, False otherwise.
-        """
+            bool: OUT: Result of the operation."""
+
         if not agent.functions:
             return False
         function_names = [get_callable_public_name(func) for func in agent.functions]
@@ -1561,18 +1415,15 @@ class Xerxes:
         return False
 
     def _detect_function_calls_regex(self, content: str, agent: Agent) -> bool:
-        """Detect function calls using regex for more precision.
-
-        More accurate detection using regular expressions to find
-        XML-formatted function calls.
+        """Internal helper to detect function calls regex.
 
         Args:
-            content: The response content to check.
-            agent: The agent with available functions.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
         Returns:
-            True if function calls are detected via regex, False otherwise.
-        """
+            bool: OUT: Result of the operation."""
+
         if not agent.functions:
             return False
         function_names = [get_callable_public_name(func) for func in agent.functions]
@@ -1587,20 +1438,14 @@ class Xerxes:
 
     @staticmethod
     def get_thoughts(response: str, tag: str = "think") -> str | None:
-        """Extract thinking/reasoning content from tagged sections.
+        """Retrieve the thoughts.
 
         Args:
-            response: The response containing tagged thoughts.
-            tag: The XML tag name to extract (default: 'think').
-
+            response (str): IN: response. OUT: Consumed during execution.
+            tag (str, optional): IN: tag. Defaults to 'think'. OUT: Consumed during execution.
         Returns:
-            The content within the tags, or None if not found.
+            str | None: OUT: Result of the operation."""
 
-        Example:
-            >>> response = "Some text <think>Internal reasoning</think> more text"
-            >>> Xerxes.get_thoughts(response)
-            'Internal reasoning'
-        """
         inside = None
         match = re.search(rf"<{tag}>(.*?)</{tag}>", response, flags=re.S)
         if match:
@@ -1609,33 +1454,26 @@ class Xerxes:
 
     @staticmethod
     def filter_thoughts(response: str, tag: str = "think") -> str:
-        """Remove all thinking tags from the response.
+        """Filter thoughts.
 
         Args:
-            response: The response containing tagged thoughts.
-            tag: The XML tag name to remove (default: 'think').
-
+            response (str): IN: response. OUT: Consumed during execution.
+            tag (str, optional): IN: tag. Defaults to 'think'. OUT: Consumed during execution.
         Returns:
-            The response with all tagged sections removed.
+            str: OUT: Result of the operation."""
 
-        Example:
-            >>> response = "Answer <think>reasoning</think> continues"
-            >>> Xerxes.filter_thoughts(response)
-            'Answer continues'
-        """
         filtered = re.sub(rf"<{tag}>.*?</{tag}>", "", response, flags=re.S)
         return filtered.strip()
 
     def format_function_parameters(self, parameters: dict) -> str:
-        """Format function parameters in a clear, structured way.
+        """Format function parameters.
 
         Args:
-            parameters: Dictionary of parameter definitions from function schema.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            parameters (dict): IN: parameters. OUT: Consumed during execution.
         Returns:
-            Formatted string representation of parameters with types,
-            requirements, and descriptions.
-        """
+            str: OUT: Result of the operation."""
+
         if not parameters.get("properties"):
             return ""
 
@@ -1661,17 +1499,14 @@ class Xerxes:
         return "\n".join(formatted_params)
 
     def generate_function_section(self, functions: list[AgentFunction]) -> str:
-        """Generate detailed function documentation for agent prompts.
-
-        Creates comprehensive documentation for available functions, organized
-        by category if applicable, with full parameter schemas and examples.
+        """Generate function section.
 
         Args:
-            functions: List of AgentFunction objects to document.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            functions (list[AgentFunction]): IN: functions. OUT: Consumed during execution.
         Returns:
-            Formatted string containing complete function documentation.
-        """
+            str: OUT: Result of the operation."""
+
         if not functions:
             return ""
 
@@ -1713,26 +1548,14 @@ class Xerxes:
         return "\n\n".join(function_docs)
 
     def _format_function_doc(self, schema: dict) -> str:
-        """Format a single function's documentation block.
-
-        Creates a structured documentation block for a function including
-        its name, purpose, parameters, return type, and usage example.
+        """Internal helper to format function doc.
 
         Args:
-            schema: Function schema dictionary containing name, description,
-                    parameters, returns, and optional examples.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            schema (dict): IN: schema. OUT: Consumed during execution.
         Returns:
-            Formatted documentation string for the function.
+            str: OUT: Result of the operation."""
 
-        Note:
-            The output format includes:
-            - Function name and purpose
-            - Parameter details with types and requirements
-            - Return type
-            - Call pattern example in XML format
-            - Optional additional examples if provided
-        """
         ind1 = SEP
         ind2 = SEP * 2
         ind3 = SEP * 3
@@ -1781,12 +1604,14 @@ class Xerxes:
         return "\n".join(doc_lines)
 
     def _build_tool_prompt_label(self, func: AgentFunction) -> str:
-        """Build a short tool label for visible system-prompt tool summaries.
+        """Internal helper to build tool prompt label.
 
-        Native tool schemas are still passed to provider APIs. This helper only
-        improves the human-readable prompt prefix so models that are weak at
-        native tool use still see what a tool is for.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            func (AgentFunction): IN: func. OUT: Consumed during execution.
+        Returns:
+            str: OUT: Result of the operation."""
+
         name = get_callable_public_name(func)
         try:
             schema = function_to_json(func)["function"]
@@ -1807,14 +1632,14 @@ class Xerxes:
         return f"{name}: {summary}"
 
     def format_context_variables(self, variables: dict[str, tp.Any]) -> str:
-        """Format context variables with type information.
+        """Format context variables.
 
         Args:
-            variables: Dictionary of context variables to format.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            variables (dict[str, tp.Any]): IN: variables. OUT: Consumed during execution.
         Returns:
-            Formatted string representation of variables with types and values.
-        """
+            str: OUT: Result of the operation."""
+
         if not variables:
             return ""
         formatted_vars = []
@@ -1826,27 +1651,27 @@ class Xerxes:
         return "\n".join(formatted_vars)
 
     def format_prompt(self, prompt: str | None) -> str:
-        """Format a prompt string.
+        """Format prompt.
 
         Args:
-            prompt: The prompt to format.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None): IN: prompt. OUT: Consumed during execution.
         Returns:
-            The formatted prompt or empty string if None.
-        """
+            str: OUT: Result of the operation."""
+
         if not prompt:
             return ""
         return prompt
 
     def format_chat_history(self, messages: MessagesHistory) -> str:
-        """Format chat messages with improved readability.
+        """Format chat history.
 
         Args:
-            messages: MessagesHistory object containing chat messages.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            messages (MessagesHistory): IN: messages. OUT: Consumed during execution.
         Returns:
-            Formatted string representation of the chat history.
-        """
+            str: OUT: Result of the operation."""
+
         formatted_messages = []
         for msg in messages.messages:
             formatted_messages.append(f"## {msg.role}:\n{msg.content}")
@@ -1870,36 +1695,28 @@ class Xerxes:
         _runtime_loop_detector: LoopDetector | None = None,
         _runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> ResponseResult | AsyncIterator[StreamingResponseType]:
-        """Create response with enhanced function calling and agent switching.
-
-        Main async method for generating agent responses with support for
-        streaming, function execution, and multi-agent orchestration.
+        """Asynchronously Create response.
 
         Args:
-            prompt: Optional user prompt to process.
-            context_variables: Optional context variables for the agent.
-            messages: Optional message history.
-            agent_id: Optional specific agent ID or Agent instance to use.
-            stream: Whether to stream the response.
-            apply_functions: Whether to execute detected function calls.
-            print_formatted_prompt: Whether to print the formatted prompt.
-            use_instructed_prompt: Whether to use instructed prompt format.
-            conversation_name_holder: Name for conversation in instructed format.
-            mention_last_turn: Whether to mention last turn in instructed format.
-            reinvoke_after_function: Whether to reinvoke after function execution.
-            reinvoked_runtime: Internal flag indicating this is a reinvocation.
-            streamer_buffer: Optional buffer for streaming chunks.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None | Agent, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            stream (bool, optional): IN: stream. Defaults to True. OUT: Consumed during execution.
+            apply_functions (bool, optional): IN: apply functions. Defaults to True. OUT: Consumed during execution.
+            print_formatted_prompt (bool, optional): IN: print formatted prompt. Defaults to False. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
+            reinvoke_after_function (bool, optional): IN: reinvoke after function. Defaults to True. OUT: Consumed during execution.
+            reinvoked_runtime (bool, optional): IN: reinvoked runtime. Defaults to False. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
+            _runtime_loop_detector (LoopDetector | None, optional): IN: runtime loop detector. Defaults to None. OUT: Consumed during execution.
+            _runtime_turn_state (_RuntimeTurnState | None, optional): IN: runtime turn state. Defaults to None. OUT: Consumed during execution.
         Returns:
-            ResponseResult if stream=False, AsyncIterator[StreamingResponseType] if stream=True.
+            ResponseResult | AsyncIterator[StreamingResponseType]: OUT: Result of the operation."""
 
-        Example:
-            >>> response = await xerxes.create_response(
-            ...     prompt="Calculate 5 + 3",
-            ...     stream=False
-            ... )
-            >>> print(response.content)
-        """
         if isinstance(agent_id, Agent):
             agent = agent_id
         else:
@@ -2079,24 +1896,23 @@ class Xerxes:
         runtime_loop_detector: LoopDetector | None = None,
         runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> AsyncIterator[StreamingResponseType]:
-        """Handle streaming response with function calls and optional reinvocation.
-
-        Processes streaming LLM responses, detects and executes function calls,
-        and optionally reinvokes the agent with function results.
+        """Asynchronously Internal helper to handle streaming with functions.
 
         Args:
-            response: The LLM response stream.
-            agent: The current agent.
-            context: Context variables for function execution.
-            prompt_messages: The original prompt messages.
-            reinvoke_after_function: Whether to reinvoke after functions.
-            reinvoked_runtime: Whether this is already a reinvocation.
-            use_instructed_prompt: Whether using instructed prompt format.
-            streamer_buffer: Optional buffer for streaming chunks.
+            self: IN: The instance. OUT: Used for attribute access.
+            response (tp.Any): IN: response. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
+            context (dict): IN: context. OUT: Consumed during execution.
+            prompt_messages (MessagesHistory): IN: prompt messages. OUT: Consumed during execution.
+            reinvoke_after_function (bool): IN: reinvoke after function. OUT: Consumed during execution.
+            reinvoked_runtime (bool): IN: reinvoked runtime. OUT: Consumed during execution.
+            use_instructed_prompt (bool): IN: use instructed prompt. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None): IN: streamer buffer. OUT: Consumed during execution.
+            runtime_loop_detector (LoopDetector | None, optional): IN: runtime loop detector. Defaults to None. OUT: Consumed during execution.
+            runtime_turn_state (_RuntimeTurnState | None, optional): IN: runtime turn state. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            AsyncIterator[StreamingResponseType]: OUT: Result of the operation."""
 
-        Yields:
-            StreamingResponseType objects including chunks, function notifications, etc.
-        """
         buffered_content = ""
         buffered_reasoning_content = ""
         function_calls_detected = False
@@ -2408,19 +2224,18 @@ class Xerxes:
         streamer_buffer: StreamerBuffer | None = None,
         runtime_turn_state: _RuntimeTurnState | None = None,
     ) -> AsyncIterator[StreamingResponseType]:
-        """Handle streaming response without function calls.
-
-        Simple streaming handler for responses that don't require function execution.
+        """Asynchronously Internal helper to handle streaming.
 
         Args:
-            response: The LLM response stream.
-            reinvoked_runtime: Whether this is a reinvocation.
-            agent: The current agent.
-            streamer_buffer: Optional buffer for streaming chunks.
+            self: IN: The instance. OUT: Used for attribute access.
+            response (tp.Any): IN: response. OUT: Consumed during execution.
+            reinvoked_runtime (Any): IN: reinvoked runtime. OUT: Consumed during execution.
+            agent (Agent): IN: agent. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
+            runtime_turn_state (_RuntimeTurnState | None, optional): IN: runtime turn state. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            AsyncIterator[StreamingResponseType]: OUT: Result of the operation."""
 
-        Yields:
-            StreamChunk and Completion objects.
-        """
         buffered_content = ""
         buffered_reasoning_content = ""
         out: StreamingResponseType
@@ -2506,40 +2321,26 @@ class Xerxes:
         reinvoked_runtime: bool = False,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> ResponseResult | Generator[StreamingResponseType, None, None]:
-        """Synchronous wrapper for create_response.
-
-        Main synchronous interface for generating agent responses. Handles both
-        streaming and non-streaming modes, with full support for function calling
-        and agent orchestration.
+        """Run.
 
         Args:
-            prompt: Optional user prompt to process.
-            context_variables: Optional context variables for the agent.
-            messages: Optional message history.
-            agent_id: Optional specific agent ID or Agent instance to use.
-            stream: Whether to stream the response (True) or return complete (False).
-            apply_functions: Whether to execute detected function calls.
-            print_formatted_prompt: Whether to print the formatted prompt.
-            use_instructed_prompt: Whether to use instructed prompt format.
-            conversation_name_holder: Name for conversation in instructed format.
-            mention_last_turn: Whether to mention last turn in instructed format.
-            reinvoke_after_function: Whether to reinvoke after function execution.
-            reinvoked_runtime: Internal flag indicating this is a reinvocation.
-            streamer_buffer: Optional buffer for streaming chunks.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None | Agent, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            stream (bool, optional): IN: stream. Defaults to True. OUT: Consumed during execution.
+            apply_functions (bool, optional): IN: apply functions. Defaults to True. OUT: Consumed during execution.
+            print_formatted_prompt (bool, optional): IN: print formatted prompt. Defaults to False. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
+            reinvoke_after_function (bool, optional): IN: reinvoke after function. Defaults to True. OUT: Consumed during execution.
+            reinvoked_runtime (bool, optional): IN: reinvoked runtime. Defaults to False. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Generator[StreamingResponseType] if stream=True, ResponseResult if stream=False.
+            ResponseResult | Generator[StreamingResponseType, None, None]: OUT: Result of the operation."""
 
-        Example:
-            >>>
-            >>> for chunk in xerxes.run(prompt="Hello", stream=True):
-            ...     if chunk.content:
-            ...         print(chunk.content, end="")
-            >>>
-            >>>
-            >>> result = xerxes.run(prompt="Hello", stream=False)
-            >>> print(result.content)
-        """
         if stream:
             return self._run_stream(
                 prompt=prompt,
@@ -2620,31 +2421,38 @@ class Xerxes:
         reinvoked_runtime: bool = False,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> Generator[StreamingResponseType, None, None]:
-        """Internal method for streaming execution.
-
-        Runs the async create_response method in a background thread and
-        yields results through a queue for synchronous iteration.
+        """Internal helper to run stream.
 
         Args:
-            Same as create_response.
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None | Agent, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            apply_functions (bool, optional): IN: apply functions. Defaults to True. OUT: Consumed during execution.
+            print_formatted_prompt (bool, optional): IN: print formatted prompt. Defaults to False. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
+            reinvoke_after_function (bool, optional): IN: reinvoke after function. Defaults to True. OUT: Consumed during execution.
+            reinvoked_runtime (bool, optional): IN: reinvoked runtime. Defaults to False. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
+        Returns:
+            Generator[StreamingResponseType, None, None]: OUT: Result of the operation."""
 
-        Yields:
-            StreamingResponseType objects from the async response.
-
-        Raises:
-            Any exception that occurs during async execution.
-        """
         output_queue: queue.Queue[StreamingResponseType | None] = queue.Queue()
         exception_holder: list[Exception | None] = [None]
 
         def run_async() -> None:
-            """Run the async response pipeline on a dedicated event loop in a background thread."""
+            """Run async."""
+
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
                 async def async_runner() -> None:
-                    """Await create_response and forward each chunk to the output queue."""
+                    """Asynchronously Async runner."""
+
                     try:
                         response = await self.create_response(
                             prompt=prompt,
@@ -2710,41 +2518,24 @@ class Xerxes:
         reinvoked_runtime: bool = False,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> tuple[StreamerBuffer, threading.Thread]:
-        """Run Xerxes in a background thread with automatic buffer creation.
-
-        Returns immediately with a StreamerBuffer and the thread handle.
-        You can start consuming from the buffer while generation is happening.
-        This is useful for non-blocking execution in synchronous contexts.
+        """Thread run.
 
         Args:
-            prompt: Optional user prompt to process.
-            context_variables: Optional context variables for the agent.
-            messages: Optional message history.
-            agent_id: Optional specific agent ID or Agent instance to use.
-            apply_functions: Whether to execute detected function calls.
-            print_formatted_prompt: Whether to print the formatted prompt.
-            use_instructed_prompt: Whether to use instructed prompt format.
-            conversation_name_holder: Name for conversation in instructed format.
-            mention_last_turn: Whether to mention last turn in instructed format.
-            reinvoke_after_function: Whether to reinvoke after function execution.
-            reinvoked_runtime: Internal flag indicating this is a reinvocation.
-            streamer_buffer: Optional pre-created buffer (creates new if None).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None | Agent, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            apply_functions (bool, optional): IN: apply functions. Defaults to True. OUT: Consumed during execution.
+            print_formatted_prompt (bool, optional): IN: print formatted prompt. Defaults to False. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
+            reinvoke_after_function (bool, optional): IN: reinvoke after function. Defaults to True. OUT: Consumed during execution.
+            reinvoked_runtime (bool, optional): IN: reinvoked runtime. Defaults to False. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Tuple of (StreamerBuffer, Thread) where:
-            - StreamerBuffer: Buffer that will receive all streaming chunks
-            - Thread: The background thread handle for monitoring/joining
-
-        Example:
-            >>> buffer, thread = xerxes.thread_run(prompt="Hello")
-            >>> for chunk in buffer.stream():
-            ...     print(chunk.content, end="")
-            >>> thread.join()
-            >>>
-            >>>
-            >>> result = buffer.get_result(timeout=30)
-            >>> print(result.content)
-        """
+            tuple[StreamerBuffer, threading.Thread]: OUT: Result of the operation."""
 
         buffer_was_none = streamer_buffer is None
         if streamer_buffer is None:
@@ -2754,7 +2545,8 @@ class Xerxes:
         exception_holder: list[Exception | None] = [None]
 
         def run_in_thread() -> None:
-            """Execute the synchronous run loop and store the result or exception."""
+            """Run in thread."""
+
             try:
                 result = self.run(
                     prompt=prompt,
@@ -2787,7 +2579,13 @@ class Xerxes:
         streamer_buffer.exception_holder = exception_holder
 
         def get_result(timeout: float | None = None) -> ResponseResult:
-            """Helper to get final result after thread completes."""
+            """Retrieve the result.
+
+            Args:
+                timeout (float | None, optional): IN: timeout. Defaults to None. OUT: Consumed during execution.
+            Returns:
+                ResponseResult: OUT: Result of the operation."""
+
             thread.join(timeout=timeout)
             if exception_holder[0]:
                 raise exception_holder[0]
@@ -2813,24 +2611,24 @@ class Xerxes:
         reinvoked_runtime: bool = False,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> tuple[StreamerBuffer, asyncio.Task]:
-        """Async version of thread_run that creates a task instead of thread.
-
-        Returns immediately with a StreamerBuffer and the task handle.
+        """Asynchronously Athread run.
 
         Args:
-            Same as create_response except stream (always streams internally).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            prompt (str | None, optional): IN: prompt. Defaults to None. OUT: Consumed during execution.
+            context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
+            messages (MessagesHistory | None, optional): IN: messages. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None | Agent, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            apply_functions (bool, optional): IN: apply functions. Defaults to True. OUT: Consumed during execution.
+            print_formatted_prompt (bool, optional): IN: print formatted prompt. Defaults to False. OUT: Consumed during execution.
+            use_instructed_prompt (bool, optional): IN: use instructed prompt. Defaults to False. OUT: Consumed during execution.
+            conversation_name_holder (str, optional): IN: conversation name holder. Defaults to 'Messages'. OUT: Consumed during execution.
+            mention_last_turn (bool, optional): IN: mention last turn. Defaults to True. OUT: Consumed during execution.
+            reinvoke_after_function (bool, optional): IN: reinvoke after function. Defaults to True. OUT: Consumed during execution.
+            reinvoked_runtime (bool, optional): IN: reinvoked runtime. Defaults to False. OUT: Consumed during execution.
+            streamer_buffer (StreamerBuffer | None, optional): IN: streamer buffer. Defaults to None. OUT: Consumed during execution.
         Returns:
-            Tuple of (StreamerBuffer, Task) where:
-            - StreamerBuffer: Buffer that will receive all streaming chunks
-            - Task: The asyncio task handle for monitoring/awaiting
-
-        Example:
-            >>> buffer, task = await xerxes.athread_run(prompt="Hello")
-            >>> async for chunk in buffer.astream():
-            ...     print(chunk.content, end="")
-            >>> await task
-        """
+            tuple[StreamerBuffer, asyncio.Task]: OUT: Result of the operation."""
 
         buffer_was_none = streamer_buffer is None
         if streamer_buffer is None:
@@ -2840,7 +2638,8 @@ class Xerxes:
         exception_holder: list[Exception | None] = [None]
 
         async def run_async() -> None:
-            """Stream the response into the buffer and build the final ResponseResult."""
+            """Asynchronously Run async."""
+
             try:
                 stream = await self.create_response(
                     prompt=prompt,
@@ -2890,7 +2689,11 @@ class Xerxes:
         streamer_buffer.exception_holder = exception_holder
 
         async def aget_result() -> ResponseResult:
-            """Helper to get final result after task completes."""
+            """Asynchronously Aget result.
+
+            Returns:
+                ResponseResult: OUT: Result of the operation."""
+
             await task
             if exception_holder[0]:
                 raise exception_holder[0]

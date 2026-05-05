@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,46 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Built-in Coder Assistant agent definition.
 
-
-"""Pre-built Coder Agent for intelligent code generation and analysis.
-
-This module provides a pre-configured AI agent specialized in software development
-tasks within the Xerxes framework. The coder agent is designed to assist with
-various programming tasks including writing, reviewing, debugging, and optimizing
-code across different programming languages.
-
-The agent is equipped with specialized tools for:
-- Executing Python code in a sandboxed environment
-- Reading and writing files for code manipulation
-- Executing shell commands for build and test operations
-- File system operations for project navigation
-
-Agent Capabilities:
-    - Code Generation: Writing clean, efficient, and maintainable code
-    - Debugging: Identifying and fixing complex issues in codebases
-    - Refactoring: Restructuring code for better organization and readability
-    - Test Generation: Creating comprehensive test suites
-    - Documentation: Generating clear code documentation
-    - Code Review: Analyzing code quality and suggesting improvements
-
-Typical usage example:
-    from xerxes import Xerxes
-    from xerxes.agents import code_agent
-
-    xerxes = Xerxes(llm=your_llm)
-    response = xerxes.run(
-        prompt="Write a function to calculate fibonacci numbers",
-        agent_id=code_agent
-    )
-
-Note:
-    The agent uses a moderate temperature (0.6) to balance creativity with
-    accuracy in code generation. It has a higher token limit (4096) to
-    accommodate complex code outputs.
+This module instantiates a pre-configured Agent for software engineering tasks
+such as writing, debugging, refactoring, and documenting code.
 """
 
 from ..tools import ExecutePythonCode, ExecuteShell, FileSystemTools, ReadFile, WriteFile

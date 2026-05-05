@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Function execution, agent orchestration, and call dispatch for Xerxes.
 
-
-"""Function execution and agent orchestration system.
-
-This module provides the core execution infrastructure for Xerxes,
-including:
-- Function registry and management
-- Agent orchestration and switching
-- Function execution with various strategies (sequential, parallel, pipeline)
-- Retry policies and error handling
-- Execution metrics and monitoring
-- Enhanced versions with additional features
-
-The module supports both synchronous and asynchronous function execution,
-timeout management, and sophisticated error recovery mechanisms.
+Provides ``AgentOrchestrator`` for multi-agent management,
+``FunctionExecutor`` for executing tool calls with retry / sandbox / policy
+support, and enhanced subclasses with metrics and stricter validation.
 """
 
 from __future__ import annotations
@@ -64,36 +56,38 @@ logger = logging.getLogger(__name__)
 
 __CTX_VARS_NAME__ = "context_variables"
 SEP = "  "
-add_depth = lambda x, ep=False: SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")  # noqa
+def add_depth(x, ep=False):
+    return SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")
 
 
 class FunctionRegistry:
-    """Registry for managing functions across agents.
+    """Index of callable functions grouped by name and owning agent.
 
-    Maintains a central registry of all functions available in the system,
-    tracking which agent owns each function and associated metadata.
-    Multiple agents may register the same function name; lookups prefer
-    the currently active agent's version.
-
-    Attributes:
-        _functions: Dictionary mapping function names to lists of
-            (callable, agent_id) tuples.
-        _function_metadata: Dictionary mapping function names to metadata.
+    Each function is stored as ``(callable, agent_id)`` so that lookups can
+    prefer the current agent's version.
     """
 
     def __init__(self):
-        """Initialize an empty function registry."""
+        """Initialize empty function and metadata indexes."""
+
         self._functions: dict[str, list[tuple[tp.Callable, str]]] = {}
         self._function_metadata: dict[str, dict] = {}
 
     def register(self, func: tp.Callable, agent_id: str, metadata: dict | None = None):
-        """Register a function with the registry.
+        """Add a function to the registry.
 
         Args:
-            func: The callable function to register.
-            agent_id: ID of the agent that owns this function.
-            metadata: Optional metadata about the function.
+            func (tp.Callable): IN: Function to register. OUT: Stored by its
+                public name.
+            agent_id (str): IN: Owning agent identifier. OUT: Stored with the
+                function.
+            metadata (dict | None): IN: Optional metadata dict. OUT: Stored
+                under the function name.
+
+        Returns:
+            None: OUT: Function is indexed.
         """
+
         func_name = get_callable_public_name(func)
         if func_name not in self._functions:
             self._functions[func_name] = []
@@ -101,16 +95,18 @@ class FunctionRegistry:
         self._function_metadata[func_name] = metadata or {}
 
     def get_function(self, name: str, current_agent_id: str | None = None) -> tuple[tp.Callable | None, str | None]:
-        """Get function and its associated agent.
+        """Retrieve a function by name, preferring the current agent's copy.
 
         Args:
-            name: Name of the function to retrieve.
-            current_agent_id: Optional ID of the currently active agent.
-                If provided, the agent's own version is preferred.
+            name (str): IN: Function identifier. OUT: Looked up in the index.
+            current_agent_id (str | None): IN: Agent to prefer. OUT: If
+                matched, that entry is returned first.
 
         Returns:
-            Tuple of (function, agent_id) or (None, None) if not found.
+            tuple[tp.Callable | None, str | None]: OUT: Function and agent_id,
+            or ``(None, None)``.
         """
+
         entries = self._functions.get(name, [])
         if not entries:
             return None, None
@@ -121,35 +117,36 @@ class FunctionRegistry:
         return entries[0]
 
     def get_functions_by_agent(self, agent_id: str) -> list[tp.Callable]:
-        """Get all functions for a specific agent.
+        """Return all functions owned by a specific agent.
 
         Args:
-            agent_id: ID of the agent.
+            agent_id (str): IN: Agent identifier. OUT: Filter key.
 
         Returns:
-            List of functions registered to the agent.
+            list[tp.Callable]: OUT: Matching functions.
         """
+
         return [func for entries in self._functions.values() for func, aid in entries if aid == agent_id]
 
 
 class AgentOrchestrator:
-    """Orchestrates multiple agents and handles switching logic.
+    """Manages a fleet of agents, routing function calls and handling switches.
 
-    Manages a collection of agents, their functions, and the logic for
-    switching between agents based on various triggers.
-
-    Attributes:
-        agents: Dictionary of registered agents by ID.
-        function_registry: Registry of all available functions.
-        switch_triggers: Dictionary of trigger handlers for agent switching.
-        current_agent_id: ID of the currently active agent.
-        execution_history: History of agent switches and executions.
-        max_agents: Maximum number of agents that may be registered.
-        enable_metrics: Whether to record per-function execution metrics.
+    Args:
+        max_agents (int): IN: Agent population limit. OUT: Enforced in
+            ``register_agent``.
+        enable_metrics (bool): IN: Whether to collect metrics. OUT: Stored.
     """
 
     def __init__(self, max_agents: int = 100, enable_metrics: bool = True):
-        """Initialize the agent orchestrator."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            max_agents (int, optional): IN: max agents. Defaults to 100. OUT: Consumed during execution.
+            enable_metrics (bool, optional): IN: enable metrics. Defaults to True. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
         self.agents: dict[str, Agent] = {}
         self.function_registry = FunctionRegistry()
         self.switch_triggers: dict[AgentSwitchTrigger, tp.Callable] = {}
@@ -160,17 +157,20 @@ class AgentOrchestrator:
         self._lock = threading.Lock()
 
     def register_agent(self, agent: Agent) -> None:
-        """Register an agent with the orchestrator.
+        """Add an agent to the orchestrator and index its functions.
 
         Args:
-            agent: The agent instance to register.
+            agent (Agent): IN: Agent instance. OUT: Assigned an ID if absent,
+                then stored.
 
         Returns:
-            None
+            None: OUT: Agent is registered and its functions are indexed.
 
         Raises:
-            ValueError: If the agent is already registered or max agents reached.
+            ValueError: OUT: If the agent ID already exists or ``max_agents``
+                is exceeded.
         """
+
         with self._lock:
             agent_id = agent.id
             if not agent_id:
@@ -191,29 +191,31 @@ class AgentOrchestrator:
                 self.current_agent_id = agent_id
 
     def register_switch_trigger(self, trigger: AgentSwitchTrigger, handler: tp.Callable) -> None:
-        """Register a custom switch trigger handler.
+        """Register a callback that can propose agent switches.
 
         Args:
-            trigger: The trigger type to register.
-            handler: The callable handler for this trigger.
+            trigger (AgentSwitchTrigger): IN: Trigger type. OUT: Used as key.
+            handler (tp.Callable): IN: Function that returns a target agent ID.
+                OUT: Stored.
 
         Returns:
-            None
+            None: OUT: Trigger is registered.
         """
+
         self.switch_triggers[trigger] = handler
 
     def should_switch_agent(self, context: dict) -> str | None:
-        """Determine if agent switching is needed.
-
-        Evaluates both the current agent's own ``switch_triggers`` and the
-        orchestrator-level trigger handlers.
+        """Evaluate switch triggers and return a target agent ID if any fire.
 
         Args:
-            context: The current execution context.
+            context (dict): IN: Runtime context. OUT: Passed to each trigger
+                handler.
 
         Returns:
-            The ID of the target agent if switching is needed, None otherwise.
+            str | None: OUT: Target agent ID, or ``None`` if no switch is
+            needed.
         """
+
         current_agent = self.agents.get(self.current_agent_id) if self.current_agent_id else None
         if current_agent:
             for trigger in current_agent.switch_triggers:
@@ -236,18 +238,20 @@ class AgentOrchestrator:
         return None
 
     def switch_agent(self, target_agent_id: str, reason: str | None = None) -> None:
-        """Switch to a different agent.
+        """Change the active agent and log the transition.
 
         Args:
-            target_agent_id: ID of the agent to switch to.
-            reason: Optional reason for the switch.
+            target_agent_id (str): IN: Agent to activate. OUT: Looked up and
+                set as ``current_agent_id``.
+            reason (str | None): IN: Optional rationale. OUT: Logged.
 
         Returns:
-            None
+            None: OUT: History is updated.
 
         Raises:
-            ValueError: If the target agent is not found.
+            ValueError: OUT: If ``target_agent_id`` is not registered.
         """
+
         with self._lock:
             if target_agent_id not in self.agents:
                 raise ValueError(f"Agent {target_agent_id} not found")
@@ -267,37 +271,57 @@ class AgentOrchestrator:
             )
 
     def get_current_agent(self) -> Agent:
-        """Get the currently active agent.
+        """Return the currently active agent.
 
         Returns:
-            The currently active Agent instance.
+            Agent: OUT: Active agent instance.
 
         Raises:
-            ValueError: If no agent is currently active.
+            ValueError: OUT: If no agent is active.
         """
+
         if not self.current_agent_id:
             raise ValueError("No active agent")
         return self.agents[self.current_agent_id]
 
     def _get_timestamp(self) -> str:
-        """Get current timestamp in ISO format.
+        """Return the current ISO timestamp.
 
         Returns:
-            Current timestamp as an ISO formatted string.
+            str: OUT: ``datetime.now().isoformat()``.
         """
+
         return datetime.now().isoformat()
 
 
 @dataclass
 class FunctionExecutionHistory:
-    """History of function executions and their results."""
+    """Record of completed function calls for context building.
+
+    Attributes:
+        executions (list[RequestFunctionCall]): IN: Empty initially. OUT:
+            Appended by ``add_execution``.
+        _execution_by_id (dict[str, RequestFunctionCall]): IN: Empty initially.
+            OUT: Maps call ID to call.
+        _executions_by_name (dict[str, list[RequestFunctionCall]]): IN: Empty
+            initially. OUT: Maps function name to calls.
+    """
 
     executions: list[RequestFunctionCall] = field(default_factory=list)
     _execution_by_id: dict[str, RequestFunctionCall] = field(default_factory=dict)
     _executions_by_name: dict[str, list[RequestFunctionCall]] = field(default_factory=dict)
 
     def add_execution(self, call: RequestFunctionCall) -> None:
-        """Add a completed function call to the history, indexing it by ID and name."""
+        """Record a completed call.
+
+        Args:
+            call (RequestFunctionCall): IN: Completed call. OUT: Indexed by ID
+                and name.
+
+        Returns:
+            None: OUT: Internal indexes are updated.
+        """
+
         self.executions.append(call)
         self._execution_by_id[call.id] = call
         if call.name not in self._executions_by_name:
@@ -305,16 +329,37 @@ class FunctionExecutionHistory:
         self._executions_by_name[call.name].append(call)
 
     def get_by_id(self, call_id: str) -> RequestFunctionCall | None:
-        """Return the function call matching call_id, or None if not found."""
+        """Retrieve a call by its unique ID.
+
+        Args:
+            call_id (str): IN: Call identifier. OUT: Looked up in the index.
+
+        Returns:
+            RequestFunctionCall | None: OUT: Matching call or ``None``.
+        """
+
         return self._execution_by_id.get(call_id)
 
     def get_by_name(self, name: str) -> RequestFunctionCall | None:
-        """Return the most recently recorded function call with the given name, or None."""
+        """Return the most recent call for a given function name.
+
+        Args:
+            name (str): IN: Function name. OUT: Looked up in the index.
+
+        Returns:
+            RequestFunctionCall | None: OUT: Latest call or ``None``.
+        """
+
         calls = self._executions_by_name.get(name)
         return calls[-1] if calls else None
 
     def get_successful_results(self) -> dict[str, tp.Any]:
-        """Return a mapping of function_name to result for all successful calls."""
+        """Return results from all successful executions.
+
+        Returns:
+            dict[str, tp.Any]: OUT: Mapping from function name to result.
+        """
+
         return {
             call.name: call.result
             for call in self.executions
@@ -322,7 +367,12 @@ class FunctionExecutionHistory:
         }
 
     def as_context_dict(self) -> dict:
-        """Convert execution history to a context dictionary suitable for prompt generation."""
+        """Build a serialisable context dictionary for prompt injection.
+
+        Returns:
+            dict: OUT: Contains ``function_history`` and ``latest_results``.
+        """
+
         return {
             "function_history": [
                 {
@@ -342,10 +392,19 @@ class FunctionExecutionHistory:
 
 
 class FunctionExecutor:
-    """Handles function execution with various strategies."""
+    """Executes lists of ``RequestFunctionCall`` objects with strategies.
+
+    Args:
+        orchestrator (AgentOrchestrator): IN: Orchestrator providing agent and
+            function registry. OUT: Stored.
+    """
 
     def __init__(self, orchestrator: AgentOrchestrator) -> None:
-        """Initialize the FunctionExecutor with a backing AgentOrchestrator."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            orchestrator (AgentOrchestrator): IN: orchestrator. OUT: Consumed during execution."""
         self.orchestrator = orchestrator
         self.execution_queue: list[RequestFunctionCall] = []
         self.completed_calls: dict[str, RequestFunctionCall] = {}
@@ -360,19 +419,31 @@ class FunctionExecutor:
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute function calls using the specified strategy.
+        """Execute a batch of function calls using the chosen strategy.
 
         Args:
-            calls: List of function calls to execute.
-            strategy: Execution strategy (SEQUENTIAL, PARALLEL, PIPELINE, CONDITIONAL).
-            context_variables: Optional context variables to pass to functions.
-            agent: Optional agent instance for function lookup.
-            runtime_features_state: Optional runtime features for policy/hooks/audit.
-            loop_detector: Optional loop detector to guard against repetitive tool calls.
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Routed to the appropriate strategy handler.
+            strategy (FunctionCallStrategy): IN: Execution strategy. OUT:
+                Selects sequential, parallel, pipeline, or conditional.
+            context_variables (dict | None): IN: Shared context. OUT: Merged
+                with execution history and passed to calls.
+            agent (Agent | None): IN: Optional agent context. OUT: Passed to
+                single-call execution.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features
+                like hooks, policy, sandbox. OUT: Passed to single-call
+                execution.
+            loop_detector (LoopDetector | None): IN: Loop detection state.
+                OUT: Passed to single-call execution.
 
         Returns:
-            List of RequestFunctionCall instances with populated results and statuses.
+            list[RequestFunctionCall]: OUT: Executed calls with updated status
+            and results.
+
+        Raises:
+            ValueError: OUT: If ``strategy`` is unrecognised.
         """
+
         context_variables = context_variables or {}
         context_variables.update(self.execution_history.as_context_dict())
 
@@ -412,7 +483,24 @@ class FunctionExecutor:
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls one after another, passing context updates between them."""
+        """Execute calls one at a time, updating shared context on success.
+
+        Args:
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Iterated in order.
+            context (dict): IN: Shared context. OUT: Updated with result
+                ``context_variables``.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``_execute_single_call``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Passed to ``_execute_single_call``.
+            loop_detector (LoopDetector | None): IN: Loop detector. OUT:
+                Passed to ``_execute_single_call``.
+
+        Returns:
+            list[RequestFunctionCall]: OUT: Executed calls.
+        """
+
         results = []
         for call in calls:
             try:
@@ -434,7 +522,23 @@ class FunctionExecutor:
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls in parallel using asyncio.gather."""
+        """Execute calls concurrently with isolated context copies.
+
+        Args:
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Gathered in parallel.
+            context (dict): IN: Shared context. OUT: Copied for each call.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``_execute_single_call``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Passed to ``_execute_single_call``.
+            loop_detector (LoopDetector | None): IN: Loop detector. OUT:
+                Passed to ``_execute_single_call``.
+
+        Returns:
+            list[RequestFunctionCall]: OUT: Executed calls; exceptions are
+            converted to failure statuses.
+        """
 
         context_dict = context if isinstance(context, dict) else {}
         tasks = [
@@ -464,7 +568,24 @@ class FunctionExecutor:
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls in a pipeline where the output of one feeds into the next."""
+        """Execute calls sequentially, chaining ``previous_result`` through context.
+
+        Args:
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Iterated in order.
+            context (dict): IN: Shared context. OUT: Updated with each call's
+                result.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``_execute_single_call``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Passed to ``_execute_single_call``.
+            loop_detector (LoopDetector | None): IN: Loop detector. OUT:
+                Passed to ``_execute_single_call``.
+
+        Returns:
+            list[RequestFunctionCall]: OUT: Executed calls.
+        """
+
         results = []
 
         context_dict = context if isinstance(context, dict) else {}
@@ -496,7 +617,23 @@ class FunctionExecutor:
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute calls in topological dependency order, skipping unsatisfied deps."""
+        """Execute calls in topological order, skipping those whose dependencies fail.
+
+        Args:
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Sorted topologically.
+            context (dict): IN: Shared context. OUT: Passed to each call.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``_execute_single_call``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Passed to ``_execute_single_call``.
+            loop_detector (LoopDetector | None): IN: Loop detector. OUT:
+                Passed to ``_execute_single_call``.
+
+        Returns:
+            list[RequestFunctionCall]: OUT: Executed calls.
+        """
+
         sorted_calls = self._topological_sort(calls)
         results: list[RequestFunctionCall] = []
 
@@ -523,22 +660,26 @@ class FunctionExecutor:
         loop_detector: LoopDetector | None = None,
         audit_turn_id: str | None = None,
     ) -> RequestFunctionCall:
-        """Execute a single function call with error handling and retries.
-
-        Applies loop detection, policy checks, before/after hooks, sandbox routing,
-        and emits audit events throughout the lifecycle of the call.
+        """Execute one function call with full policy, sandbox, and hook support.
 
         Args:
-            call: The function call to execute.
-            context: Context variables for the call.
-            agent: Optional agent used for direct function lookup.
-            runtime_features_state: Runtime state supplying policy, hooks, and audit.
-            loop_detector: Optional detector for repetitive tool-call patterns.
-            audit_turn_id: Optional turn identifier for audit trail correlation.
+            call (RequestFunctionCall): IN: Call to execute. OUT: Mutated with
+                status, result, and error.
+            context (dict): IN: Shared context. OUT: Passed to the function
+                if it accepts ``context_variables``.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``_resolve_function_and_agent``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Enables hooks, policy, sandbox routing, and audit.
+            loop_detector (LoopDetector | None): IN: Loop detection. OUT:
+                Checked before execution.
+            audit_turn_id (str | None): IN: Turn ID for audit events. OUT:
+                Passed to audit emitter.
 
         Returns:
-            The updated RequestFunctionCall with result/status/error populated.
+            RequestFunctionCall: OUT: The same call object, updated.
         """
+
         call.status = ExecutionStatus.PENDING
 
         for attempt in range(call.max_retries + 1):
@@ -795,21 +936,23 @@ class FunctionExecutor:
         _audit,
         audit_turn_id,
     ) -> tuple[tp.Callable, str | None]:
-        """Resolve the callable and owning agent ID for a function call.
+        """Find the implementation and owning agent for a function call.
 
         Args:
-            call: The function call whose name will be looked up.
-            agent: Optional agent to search first; falls back to the orchestrator registry.
-            _audit: Optional audit emitter for emitting agent switch events.
-            audit_turn_id: Optional turn identifier for audit trail correlation.
+            call (RequestFunctionCall): IN: Call to resolve. OUT: ``name`` is
+                used for lookup.
+            agent (Agent | None): IN: Preferred agent context. OUT: Checked
+                first.
+            _audit: IN: Audit emitter. OUT: Used to log agent switches.
+            audit_turn_id: IN: Turn ID for audit. OUT: Passed to emitter.
 
         Returns:
-            Tuple of (callable, agent_id). Triggers an agent switch if the function
-            belongs to a different agent than the currently active one.
+            tuple[tp.Callable, str | None]: OUT: Function and agent_id.
 
         Raises:
-            ValueError: If the function name is not found in the agent or registry.
+            ValueError: OUT: If the function is not found.
         """
+
         if agent is not None:
             func = {get_callable_public_name(fn): fn for fn in agent.functions}.get(call.name, None)
             agent_id = agent.id
@@ -837,7 +980,16 @@ class FunctionExecutor:
 
     @staticmethod
     def _normalize_call_arguments(call: RequestFunctionCall) -> dict:
-        """Normalize call arguments to a plain dict, parsing JSON strings if needed."""
+        """Normalise a call's arguments into a plain dict.
+
+        Args:
+            call (RequestFunctionCall): IN: Call with ``arguments``. OUT:
+                Parsed from dict, JSON string, or empty.
+
+        Returns:
+            dict: OUT: Clean argument mapping.
+        """
+
         if isinstance(call.arguments, dict):
             return call.arguments.copy()
         if isinstance(call.arguments, str):
@@ -855,20 +1007,19 @@ class FunctionExecutor:
 
     @staticmethod
     def _coerce_argument_types(args: dict, func: tp.Callable) -> dict:
-        """Coerce string argument values to the types expected by the function signature.
+        """Coerce string arguments to match the function's type annotations.
 
-        JSON parsing from LLM tool calls often leaves numeric values as strings.
-        This method inspects the function signature and casts ``str`` values to
-        ``int``, ``float``, or ``bool`` when the parameter annotation indicates
-        the target type.
+        Supports ``int``, ``float``, ``bool``, ``list``, and ``dict``.
 
         Args:
-            args: Parsed argument dictionary (may contain string values).
-            func: The callable whose signature should be used for coercion.
+            args (dict): IN: Normalised arguments. OUT: Types may be adjusted.
+            func (tp.Callable): IN: Target function. OUT: Signature is
+                inspected.
 
         Returns:
-            A new dictionary with coerced values where possible.
+            dict: OUT: Potentially modified arguments.
         """
+
         import typing
 
         coerced = dict(args)
@@ -886,7 +1037,7 @@ class FunctionExecutor:
             ann = param.annotation
             if ann is inspect.Parameter.empty:
                 continue
-            # Unwrap Optional[X] and Union types (typing.Union and types.UnionType)
+
             origin = getattr(ann, "__origin__", None)
             args_tuple = getattr(ann, "__args__", ())
             is_union = origin is typing.Union or type(ann).__name__ == "UnionType"
@@ -894,7 +1045,7 @@ class FunctionExecutor:
                 ann = next(a for a in args_tuple if a is not type(None))
                 origin = getattr(ann, "__origin__", None)
                 args_tuple = getattr(ann, "__args__", ())
-            # Handle list[X] → try json.loads first
+
             if origin is list and len(args_tuple) == 1:
                 try:
                     parsed = json.loads(value)
@@ -903,7 +1054,7 @@ class FunctionExecutor:
                 except Exception:
                     pass
                 continue
-            # Handle dict[X, Y] → try json.loads
+
             if origin is dict and len(args_tuple) == 2:
                 try:
                     parsed = json.loads(value)
@@ -912,7 +1063,7 @@ class FunctionExecutor:
                 except Exception:
                     pass
                 continue
-            # Simple type coercion
+
             if ann is int:
                 try:
                     coerced[param_name] = int(value)
@@ -928,21 +1079,29 @@ class FunctionExecutor:
         return coerced
 
     def _resolve_argument_templates(self, arguments: dict) -> dict:
-        """Resolve template references like ``{call_id.attr}`` within argument values.
-
-        Supports whole-value replacement (e.g. ``"{prev.result}"``) and
-        inline interpolation (e.g. ``"prefix {prev.result} suffix"``).
+        """Replace ``{call_id.attr}`` template references with actual values.
 
         Args:
-            arguments: Raw argument dictionary potentially containing template strings.
+            arguments (dict): IN: Arguments that may contain template strings.
+                OUT: Templates are resolved against ``execution_history``.
 
         Returns:
-            A new dictionary with template references resolved to concrete values.
+            dict: OUT: Arguments with templates substituted.
         """
+
         pattern = re.compile(r"^\{([^{}]+)\}$")
 
         def _lookup(reference: str) -> tp.Any:
-            """Look up a dotted reference (call_id.attr) in execution history."""
+            """Resolve a ``call_id.attr`` reference from execution history.
+
+            Args:
+                reference (str): IN: Dotted reference. OUT: Split and looked
+                    up.
+
+            Returns:
+                tp.Any: OUT: Attribute value or ``None``.
+            """
+
             parts = reference.split(".")
             if len(parts) != 2:
                 return None
@@ -953,7 +1112,16 @@ class FunctionExecutor:
             return getattr(call, attr, None)
 
         def _resolve(value: tp.Any) -> tp.Any:
-            """Recursively resolve template references in a value."""
+            """Recursively resolve templates in a value.
+
+            Args:
+                value (tp.Any): IN: Scalar, list, or dict. OUT: Templates are
+                    replaced.
+
+            Returns:
+                tp.Any: OUT: Resolved value.
+            """
+
             if isinstance(value, str):
                 whole_match = pattern.match(value)
                 if whole_match:
@@ -976,7 +1144,16 @@ class FunctionExecutor:
         return {key: _resolve(value) for key, value in arguments.items()}
 
     async def _run_function(self, func: tp.Callable, args: dict) -> tp.Any:
-        """Run a function, awaiting it if it is a coroutine function or offloading to a thread otherwise."""
+        """Invoke ``func`` with ``args``, handling sync vs async.
+
+        Args:
+            func (tp.Callable): IN: Function to run. OUT: Invoked.
+            args (dict): IN: Keyword arguments. OUT: Passed to ``func``.
+
+        Returns:
+            tp.Any: OUT: Function return value.
+        """
+
         if asyncio.iscoroutinefunction(func):
             return await func(**args)
         else:
@@ -984,7 +1161,21 @@ class FunctionExecutor:
             return await loop.run_in_executor(None, lambda: func(**args))
 
     async def _run_function_with_timeout(self, func: tp.Callable, args: dict, timeout: float | None) -> tp.Any:
-        """Run a function with an optional timeout, raising asyncio.TimeoutError if exceeded."""
+        """Run a function with an optional timeout.
+
+        Args:
+            func (tp.Callable): IN: Function to run. OUT: Invoked.
+            args (dict): IN: Keyword arguments. OUT: Passed to ``func``.
+            timeout (float | None): IN: Seconds to wait. OUT: Passed to
+                ``asyncio.wait_for``.
+
+        Returns:
+            tp.Any: OUT: Function return value.
+
+        Raises:
+            TimeoutError: OUT: If the timeout expires.
+        """
+
         if timeout:
             return await asyncio.wait_for(self._run_function(func, args), timeout=timeout)
         return await self._run_function(func, args)
@@ -997,24 +1188,32 @@ class FunctionExecutor:
         args: dict,
         timeout: float | None,
     ) -> tp.Any:
-        """Execute a function via the sandbox router, applying the optional timeout.
+        """Run a function inside a sandbox environment.
 
         Args:
-            router: SandboxRouter instance that provides the sandbox backend.
-            tool_name: Name of the tool being executed (used for backend dispatch).
-            func: The callable to execute inside or outside the sandbox.
-            args: Keyword arguments to pass to the function.
-            timeout: Optional wall-clock timeout in seconds.
+            router (tp.Any): IN: Sandbox router. OUT: Used to decide and
+                execute.
+            tool_name (str): IN: Tool identifier. OUT: Passed to the router.
+            func (tp.Callable): IN: Function to run. OUT: Passed to the
+                router.
+            args (dict): IN: Keyword arguments. OUT: Passed to the router.
+            timeout (float | None): IN: Seconds to wait. OUT: Passed to
+                ``asyncio.wait_for``.
 
         Returns:
-            The function's return value.
+            tp.Any: OUT: Sandbox execution result.
 
         Raises:
-            SandboxExecutionUnavailableError: If no sandbox backend is configured.
-            asyncio.TimeoutError: If the execution exceeds the timeout.
+            SandboxExecutionUnavailableError: OUT: If the sandbox backend is
+                missing.
+            TimeoutError: OUT: If the timeout expires.
         """
 
         async def _sandbox_runner() -> tp.Any:
+            """Asynchronously Internal helper to sandbox runner.
+
+            Returns:
+                tp.Any: OUT: Result of the operation."""
             if router.backend is None:
                 raise SandboxExecutionUnavailableError(tool_name)
             loop = asyncio.get_event_loop()
@@ -1025,18 +1224,19 @@ class FunctionExecutor:
         return await _sandbox_runner()
 
     def _topological_sort(self, calls: list[RequestFunctionCall]) -> list[RequestFunctionCall]:
-        """Sort function calls into a dependency-safe execution order.
+        """Sort calls so dependencies are satisfied before dependents.
 
         Args:
-            calls: List of function calls, each potentially listing other call IDs
-                in their ``dependencies`` attribute.
+            calls (list[RequestFunctionCall]): IN: Calls with
+                ``dependencies``. OUT: Reordered.
 
         Returns:
-            The same calls reordered so that dependencies come before dependents.
+            list[RequestFunctionCall]: OUT: Topologically sorted calls.
 
         Raises:
-            ValueError: If a circular dependency is detected.
+            ValueError: OUT: If a circular dependency is detected.
         """
+
         sorted_calls = []
         remaining = calls.copy()
 
@@ -1054,7 +1254,18 @@ class FunctionExecutor:
         return sorted_calls
 
     def _dependencies_satisfied(self, call: RequestFunctionCall, completed: list[RequestFunctionCall]) -> bool:
-        """Return True if all dependencies of call have been successfully completed."""
+        """Check whether all of a call's dependencies have succeeded.
+
+        Args:
+            call (RequestFunctionCall): IN: Call to check. OUT:
+                ``dependencies`` are inspected.
+            completed (list[RequestFunctionCall]): IN: Already finished calls.
+                OUT: Checked for success and ID membership.
+
+        Returns:
+            bool: OUT: ``True`` if every dependency is present and successful.
+        """
+
         completed_ids = {c.id for c in completed if c.status == ExecutionStatus.SUCCESS}
         return all(dep in completed_ids for dep in call.dependencies)
 
@@ -1077,37 +1288,96 @@ else:
     except ImportError:
 
         class AgentError(Exception):
-            """Raised when an agent-level error occurs."""
+            """Base error for agent-related failures.
+
+            Args:
+                agent_id (str): IN: Agent identifier. OUT: Included in the
+                    message.
+                message (str): IN: Error description. OUT: Included in the
+                    message.
+            """
 
             def __init__(self, agent_id: str, message: str) -> None:
-                """Initialize with the agent ID and error message."""
+                """Initialize the instance.
+
+                Args:
+                    self: IN: The instance. OUT: Used for attribute access.
+                    agent_id (str): IN: agent id. OUT: Consumed during execution.
+                    message (str): IN: message. OUT: Consumed during execution."""
                 super().__init__(f"Agent {agent_id}: {message}")
 
         class XerxesTimeoutError(Exception):
-            """Raised when a function execution exceeds its time limit."""
+            """Raised when a function exceeds its timeout.
+
+            Args:
+                func_name (str): IN: Function identifier. OUT: Included in the
+                    message.
+                timeout (float): IN: Timeout seconds. OUT: Included in the
+                    message.
+            """
 
             def __init__(self, func_name: str, timeout: float) -> None:
-                """Initialize with the function name and timeout duration."""
+                """Initialize the instance.
+
+                Args:
+                    self: IN: The instance. OUT: Used for attribute access.
+                    func_name (str): IN: func name. OUT: Consumed during execution.
+                    timeout (float): IN: timeout. OUT: Consumed during execution."""
                 super().__init__(f"Function {func_name} timed out after {timeout}s")
 
         class FunctionExecutionError(Exception):
-            """Raised when a function call fails during execution."""
+            """Raised when a function fails during execution.
+
+            Args:
+                func_name (str): IN: Function identifier. OUT: Included in
+                    the message.
+                message (str): IN: Error description. OUT: Included in the
+                    message.
+                original_error (BaseException | None): IN: Wrapped exception.
+                    OUT: Stored.
+            """
 
             def __init__(self, func_name: str, message: str, original_error: BaseException | None = None) -> None:
-                """Initialize with the function name, error message, and optional original exception."""
+                """Initialize the instance.
+
+                Args:
+                    self: IN: The instance. OUT: Used for attribute access.
+                    func_name (str): IN: func name. OUT: Consumed during execution.
+                    message (str): IN: message. OUT: Consumed during execution.
+                    original_error (BaseException | None, optional): IN: original error. Defaults to None. OUT: Consumed during execution."""
                 super().__init__(f"Function {func_name}: {message}")
                 self.original_error = original_error
 
         class ValidationError(Exception):
-            """Raised when function argument validation fails."""
+            """Raised when argument validation fails.
+
+            Args:
+                param_name (str): IN: Parameter identifier. OUT: Included in
+                    the message.
+                message (str): IN: Error description. OUT: Included in the
+                    message.
+            """
 
             def __init__(self, param_name: str, message: str) -> None:
-                """Initialize with the parameter name and validation message."""
+                """Initialize the instance.
+
+                Args:
+                    self: IN: The instance. OUT: Used for attribute access.
+                    param_name (str): IN: param name. OUT: Consumed during execution.
+                    message (str): IN: message. OUT: Consumed during execution."""
                 super().__init__(f"Validation error for {param_name}: {message}")
 
 
 class RetryPolicy:
-    """Configurable retry policy for function execution."""
+    """Exponential-backoff retry configuration.
+
+    Args:
+        max_retries (int): IN: Maximum retry attempts. OUT: Stored.
+        initial_delay (float): IN: Starting delay in seconds. OUT: Stored.
+        max_delay (float): IN: Delay ceiling. OUT: Stored.
+        exponential_base (float): IN: Multiplier per attempt. OUT: Stored.
+        jitter (bool): IN: Whether to randomise delay. OUT: Stored.
+    """
 
     def __init__(
         self,
@@ -1117,15 +1387,15 @@ class RetryPolicy:
         exponential_base: float = 2.0,
         jitter: bool = True,
     ) -> None:
-        """Initialize the RetryPolicy with backoff parameters.
+        """Initialize the instance.
 
         Args:
-            max_retries: Maximum number of retry attempts after the initial try.
-            initial_delay: Delay in seconds before the first retry.
-            max_delay: Maximum delay cap in seconds.
-            exponential_base: Base for exponential backoff calculation.
-            jitter: If True, apply random jitter to the delay to avoid thundering herd.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            max_retries (int, optional): IN: max retries. Defaults to 3. OUT: Consumed during execution.
+            initial_delay (float, optional): IN: initial delay. Defaults to 1.0. OUT: Consumed during execution.
+            max_delay (float, optional): IN: max delay. Defaults to 60.0. OUT: Consumed during execution.
+            exponential_base (float, optional): IN: exponential base. Defaults to 2.0. OUT: Consumed during execution.
+            jitter (bool, optional): IN: jitter. Defaults to True. OUT: Consumed during execution."""
         self.max_retries = max_retries
         self.initial_delay = initial_delay
         self.max_delay = max_delay
@@ -1133,7 +1403,16 @@ class RetryPolicy:
         self.jitter = jitter
 
     def get_delay(self, attempt: int) -> float:
-        """Calculate delay for a given retry attempt."""
+        """Compute the delay before a retry attempt.
+
+        Args:
+            attempt (int): IN: Zero-based attempt number. OUT: Used in the
+                exponential formula.
+
+        Returns:
+            float: OUT: Delay in seconds, with optional jitter.
+        """
+
         delay = min(self.initial_delay * (self.exponential_base**attempt), self.max_delay)
         if self.jitter:
             import random
@@ -1144,10 +1423,22 @@ class RetryPolicy:
 
 @dataclass
 class ExecutionMetrics:
-    """Metrics for function execution.
+    """Running statistics for function execution performance.
 
-    Tracks aggregate statistics across all recorded executions including
-    success/failure counts, call counts, and duration statistics.
+    Attributes:
+        total_calls (int): IN: Counter. OUT: Incremented by
+            ``record_execution``.
+        successful_calls (int): IN: Counter. OUT: Incremented on success.
+        failed_calls (int): IN: Counter. OUT: Incremented on failure.
+        timeout_calls (int): IN: Counter. OUT: Currently unused.
+        total_duration (float): IN: Accumulator. OUT: Incremented by
+            ``record_execution``.
+        average_duration (float): IN: Computed metric. OUT: Updated by
+            ``record_execution``.
+        max_duration (float): IN: Peak metric. OUT: Updated by
+            ``record_execution``.
+        min_duration (float): IN: Floor metric. OUT: Updated by
+            ``record_execution``.
     """
 
     total_calls: int = 0
@@ -1160,12 +1451,17 @@ class ExecutionMetrics:
     min_duration: float = float("inf")
 
     def record_execution(self, duration: float, status: ExecutionStatus) -> None:
-        """Record a single execution result into the running metrics.
+        """Update metrics with a new observation.
 
         Args:
-            duration: Wall-clock time for the execution in seconds.
-            status: The terminal status of the execution.
+            duration (float): IN: Elapsed seconds. OUT: Incorporated.
+            status (ExecutionStatus): IN: Outcome. OUT: Determines success vs
+                failure increment.
+
+        Returns:
+            None: OUT: All counters and averages are updated.
         """
+
         self.total_calls += 1
         self.total_duration += duration
 
@@ -1180,13 +1476,13 @@ class ExecutionMetrics:
 
 
 class EnhancedFunctionRegistry(FunctionRegistry):
-    """Enhanced registry with validation, metrics, and metadata management.
-
-    Extends :class:`FunctionRegistry` with per-function argument validators
-    and execution metrics while inheriting multi-agent function storage.
-    """
+    """Function registry extended with per-function validators and metrics."""
 
     def __init__(self) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
         super().__init__()
         self._function_validators: dict[str, tp.Callable | None] = {}
         self._function_metrics: dict[str, ExecutionMetrics] = {}
@@ -1198,31 +1494,44 @@ class EnhancedFunctionRegistry(FunctionRegistry):
         metadata: dict | None = None,
         validator: tp.Callable | None = None,
     ) -> None:
-        """Register a function with optional argument validator.
+        """Register a function with an optional validator and metrics slot.
 
         Args:
-            func: The callable to register.
-            agent_id: ID of the owning agent.
-            metadata: Optional metadata dictionary for the function.
-            validator: Optional callable that receives the arguments dict and raises
-                on invalid input.
+            func (tp.Callable): IN: Function to register. OUT: Passed to
+                ``super().register``.
+            agent_id (str): IN: Owning agent. OUT: Passed to
+                ``super().register``.
+            metadata (dict | None): IN: Optional metadata. OUT: Passed to
+                ``super().register``.
+            validator (tp.Callable | None): IN: Optional argument validator.
+                OUT: Stored.
+
+        Returns:
+            None: OUT: Function, metadata, validator, and metrics are indexed.
         """
+
         super().register(func, agent_id, metadata)
         func_name = get_callable_public_name(func)
         self._function_validators[func_name] = validator
         self._function_metrics[func_name] = ExecutionMetrics()
 
     def validate_arguments(self, func_name: str, arguments: dict) -> None:
-        """Validate that all required parameters are present and pass the custom validator.
+        """Validate that required parameters are present and pass custom validators.
 
         Args:
-            func_name: Name of the registered function to validate against.
-            arguments: Argument dictionary to check.
+            func_name (str): IN: Function to validate. OUT: Looked up in the
+                registry.
+            arguments (dict): IN: Proposed arguments. OUT: Checked against
+                signature and custom validator.
+
+        Returns:
+            None: OUT: Silent on success.
 
         Raises:
-            ValidationError: If the function is not registered, a required parameter
-                is missing, or the custom validator rejects the arguments.
+            ValidationError: OUT: If a required parameter is missing or the
+                custom validator rejects the arguments.
         """
+
         entries = self._functions.get(func_name, [])
         if not entries:
             raise ValidationError(func_name, "Function not registered")
@@ -1242,25 +1551,43 @@ class EnhancedFunctionRegistry(FunctionRegistry):
             validator(arguments)
 
     def get_metrics(self, func_name: str) -> ExecutionMetrics | None:
-        """Get execution metrics for a function."""
+        """Return metrics for a registered function.
+
+        Args:
+            func_name (str): IN: Function identifier. OUT: Looked up.
+
+        Returns:
+            ExecutionMetrics | None: OUT: Metrics object or ``None``.
+        """
+
         return self._function_metrics.get(func_name)
 
 
 class EnhancedAgentOrchestrator(AgentOrchestrator):
-    """Enhanced orchestrator — alias for AgentOrchestrator.
-
-    All enhancements have been merged into the base class; this subclass
-    is kept for backward compatibility and explicit opt-in.
-    """
+    """Agent orchestrator that uses ``EnhancedFunctionRegistry``."""
 
     def __init__(self, max_agents: int = 100, enable_metrics: bool = True) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            max_agents (int, optional): IN: max agents. Defaults to 100. OUT: Consumed during execution.
+            enable_metrics (bool, optional): IN: enable metrics. Defaults to True. OUT: Consumed during execution."""
         super().__init__(max_agents=max_agents, enable_metrics=enable_metrics)
         self.function_registry = EnhancedFunctionRegistry()
 
 
 class EnhancedFunctionExecutor(FunctionExecutor):
-    """Enhanced function executor — extends FunctionExecutor with retry, timeout,
-    concurrency limits, and batch execution helpers.
+    """Function executor with semaphore-based concurrency, retry, and timeout.
+
+    Args:
+        orchestrator (AgentOrchestrator): IN: Orchestrator instance. OUT:
+            Passed to ``super().__init__``.
+        default_timeout (float): IN: Default call timeout. OUT: Stored.
+        retry_policy (RetryPolicy | None): IN: Retry configuration. OUT:
+            Defaults to a new ``RetryPolicy``.
+        max_concurrent_executions (int): IN: Semaphore size. OUT: Limits
+            concurrent calls.
     """
 
     def __init__(
@@ -1270,6 +1597,14 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         retry_policy: RetryPolicy | None = None,
         max_concurrent_executions: int = 10,
     ) -> None:
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            orchestrator (AgentOrchestrator): IN: orchestrator. OUT: Consumed during execution.
+            default_timeout (float, optional): IN: default timeout. Defaults to 30.0. OUT: Consumed during execution.
+            retry_policy (RetryPolicy | None, optional): IN: retry policy. Defaults to None. OUT: Consumed during execution.
+            max_concurrent_executions (int, optional): IN: max concurrent executions. Defaults to 10. OUT: Consumed during execution."""
         super().__init__(orchestrator)
         self.default_timeout = default_timeout
         self.retry_policy = retry_policy or RetryPolicy()
@@ -1286,12 +1621,20 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         loop_detector: Any = None,
         audit_turn_id: str | None = None,
     ) -> RequestFunctionCall:
-        """Compatibility wrapper for Xerxes internal usage.
+        """Delegate to the base implementation.
 
-        Delegates to the base :class:`FunctionExecutor` implementation while
-        accepting the same signature so ``Xerxes`` can use either executor
-        interchangeably.
+        Args:
+            call (RequestFunctionCall): IN: Call to execute. OUT: Passed up.
+            context (dict): IN: Shared context. OUT: Passed up.
+            agent (Agent | None): IN: Agent context. OUT: Passed up.
+            runtime_features_state (Any): IN: Features. OUT: Passed up.
+            loop_detector (Any): IN: Loop detection. OUT: Passed up.
+            audit_turn_id (str | None): IN: Audit turn ID. OUT: Passed up.
+
+        Returns:
+            RequestFunctionCall: OUT: Result from ``super()``.
         """
+
         return await super()._execute_single_call(
             call,
             context,
@@ -1307,7 +1650,22 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         arguments: dict,
         timeout: float | None = None,
     ) -> tp.Any:
-        """Execute a function with a timeout, wrapping exceptions in framework types."""
+        """Run a function with timeout, using the thread pool for sync functions.
+
+        Args:
+            func (tp.Callable): IN: Function to run. OUT: Invoked.
+            arguments (dict): IN: Keyword arguments. OUT: Passed to ``func``.
+            timeout (float | None): IN: Override timeout. OUT: Defaults to
+                ``self.default_timeout``.
+
+        Returns:
+            tp.Any: OUT: Function result.
+
+        Raises:
+            XerxesTimeoutError: OUT: On timeout.
+            FunctionExecutionError: OUT: On execution failure.
+        """
+
         timeout = timeout or self.default_timeout
 
         try:
@@ -1330,7 +1688,24 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         timeout: float | None = None,
         retry_policy: RetryPolicy | None = None,
     ) -> tp.Any:
-        """Execute a function with automatic retries on FunctionExecutionError."""
+        """Run a function with automatic retries on failure.
+
+        Args:
+            func (tp.Callable): IN: Function to run. OUT: Invoked repeatedly.
+            arguments (dict): IN: Keyword arguments. OUT: Passed to ``func``.
+            timeout (float | None): IN: Per-attempt timeout. OUT: Passed to
+                ``execute_with_timeout``.
+            retry_policy (RetryPolicy | None): IN: Override retry config.
+                OUT: Defaults to ``self.retry_policy``.
+
+        Returns:
+            tp.Any: OUT: Function result on success.
+
+        Raises:
+            XerxesTimeoutError: OUT: On timeout (not retried).
+            FunctionExecutionError: OUT: If all attempts fail.
+        """
+
         policy = retry_policy or self.retry_policy
         last_error = None
 
@@ -1363,7 +1738,19 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         context_variables: dict | None = None,
         agent: Agent | None = None,
     ) -> RequestFunctionCall:
-        """Execute a single function call with full error handling."""
+        """Execute one call under the semaphore with metrics recording.
+
+        Args:
+            call (RequestFunctionCall): IN: Call to execute. OUT: Mutated.
+            context_variables (dict | None): IN: Shared context. OUT: Passed to
+                the function if accepted.
+            agent (Agent | None): IN: Agent context. OUT: Used for timeout
+                override.
+
+        Returns:
+            RequestFunctionCall: OUT: Updated call object.
+        """
+
         async with self.execution_semaphore:
             start_time = time.time()
             func_name = call.name
@@ -1452,7 +1839,31 @@ class EnhancedFunctionExecutor(FunctionExecutor):
         runtime_features_state: RuntimeFeaturesState | None = None,
         loop_detector: LoopDetector | None = None,
     ) -> list[RequestFunctionCall]:
-        """Execute multiple function calls with specified strategy."""
+        """Execute a batch of calls, storing successful results in context.
+
+        Supports ``SEQUENTIAL`` and ``PARALLEL`` only.
+
+        Args:
+            calls (list[RequestFunctionCall]): IN: Calls to execute. OUT:
+                Executed.
+            strategy (FunctionCallStrategy): IN: Execution mode. OUT:
+                ``SEQUENTIAL`` or ``PARALLEL``.
+            context_variables (dict | None): IN: Shared context. OUT:
+                Enriched with ``{name}_result`` entries on sequential success.
+            agent (Agent | None): IN: Agent context. OUT: Passed to
+                ``execute_single_call``.
+            runtime_features_state (RuntimeFeaturesState | None): IN: Features.
+                OUT: Unused in this override.
+            loop_detector (LoopDetector | None): IN: Loop detection. OUT:
+                Unused in this override.
+
+        Returns:
+            list[RequestFunctionCall]: OUT: Executed calls.
+
+        Raises:
+            ValueError: OUT: If strategy is not supported.
+        """
+
         context_variables = context_variables or {}
 
         if strategy == FunctionCallStrategy.SEQUENTIAL:
@@ -1476,13 +1887,24 @@ class EnhancedFunctionExecutor(FunctionExecutor):
 
     @asynccontextmanager
     async def batch_execution(self) -> tp.AsyncGenerator[EnhancedFunctionExecutor, None]:
-        """Async context manager for a batch execution session with guaranteed cleanup."""
+        """Context manager for scoped batch execution.
+
+        Returns:
+            tp.AsyncGenerator[EnhancedFunctionExecutor, None]: OUT: Yields
+            ``self``.
+        """
+
         try:
             yield self
         finally:
             await asyncio.sleep(0)
 
     def __del__(self) -> None:
-        """Shut down the thread pool executor on garbage collection."""
+        """Clean up the thread pool on garbage collection.
+
+        Returns:
+            None: OUT: Thread pool is shut down without waiting.
+        """
+
         if hasattr(self, "thread_pool"):
             self.thread_pool.shutdown(wait=False)

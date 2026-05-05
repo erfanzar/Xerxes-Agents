@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,20 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Skill drafting from observed tool sequences.
 
-"""Skill drafter — turns a :class:`SkillCandidate` into a SKILL.md file.
-
-Hermes' authored skills follow a procedure / pitfalls / verification
-template. The drafter has two paths:
-
-1. **LLM-driven**: when an LLM client is provided, it generates a rich
-   draft including a natural-language procedure summary.
-2. **Template fallback**: deterministic, dependency-free formatter that
-   works in tests, CI, and offline. The trigger heuristic provides
-   enough structured info that the template alone is useful.
+``SkillDrafter`` turns a ``SkillCandidate`` into a ``SKILL.md`` document,
+optionally refining it with an LLM.
 """
 
 from __future__ import annotations
@@ -35,7 +30,17 @@ DEFAULT_VERSION = "0.1.0"
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
-    """Convert *text* into a ``kebab-case`` skill identifier."""
+    """Normalise arbitrary text into a URL-safe slug.
+
+    Args:
+        text (str): IN: Raw text. OUT: Lowercased, non-alphanumerics replaced
+            with hyphens, and truncated.
+        max_len (int): IN: Maximum slug length. OUT: Enforced on the result.
+
+    Returns:
+        str: OUT: Clean slug string.
+    """
+
     text = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
     if not text:
         text = f"skill-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -43,7 +48,17 @@ def _slugify(text: str, max_len: int = 40) -> str:
 
 
 def _summarise_args(args: dict[str, tp.Any], max_chars: int = 120) -> str:
-    """Compact one-line preview of an argument dict."""
+    """Format a dict of arguments into a compact human-readable string.
+
+    Args:
+        args (dict[str, tp.Any]): IN: Tool arguments. OUT: Stringified and
+            truncated.
+        max_chars (int): IN: Maximum output length. OUT: Enforced.
+
+    Returns:
+        str: OUT: Compact summary like ``"key=value, ..."``.
+    """
+
     if not args:
         return "(no args)"
     parts = []
@@ -66,30 +81,24 @@ def render_skill_template(
     version: str = DEFAULT_VERSION,
     tags: list[str] | None = None,
 ) -> str:
-    """Format a :class:`SkillCandidate` into Hermes-style SKILL.md text.
-
-    Sections produced (in order):
-
-    1. YAML frontmatter (name / description / version / tags / required_tools).
-    2. ``
-    3. ``
-    4. ``
-    5. ``
-
-    The output is deterministic — embedding the same candidate twice
-    yields the same text — which keeps the drafter idempotent and
-    makes diffs reviewable when skills are auto-improved later.
+    """Generate a ``SKILL.md`` document from a tool sequence candidate.
 
     Args:
-        candidate: The finished tool sequence to canonicalise.
-        name: Override the auto-derived skill name.
-        description: Override the auto-derived description.
-        version: Initial semver. Defaults to ``"0.1.0"``.
-        tags: Tag list. Defaults to the unique tools list.
+        candidate (SkillCandidate): IN: Observed tool calls and final
+            response. OUT: Used to build frontmatter, procedure, pitfalls, and
+            verification sections.
+        name (str | None): IN: Override skill name. OUT: Auto-generated from
+            the prompt or signature if omitted.
+        description (str | None): IN: Override description. OUT: Defaults to
+            the user prompt.
+        version (str): IN: Semver string. OUT: Placed in frontmatter.
+        tags (list[str] | None): IN: Override tag list. OUT: Defaults to
+            ``candidate.unique_tools``.
 
     Returns:
-        SKILL.md-formatted text ready to be written to disk.
+        str: OUT: Complete markdown document with YAML frontmatter.
     """
+
     auto_name = name or _slugify(candidate.user_prompt or candidate.signature() or "skill")
     auto_desc = description or (candidate.user_prompt.strip() or "Auto-authored skill from tool sequence.")
     if len(auto_desc) > 200:
@@ -144,17 +153,13 @@ def render_skill_template(
 
 
 class SkillDrafter:
-    """Drafts a SKILL.md from a :class:`SkillCandidate`.
+    """Produces ``SKILL.md`` files from ``SkillCandidate`` observations.
 
-    Optional ``llm_client`` parameter lets callers supply an LLM that
-    can rewrite the auto-generated draft into more natural language.
-    The fallback (template-only) path is always available and is the
-    default in tests / offline.
-
-    Attributes:
-        skills_dir: Directory where new SKILL.md files are written.
-        llm_client: Optional LLM client (any object with a ``complete``
-            or ``__call__`` method that accepts a string prompt).
+    Args:
+        skills_dir (str | Path): IN: Destination directory for drafted skills.
+            OUT: Created if missing.
+        llm_client (tp.Any | None): IN: Optional LLM client for refinement.
+            OUT: Used by ``_refine_with_llm``.
     """
 
     def __init__(
@@ -162,16 +167,25 @@ class SkillDrafter:
         skills_dir: str | Path,
         llm_client: tp.Any | None = None,
     ) -> None:
-        """Initialise the drafter.
+        """Initialize the instance.
 
         Args:
-            skills_dir: Directory where new SKILL.md files are saved.
-                Created if it does not exist.
-            llm_client: Optional LLM client. When provided, its
-                ``complete(prompt) -> str`` method (or ``__call__``) is
-                invoked to refine the draft.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution."""
         self.skills_dir = Path(skills_dir).expanduser()
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution."""
         self.skills_dir.mkdir(parents=True, exist_ok=True)
         self.llm_client = llm_client
 
@@ -183,19 +197,23 @@ class SkillDrafter:
         description: str | None = None,
         write: bool = True,
     ) -> tuple[str, Path | None]:
-        """Render a SKILL.md (and optionally save it).
+        """Generate a skill document and optionally write it to disk.
 
         Args:
-            candidate: The candidate to draft.
-            name: Override the auto-derived skill name.
-            description: Override the auto-derived description.
-            write: When ``True``, write the SKILL.md to disk under
-                ``skills_dir/<name>/SKILL.md``. When ``False``, return
-                ``(text, None)``.
+            candidate (SkillCandidate): IN: Observed tool sequence. OUT: Passed
+                to ``render_skill_template``.
+            name (str | None): IN: Override skill name. OUT: Passed to the
+                template.
+            description (str | None): IN: Override description. OUT: Passed to
+                the template.
+            write (bool): IN: Whether to persist the file. OUT: Determines
+                whether a path is returned.
 
         Returns:
-            ``(skill_md_text, path_or_None)``.
+            tuple[str, Path | None]: OUT: Generated markdown text and optional
+            written path.
         """
+
         text = render_skill_template(candidate, name=name, description=description)
         if self.llm_client is not None:
             text = self._refine_with_llm(text, candidate)
@@ -209,7 +227,18 @@ class SkillDrafter:
         return text, path
 
     def _refine_with_llm(self, draft: str, candidate: SkillCandidate) -> str:
-        """Best-effort LLM refinement; falls back to the raw draft on error."""
+        """Ask the configured LLM to polish the generated markdown.
+
+        Args:
+            draft (str): IN: Raw generated SKILL.md. OUT: Sent as part of the
+                prompt.
+            candidate (SkillCandidate): IN: Original candidate. OUT: Unused
+                directly but available for context.
+
+        Returns:
+            str: OUT: Refined text, or ``draft`` on failure.
+        """
+
         if self.llm_client is None:
             return draft
         prompt = (
@@ -234,7 +263,15 @@ class SkillDrafter:
 
     @staticmethod
     def _extract_name_from_text(text: str) -> str | None:
-        """Pull ``name:`` value from the YAML frontmatter."""
+        """Parse the ``name`` field from YAML frontmatter.
+
+        Args:
+            text (str): IN: SKILL.md content. OUT: Searched for ``name: ...``.
+
+        Returns:
+            str | None: OUT: Slugified name or ``None``.
+        """
+
         m = re.search(r"^name:\s*(.+)$", text, re.MULTILINE)
         if m:
             return _slugify(m.group(1))

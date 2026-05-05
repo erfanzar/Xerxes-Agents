@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,31 +6,22 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Agent definitions and built-in agents for the Xerxes framework.
 
+This module exports built-in agent instances (e.g., code_agent, research_agent),
+agent specification loaders, compaction utilities, and sub-agent management
+primitives used throughout the system.
 
-"""Pre-built agents for specialized tasks within the Xerxes framework.
-
-This module provides a collection of ready-to-use agent configurations optimized
-for specific domains and use cases. These pre-built agents can be used directly
-or serve as templates for creating custom specialized agents.
-
-Available Agents:
-    - code_agent: Specialized for code generation, review, and debugging tasks
-    - data_analyst_agent: Optimized for data analysis and visualization tasks
-    - planner_agent: Designed for task planning and project management
-    - research_agent: Configured for research and information gathering
-    - CompactionAgent: Agent for memory compaction and summarization
-
-Example:
-    >>> from xerxes.agents import code_agent, research_agent
-    >>> from xerxes import OpenAILLM
-    >>>
-    >>> llm = OpenAILLM(api_key="your-api-key")
-    >>> coder = code_agent(llm=llm)
-    >>> response = coder.query("Write a Python function to sort a list")
+Main exports:
+    - Built-in agents: code_agent, data_analyst_agent, planner_agent, research_agent
+    - CompactionAgent and create_compaction_agent for context compaction
+    - AgentDefinition and related loader functions
+    - SubAgentManager and SubAgentTask for sub-agent orchestration
 """
 
 from . import compaction_agent
@@ -43,6 +34,7 @@ from .definitions import (
     BUILTIN_AGENTS,
     AgentDefinition,
     get_agent_definition,
+    list_agent_definition_load_errors,
     list_agent_definitions,
     load_agent_definitions,
 )
@@ -59,6 +51,7 @@ __all__ = (
     "create_compaction_agent",
     "data_analyst_agent",
     "get_agent_definition",
+    "list_agent_definition_load_errors",
     "list_agent_definitions",
     "load_agent_definitions",
     "planner_agent",

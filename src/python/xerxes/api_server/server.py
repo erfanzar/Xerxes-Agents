@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Xerxes API server bootstrap and agent registration.
 
-
-"""Main API server for the modular Xerxes API server.
-
-This module provides the core API server infrastructure for Xerxes,
-including:
-- FastAPI-based HTTP server with OpenAI-compatible endpoints
-- Agent registration and management
-- Cortex multi-agent orchestration support
-- Modular router architecture for different endpoint groups
-- Completion services for both standard and Cortex agents
-
-The server supports both standard Xerxes agents and Cortex agents
-for multi-agent orchestration, with full compatibility with OpenAI
-client libraries.
+This module provides :class:`XerxesAPIServer`, a FastAPI-based server that
+exposes an OpenAI-compatible HTTP API for both standard agents and Cortex
+multi-agent execution.
 """
 
 from __future__ import annotations
@@ -44,35 +36,9 @@ from .routers import ChatRouter, HealthRouter, ModelsRouter
 
 
 class XerxesAPIServer:
-    """Modular FastAPI server that provides OpenAI-compatible API for Xerxes agents.
+    """FastAPI server for Xerxes agents with optional Cortex support.
 
-    This server exposes registered Xerxes agents through HTTP endpoints that follow
-    the OpenAI API specification, allowing seamless integration with OpenAI client libraries.
-
-    The server is designed with a modular architecture:
-    - Separate routers for different endpoint groups
-    - Dedicated service for completion logic
-    - Message conversion utilities
-    - Centralized models for request/response handling
-
-    Attributes:
-        xerxes: The Xerxes instance managing agents.
-        llm: LLM instance for Cortex agents.
-        agents: Dictionary mapping agent IDs to Agent objects.
-        cortex_agents: List of registered CortexAgent instances.
-        enable_cortex: Whether Cortex endpoints are enabled.
-        app: FastAPI application instance.
-        completion_service: Service for handling standard chat completions.
-        cortex_completion_service: Service for handling Cortex completions.
-
-    Example:
-        >>> from xerxes import Xerxes
-        >>> from xerxes.api_server import XerxesAPIServer
-        >>>
-        >>> xerxes = Xerxes(client=openai_client)
-        >>> server = XerxesAPIServer(xerxes)
-        >>> server.register_agent(my_agent)
-        >>> server.run(port=8000)
+    Handles agent registration, router setup, and server execution via uvicorn.
     """
 
     def __init__(
@@ -85,28 +51,17 @@ class XerxesAPIServer:
     ):
         """Initialize the API server.
 
-        Sets up the FastAPI application, completion services, and optionally
-        the Cortex multi-agent orchestration layer. If Cortex is enabled and
-        an LLM is provided, the Cortex completion service and routers are
-        initialized immediately. Otherwise, routers are deferred until the
-        first agent is registered.
-
         Args:
-            xerxes_instance: Optional ``Xerxes`` instance to use for standard
-                agent management and execution. Required for registering
-                standard agents via ``register_agent``.
-            llm: Optional ``BaseLLM`` instance for powering Cortex agents.
-                Required when ``enable_cortex`` is ``True``.
-            can_overide_samplings: Whether to allow incoming request parameters
-                (temperature, top_p, max_tokens, etc.) to override the agent's
-                default sampling settings. Defaults to ``False``.
-            enable_cortex: Whether to enable Cortex multi-agent orchestration
-                endpoints. When ``True``, the server supports model names
-                containing ``"cortex"`` for multi-agent workflows.
-                Defaults to ``False``.
-            use_universal_agent: Whether to include a ``UniversalAgent`` as a
-                fallback agent in the Cortex agent pool. Only relevant when
-                ``enable_cortex`` is ``True``. Defaults to ``True``.
+            xerxes_instance (Xerxes | None): IN: Xerxes runtime for standard agents.
+                OUT: Used to create the completion service.
+            llm (BaseLLM | None): IN: LLM backend for Cortex mode. OUT: Passed to
+                :class:`CortexCompletionService` when ``enable_cortex`` is ``True``.
+            can_overide_samplings (bool): IN: Whether request sampling parameters
+                may override agent defaults. OUT: Passed to :class:`CompletionService`.
+            enable_cortex (bool): IN: Whether Cortex multi-agent mode is enabled.
+                OUT: Controls backend and router initialization.
+            use_universal_agent (bool): IN: Whether to include a universal agent
+                in the Cortex backend. OUT: Passed to :class:`CortexCompletionService`.
         """
         self.xerxes = xerxes_instance
         self.llm = llm
@@ -144,28 +99,14 @@ class XerxesAPIServer:
             self._routers_initialized = True
 
     def register_agent(self, agent: Agent) -> None:
-        """Register a standard agent to be available via the API.
-
-        Adds the agent to both the Xerxes instance and the server's internal
-        agent registry. The agent becomes accessible through the chat
-        completions endpoint using its ID, name, or model as the ``model``
-        parameter in requests. If routers have not yet been initialized,
-        this method triggers router setup.
+        """Register a standard agent with the server.
 
         Args:
-            agent: The ``Agent`` instance to register. Must have at least
-                one of ``id``, ``name``, or ``model`` set to serve as the
-                lookup key in the agent registry.
+            agent (Agent): IN: Agent to register. OUT: Added to the internal agent
+                dictionary and the Xerxes instance.
 
         Raises:
-            ValueError: If no ``Xerxes`` instance was provided during server
-                initialization, since standard agents require Xerxes for
-                execution.
-
-        Example:
-            >>> server = XerxesAPIServer(xerxes_instance=xerxes)
-            >>> agent = Agent(id="assistant", model="gpt-4", instructions="Help users")
-            >>> server.register_agent(agent)
+            ValueError: If no Xerxes instance was provided during initialization.
         """
         if not self.xerxes:
             raise ValueError("Xerxes instance required for registering regular agents")
@@ -180,26 +121,14 @@ class XerxesAPIServer:
             self._routers_initialized = True
 
     def register_cortex_agent(self, agent: CortexAgent) -> None:
-        """Register a ``CortexAgent`` for multi-agent orchestration.
-
-        Adds the agent to the Cortex agent pool. If the Cortex completion
-        service has already been initialized, its agent list is updated
-        immediately. If routers have not yet been initialized, this method
-        triggers router setup.
+        """Register a Cortex agent with the server.
 
         Args:
-            agent: The ``CortexAgent`` instance to register. This agent
-                will be available for task assignment and orchestration
-                through the Cortex completion service.
+            agent (CortexAgent): IN: Cortex agent to register. OUT: Appended to
+                the agent list and reflected in the completion service.
 
         Raises:
-            ValueError: If Cortex was not enabled during server initialization
-                (i.e., ``enable_cortex=False``).
-
-        Example:
-            >>> server = XerxesAPIServer(llm=my_llm, enable_cortex=True)
-            >>> cortex_agent = CortexAgent(name="researcher", llm=my_llm)
-            >>> server.register_cortex_agent(cortex_agent)
+            ValueError: If Cortex mode is not enabled.
         """
         if not self.enable_cortex:
             raise ValueError("Cortex must be enabled to register CortexAgents")
@@ -214,22 +143,7 @@ class XerxesAPIServer:
             self._routers_initialized = True
 
     def _setup_routers(self) -> None:
-        """Set up and include FastAPI routers for the API endpoints.
-
-        Configures the appropriate routers based on which services are
-        available and includes them in the FastAPI application:
-
-        - ``UnifiedChatRouter``: Used when Cortex is enabled. Handles both
-          standard and Cortex requests through a single endpoint.
-        - ``ChatRouter``: Used when only standard agents are available.
-        - ``ModelsRouter``: Lists all available models/agents. Included
-          whenever at least one completion service is active.
-        - ``HealthRouter``: Provides the health check endpoint. Included
-          whenever at least one completion service is active.
-
-        This method is called automatically when the first agent is
-        registered or during ``__init__`` if Cortex is pre-configured.
-        """
+        """Configure and include FastAPI routers based on available backends."""
         from .routers import UnifiedChatRouter
 
         if self.enable_cortex and self.cortex_completion_service:
@@ -251,19 +165,11 @@ class XerxesAPIServer:
             self.app.include_router(health_router.router, tags=["health"])
 
     def _get_all_models(self) -> dict[str, Any]:
-        """Get all available models including Cortex virtual models.
-
-        Builds a combined dictionary of all registered standard agents and,
-        if Cortex is enabled, adds virtual model entries for each supported
-        Cortex mode and process type. Virtual Cortex models are generated
-        with multiple common prefixes (empty, ``"xerxes-"``, ``"api-"``,
-        ``"v1-"``) to support flexible model naming in client requests.
+        """Build a combined model dictionary including Cortex variants.
 
         Returns:
-            Dictionary mapping model name strings to either ``Agent`` objects
-            (for standard agents) or configuration dictionaries (for Cortex
-            virtual models) containing ``type``, ``mode``, and optionally
-            ``process`` keys.
+            dict[str, Any]: OUT: Mapping of model IDs to agent objects or Cortex
+                configuration dicts.
         """
         models: dict[str, Any] = dict(self.agents)
 
@@ -285,30 +191,16 @@ class XerxesAPIServer:
         return models
 
     def run(self, host: str = "0.0.0.0", port: int = 11881, **kwargs) -> None:
-        """Run the API server using uvicorn.
-
-        Starts the uvicorn ASGI server with the configured FastAPI application.
-        If routers have not been initialized yet, this method attempts to set
-        them up. Raises an error if no agents have been registered and Cortex
-        is not enabled.
+        """Start the uvicorn server.
 
         Args:
-            host: The hostname or IP address to bind the server to.
-                Defaults to ``"0.0.0.0"`` (all interfaces).
-            port: The TCP port number to bind the server to.
-                Defaults to ``11881``.
-            **kwargs: Additional keyword arguments passed directly to
-                ``uvicorn.run()``, such as ``log_level``, ``workers``,
-                ``ssl_keyfile``, etc.
+            host (str): IN: Bind host. OUT: Passed to ``uvicorn.run``.
+            port (int): IN: Bind port. OUT: Passed to ``uvicorn.run``.
+            **kwargs (Any): IN: Additional uvicorn options. OUT: Forwarded to
+                ``uvicorn.run``.
 
         Raises:
-            RuntimeError: If no agents are registered and Cortex is not
-                enabled, since the server would have no endpoints to serve.
-
-        Example:
-            >>> server = XerxesAPIServer(xerxes_instance=xerxes)
-            >>> server.register_agent(agent)
-            >>> server.run(host="127.0.0.1", port=8000, log_level="info")
+            RuntimeError: If no agents are registered and routers were not initialized.
         """
         if not self._routers_initialized:
             if self.enable_cortex and self.cortex_completion_service:
@@ -329,40 +221,20 @@ class XerxesAPIServer:
         can_overide_samplings: bool = False,
         **xerxes_kwargs,
     ) -> XerxesAPIServer:
-        """Create a Xerxes API server with the given client and agents.
-
-        This is a convenience factory method that handles the full setup
-        sequence: creating a ``Xerxes`` instance, wrapping it in a
-        ``XerxesAPIServer``, and registering all provided agents. The
-        returned server is ready to be started with ``run()``.
+        """Factory method to create and configure a server from an LLM client.
 
         Args:
-            client: An OpenAI-compatible client instance (e.g.,
-                ``openai.OpenAI(...)``). Passed to the ``Xerxes`` constructor.
-            agents: A single ``Agent`` instance or a list of ``Agent``
-                instances to register with the server. If ``None``, no agents
-                are registered and they must be added later via
-                ``register_agent()``.
-            can_overide_samplings: Whether to allow incoming request parameters
-                (temperature, top_p, max_tokens, etc.) to override the agent's
-                default sampling settings. Defaults to ``False``.
-            **xerxes_kwargs: Additional keyword arguments passed directly to
-                the ``Xerxes`` constructor (e.g., ``max_history_length``,
-                ``system_prompt``).
+            client (Any): IN: LLM client passed to :class:`Xerxes`. OUT: Used as
+                the ``llm`` argument.
+            agents (list[Agent] | None | Agent): IN: Agent(s) to register. OUT:
+                Normalized to a list and registered.
+            can_overide_samplings (bool): IN: Whether sampling overrides are allowed.
+                OUT: Passed to the server constructor.
+            **xerxes_kwargs (Any): IN: Extra keyword arguments for :class:`Xerxes`.
+                OUT: Forwarded to the Xerxes constructor.
 
         Returns:
-            A fully configured ``XerxesAPIServer`` instance with all provided
-            agents registered and ready to serve requests.
-
-        Example:
-            >>> import openai
-            >>> from xerxes.types import Agent
-            >>> from xerxes.api_server import XerxesAPIServer
-            >>>
-            >>> client = openai.OpenAI(api_key="key", base_url="url")
-            >>> agent = Agent(id="assistant", model="gpt-4", instructions="Help users")
-            >>> server = XerxesAPIServer.create_server(client, agents=[agent])
-            >>> server.run(port=8000)
+            XerxesAPIServer: OUT: Configured and ready-to-run server instance.
         """
         xerxes = Xerxes(llm=client, **xerxes_kwargs)
         server = XerxesAPIServer(xerxes_instance=xerxes, can_overide_samplings=can_overide_samplings)

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,15 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Helper utilities for webhook-based channel implementations.
 
-"""Shared helpers for channel adapters.
-
-Mostly an abstract :class:`WebhookChannel` mixin: most messaging
-platforms expose an HTTP POST endpoint plus an outbound REST call. The
-mixin gives adapters a uniform structure.
+Provides ``WebhookChannel`` — a base class that bridges inbound HTTP
+webhooks to the Xerxes ``Channel`` interface — plus simple HTTP and JSON
+parsing helpers used by concrete adapters.
 """
 
 from __future__ import annotations
@@ -32,43 +33,53 @@ logger = logging.getLogger(__name__)
 
 
 class WebhookChannel(Channel):
-    """Channel base class for platforms that ship inbound via HTTP POST.
+    """Abstract channel that receives messages via HTTP webhooks.
 
-    Subclasses implement two methods:
-
-    - :meth:`_parse_inbound`: turn the raw POST body into one or more
-      :class:`ChannelMessage`.
-    - :meth:`_send_outbound`: deliver an outbound :class:`ChannelMessage`
-      to the platform.
-
-    A :class:`WebhookDispatcher` is responsible for actually routing
-    HTTP requests to :meth:`handle_webhook`; the channel itself does not
-    bind a port.
+    Subclasses implement ``_parse_inbound`` and ``_send_outbound`` to
+    translate platform-specific payloads to/from ``ChannelMessage``.
     """
 
     def __init__(self) -> None:
-        """Initialise with no inbound handler attached."""
+        """Initialize the channel with no active inbound handler."""
         self._handler: InboundHandler | None = None
 
     async def start(self, on_inbound: InboundHandler) -> None:
-        """Attach the inbound handler that will receive parsed messages.
+        """Register the inbound message handler.
 
         Args:
-            on_inbound: Coroutine invoked once per :class:`ChannelMessage`
-                parsed from a webhook POST.
+            on_inbound (InboundHandler): IN: async callback that will receive
+                parsed ``ChannelMessage`` instances. OUT: stored internally and
+                invoked for each inbound webhook.
         """
         self._handler = on_inbound
 
     async def stop(self) -> None:
-        """Detach the inbound handler so further webhooks are rejected."""
+        """Clear the inbound handler, stopping message processing."""
         self._handler = None
 
     async def send(self, message: ChannelMessage) -> None:
-        """Deliver ``message`` by invoking :meth:`_send_outbound`."""
+        """Send an outbound message via the channel.
+
+        Args:
+            message (ChannelMessage): IN: the message to transmit. OUT: passed
+                to ``_send_outbound`` for platform-specific delivery.
+        """
         await self._send_outbound(message)
 
     async def handle_webhook(self, headers: dict[str, str], body: bytes) -> WebhookResponse:
-        """Parse the body and forward each :class:`ChannelMessage`."""
+        """Process an incoming HTTP webhook payload.
+
+        Args:
+            headers (dict[str, str]): IN: HTTP headers from the webhook
+                request. OUT: forwarded to ``_parse_inbound``.
+            body (bytes): IN: raw request body. OUT: parsed by
+                ``_parse_inbound`` into ``ChannelMessage`` objects.
+
+        Returns:
+            WebhookResponse: OUT: HTTP response to return to the caller.
+                503 if the channel is not started, 400 on parse failure,
+                200 on success.
+        """
         if self._handler is None:
             return WebhookResponse(status=503, body="channel not started")
         try:
@@ -85,15 +96,35 @@ class WebhookChannel(Channel):
 
     @abstractmethod
     def _parse_inbound(self, headers: dict[str, str], body: bytes) -> list[ChannelMessage]:
-        """Convert the raw body to channel messages."""
+        """Parse a webhook payload into ``ChannelMessage`` instances.
+
+        Args:
+            headers (dict[str, str]): IN: HTTP headers from the request.
+            body (bytes): IN: raw request body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed messages to deliver inbound.
+        """
 
     @abstractmethod
     async def _send_outbound(self, message: ChannelMessage) -> None:
-        """Deliver an outbound message via the platform's API."""
+        """Transmit an outbound message to the platform.
+
+        Args:
+            message (ChannelMessage): IN: message to send.
+        """
 
 
 def parse_json_body(body: bytes) -> dict[str, tp.Any]:
-    """Parse a JSON request body into a dict, returning ``{}`` on error."""
+    """Safely parse a bytes payload as JSON.
+
+    Args:
+        body (bytes): IN: raw HTTP body, possibly empty.
+
+    Returns:
+        dict[str, Any]: OUT: parsed JSON object, or an empty dict if the body
+        is empty or not valid JSON / not a dict.
+    """
     if not body:
         return {}
     try:
@@ -111,10 +142,25 @@ def http_post(
     http_client: tp.Any | None = None,
     timeout: float = 15.0,
 ) -> dict[str, tp.Any]:
-    """Convenience POST that prefers an injected ``http_client`` callable.
+    """POST JSON data to a URL.
 
-    The injected client should accept ``(url, json=..., headers=...)``
-    and return a dict. When absent, falls back to ``httpx``.
+    Args:
+        url (str): IN: target URL.
+        json_body (dict[str, Any] | None): IN: JSON-serializable request body.
+            OUT: serialized and sent as the request payload.
+        headers (dict[str, str] | None): IN: extra HTTP headers. OUT: merged
+            into the outgoing request.
+        http_client (Any | None): IN: optional callable with a ``requests``-
+            like signature ``(url, json=..., headers=...)``. OUT: used instead
+            of ``httpx`` when provided.
+        timeout (float): IN: request timeout in seconds. Defaults to 15.0.
+
+    Returns:
+        dict[str, Any]: OUT: parsed JSON response, or ``{"raw": <text>}`` if
+        the response is not valid JSON.
+
+    Raises:
+        RuntimeError: If ``httpx`` is required but not installed.
     """
     if http_client is not None:
         out = http_client(url, json=json_body, headers=headers)

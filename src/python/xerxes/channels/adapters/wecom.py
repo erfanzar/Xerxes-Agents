@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""WeCom (企业微信) channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""WeCom (Enterprise WeChat / 企业微信) adapter."""
+Connects to the WeCom API for enterprise messaging.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +25,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class WeComChannel(WebhookChannel):
-    """WeCom self-built application bot.
-
-    Inbound: WeCom POSTs the (decrypted) callback envelope.
-    Outbound: ``POST {api_base}/cgi-bin/message/send?access_token=...``.
-    """
+    """Channel implementation for WeCom (Enterprise WeChat)."""
 
     name = "wecom"
 
@@ -29,14 +38,20 @@ class WeComChannel(WebhookChannel):
         api_base: str = "https://qyapi.weixin.qq.com",
         http_client: tp.Any = None,
     ) -> None:
-        """Configure the adapter for a WeCom self-built application.
+        """Initialize the WeCom channel.
 
         Args:
-            access_token: Static access token (used when no provider set).
-            agent_id: Numeric agent/application id inside the enterprise.
-            token_provider: Callable returning the current access token.
-            api_base: WeCom open-API base URL.
-            http_client: Optional injected HTTP callable for tests.
+            access_token (str): IN: static access token. Defaults to empty.
+                OUT: fallback when ``token_provider`` is not given.
+            agent_id (str | int): IN: WeCom agent identifier.
+                OUT: included in outbound message payloads.
+            token_provider (Callable | None): IN: optional callable that
+                returns a fresh access token. OUT: takes precedence over the
+                static token.
+            api_base (str): IN: base URL for WeCom APIs.
+                OUT: stored with trailing slash removed.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.access_token = access_token
@@ -46,7 +61,12 @@ class WeComChannel(WebhookChannel):
         self._http = http_client
 
     def _resolve_token(self) -> str:
-        """Return the current access token, preferring ``token_provider``."""
+        """Resolve the current access token.
+
+        Returns:
+            str: OUT: token from ``token_provider`` if available, otherwise
+            the static ``access_token``.
+        """
         if self.token_provider is not None:
             tok = self.token_provider()
             if tok:
@@ -54,11 +74,14 @@ class WeComChannel(WebhookChannel):
         return self.access_token
 
     def _parse_inbound(self, headers, body):
-        """Pick content and sender from either XML-derived or JSON fields.
+        """Parse a WeCom webhook payload into ``ChannelMessage``.
 
-        WeCom's encrypted callback is decoded upstream to JSON; this reads
-        either ``Content``/``FromUserName`` (XML shape) or the lowercase
-        ``content``/``from_user`` aliases.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages.
         """
         data = parse_json_body(body)
         if not data:
@@ -79,7 +102,12 @@ class WeComChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Call ``cgi-bin/message/send`` with an access token on the query string."""
+        """Send a text message via the WeCom API.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``channel_user_id``
+                or ``room_id`` is the recipient, and ``text`` the content.
+        """
         token = self._resolve_token()
         url = f"{self.api_base}/cgi-bin/message/send?access_token={token}"
         body = {

@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,25 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Console module for Xerxes.
 
-
-"""Lightweight logging system for Xerxes using ANSI colors.
-
-This module provides a centralized, color-coded logging system for the
-Xerxes framework. It includes:
-- ANSI color support for terminal output
-- Thread-safe singleton logger implementation
-- Colored log level formatting
-- Utility functions for common logging patterns
-- Streaming callback for real-time event display
-
-The logging system automatically detects TTY terminals and applies
-ANSI colors accordingly, falling back to plain text in non-TTY contexts.
-
-Example:
-    >>> from xerxes.logging.console import get_logger, log_step
-    >>> logger = get_logger()
-    >>> logger.info("Starting process")
-    >>> log_step("INIT", "Initializing components", color="GREEN")
-"""
+Exports:
+    - COLORS
+    - LEVEL_COLORS
+    - ColorFormatter
+    - XerxesLogger
+    - get_logger
+    - set_verbosity
+    - log_step
+    - log_thinking
+    - log_success
+    - log_error
+    - ... and 8 more."""
 
 import datetime
 import json
@@ -79,7 +74,6 @@ COLORS = {
     "BLUE_PURPLE": "\033[38;5;99m",
 }
 
-
 LEVEL_COLORS = {
     "DEBUG": COLORS["LIGHT_BLUE"],
     "INFO": COLORS["BLUE_PURPLE"],
@@ -90,24 +84,20 @@ LEVEL_COLORS = {
 
 
 class ColorFormatter(logging.Formatter):
-    """Custom log formatter that adds ANSI color codes to log output.
+    """Color formatter.
 
-    This formatter colorizes log messages based on their severity level
-    and adds timestamps and logger names with appropriate styling.
-
-    The formatter handles multi-line messages by prepending the formatted
-    name to each line, ensuring consistent visual alignment.
+    Inherits from: logging.Formatter
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format a log record with ANSI color codes.
+        """Format.
 
         Args:
-            record: The log record to format.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            record (logging.LogRecord): IN: record. OUT: Consumed during execution.
         Returns:
-            Formatted string with ANSI color codes applied based on log level.
-        """
+            str: OUT: Result of the operation."""
+
         orig_levelname = record.levelname
         color = LEVEL_COLORS.get(record.levelname, COLORS["RESET"])
         record.levelname = f"{color}{record.levelname:<8}{COLORS['RESET']}"
@@ -123,29 +113,19 @@ class ColorFormatter(logging.Formatter):
 
 
 class XerxesLogger:
-    """Centralized logger for Xerxes with colored output support.
-
-    Thread-safe singleton logger that provides colored console output
-    with configurable log levels. Uses the singleton pattern to ensure
-    a single logger instance across the application.
-
-    Attributes:
-        logger: The underlying Python logging.Logger instance.
-
-    Note:
-        Log level can be configured via the XERXES_LOG_LEVEL environment
-        variable. Defaults to INFO if not set.
-    """
+    """Xerxes logger."""
 
     _instance = None
     _lock = threading.Lock()
 
     def __new__(cls):
-        """Create or return the singleton logger instance.
+        """Dunder method for new.
 
+        Args:
+            cls: IN: The class. OUT: Used for class-level operations.
         Returns:
-            The singleton XerxesLogger instance.
-        """
+            Any: OUT: Result of the operation."""
+
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -153,17 +133,25 @@ class XerxesLogger:
         return cls._instance
 
     def __init__(self):
-        """Initialize the logger if not already initialized."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         if not hasattr(self, "_initialized"):
             self._initialized = True
             self._setup_logger()
 
     def _setup_logger(self):
-        """Set up the main logger with colored console handler.
+        """Internal helper to setup logger.
 
-        Configures the internal logger with a ColorFormatter and sets
-        the log level from environment variables.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger = logging.getLogger("Xerxes")
         self.logger.setLevel(logging.DEBUG)
 
@@ -176,71 +164,90 @@ class XerxesLogger:
         self.logger.addHandler(console_handler)
 
     def _get_log_level(self) -> int:
-        """Get log level from XERXES_LOG_LEVEL environment variable.
+        """Internal helper to get log level.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Integer log level corresponding to the environment variable
-            value, defaulting to INFO if not set or invalid.
-        """
+            int: OUT: Result of the operation."""
+
         level_str = os.environ.get("XERXES_LOG_LEVEL", "INFO").upper()
         return getattr(logging, level_str, logging.INFO)
 
     def debug(self, message: str, *args, **kwargs):
-        """Log a message at DEBUG level.
+        """Debug.
 
         Args:
-            message: The message to log.
-            *args: Positional arguments for string formatting.
-            **kwargs: Keyword arguments passed to the logger.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            message (str): IN: message. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger.debug(message, *args, **kwargs)
 
     def info(self, message: str, *args, **kwargs):
-        """Log a message at INFO level.
+        """Info.
 
         Args:
-            message: The message to log.
-            *args: Positional arguments for string formatting.
-            **kwargs: Keyword arguments passed to the logger.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            message (str): IN: message. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger.info(message, *args, **kwargs)
 
     def warning(self, message: str, *args, **kwargs):
-        """Log a message at WARNING level.
+        """Warning.
 
         Args:
-            message: The message to log.
-            *args: Positional arguments for string formatting.
-            **kwargs: Keyword arguments passed to the logger.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            message (str): IN: message. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger.warning(message, *args, **kwargs)
 
     def error(self, message: str, *args, **kwargs):
-        """Log a message at ERROR level.
+        """Error.
 
         Args:
-            message: The message to log.
-            *args: Positional arguments for string formatting.
-            **kwargs: Keyword arguments passed to the logger.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            message (str): IN: message. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger.error(message, *args, **kwargs)
 
     def critical(self, message: str, *args, **kwargs):
-        """Log a message at CRITICAL level.
+        """Critical.
 
         Args:
-            message: The message to log.
-            *args: Positional arguments for string formatting.
-            **kwargs: Keyword arguments passed to the logger.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            message (str): IN: message. OUT: Consumed during execution.
+            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         self.logger.critical(message, *args, **kwargs)
 
     def set_level(self, level: str):
-        """Set the logging level for the logger and all handlers.
+        """Set the level.
 
         Args:
-            level: Log level name ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            level (str): IN: level. OUT: Consumed during execution.
+        Returns:
+            Any: OUT: Result of the operation."""
+
         numeric_level = getattr(logging, level.upper(), logging.INFO)
         self.logger.setLevel(numeric_level)
         for handler in self.logger.handlers:
@@ -248,47 +255,36 @@ class XerxesLogger:
 
 
 def get_logger() -> XerxesLogger:
-    """Get the singleton XerxesLogger instance.
+    """Retrieve the logger.
 
     Returns:
-        The global XerxesLogger singleton instance.
+        XerxesLogger: OUT: Result of the operation."""
 
-    Example:
-        >>> logger = get_logger()
-        >>> logger.info("Application started")
-    """
     return XerxesLogger()
 
 
 def set_verbosity(level: str):
-    """Set the global verbosity level for the Xerxes logger.
+    """Set the verbosity.
 
     Args:
-        level: Log level name ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL').
+        level (str): IN: level. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
 
-    Example:
-        >>> set_verbosity('DEBUG')
-        >>> set_verbosity('ERROR')
-    """
     logger = get_logger()
     logger.set_level(level)
 
 
 def log_step(step_name: str, description: str = "", color: str = "CYAN"):
-    """Log a step in the process with formatted, colored output.
-
-    Displays a step name in brackets with optional description.
-    Colors are applied only when output is to a TTY terminal.
+    """Log step.
 
     Args:
-        step_name: Name of the step (displayed in brackets).
-        description: Optional description following the step name.
-        color: Color name from COLORS dict (default: "CYAN").
+        step_name (str): IN: step name. OUT: Consumed during execution.
+        description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
+        color (str, optional): IN: color. Defaults to 'CYAN'. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
 
-    Example:
-        >>> log_step("INIT", "Loading configuration")
-        >>> log_step("BUILD", "Compiling assets", color="GREEN")
-    """
     logger = get_logger()
     color_code = COLORS.get(color.upper(), COLORS["CYAN"])
     reset = COLORS["RESET"]
@@ -306,14 +302,13 @@ def log_step(step_name: str, description: str = "", color: str = "CYAN"):
 
 
 def log_thinking(agent_name: str):
-    """Log an agent's thinking state with colored brain emoji.
-
-    Displays a visual indicator that an agent is processing or thinking,
-    with blue/purple coloring in TTY terminals.
+    """Log thinking.
 
     Args:
-        agent_name: Name of the agent that is currently thinking.
-    """
+        agent_name (str): IN: agent name. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         logger.info(
@@ -324,11 +319,13 @@ def log_thinking(agent_name: str):
 
 
 def log_success(message: str):
-    """Log a success message with rocket emoji and blue color.
+    """Log success.
 
     Args:
-        message: The success message to display.
-    """
+        message (str): IN: message. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         logger.info(f"{COLORS['BLUE']}🚀 {message}{COLORS['RESET']}")
@@ -337,11 +334,13 @@ def log_success(message: str):
 
 
 def log_error(message: str):
-    """Log an error message with cross emoji and red color.
+    """Log error.
 
     Args:
-        message: The error message to display.
-    """
+        message (str): IN: message. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         logger.error(f"{COLORS['LIGHT_RED']}❌ {message}{COLORS['RESET']}")
@@ -350,11 +349,13 @@ def log_error(message: str):
 
 
 def log_warning(message: str):
-    """Log a warning message with warning emoji and yellow color.
+    """Log warning.
 
     Args:
-        message: The warning message to display.
-    """
+        message (str): IN: message. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         logger.warning(f"{COLORS['YELLOW']}⚠️ {message}{COLORS['RESET']}")
@@ -363,13 +364,15 @@ def log_warning(message: str):
 
 
 def log_retry(attempt: int, max_attempts: int, error: str):
-    """Log a retry attempt with attempt counter and error details.
+    """Log retry.
 
     Args:
-        attempt: Current attempt number (1-based).
-        max_attempts: Maximum number of attempts allowed.
-        error: Description of the error that triggered the retry.
-    """
+        attempt (int): IN: attempt. OUT: Consumed during execution.
+        max_attempts (int): IN: max attempts. OUT: Consumed during execution.
+        error (str): IN: error. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['YELLOW']}⏳ Retry {attempt}/{max_attempts}: {COLORS['LIGHT_RED']}{error}{COLORS['RESET']}"
@@ -379,15 +382,14 @@ def log_retry(attempt: int, max_attempts: int, error: str):
 
 
 def log_delegation(from_agent: str, to_agent: str):
-    """Log an agent delegation event with arrow visualization.
-
-    Displays a formatted message showing control transfer from
-    one agent to another.
+    """Log delegation.
 
     Args:
-        from_agent: Name of the delegating agent.
-        to_agent: Name of the agent receiving delegation.
-    """
+        from_agent (str): IN: from agent. OUT: Consumed during execution.
+        to_agent (str): IN: to agent. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         message = (
@@ -401,11 +403,13 @@ def log_delegation(from_agent: str, to_agent: str):
 
 
 def log_agent_start(agent: str | None = None):
-    """Log the initialization of an agent.
+    """Log agent start.
 
     Args:
-        agent: Name of the agent being started.
-    """
+        agent (str | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         message = f" {COLORS['BLUE_PURPLE']}{agent} Agent is started.{COLORS['RESET']}"
@@ -415,12 +419,14 @@ def log_agent_start(agent: str | None = None):
 
 
 def log_task_start(task_name: str, agent: str | None = None):
-    """Log the start of a task with optional agent context.
+    """Log task start.
 
     Args:
-        task_name: Name or description of the task being started.
-        agent: Optional name of the agent executing the task.
-    """
+        task_name (str): IN: task name. OUT: Consumed during execution.
+        agent (str | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['BLUE']} Task Started: {COLORS['BOLD']}{task_name}{COLORS['RESET']}"
@@ -434,12 +440,14 @@ def log_task_start(task_name: str, agent: str | None = None):
 
 
 def log_task_complete(task_name: str, duration: float | None = None):
-    """Log task completion with optional duration.
+    """Log task complete.
 
     Args:
-        task_name: Name of the completed task.
-        duration: Optional execution duration in seconds.
-    """
+        task_name (str): IN: task name. OUT: Consumed during execution.
+        duration (float | None, optional): IN: duration. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     logger = get_logger()
     if sys.stdout.isatty():
         message = f"{COLORS['GREEN']}🚀 Task Completed: {task_name}{COLORS['RESET']}"
@@ -456,31 +464,12 @@ logger = get_logger()
 
 
 def stream_callback(chunk):
-    """Purple-accented streaming callback for real-time event display.
-
-    Handles various event types from the Xerxes streaming system and
-    displays them with appropriate formatting, colors, and timing
-    information. Maintains internal state for tracking tool calls
-    and execution times.
-
-    Supports the following event types:
-    - StreamChunk: Content streaming and tool call arguments
-    - FunctionDetection: Detection of function calls in output
-    - FunctionCallsExtracted: List of extracted function calls
-    - FunctionExecutionStart: Beginning of function execution
-    - FunctionExecutionComplete: Completion of function execution
-    - AgentSwitch: Agent transition events
-    - ReinvokeSignal: Re-invocation signals
-    - Completion: Task/pipeline completion events
+    """Stream callback.
 
     Args:
-        chunk: Event object from the streaming system. Can be any of
-            the supported event types defined in xerxes.types.
-
-    Note:
-        Uses internal state to track tool call headers, indentation,
-        and execution timing across multiple calls.
-    """
+        chunk (Any): IN: chunk. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
 
     COL = COLORS
     ACCENT = COL["BLUE_PURPLE"]
@@ -505,145 +494,114 @@ def stream_callback(chunk):
     ANSI_RE = re.compile(r"\x1b```math[0-9;]*m")
 
     def strip_ansi(s: str) -> str:
-        """Strip ANSI escape codes from a string.
+        """Strip ansi.
 
         Args:
-            s: The string potentially containing ANSI escape sequences.
-
+            s (str): IN: s. OUT: Consumed during execution.
         Returns:
-            The input string with all ANSI escape sequences removed.
-        """
+            str: OUT: Result of the operation."""
+
         return ANSI_RE.sub("", s)
 
     def term_width() -> int:
-        """Return the current terminal width in columns.
-
-        Queries the terminal size via ``shutil.get_terminal_size`` and clamps
-        the result to a minimum of 60 columns.
+        """Term width.
 
         Returns:
-            The terminal width in columns, with a minimum of 60 and a
-            fallback default of 100 if the terminal size cannot be determined.
-        """
+            int: OUT: Result of the operation."""
+
         try:
             return max(60, shutil.get_terminal_size(fallback=(100, 24)).columns)
         except Exception:
             return 100
 
     def paint(text: object, *styles: str) -> str:
-        """Wrap text with ANSI style codes and a reset suffix.
+        """Paint.
 
         Args:
-            text: The object to render as styled text. Converted to ``str``
-                before wrapping.
-            *styles: One or more ANSI escape code strings to prepend.
-
+            text (object): IN: text. OUT: Consumed during execution.
+            *styles: IN: Additional positional arguments. OUT: Passed through to downstream calls.
         Returns:
-            The styled string with all style codes prepended and an
-            ANSI reset code appended.
-        """
+            str: OUT: Result of the operation."""
+
         return "".join(styles) + str(text) + RESET
 
     def tag(agent_id: str) -> str:
-        """Format an agent identifier as a bold accented bracketed label.
+        """Tag.
 
         Args:
-            agent_id: The agent identifier string to format.
-
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
         Returns:
-            A string of the form ``[agent_id]`` wrapped in bold and accent
-            ANSI codes.
-        """
+            str: OUT: Result of the operation."""
+
         return f"{BOLD}{ACCENT}[{agent_id}]{RESET}"
 
     def bullet() -> str:
-        """Return a styled bullet point character.
+        """Bullet.
 
         Returns:
-            A bullet character (``'\\u2022'``) wrapped in accent and bold
-            ANSI codes.
-        """
+            str: OUT: Result of the operation."""
+
         return paint("•", ACCENT, BOLD)
 
     def ensure_newline() -> None:
-        """Print a newline if the current output line is still open.
+        """Ensure newline."""
 
-        Checks the internal ``open_line`` state flag and, if a line is
-        currently incomplete, flushes a newline to ``stdout`` and resets
-        the flag to ``False``.
-        """
         if state["open_line"]:
             print("", flush=True)
             state["open_line"] = False
 
     def write(s: str) -> None:
-        """Print text without a trailing newline and mark the line as open.
+        """Write.
 
         Args:
-            s: The string to write to ``stdout``.
-        """
+            s (str): IN: s. OUT: Consumed during execution."""
+
         print(s, end="", flush=True)
         state["open_line"] = True
 
     def writeln(s: str) -> None:
-        """Ensure any open line is closed, then print a complete line.
-
-        Calls :func:`ensure_newline` first so that any partial output is
-        properly terminated before writing the new line.
+        """Writeln.
 
         Args:
-            s: The string to print as a full line to ``stdout``.
-        """
+            s (str): IN: s. OUT: Consumed during execution."""
+
         ensure_newline()
         print(s, flush=True)
         state["open_line"] = False
 
     def indent_newlines(s: str, indent: str) -> str:
-        """Replace embedded newlines with newline-plus-indent sequences.
+        """Indent newlines.
 
         Args:
-            s: The source string that may contain embedded newlines.
-            indent: The indentation string to insert after each newline.
-
+            s (str): IN: s. OUT: Consumed during execution.
+            indent (str): IN: indent. OUT: Consumed during execution.
         Returns:
-            The string with all newline characters replaced by the
-            newline followed by *indent*. Returns *s* unchanged if it
-            is empty or contains no newlines.
-        """
+            str: OUT: Result of the operation."""
+
         if not s or "\n" not in s:
             return s
         return s.replace("\n", "\n" + indent)
 
     def preview(text: object, max_len: int = 100) -> str:
-        """Truncate text to *max_len* characters, appending an ellipsis if needed.
+        """Preview.
 
         Args:
-            text: The object to preview. Converted to ``str`` before
-                truncation.
-            max_len: Maximum allowed length before truncation. Defaults
-                to 100.
-
+            text (object): IN: text. OUT: Consumed during execution.
+            max_len (int, optional): IN: max len. Defaults to 100. OUT: Consumed during execution.
         Returns:
-            The string representation of *text*, truncated to *max_len*
-            characters with a trailing ellipsis (``'\\u2026'``) if the
-            original exceeds the limit.
-        """
+            str: OUT: Result of the operation."""
+
         s = str(text)
         return (s[:max_len] + "…") if len(s) > max_len else s
 
     def pretty_result(value: object) -> str:
-        """Serialize a value to a human-readable string.
-
-        Attempts JSON serialization first for ``dict`` and ``list`` types,
-        then falls back to ``pprint.pformat`` if JSON encoding fails.
+        """Pretty result.
 
         Args:
-            value: The object to serialize. Dicts and lists are serialized
-                as indented JSON; other types use a ``str`` default encoder.
-
+            value (object): IN: value. OUT: Consumed during execution.
         Returns:
-            A formatted, human-readable string representation of *value*.
-        """
+            str: OUT: Result of the operation."""
+
         try:
             if isinstance(value, dict | list):
                 return json.dumps(value, indent=2, ensure_ascii=False)
@@ -652,15 +610,11 @@ def stream_callback(chunk):
             return pformat(value, width=max(60, term_width() - 8), compact=False)
 
     def hr(title: str | None = None) -> None:
-        """Print a full-width horizontal rule, optionally with a centred title.
-
-        Renders a line of ``'\\u2500'`` characters spanning the terminal
-        width. When *title* is provided, it is centered within the rule.
+        """Hr.
 
         Args:
-            title: Optional title text to center within the horizontal
-                rule. If ``None``, a plain line is printed.
-        """
+            title (str | None, optional): IN: title. Defaults to None. OUT: Consumed during execution."""
+
         width = term_width()
         if not title:
             print(paint("─" * width, ACCENT), flush=True)

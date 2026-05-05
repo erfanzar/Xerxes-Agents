@@ -1,25 +1,56 @@
-#!/usr/bin/env python3
-"""Extract text from documents using marker-pdf. High-quality OCR + layout analysis.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Extract marker module for Xerxes.
 
-Requires ~3-5GB disk (PyTorch + models downloaded on first use).
-Supports: PDF, DOCX, PPTX, XLSX, HTML, EPUB, images.
-
-Usage:
-    python extract_marker.py document.pdf
-    python extract_marker.py document.pdf --output_dir ./output
-    python extract_marker.py presentation.pptx
-    python extract_marker.py spreadsheet.xlsx
-    python extract_marker.py scanned_doc.pdf           # OCR works here
-    python extract_marker.py document.pdf --json        # Structured output
-    python extract_marker.py document.pdf --use_llm     # LLM-boosted accuracy
-"""
+Exports:
+    - convert
+    - check_requirements"""
 
 import os
 import sys
 
 
 def convert(path, output_dir=None, output_format="markdown", use_llm=False):
+    """Convert.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
+        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
+        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     from marker.config.parser import ConfigParser
+
+    """Convert.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
+        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
+        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+    """Convert.
+
+    Args:
+        path (Any): IN: path. OUT: Consumed during execution.
+        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
+        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
+        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
     from marker.converters.pdf import PdfConverter
     from marker.models import create_model_dict
 
@@ -48,7 +79,6 @@ def convert(path, output_dir=None, output_format="markdown", use_llm=False):
     else:
         print(rendered.markdown)
 
-    # Save images if output_dir specified
     if output_dir and hasattr(rendered, "images") and rendered.images:
         from pathlib import Path
 
@@ -61,8 +91,21 @@ def convert(path, output_dir=None, output_format="markdown", use_llm=False):
 
 
 def check_requirements():
-    """Check disk space before installing."""
+    """Check requirements.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+
     import shutil
+
+    """Check requirements.
+
+    Returns:
+        Any: OUT: Result of the operation."""
+    """Check requirements.
+
+    Returns:
+        Any: OUT: Result of the operation."""
 
     free_gb = shutil.disk_usage("/").free / (1024**3)
     if free_gb < 5:

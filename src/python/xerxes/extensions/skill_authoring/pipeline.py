@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,24 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""End-to-end skill authoring pipeline.
 
-"""End-to-end Hermes-style skill authoring pipeline.
-
-Wires together the per-iteration components into one orchestrator:
-
-    on_turn_end ->
-        ToolSequenceTracker.end_turn ->
-        SkillAuthoringTrigger.should_author? ->
-        SkillDrafter.draft ->
-        SkillVerifier.generate (sidecar) ->
-        AuditEmitter.emit_skill_authored ->
-        return SkillSuggestion event
-
-The pipeline is the natural integration point for the runtime — the
-streaming loop calls :meth:`on_turn_end` at the end of every turn.
+``SkillAuthoringPipeline`` wires together tracking, triggering, drafting,
+verification, and telemetry so that a completed agent turn can automatically
+yield a new ``SKILL.md``.
 """
 
 from __future__ import annotations
@@ -48,16 +40,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AuthoringResult:
-    """What the pipeline produced from one turn.
+    """Outcome of a single turn's authoring attempt.
 
     Attributes:
-        candidate: The captured tool sequence.
-        authored: Whether a new skill was drafted.
-        skill_path: Filesystem path of the new SKILL.md (when ``authored``).
-        skill_name: Name of the drafted skill.
-        version: Version of the drafted skill.
-        recipe_path: Filesystem path of the verification recipe sidecar.
-        reason: Human-readable explanation when not authored.
+        candidate (SkillCandidate): IN: Observed tool sequence. OUT: Stored.
+        authored (bool): IN: Success flag. OUT: ``True`` if a skill was
+            written.
+        skill_path (Path | None): IN: Written file path. OUT: Set on success.
+        skill_name (str): IN: Extracted skill name. OUT: Set on success.
+        version (str): IN: Extracted version. OUT: Set on success.
+        recipe_path (Path | None): IN: Verification recipe path. OUT: Set on
+            success.
+        reason (str): IN: Empty on success. OUT: Failure description.
     """
 
     candidate: SkillCandidate
@@ -70,20 +64,21 @@ class AuthoringResult:
 
 
 class SkillAuthoringPipeline:
-    """End-to-end orchestrator for autonomous skill authoring.
+    """Orchestrates automatic skill creation after agent turns.
 
-    Holds references to the tracker, trigger, drafter, verifier, and
-    telemetry. The runtime calls :meth:`begin_turn` / :meth:`record_call`
-    during execution and :meth:`on_turn_end` to finalise.
-
-    Example:
-        >>> p = SkillAuthoringPipeline(skills_dir="./skills")
-        >>> p.begin_turn(agent_id="coder", user_prompt="set up CI")
-        >>> p.record_call("Read", {"path": "ci.yml"})
-        >>>
-        >>> result = p.on_turn_end(final_response="CI configured")
-        >>> if result.authored:
-        ...     print(f"new skill: {result.skill_path}")
+    Args:
+        skills_dir (str | Path): IN: Destination for drafted skills. OUT:
+            Passed to ``SkillDrafter``.
+        config (SkillAuthoringConfig | None): IN: Trigger thresholds. OUT:
+            Defaults to a new ``SkillAuthoringConfig``.
+        skill_registry (SkillRegistry | None): IN: Registry for duplicate
+            detection. OUT: Passed to ``SkillAuthoringTrigger``.
+        llm_client (tp.Any | None): IN: Optional LLM for refinement. OUT:
+            Passed to ``SkillDrafter``.
+        telemetry (SkillTelemetry | None): IN: Telemetry backend. OUT:
+            Defaults to a new ``SkillTelemetry``.
+        audit_emitter (AuditEmitter | None): IN: Optional audit emitter. OUT:
+            Used to log authored events.
     """
 
     def __init__(
@@ -96,19 +91,37 @@ class SkillAuthoringPipeline:
         telemetry: SkillTelemetry | None = None,
         audit_emitter: AuditEmitter | None = None,
     ) -> None:
-        """Initialise the pipeline.
+        """Initialize the instance.
 
         Args:
-            skills_dir: Directory where new SKILL.md files are written.
-            config: Trigger heuristic config. Defaults to
-                :class:`SkillAuthoringConfig` defaults.
-            skill_registry: Optional registry for novelty checks; new
-                skills are also registered here when authored.
-            llm_client: Optional LLM for skill draft refinement.
-            telemetry: Optional shared :class:`SkillTelemetry`.
-            audit_emitter: Optional :class:`AuditEmitter` for events.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            config (SkillAuthoringConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution.
+            telemetry (SkillTelemetry | None, optional): IN: telemetry. Defaults to None. OUT: Consumed during execution.
+            audit_emitter (AuditEmitter | None, optional): IN: audit emitter. Defaults to None. OUT: Consumed during execution."""
         self.tracker = ToolSequenceTracker()
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            config (SkillAuthoringConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution.
+            telemetry (SkillTelemetry | None, optional): IN: telemetry. Defaults to None. OUT: Consumed during execution.
+            audit_emitter (AuditEmitter | None, optional): IN: audit emitter. Defaults to None. OUT: Consumed during execution."""
+        """Initialize the instance.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+            skills_dir (str | Path): IN: skills dir. OUT: Consumed during execution.
+            config (SkillAuthoringConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
+            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
+            llm_client (tp.Any | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution.
+            telemetry (SkillTelemetry | None, optional): IN: telemetry. Defaults to None. OUT: Consumed during execution.
+            audit_emitter (AuditEmitter | None, optional): IN: audit emitter. Defaults to None. OUT: Consumed during execution."""
         self.config = config or SkillAuthoringConfig()
         self.trigger = SkillAuthoringTrigger(self.config, skill_registry=skill_registry)
         self.drafter = SkillDrafter(skills_dir, llm_client=llm_client)
@@ -123,22 +136,46 @@ class SkillAuthoringPipeline:
         turn_id: str | None = None,
         user_prompt: str = "",
     ) -> None:
-        """Start a tracked turn (delegates to the underlying tracker)."""
+        """Reset the tracker for a new agent turn.
+
+        Args:
+            agent_id (str | None): IN: Agent identifier. OUT: Passed to
+                tracker.
+            turn_id (str | None): IN: Turn identifier. OUT: Passed to tracker.
+            user_prompt (str): IN: User message text. OUT: Passed to tracker.
+
+        Returns:
+            None: OUT: Internal tracker state is reset.
+        """
+
         self.tracker.begin_turn(agent_id=agent_id, turn_id=turn_id, user_prompt=user_prompt)
 
     def record_call(self, *args: tp.Any, **kwargs: tp.Any) -> tp.Any:
-        """Forward a tool-call recording to the tracker."""
+        """Forward a tool call event to the internal tracker.
+
+        Args:
+            *args: IN: Positional args for ``ToolSequenceTracker.record_call``.
+                OUT: Forwarded.
+            **kwargs: IN: Keyword args for ``ToolSequenceTracker.record_call``.
+                OUT: Forwarded.
+
+        Returns:
+            tp.Any: OUT: Return value from the tracker.
+        """
+
         return self.tracker.record_call(*args, **kwargs)
 
     def on_turn_end(self, final_response: str = "") -> AuthoringResult:
-        """Finalise the turn and run the authoring loop.
+        """Evaluate the tracked turn and draft a skill if criteria are met.
 
         Args:
-            final_response: The agent's final answer for the turn.
+            final_response (str): IN: Agent's final text response. OUT: Passed
+                to ``end_turn``.
 
         Returns:
-            An :class:`AuthoringResult` describing what happened.
+            AuthoringResult: OUT: Detailed result of the authoring attempt.
         """
+
         candidate = self.tracker.end_turn(final_response=final_response)
         if not self.trigger.should_author(candidate):
             return AuthoringResult(
@@ -190,14 +227,15 @@ class SkillAuthoringPipeline:
 
     @staticmethod
     def _extract_name(text: str) -> str | None:
-        """Return the ``name:`` value from SKILL.md front-matter.
+        """Parse the ``name`` field from YAML frontmatter.
 
         Args:
-            text: Raw contents of a SKILL.md file.
+            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
 
         Returns:
-            The unquoted skill name, or ``None`` if no name line is present.
+            str | None: OUT: Name string or ``None``.
         """
+
         for line in text.splitlines():
             if line.startswith("name:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")
@@ -205,14 +243,15 @@ class SkillAuthoringPipeline:
 
     @staticmethod
     def _extract_version(text: str) -> str | None:
-        """Return the ``version:`` value from SKILL.md front-matter.
+        """Parse the ``version`` field from YAML frontmatter.
 
         Args:
-            text: Raw contents of a SKILL.md file.
+            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
 
         Returns:
-            The unquoted version string, or ``None`` if no version line is present.
+            str | None: OUT: Version string or ``None``.
         """
+
         for line in text.splitlines():
             if line.startswith("version:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")

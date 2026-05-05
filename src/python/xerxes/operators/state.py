@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,19 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""State module for Xerxes.
 
-
-"""Operator runtime state and tool construction.
-
-Provides :class:`OperatorState`, the central composition root for the
-operator subsystem.  It owns the PTY, browser, plan, user-prompt, and
-sub-agent managers and exposes a :meth:`~OperatorState.build_tools`
-method that returns all operator tool callables ready for registration
-in the Xerxes runtime.
-"""
+Exports:
+    - OperatorState"""
 
 from __future__ import annotations
 
@@ -45,40 +41,15 @@ from .user_prompt import UserPromptManager
 
 
 class OperatorState:
-    """Own runtime managers and expose operator tool callables.
-
-    Acts as the single entry point for the operator subsystem.  On
-    construction it creates all sub-managers (PTY, browser, plan,
-    user-prompt) and defers sub-agent manager creation until the
-    runtime is attached via :meth:`attach_runtime`.
-
-    Attributes:
-        config: The :class:`OperatorRuntimeConfig` governing this
-            operator instance.
-        pty_manager: Manages persistent PTY shell sessions.
-        browser_manager: Manages Playwright browser pages.
-        plan_manager: Manages the structured execution plan.
-        user_prompt_manager: Manages user clarification questions.
-        xerxes: Reference to the parent Xerxes instance, set by
-            :meth:`attach_runtime`.
-        runtime_state: Reference to the shared runtime state, set by
-            :meth:`attach_runtime`.
-        subagent_manager: Manages spawned background sub-agents.
-            ``None`` until :meth:`attach_runtime` is called.
-    """
+    """Operator state."""
 
     def __init__(self, config: OperatorRuntimeConfig) -> None:
-        """Initialise the operator state with the given configuration.
-
-        Creates all sub-managers except the sub-agent manager, which
-        requires a live Xerxes instance and is deferred to
-        :meth:`attach_runtime`.
+        """Initialize the instance.
 
         Args:
-            config: Operator runtime configuration controlling browser
-                headless mode, screenshot directory, shell defaults,
-                and tool allowlists.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            config (OperatorRuntimeConfig): IN: config. OUT: Consumed during execution."""
+
         self.config = config
         self.pty_manager = PTYSessionManager()
         self.browser_manager = BrowserManager(
@@ -93,33 +64,24 @@ class OperatorState:
         self._tool_cache: list[tp.Callable] | None = None
 
     def attach_runtime(self, xerxes: tp.Any, runtime_state: tp.Any) -> None:
-        """Bind the operator runtime to a concrete Xerxes instance.
-
-        This must be called before any sub-agent tools can be used.
-        It stores references to the parent runtime and creates the
-        :class:`SpawnedAgentManager`.
+        """Attach runtime.
 
         Args:
-            xerxes: The parent :class:`Xerxes` instance.
-            runtime_state: The shared runtime state object that holds
-                policy, configuration, and audit emitter references.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            xerxes (tp.Any): IN: xerxes. OUT: Consumed during execution.
+            runtime_state (tp.Any): IN: runtime state. OUT: Consumed during execution."""
+
         self.xerxes = xerxes
         self.runtime_state = runtime_state
         self.subagent_manager = SpawnedAgentManager(xerxes, runtime_state)
 
     def set_power_tools_enabled(self, enabled: bool) -> None:
-        """Update the power-tools flag and effective optional-tools policy.
-
-        When enabling, removes high-power tools from the policy
-        engine's ``optional_tools`` set so they become available.
-        When disabling, adds them back so the policy engine blocks
-        them.
+        """Set the power tools enabled.
 
         Args:
-            enabled: ``True`` to activate high-power tools,
-                ``False`` to deactivate them.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            enabled (bool): IN: enabled. OUT: Consumed during execution."""
+
         self.config.power_tools_enabled = enabled
         if self.runtime_state is None:
             return
@@ -130,22 +92,13 @@ class OperatorState:
             policy.optional_tools.update(HIGH_POWER_OPERATOR_TOOLS)
 
     def list_operator_state(self) -> dict[str, tp.Any]:
-        """Return summaries for operator-managed runtime state.
+        """List operator state.
 
-        Aggregates status from every sub-manager into a single
-        dictionary suitable for TUI display or API responses.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A dictionary containing:
+            dict[str, tp.Any]: OUT: Result of the operation."""
 
-            - ``power_tools_enabled``: Current power-tools flag.
-            - ``pty_sessions``: List of PTY session summaries.
-            - ``browser_pages``: List of tracked browser page summaries.
-            - ``spawned_agents``: List of sub-agent handle snapshots.
-            - ``plan``: Current plan state dictionary.
-            - ``pending_user_prompt``: Pending question dictionary, or
-              ``None``.
-        """
         return {
             "power_tools_enabled": self.config.power_tools_enabled,
             "pty_sessions": self.pty_manager.list_sessions(),
@@ -156,16 +109,13 @@ class OperatorState:
         }
 
     def build_tools(self) -> list[tp.Callable]:
-        """Build and cache the operator tool functions.
+        """Build tools.
 
-        On first call, instantiates all operator tool closures and
-        caches the list.  Subsequent calls return a shallow copy of
-        the cached list.
-
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A list of callable operator tool functions, each decorated
-            with :func:`operator_tool` metadata.
-        """
+            list[tp.Callable]: OUT: Result of the operation."""
+
         if self._tool_cache is None:
             self._tool_cache = [
                 self._build_exec_command(),
@@ -194,19 +144,11 @@ class OperatorState:
 
     @staticmethod
     def _validate_patch_text(patch: str) -> None:
-        """Reject clearly malformed patch payloads before calling git apply.
-
-        Checks that the patch text contains unified diff headers
-        (``---``/``+++`` or ``diff --git``) and at least one ``@@``
-        hunk marker.
+        """Internal helper to validate patch text.
 
         Args:
-            patch: The raw unified diff text to validate.
+            patch (str): IN: patch. OUT: Consumed during execution."""
 
-        Raises:
-            ValueError: If the patch is empty, lacks headers, or has
-                no ``@@`` hunk markers.
-        """
         text = patch.strip()
         if not text:
             raise ValueError("Patch text must be non-empty")
@@ -217,21 +159,14 @@ class OperatorState:
             raise ValueError("Patch must be a unified diff with ---/+++ headers and @@ hunks")
 
     def create_reinvoke_message(self, result: tp.Any) -> UserMessage | None:
-        """Convert special operator tool results into a reinvocation message.
-
-        When the tool result is an :class:`ImageInspectionResult`, a
-        multimodal :class:`UserMessage` is constructed containing both
-        a text summary and the image data, enabling the LLM to inspect
-        the image in the next turn.
+        """Create reinvoke message.
 
         Args:
-            result: The raw tool result to inspect.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            result (tp.Any): IN: result. OUT: Consumed during execution.
         Returns:
-            A :class:`UserMessage` with text and image chunks when the
-            result is an :class:`ImageInspectionResult`, or ``None``
-            for all other result types.
-        """
+            UserMessage | None: OUT: Result of the operation."""
+
         if isinstance(result, ImageInspectionResult):
             image = result.image.copy()
             return UserMessage(
@@ -243,32 +178,25 @@ class OperatorState:
         return None
 
     def summarize_result(self, result: tp.Any) -> tuple[tp.Any, dict[str, tp.Any]]:
-        """Return a tool-message-safe result plus serialisable metadata.
-
-        For :class:`ImageInspectionResult`, the heavy PIL image is
-        replaced by a compact text summary in the first element, and
-        the metadata dictionary contains all scalar fields.
+        """Summarize result.
 
         Args:
-            result: The raw tool result to summarise.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            result (tp.Any): IN: result. OUT: Consumed during execution.
         Returns:
-            A two-tuple of ``(safe_result, metadata)`` where
-            *safe_result* is suitable for inclusion in a tool-call
-            message and *metadata* is a JSON-serialisable dictionary
-            (empty for non-image results).
-        """
+            tuple[tp.Any, dict[str, tp.Any]]: OUT: Result of the operation."""
+
         if isinstance(result, ImageInspectionResult):
             return result.summary(), result.tool_metadata()
         return result, {}
 
     def _build_exec_command(self) -> tp.Callable:
-        """Build the ``exec_command`` operator tool closure.
+        """Internal helper to build exec command.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            starts a persistent PTY session.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "exec_command",
@@ -285,31 +213,17 @@ class OperatorState:
             max_output_chars: int | None = None,
             login: bool = True,
         ) -> dict[str, tp.Any]:
-            """Start an interactive terminal session and return its session metadata.
+            """Asynchronously Exec command.
 
             Args:
-                cmd: Shell command to launch inside the PTY.  This can
-                    be a shell, REPL, long-running script, or one-shot
-                    command that you may want to continue interacting
-                    with later.
-                workdir: Working directory for the new session.  If
-                    omitted, the operator runtime default working
-                    directory is used.
-                yield_time_ms: How long to wait before collecting
-                    initial output.  Higher values are useful for
-                    commands that need time to render a prompt or
-                    produce startup output.
-                max_output_chars: Maximum number of characters captured
-                    from the initial output chunk.
-                login: When ``True``, start the shell with login
-                    semantics so normal shell initialisation files run.
-
+                cmd (str): IN: cmd. OUT: Consumed during execution.
+                workdir (str | None, optional): IN: workdir. Defaults to None. OUT: Consumed during execution.
+                yield_time_ms (int | None, optional): IN: yield time ms. Defaults to None. OUT: Consumed during execution.
+                max_output_chars (int | None, optional): IN: max output chars. Defaults to None. OUT: Consumed during execution.
+                login (bool, optional): IN: login. Defaults to True. OUT: Consumed during execution.
             Returns:
-                A dictionary that includes a stable ``session_id``,
-                startup output, exit state if the process finished
-                quickly, and runtime metadata needed by
-                ``write_stdin``.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await asyncio.to_thread(
                 self.pty_manager.create_session,
                 cmd,
@@ -322,12 +236,12 @@ class OperatorState:
         return exec_command
 
     def _build_write_stdin(self) -> tp.Callable:
-        """Build the ``write_stdin`` operator tool closure.
+        """Internal helper to build write stdin.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            writes to a live PTY session.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "write_stdin",
@@ -344,28 +258,18 @@ class OperatorState:
             close_stdin: bool = False,
             interrupt: bool = False,
         ) -> dict[str, tp.Any]:
-            """Continue interacting with an existing PTY session.
+            """Asynchronously Write stdin.
 
             Args:
-                session_id: Identifier returned by ``exec_command`` for
-                    the live session you want to continue.
-                chars: Text to send to the process stdin.  Include
-                    ``\\n`` when the program expects Enter to be
-                    pressed.
-                yield_time_ms: How long to wait before reading the next
-                    output chunk after sending input.
-                max_output_chars: Maximum number of output characters
-                    to collect from this interaction.
-                close_stdin: When ``True``, close the session stdin
-                    after sending any provided text.  Useful for
-                    programs waiting on EOF.
-                interrupt: When ``True``, send an interrupt signal to
-                    the running process before reading output.
-
+                session_id (str): IN: session id. OUT: Consumed during execution.
+                chars (str, optional): IN: chars. Defaults to ''. OUT: Consumed during execution.
+                yield_time_ms (int | None, optional): IN: yield time ms. Defaults to None. OUT: Consumed during execution.
+                max_output_chars (int | None, optional): IN: max output chars. Defaults to None. OUT: Consumed during execution.
+                close_stdin (bool, optional): IN: close stdin. Defaults to False. OUT: Consumed during execution.
+                interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
             Returns:
-                The latest session output plus status fields such as
-                whether the process is still running or has exited.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await asyncio.to_thread(
                 self.pty_manager.write,
                 session_id,
@@ -379,12 +283,12 @@ class OperatorState:
         return write_stdin
 
     def _build_apply_patch(self) -> tp.Callable:
-        """Build the ``apply_patch`` operator tool closure.
+        """Internal helper to build apply patch.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            applies a unified diff via ``git apply``.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "apply_patch",
@@ -394,27 +298,15 @@ class OperatorState:
             ),
         )
         def apply_patch(patch: str, check: bool = False, workdir: str | None = None) -> dict[str, tp.Any]:
-            """Validate and apply a unified patch to the repository worktree.
+            """Apply patch.
 
             Args:
-                patch: Full unified diff text, including file headers
-                    and at least one ``@@`` hunk.  Malformed patches
-                    are rejected before git is called.
-                check: When ``True``, validate the patch with
-                    ``git apply --check`` without modifying files.
-                workdir: Directory in which ``git apply`` should run.
-                    Defaults to the current process working directory.
-
+                patch (str): IN: patch. OUT: Consumed during execution.
+                check (bool, optional): IN: check. Defaults to False. OUT: Consumed during execution.
+                workdir (str | None, optional): IN: workdir. Defaults to None. OUT: Consumed during execution.
             Returns:
-                Result metadata containing whether the patch was
-                applied or only checked, the effective working
-                directory, and any stdout emitted by git.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                ValueError: If the patch text is malformed.
-                RuntimeError: If ``git apply`` exits with a non-zero
-                    return code.
-            """
             import subprocess
 
             self._validate_patch_text(patch)
@@ -441,12 +333,12 @@ class OperatorState:
         return apply_patch
 
     def _build_spawn_agent(self) -> tp.Callable:
-        """Build the ``spawn_agent`` operator tool closure.
+        """Internal helper to build spawn agent.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            creates a managed background sub-agent.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "spawn_agent",
@@ -462,30 +354,17 @@ class OperatorState:
             prompt_profile: str | None = None,
             nickname: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Spawn a background Xerxes sub-agent.
+            """Asynchronously Spawn agent.
 
             Args:
-                message: Optional initial task or instruction for the
-                    spawned agent to start working on immediately.
-                task_description: Backward-compatible alias for
-                    ``message`` accepted by older tool callers.
-                agent_id: Specific registered agent ID to use.  If
-                    omitted, the runtime chooses the current/default
-                    agent behaviour.
-                prompt_profile: Prompt profile override for the spawned
-                    agent.  If omitted, the operator runtime default
-                    for sub-agents is used.
-                nickname: Optional human-readable label to make later
-                    references easier.
-
+                message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
+                task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
+                agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+                prompt_profile (str | None, optional): IN: prompt profile. Defaults to None. OUT: Consumed during execution.
+                nickname (str | None, optional): IN: nickname. Defaults to None. OUT: Consumed during execution.
             Returns:
-                Handle metadata including the spawned agent ID,
-                current status, and any task-start information.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                RuntimeError: If the sub-agent manager has not been
-                    initialised via :meth:`attach_runtime`.
-            """
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
             return await self.subagent_manager.spawn(
@@ -499,12 +378,12 @@ class OperatorState:
         return spawn_agent
 
     def _build_resume_agent(self) -> tp.Callable:
-        """Build the ``resume_agent`` operator tool closure.
+        """Internal helper to build resume agent.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            resumes a previously closed sub-agent handle.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "resume_agent",
@@ -512,34 +391,27 @@ class OperatorState:
                 "Reopen a previously closed spawned-agent handle so it can receive more input or be waited on again."
             ),
         )
-        def resume_agent(id: str) -> dict[str, tp.Any]:  # noqa: A002
-            """Resume a previously closed sub-agent handle.
+        def resume_agent(agent_id: str) -> dict[str, tp.Any]:
+            """Resume agent.
 
             Args:
-                id: Handle identifier returned by ``spawn_agent``.
-
+                agent_id (str): IN: agent id. OUT: Consumed during execution.
             Returns:
-                Updated handle metadata showing that the handle is
-                active again.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                RuntimeError: If the sub-agent manager is not
-                    available.
-                ValueError: If the handle ID is not found.
-            """
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
-            return self.subagent_manager.resume(id)
+            return self.subagent_manager.resume(agent_id)
 
         return resume_agent
 
     def _build_send_input(self) -> tp.Callable:
-        """Build the ``send_input`` operator tool closure.
+        """Internal helper to build send input.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            delivers instructions to a spawned agent.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "send_input",
@@ -552,38 +424,25 @@ class OperatorState:
             target: str | None = None,
             message: str | None = None,
             interrupt: bool = False,
-            id: str | None = None,  # noqa: A002
+            agent_id: str | None = None,
             handle_id: str | None = None,
             task_description: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Deliver a new instruction to a spawned agent.
+            """Asynchronously Send input.
 
             Args:
-                target: Spawned-agent handle ID that should receive
-                    the input. When omitted, the most recently updated
-                    non-closed handle is used.
-                message: Text instruction or follow-up task for the
-                    spawned agent.
-                interrupt: When ``True``, stop the agent's current
-                    task and handle this message immediately.  When
-                    ``False``, queue the message behind current work.
-                id: Backward-compatible alias for ``target``.
-                handle_id: Backward-compatible alias for ``target``.
-                task_description: Backward-compatible alias for
-                    ``message`` accepted by older tool callers.
-
+                target (str | None, optional): IN: target. Defaults to None. OUT: Consumed during execution.
+                message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
+                interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
+                agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+                handle_id (str | None, optional): IN: handle id. Defaults to None. OUT: Consumed during execution.
+                task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
             Returns:
-                Delivery metadata including the target handle and
-                updated status.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                RuntimeError: If the sub-agent manager is not
-                    available.
-                ValueError: If the handle is closed or not found.
-            """
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
-            resolved_target = target or id or handle_id
+            resolved_target = target or agent_id or handle_id
             return await self.subagent_manager.send_input(
                 resolved_target,
                 message=message,
@@ -594,34 +453,26 @@ class OperatorState:
         return send_input
 
     def _build_wait_agent(self) -> tp.Callable:
-        """Build the ``wait_agent`` operator tool closure.
+        """Internal helper to build wait agent.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            waits for spawned agents to reach a terminal state.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "wait_agent",
             description=("Wait for one or more spawned agents to reach a terminal state or until a timeout expires."),
         )
         async def wait_agent(targets: list[str], timeout_ms: int = 30000) -> dict[str, tp.Any]:
-            """Wait for spawned agents to finish.
+            """Asynchronously Wait agent.
 
             Args:
-                targets: One or more spawned-agent handle IDs to watch.
-                timeout_ms: Maximum time to wait in milliseconds before
-                    returning a timeout-style result.
-
+                targets (list[str]): IN: targets. OUT: Consumed during execution.
+                timeout_ms (int, optional): IN: timeout ms. Defaults to 30000. OUT: Consumed during execution.
             Returns:
-                Completion or timeout data for the requested handles,
-                including any final message when available.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                RuntimeError: If the sub-agent manager is not
-                    available.
-                ValueError: If any target handle ID is not found.
-            """
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
             return await self.subagent_manager.wait(targets, timeout_ms=timeout_ms)
@@ -629,12 +480,12 @@ class OperatorState:
         return wait_agent
 
     def _build_close_agent(self) -> tp.Callable:
-        """Build the ``close_agent`` operator tool closure.
+        """Internal helper to build close agent.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            closes a spawned-agent handle.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "close_agent",
@@ -644,19 +495,13 @@ class OperatorState:
             ),
         )
         def close_agent(target: str) -> dict[str, tp.Any]:
-            """Close a spawned-agent handle.
+            """Close agent.
 
             Args:
-                target: Spawned-agent handle ID to close.
-
+                target (str): IN: target. OUT: Consumed during execution.
             Returns:
-                Final handle status after shutdown/cancellation.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                RuntimeError: If the sub-agent manager is not
-                    available.
-                ValueError: If the handle ID is not found.
-            """
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
             return self.subagent_manager.close(target)
@@ -664,12 +509,12 @@ class OperatorState:
         return close_agent
 
     def _build_ask_user(self) -> tp.Callable:
-        """Build the ``ask_user`` operator tool closure.
+        """Internal helper to build ask user.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            pauses the run to ask the user a question.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "ask_user",
@@ -685,24 +530,16 @@ class OperatorState:
             allow_freeform: bool = True,
             placeholder: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Request clarification from the live UI and wait for the answer.
+            """Asynchronously Ask user.
 
             Args:
-                question: The exact question to show to the user.
-                options: Optional list of suggested choices.  The UI
-                    renders these as numbered options that the user can
-                    choose by number or by typing the full label.
-                allow_freeform: When ``True``, the user may type a
-                    custom answer instead of selecting one of the
-                    provided options.
-                placeholder: Optional input hint shown in the terminal
-                    UI while waiting for the answer.
-
+                question (str): IN: question. OUT: Consumed during execution.
+                options (list[str] | None, optional): IN: options. Defaults to None. OUT: Consumed during execution.
+                allow_freeform (bool, optional): IN: allow freeform. Defaults to True. OUT: Consumed during execution.
+                placeholder (str | None, optional): IN: placeholder. Defaults to None. OUT: Consumed during execution.
             Returns:
-                The resolved answer payload, including the raw input,
-                normalised answer text, and matched option when one
-                was selected.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await self.user_prompt_manager.request(
                 question,
                 options=options,
@@ -713,12 +550,12 @@ class OperatorState:
         return ask_user
 
     def _build_view_image(self) -> tp.Callable:
-        """Build the ``view_image`` operator tool closure.
+        """Internal helper to build view image.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            loads and inspects a local image file.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "view_image",
@@ -729,23 +566,14 @@ class OperatorState:
             ),
         )
         def view_image(path: str, detail: str = "auto") -> ImageInspectionResult:
-            """Open a local image and prepare it for multimodal inspection.
+            """View image.
 
             Args:
-                path: Absolute or relative path to an image file on
-                    disk.
-                detail: Requested inspection detail level forwarded
-                    with the tool result.  ``"auto"`` lets the runtime
-                    decide.
-
+                path (str): IN: path. OUT: Consumed during execution.
+                detail (str, optional): IN: detail. Defaults to 'auto'. OUT: Consumed during execution.
             Returns:
-                Structured metadata plus an in-memory PIL image that
-                can be attached to the reinvocation message.
+                ImageInspectionResult: OUT: Result of the operation."""
 
-            Raises:
-                FileNotFoundError: If the resolved path does not point
-                    to an existing file.
-            """
             resolved = pathlib.Path(path).expanduser().resolve()
             if not resolved.is_file():
                 raise FileNotFoundError(f"Image path not found: {resolved}")
@@ -765,12 +593,12 @@ class OperatorState:
         return view_image
 
     def _build_update_plan(self) -> tp.Callable:
-        """Build the ``update_plan`` operator tool closure.
+        """Internal helper to build update plan.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            mutates the shared execution plan.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "update_plan",
@@ -780,18 +608,14 @@ class OperatorState:
             ),
         )
         def update_plan(explanation: str | None = None, plan: list[dict[str, str]] | None = None) -> dict[str, tp.Any]:
-            """Mutate the shared structured plan state.
+            """Update plan.
 
             Args:
-                explanation: Optional short note explaining why the
-                    plan changed or what the current state means.
-                plan: Full list of plan steps.  Each item should
-                    include ``step`` and ``status`` fields.
-
+                explanation (str | None, optional): IN: explanation. Defaults to None. OUT: Consumed during execution.
+                plan (list[dict[str, str]] | None, optional): IN: plan. Defaults to None. OUT: Consumed during execution.
             Returns:
-                The updated plan payload, including revision number,
-                explanation, and normalised steps.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             updated = self.plan_manager.update(explanation, plan or [])
             if self.runtime_state is not None and self.runtime_state.audit_emitter is not None:
                 self.runtime_state.audit_emitter.emit_hook_mutation(
@@ -804,12 +628,12 @@ class OperatorState:
         return update_plan
 
     def _build_web_search_query(self) -> tp.Callable:
-        """Build the ``web.search_query`` operator tool closure.
+        """Internal helper to build web search query.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            performs a Google web search.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.search_query",
@@ -824,20 +648,16 @@ class OperatorState:
             n_results: int = 5,
             domains: list[str] | None = None,
         ) -> dict[str, tp.Any]:
-            """Run a Google search and return normalised results.
+            """Web search query.
 
             Args:
-                q: Search query text.
-                search_type: Vertical hint (``text``/``news``);
-                    Google search currently treats all values as text.
-                n_results: Number of results to request.
-                domains: Optional list of preferred domains. The first
-                    domain (if any) becomes a ``site:`` restriction.
-
+                q (str): IN: q. OUT: Consumed during execution.
+                search_type (str, optional): IN: search type. Defaults to 'text'. OUT: Consumed during execution.
+                n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
+                domains (list[str] | None, optional): IN: domains. Defaults to None. OUT: Consumed during execution.
             Returns:
-                ``{"query", "search_type", "results"}`` where ``results``
-                is a list of ``{"title", "url", "snippet"}`` dicts.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             site = domains[0] if domains else None
             time_range = "d" if search_type == "news" else None
             payload = GoogleSearch.static_call(
@@ -856,12 +676,12 @@ class OperatorState:
         return web_search_query
 
     def _build_web_image_query(self) -> tp.Callable:
-        """Build the ``web.image_query`` operator tool closure.
+        """Internal helper to build web image query.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            searches for image results via Google.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.image_query",
@@ -871,21 +691,15 @@ class OperatorState:
             ),
         )
         def web_image_query(q: str, n_results: int = 5, domains: list[str] | None = None) -> dict[str, tp.Any]:
-            """Search for image-bearing pages related to a query.
-
-            Note: Google CSE returns web pages, not raw image URLs —
-            the agent must follow up with ``browser_get_images`` (or
-            curl) on the result page to fetch the actual image links.
+            """Web image query.
 
             Args:
-                q: Search query text.
-                n_results: Number of result pages to request.
-                domains: Optional preferred domains; first becomes a
-                    ``site:`` restriction.
-
+                q (str): IN: q. OUT: Consumed during execution.
+                n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
+                domains (list[str] | None, optional): IN: domains. Defaults to None. OUT: Consumed during execution.
             Returns:
-                Query metadata plus normalised result pages.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             site = domains[0] if domains else None
             payload = GoogleSearch.static_call(
                 query=f"{q} images",
@@ -897,12 +711,12 @@ class OperatorState:
         return web_image_query
 
     def _build_web_open(self) -> tp.Callable:
-        """Build the ``web.open`` operator tool closure.
+        """Internal helper to build web open.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            opens or re-inspects a browser page.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.open",
@@ -912,32 +726,26 @@ class OperatorState:
             ),
         )
         async def web_open(url: str | None = None, ref_id: str | None = None, wait_ms: int = 500) -> dict[str, tp.Any]:
-            """Open a new page or inspect an already tracked page.
+            """Asynchronously Web open.
 
             Args:
-                url: URL to open in the browser.  Provide this for a
-                    new page visit.
-                ref_id: Existing browser page reference to revisit
-                    instead of opening a new URL.
-                wait_ms: Additional time to wait after navigation so
-                    the page has time to settle before metadata is
-                    captured.
-
+                url (str | None, optional): IN: url. Defaults to None. OUT: Consumed during execution.
+                ref_id (str | None, optional): IN: ref id. Defaults to None. OUT: Consumed during execution.
+                wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
             Returns:
-                Page reference data, title, URL, and extracted browser
-                metadata for follow-up actions like click or find.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await self.browser_manager.open(url=url, ref_id=ref_id, wait_ms=wait_ms)
 
         return web_open
 
     def _build_web_click(self) -> tp.Callable:
-        """Build the ``web.click`` operator tool closure.
+        """Internal helper to build web click.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            clicks an element on a tracked browser page.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.click",
@@ -952,23 +760,17 @@ class OperatorState:
             text: str | None = None,
             wait_ms: int = 500,
         ) -> dict[str, tp.Any]:
-            """Interact with a tracked browser page.
+            """Asynchronously Web click.
 
             Args:
-                ref_id: Browser page reference returned by ``web.open``
-                    or a previous browser action.
-                link_id: Numeric link identifier from the page summary.
-                    Use this when the runtime exposed clickable links
-                    with IDs.
-                selector: CSS selector to click directly.
-                text: Fallback text match used when selector and link
-                    ID are not available.
-                wait_ms: Additional post-click wait time in
-                    milliseconds.
-
+                ref_id (str): IN: ref id. OUT: Consumed during execution.
+                link_id (int | None, optional): IN: link id. Defaults to None. OUT: Consumed during execution.
+                selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
+                text (str | None, optional): IN: text. Defaults to None. OUT: Consumed during execution.
+                wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
             Returns:
-                Updated browser page summary after the click.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await self.browser_manager.click(
                 ref_id,
                 link_id=link_id,
@@ -980,12 +782,12 @@ class OperatorState:
         return web_click
 
     def _build_web_find(self) -> tp.Callable:
-        """Build the ``web.find`` operator tool closure.
+        """Internal helper to build web find.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            searches for text on a tracked browser page.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.find",
@@ -994,29 +796,25 @@ class OperatorState:
             ),
         )
         async def web_find(ref_id: str, pattern: str) -> dict[str, tp.Any]:
-            """Find text on a previously opened browser page.
+            """Asynchronously Web find.
 
             Args:
-                ref_id: Browser page reference to inspect.
-                pattern: Text or pattern to search for inside the page
-                    content.
-
+                ref_id (str): IN: ref id. OUT: Consumed during execution.
+                pattern (str): IN: pattern. OUT: Consumed during execution.
             Returns:
-                Match information such as hit count and matched
-                snippets or locations, depending on the browser
-                manager output.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await self.browser_manager.find(ref_id, pattern)
 
         return web_find
 
     def _build_web_screenshot(self) -> tp.Callable:
-        """Build the ``web.screenshot`` operator tool closure.
+        """Internal helper to build web screenshot.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            captures a screenshot of a tracked browser page.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.screenshot",
@@ -1026,30 +824,26 @@ class OperatorState:
             ),
         )
         async def web_screenshot(ref_id: str, path: str | None = None, full_page: bool = True) -> dict[str, tp.Any]:
-            """Capture and save a page screenshot.
+            """Asynchronously Web screenshot.
 
             Args:
-                ref_id: Browser page reference to capture.
-                path: Optional destination path.  If omitted, the
-                    browser manager chooses a default location.
-                full_page: When ``True``, capture the entire page
-                    instead of only the visible viewport.
-
+                ref_id (str): IN: ref id. OUT: Consumed during execution.
+                path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
+                full_page (bool, optional): IN: full page. Defaults to True. OUT: Consumed during execution.
             Returns:
-                Screenshot metadata including the saved path and page
-                reference.
-            """
+                dict[str, tp.Any]: OUT: Result of the operation."""
+
             return await self.browser_manager.screenshot(ref_id, path=path, full_page=full_page)
 
         return web_screenshot
 
     def _build_web_weather(self) -> tp.Callable:
-        """Build the ``web.weather`` operator tool closure.
+        """Internal helper to build web weather.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            fetches current weather data via Open-Meteo.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.weather",
@@ -1059,25 +853,13 @@ class OperatorState:
             ),
         )
         async def web_weather(location: str) -> dict[str, tp.Any]:
-            """Fetch current weather data for a human-readable location string.
-
-            Geocodes the location name via the Open-Meteo geocoding API
-            and then retrieves the current forecast for the resolved
-            coordinates.
+            """Asynchronously Web weather.
 
             Args:
-                location: City, region, or place name to geocode first.
-
+                location (str): IN: location. OUT: Consumed during execution.
             Returns:
-                Normalised weather payload including resolved location
-                metadata and current forecast values such as
-                temperature, apparent temperature, and wind speed.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                ValueError: If the location cannot be geocoded.
-                httpx.HTTPStatusError: If either upstream API returns
-                    a non-2xx response.
-            """
             async with httpx.AsyncClient(timeout=20) as client:
                 geo = await client.get(
                     "https://geocoding-api.open-meteo.com/v1/search",
@@ -1106,12 +888,12 @@ class OperatorState:
         return web_weather
 
     def _build_web_finance(self) -> tp.Callable:
-        """Build the ``web.finance`` operator tool closure.
+        """Internal helper to build web finance.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            fetches financial quote data from Yahoo Finance.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.finance",
@@ -1121,29 +903,15 @@ class OperatorState:
             ),
         )
         async def web_finance(ticker: str, market: str | None = None, kind: str = "equity") -> dict[str, tp.Any]:
-            """Fetch current quote data for a ticker symbol.
+            """Asynchronously Web finance.
 
             Args:
-                ticker: Symbol to look up, such as ``AAPL`` or
-                    ``BTC-USD``.
-                market: Optional market suffix appended to the symbol
-                    for providers that expect ``TICKER.MARKET``
-                    notation.
-                kind: Asset kind hint such as ``equity``, ``crypto``,
-                    or ``fund``.  This value is returned for context
-                    but does not change the upstream request shape.
-
+                ticker (str): IN: ticker. OUT: Consumed during execution.
+                market (str | None, optional): IN: market. Defaults to None. OUT: Consumed during execution.
+                kind (str, optional): IN: kind. Defaults to 'equity'. OUT: Consumed during execution.
             Returns:
-                Normalised quote information including current price,
-                currency, price change, percent change, and the raw
-                quote payload.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                ValueError: If no finance data is returned for the
-                    symbol.
-                httpx.HTTPStatusError: If Yahoo Finance returns a
-                    non-2xx response.
-            """
             symbol = ticker if not market else f"{ticker}.{market}"
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.get(
@@ -1169,12 +937,12 @@ class OperatorState:
         return web_finance
 
     def _build_web_sports(self) -> tp.Callable:
-        """Build the ``web.sports`` operator tool closure.
+        """Internal helper to build web sports.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            fetches sports data from ESPN.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.sports",
@@ -1189,26 +957,16 @@ class OperatorState:
             team: str | None = None,
             opponent: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Fetch schedule or standings data for a supported sports league.
+            """Asynchronously Web sports.
 
             Args:
-                league: Supported league code such as ``nba``,
-                    ``wnba``, ``nfl``, ``nhl``, ``mlb``, or ``epl``.
-                fn: Either ``"schedule"`` or ``"standings"``.
-                team: Optional team filter echoed back in the response
-                    for caller-side narrowing.
-                opponent: Optional opponent filter echoed back in the
-                    response for caller-side narrowing.
-
+                league (str): IN: league. OUT: Consumed during execution.
+                fn (str, optional): IN: fn. Defaults to 'schedule'. OUT: Consumed during execution.
+                team (str | None, optional): IN: team. Defaults to None. OUT: Consumed during execution.
+                opponent (str | None, optional): IN: opponent. Defaults to None. OUT: Consumed during execution.
             Returns:
-                League metadata and the raw ESPN payload for the
-                requested function.
+                dict[str, tp.Any]: OUT: Result of the operation."""
 
-            Raises:
-                ValueError: If the league code is not supported.
-                httpx.HTTPStatusError: If ESPN returns a non-2xx
-                    response.
-            """
             league_map = {
                 "nba": "basketball/nba",
                 "wnba": "basketball/wnba",
@@ -1236,12 +994,12 @@ class OperatorState:
         return web_sports
 
     def _build_web_time(self) -> tp.Callable:
-        """Build the ``web.time`` operator tool closure.
+        """Internal helper to build web time.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            A callable decorated with operator tool metadata that
-            computes the current time for a UTC offset.
-        """
+            tp.Callable: OUT: Result of the operation."""
 
         @operator_tool(
             "web.time",
@@ -1251,19 +1009,13 @@ class OperatorState:
             ),
         )
         def web_time(utc_offset: str) -> dict[str, str]:
-            """Compute the current date and time for a UTC offset.
-
-            Parses the offset string, applies the delta to the current
-            UTC time, and returns formatted date/time components.
+            """Web time.
 
             Args:
-                utc_offset: Offset string like ``+03:00`` or
-                    ``-05:00``.
-
+                utc_offset (str): IN: utc offset. OUT: Consumed during execution.
             Returns:
-                Normalised time fields including ISO timestamp, date,
-                time, and the offset that was applied.
-            """
+                dict[str, str]: OUT: Result of the operation."""
+
             sign = 1 if utc_offset.startswith("+") else -1
             hours_str, minutes_str = utc_offset[1:].split(":", 1)
             delta = timedelta(hours=sign * int(hours_str), minutes=sign * int(minutes_str))

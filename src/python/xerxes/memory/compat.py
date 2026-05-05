@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,17 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Compat module for Xerxes.
 
-
-"""Backward-compatible memory API for legacy Xerxes callers.
-
-Provides :class:`MemoryType`, :class:`MemoryEntry`, and :class:`MemoryStore`
-which mirror the older public surface so that existing code continues to work
-without modification.
-"""
+Exports:
+    - MemoryType
+    - MemoryEntry
+    - MemoryStore"""
 
 from __future__ import annotations
 
@@ -31,10 +31,9 @@ from .storage import SQLiteStorage
 
 
 class MemoryType(StrEnum):
-    """Legacy memory type enum.
+    """Memory type.
 
-    Each value names a category of memory that the :class:`MemoryStore`
-    maintains separately.
+    Inherits from: StrEnum
     """
 
     SHORT_TERM = "short_term"
@@ -47,19 +46,15 @@ class MemoryType(StrEnum):
 
 @dataclass
 class MemoryEntry(MemoryItem):
-    """Legacy memory entry shape expected by the older API/tests.
+    """Memory entry.
 
-    Extends :class:`~xerxes.memory.base.MemoryItem` with additional fields
-    that the legacy public API exposes: ``context``, ``importance_score``,
-    and ``tags``. These are synced into ``metadata`` during ``__post_init__``
-    so that the underlying storage machinery sees them.
+    Inherits from: MemoryItem
 
     Attributes:
-        memory_type: Memory category (default: SHORT_TERM).
-        context: Arbitrary context dictionary attached to this entry.
-        importance_score: Importance weight used for promotion decisions (0-1).
-        tags: Searchable string labels for this entry.
-    """
+        memory_type (str | MemoryType): memory type.
+        context (dict[str, Any]): context.
+        importance_score (float): importance score.
+        tags (list[str]): tags."""
 
     memory_type: str | MemoryType = MemoryType.SHORT_TERM
     context: dict[str, Any] = field(default_factory=dict)
@@ -67,7 +62,11 @@ class MemoryEntry(MemoryItem):
     tags: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Normalise memory_type and sync legacy fields into metadata."""
+        """Dunder method for post init.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         if isinstance(self.memory_type, MemoryType):
             self.memory_type = self.memory_type.value
 
@@ -79,12 +78,13 @@ class MemoryEntry(MemoryItem):
         self.metadata["importance"] = self.importance_score
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialise entry to a dictionary including legacy fields.
+        """To dict.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary representation extending the base :meth:`MemoryItem.to_dict`
-            output with ``context``, ``importance_score``, and ``tags`` keys.
-        """
+            dict[str, Any]: OUT: Result of the operation."""
+
         data = super().to_dict()
         data["memory_type"] = self.memory_type
         data["context"] = dict(self.context)
@@ -94,12 +94,9 @@ class MemoryEntry(MemoryItem):
 
 
 class MemoryStore(ContextualMemory):
-    """Compatibility wrapper preserving the legacy memory store surface.
+    """Memory store.
 
-    Maintains per-type buckets (``self.memories``) alongside the underlying
-    :class:`~xerxes.memory.contextual_memory.ContextualMemory` stores so that
-    legacy callers using :meth:`add_memory` / :meth:`retrieve_memories` etc.
-    continue to work correctly.
+    Inherits from: ContextualMemory
     """
 
     def __init__(
@@ -114,19 +111,20 @@ class MemoryStore(ContextualMemory):
         cache_size: int = 100,
         memory_type: MemoryType | None = None,
     ) -> None:
-        """Initialise the legacy-compatible memory store.
+        """Initialize the instance.
 
         Args:
-            max_short_term: Maximum entries in the short-term bucket.
-            max_working: Maximum entries in the working-memory bucket.
-            max_long_term: Maximum entries in the long-term bucket.
-            enable_vector_search: Reserved; vector search is not currently used.
-            embedding_dimension: Reserved embedding dimension hint.
-            enable_persistence: Whether to enable SQLite persistence.
-            persistence_path: File path for the SQLite database.
-            cache_size: Reserved cache size hint.
-            memory_type: Default :class:`MemoryType` for new entries.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            max_short_term (int, optional): IN: max short term. Defaults to 100. OUT: Consumed during execution.
+            max_working (int, optional): IN: max working. Defaults to 10. OUT: Consumed during execution.
+            max_long_term (int, optional): IN: max long term. Defaults to 10000. OUT: Consumed during execution.
+            enable_vector_search (bool, optional): IN: enable vector search. Defaults to False. OUT: Consumed during execution.
+            embedding_dimension (int, optional): IN: embedding dimension. Defaults to 768. OUT: Consumed during execution.
+            enable_persistence (bool, optional): IN: enable persistence. Defaults to False. OUT: Consumed during execution.
+            persistence_path (str | None, optional): IN: persistence path. Defaults to None. OUT: Consumed during execution.
+            cache_size (int, optional): IN: cache size. Defaults to 100. OUT: Consumed during execution.
+            memory_type (MemoryType | None, optional): IN: memory type. Defaults to None. OUT: Consumed during execution."""
+
         import os
 
         write_memory = os.environ.get("WRITE_MEMORY", "0") == "1"
@@ -160,23 +158,20 @@ class MemoryStore(ContextualMemory):
         tags: list | None = None,
         **kwargs,
     ) -> MemoryEntry:
-        """Create and store a new memory entry.
-
-        Adds the entry to the appropriate per-type bucket, syncs it into the
-        underlying ContextualMemory stores, and enforces capacity limits.
+        """Add memory.
 
         Args:
-            content: Text content to store.
-            memory_type: Which bucket to place the entry in.
-            agent_id: Identifier of the creating agent.
-            context: Optional context dictionary attached to the entry.
-            importance_score: Importance weight (0-1) influencing promotion.
-            tags: Optional list of string tags for filtering.
-            **kwargs: Additional fields passed to :class:`MemoryEntry`.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            content (str): IN: content. OUT: Consumed during execution.
+            memory_type (MemoryType): IN: memory type. OUT: Consumed during execution.
+            agent_id (str): IN: agent id. OUT: Consumed during execution.
+            context (dict | None, optional): IN: context. Defaults to None. OUT: Consumed during execution.
+            importance_score (float, optional): IN: importance score. Defaults to 0.5. OUT: Consumed during execution.
+            tags (list | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
+            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
-            The newly created :class:`MemoryEntry`.
-        """
+            MemoryEntry: OUT: Result of the operation."""
+
         entry = MemoryEntry(
             content=content,
             timestamp=kwargs.pop("timestamp", datetime.now()),
@@ -202,20 +197,20 @@ class MemoryStore(ContextualMemory):
         query_embedding: object = None,
         memory_type: MemoryType | None = None,
     ) -> list[MemoryEntry]:
-        """Retrieve entries matching the given criteria across memory types.
+        """Retrieve memories.
 
         Args:
-            memory_types: Explicit list of types to search; defaults to all.
-            agent_id: If provided, only return entries for this agent.
-            tags: If provided, only return entries containing at least one tag.
-            limit: Maximum number of entries to return.
-            min_importance: Minimum importance_score threshold (inclusive).
-            query_embedding: Accepted for API compatibility but not used.
-            memory_type: Single type shortcut (used when memory_types is None).
-
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_types (list[MemoryType] | None, optional): IN: memory types. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            tags (list | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
+            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+            min_importance (float, optional): IN: min importance. Defaults to 0.0. OUT: Consumed during execution.
+            query_embedding (object, optional): IN: query embedding. Defaults to None. OUT: Consumed during execution.
+            memory_type (MemoryType | None, optional): IN: memory type. Defaults to None. OUT: Consumed during execution.
         Returns:
-            List of matching :class:`MemoryEntry` instances, newest first.
-        """
+            list[MemoryEntry]: OUT: Result of the operation."""
+
         del query_embedding
 
         selected_types = memory_types or ([memory_type] if memory_type is not None else list(MemoryType))
@@ -235,14 +230,14 @@ class MemoryStore(ContextualMemory):
         return results[:limit]
 
     def retrieve_recent(self, minutes_ago: int = 60) -> list[MemoryEntry]:
-        """Return all entries created within the last *minutes_ago* minutes.
+        """Retrieve recent.
 
         Args:
-            minutes_ago: Look-back window in minutes.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            minutes_ago (int, optional): IN: minutes ago. Defaults to 60. OUT: Consumed during execution.
         Returns:
-            List of :class:`MemoryEntry` instances, newest first.
-        """
+            list[MemoryEntry]: OUT: Result of the operation."""
+
         cutoff = datetime.now() - timedelta(minutes=minutes_ago)
         recent = [entry for entries in self.memories.values() for entry in entries if entry.timestamp >= cutoff]
         recent.sort(key=lambda item: item.timestamp, reverse=True)
@@ -253,12 +248,13 @@ class MemoryStore(ContextualMemory):
         memory_type: MemoryType | None = None,
         agent_id: str | None = None,
     ) -> None:
-        """Clear stored entries, optionally scoped to a type and/or agent.
+        """Clear memories.
 
         Args:
-            memory_type: If provided, only clear this type's bucket.
-            agent_id: If provided, only remove entries belonging to this agent.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_type (MemoryType | None, optional): IN: memory type. Defaults to None. OUT: Consumed during execution.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution."""
+
         if memory_type is None:
             if agent_id is None:
                 for selected_type in MemoryType:
@@ -283,20 +279,16 @@ class MemoryStore(ContextualMemory):
         merge_similar: bool = True,
         threshold: float = 0.7,
     ) -> str:
-        """Promote high-importance memories to long-term and return a summary.
-
-        Iterates over short-term, working, and episodic buckets and moves any
-        entry with ``importance_score >= threshold`` into the long-term bucket.
-        Then generates a text summary of the most important and recent entries.
+        """Consolidate memories.
 
         Args:
-            agent_id: If provided, only consider entries for this agent.
-            merge_similar: Accepted for API compatibility; merging is not performed.
-            threshold: Minimum importance score for promotion and inclusion in summary.
-
+            self: IN: The instance. OUT: Used for attribute access.
+            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
+            merge_similar (bool, optional): IN: merge similar. Defaults to True. OUT: Consumed during execution.
+            threshold (float, optional): IN: threshold. Defaults to 0.7. OUT: Consumed during execution.
         Returns:
-            Formatted text summary, or an empty string if no entries match.
-        """
+            str: OUT: Result of the operation."""
+
         del merge_similar
 
         promoted: list[MemoryEntry] = []
@@ -334,23 +326,25 @@ class MemoryStore(ContextualMemory):
         return "\n".join(summary_parts)
 
     def get_statistics(self) -> dict:
-        """Return aggregate statistics including the legacy total_memories count.
+        """Retrieve the statistics.
 
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            Dictionary extending the base statistics with ``total_memories``
-            (sum across all type buckets) and ``cache_hit_rate`` (always 0.0).
-        """
+            dict: OUT: Result of the operation."""
+
         stats = super().get_statistics()
         stats["total_memories"] = sum(len(entries) for entries in self.memories.values())
         stats["cache_hit_rate"] = 0.0
         return stats
 
     def _enforce_limit(self, memory_type: MemoryType) -> None:
-        """Trim the named bucket if it exceeds its configured capacity.
+        """Internal helper to enforce limit.
 
         Args:
-            memory_type: The bucket to check and trim.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            memory_type (MemoryType): IN: memory type. OUT: Consumed during execution."""
+
         if memory_type == MemoryType.SHORT_TERM:
             limit = self.max_short_term
         elif memory_type == MemoryType.WORKING:
@@ -367,15 +361,13 @@ class MemoryStore(ContextualMemory):
         self._rebuild_underlying_stores()
 
     def _sync_underlying_stores(self, entry: MemoryEntry, memory_type: MemoryType) -> None:
-        """Mirror a single entry into the appropriate ContextualMemory sub-stores.
-
-        Long-term, semantic, and procedural entries go into ``long_term``;
-        all others go into ``short_term``.
+        """Internal helper to sync underlying stores.
 
         Args:
-            entry: The entry to mirror.
-            memory_type: The source bucket for this entry.
-        """
+            self: IN: The instance. OUT: Used for attribute access.
+            entry (MemoryEntry): IN: entry. OUT: Consumed during execution.
+            memory_type (MemoryType): IN: memory type. OUT: Consumed during execution."""
+
         if memory_type in {MemoryType.LONG_TERM, MemoryType.SEMANTIC, MemoryType.PROCEDURAL}:
             self.long_term._items.append(entry)
             self.long_term._index[entry.memory_id] = entry
@@ -386,11 +378,11 @@ class MemoryStore(ContextualMemory):
         self._index[entry.memory_id] = entry
 
     def _rebuild_underlying_stores(self) -> None:
-        """Rebuild the ContextualMemory sub-stores from the canonical buckets.
+        """Internal helper to rebuild underlying stores.
 
-        Clears all sub-store state and re-syncs every entry from
-        ``self.memories``.  Called after any bulk-deletion operation.
-        """
+        Args:
+            self: IN: The instance. OUT: Used for attribute access."""
+
         self.short_term._items = []
         self.short_term._index = {}
         self.long_term._items = []

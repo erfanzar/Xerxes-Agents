@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,42 +6,23 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Events module for Xerxes.
 
-
-"""Typed streaming events for the Xerxes agent loop.
-
-Inspired by the nano-claude-code event protocol, this module defines a set of
-typed dataclasses that represent discrete events during streaming agent
-execution. A generator-based agent loop yields these events, allowing the
-consumer (TUI, API server, etc.) to handle each event type independently.
-
-Event types:
-
-- :class:`TextChunk` — Incremental text from the model.
-- :class:`ThinkingChunk` — Incremental thinking/reasoning text.
-- :class:`ToolStart` — A tool invocation is about to begin.
-- :class:`ToolEnd` — A tool invocation has completed (with result).
-- :class:`PermissionRequest` — The loop is requesting user permission.
-- :class:`TurnDone` — An LLM turn has completed (with token counts).
-
-The :data:`StreamEvent` type alias is the union of all event types.
-
-Usage::
-
-    from xerxes.streaming.events import TextChunk, ToolStart, ToolEnd
-
-    for event in agent_loop(...):
-        match event:
-            case TextChunk(text=t):
-                print(t, end="")
-            case ToolStart(name=n):
-                print(f"\\n[tool] {n} ...")
-            case ToolEnd(name=n, result=r):
-                print(f"[tool] {n} → {r[:80]}")
-"""
+Exports:
+    - AgentState
+    - TextChunk
+    - ThinkingChunk
+    - ToolStart
+    - ToolEnd
+    - PermissionRequest
+    - TurnDone
+    - SkillSuggestion
+    - StreamEvent"""
 
 from __future__ import annotations
 
@@ -51,19 +32,16 @@ from typing import Any
 
 @dataclass
 class AgentState:
-    """Mutable session state for the streaming agent loop.
-
-    Tracks the conversation history (in neutral message format), cumulative
-    token usage, and the number of LLM turns taken.
+    """Agent state.
 
     Attributes:
-        messages: List of neutral-format messages (dicts with ``role``,
-            ``content``, optionally ``tool_calls``, ``tool_call_id``, ``name``).
-        total_input_tokens: Cumulative input tokens across all turns.
-        total_output_tokens: Cumulative output tokens across all turns.
-        turn_count: Number of LLM turns completed.
-        metadata: Arbitrary key-value metadata for the session.
-    """
+        messages (list[dict[str, Any]]): messages.
+        total_input_tokens (int): total input tokens.
+        total_output_tokens (int): total output tokens.
+        turn_count (int): turn count.
+        metadata (dict[str, Any]): metadata.
+        thinking_content (list[str]): thinking content.
+        tool_executions (list[dict[str, Any]]): tool executions."""
 
     messages: list[dict[str, Any]] = field(default_factory=list)
     total_input_tokens: int = 0
@@ -71,14 +49,32 @@ class AgentState:
     turn_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     thinking_content: list[str] = field(default_factory=list)
-    """Accumulated thinking/reasoning text per turn (indexed by turn_count - 1)."""
+
     tool_executions: list[dict[str, Any]] = field(default_factory=list)
-    """Full tool execution records: name, inputs, result, duration_ms, permitted."""
 
     @property
     def cost(self) -> float:
-        """Estimated total cost in USD (requires model in metadata)."""
+        """Return Cost.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
+
         from xerxes.llms.registry import calc_cost
+
+        """Return Cost.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
+        """Return Cost.
+
+        Args:
+            self: IN: The instance. OUT: Used for attribute access.
+        Returns:
+            float: OUT: Result of the operation."""
 
         model = self.metadata.get("model", "")
         return calc_cost(model, self.total_input_tokens, self.total_output_tokens)
@@ -86,38 +82,32 @@ class AgentState:
 
 @dataclass
 class TextChunk:
-    """Incremental text output from the model.
+    """Text chunk.
 
     Attributes:
-        text: The text fragment.
-    """
+        text (str): text."""
 
     text: str
 
 
 @dataclass
 class ThinkingChunk:
-    """Incremental thinking/reasoning output from the model.
-
-    Only emitted when the model supports extended thinking (e.g. Claude
-    with ``thinking`` enabled, DeepSeek-Reasoner, o1/o3).
+    """Thinking chunk.
 
     Attributes:
-        text: The thinking text fragment.
-    """
+        text (str): text."""
 
     text: str
 
 
 @dataclass
 class ToolStart:
-    """Emitted when a tool invocation is about to begin.
+    """Tool start.
 
     Attributes:
-        name: The tool name (e.g. ``"Read"``, ``"Bash"``).
-        inputs: The tool input arguments.
-        tool_call_id: Provider-assigned tool call ID.
-    """
+        name (str): name.
+        inputs (dict[str, Any]): inputs.
+        tool_call_id (str): tool call id."""
 
     name: str
     inputs: dict[str, Any]
@@ -126,15 +116,14 @@ class ToolStart:
 
 @dataclass
 class ToolEnd:
-    """Emitted when a tool invocation has completed.
+    """Tool end.
 
     Attributes:
-        name: The tool name.
-        result: The tool's output (string).
-        permitted: Whether the tool was actually executed (False if denied).
-        tool_call_id: Provider-assigned tool call ID.
-        duration_ms: Execution duration in milliseconds (0 if not measured).
-    """
+        name (str): name.
+        result (str): result.
+        permitted (bool): permitted.
+        tool_call_id (str): tool call id.
+        duration_ms (float): duration ms."""
 
     name: str
     result: str
@@ -145,17 +134,13 @@ class ToolEnd:
 
 @dataclass
 class PermissionRequest:
-    """Emitted when the agent loop needs user permission to proceed.
-
-    The consumer should set :attr:`granted` to ``True`` or ``False``
-    before the loop continues.
+    """Permission request.
 
     Attributes:
-        tool_name: Name of the tool requiring permission.
-        description: Human-readable description of the operation.
-        inputs: The tool input arguments (for display).
-        granted: Set by the consumer — ``True`` to allow, ``False`` to deny.
-    """
+        tool_name (str): tool name.
+        description (str): description.
+        inputs (dict[str, Any]): inputs.
+        granted (bool): granted."""
 
     tool_name: str
     description: str
@@ -165,14 +150,13 @@ class PermissionRequest:
 
 @dataclass
 class TurnDone:
-    """Emitted at the end of each LLM turn.
+    """Turn done.
 
     Attributes:
-        input_tokens: Tokens consumed in this turn's input.
-        output_tokens: Tokens generated in this turn's output.
-        tool_calls_count: Number of tool calls made in this turn.
-        model: Model used for this turn.
-    """
+        input_tokens (int): input tokens.
+        output_tokens (int): output tokens.
+        tool_calls_count (int): tool calls count.
+        model (str): model."""
 
     input_tokens: int
     output_tokens: int
@@ -182,21 +166,15 @@ class TurnDone:
 
 @dataclass
 class SkillSuggestion:
-    """Streamed when the autonomous skill authoring loop drafts a candidate.
-
-    The runtime emits this event after a successful multi-step turn has
-    been canonicalised into a SKILL.md draft. Consumers (TUI, IDE
-    overlay, web UI) typically render an accept/dismiss prompt; the
-    user's response is fed back via :class:`AuditEmitter.emit_skill_feedback`.
+    """Skill suggestion.
 
     Attributes:
-        skill_name: Suggested skill identifier.
-        version: Initial version (typically ``"0.1.0"``).
-        description: One-line summary derived from the originating prompt.
-        source_path: Filesystem location where the SKILL.md was written.
-        tool_count: Number of tool calls captured in the source candidate.
-        unique_tools: Distinct tool names in the candidate.
-    """
+        skill_name (str): skill name.
+        version (str): version.
+        description (str): description.
+        source_path (str): source path.
+        tool_count (int): tool count.
+        unique_tools (list[str]): unique tools."""
 
     skill_name: str
     version: str = "0.1.0"

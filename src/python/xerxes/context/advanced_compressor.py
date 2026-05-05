@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,30 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Advanced context compression using tool-result pruning and LLM summarization.
 
-
-"""Advanced context compression inspired by Hermes Agent's ContextCompressor.
-
-Features:
-- Tool-result pruning pre-pass (replace large outputs with 1-line summaries)
-- Structured summarization template (Resolved/Pending/State/Remaining)
-- Handoff framing to prevent model from treating summary as active instructions
-- Iterative summary updates on repeated compactions
-- Token-budget tail protection
-
-Usage::
-
-    from xerxes.context.advanced_compressor import HermesCompressionStrategy
-
-    compressor = HermesCompressionStrategy(
-        target_tokens=4000,
-        model="gpt-4",
-        llm_client=client,
-    )
-    compacted, stats = compressor.compact(messages)
+Implements ``HermesCompressionStrategy``, which reduces token usage by
+summarizing bulky tool outputs and by generating a high-level summary of
+older conversation turns via an optional LLM client.
 """
 
 from __future__ import annotations
@@ -42,7 +28,6 @@ from typing import Any
 from .compaction_strategies import BaseCompactionStrategy
 
 logger = logging.getLogger(__name__)
-
 
 SUMMARY_PREFIX = (
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
@@ -59,18 +44,19 @@ _SUMMARY_RATIO = 0.20
 _SUMMARY_TOKENS_CEILING = 12_000
 _CHARS_PER_TOKEN = 4
 
-
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
-    """Create an informative 1-line summary of a tool call + result.
+    """Create a terse summary of a tool execution result.
 
-    Returns strings like::
+    Args:
+        tool_name (str): IN: name of the tool that was executed.
+        tool_args (str): IN: JSON-encoded arguments passed to the tool.
+        tool_content (str): IN: raw output / content returned by the tool.
 
-        [terminal] ran `npm test` -> exit 0, 47 lines output
-        [read_file] read config.py from line 1 (1,200 chars)
-        [search_files] content search for 'compress' in agent/ -> 12 matches
+    Returns:
+        str: OUT: one-line summary describing what the tool did.
     """
     try:
         args = json.loads(tool_args) if tool_args else {}
@@ -134,9 +120,15 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
 
 
 def _prune_tool_results(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Replace large tool results with 1-line summaries.
+    """Replace verbose tool-result messages with compact summaries.
 
-    Only tool messages with >500 char content are pruned.
+    Args:
+        messages (list[dict[str, Any]]): IN: conversation messages in
+            OpenAI-style dict format.
+
+    Returns:
+        list[dict[str, Any]]: OUT: messages with tool results longer than
+        500 characters summarized.
     """
     result = []
     for msg in messages:
@@ -176,7 +168,17 @@ def _build_summary_prompt(
     messages: list[dict[str, Any]],
     previous_summary: str | None = None,
 ) -> str:
-    """Build the summarizer prompt from conversation messages."""
+    """Assemble the prompt text used to request a conversation summary.
+
+    Args:
+        messages (list[dict[str, Any]]): IN: conversation messages to
+            summarize.
+        previous_summary (str | None): IN: prior summary to update rather
+            than repeat.
+
+    Returns:
+        str: OUT: complete prompt string for the summarizer.
+    """
     lines = [_SUMMARIZER_PREAMBLE, "", "CONVERSATION HISTORY:"]
     for msg in messages:
         role = msg.get("role", "unknown")
@@ -208,15 +210,7 @@ def _build_summary_prompt(
 
 
 class HermesCompressionStrategy(BaseCompactionStrategy):
-    """Advanced context compression with tool pruning and structured summaries.
-
-    Algorithm:
-      1. Prune old tool results (cheap, no LLM call).
-      2. Protect head messages (system prompt + first exchange).
-      3. Protect tail messages by token budget.
-      4. Summarize middle turns with structured LLM prompt.
-      5. On subsequent compactions, iteratively update the previous summary.
-    """
+    """Compaction strategy that prunes tool results and LLM-summarizes history."""
 
     def __init__(
         self,
@@ -227,6 +221,22 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
         llm_client: Any | None = None,
         tail_token_budget: int | None = None,
     ):
+        """Initialize the Hermes compression strategy.
+
+        Args:
+            target_tokens (int): IN: desired maximum token count after
+                compaction.
+            model (str): IN: model name for token counting.
+                Defaults to "gpt-4".
+            preserve_system (bool): IN: whether to keep system messages.
+                Defaults to ``True``.
+            preserve_recent (int): IN: number of recent messages to protect.
+                Defaults to 3.
+            llm_client (Any | None): IN: optional LLM client capable of
+                ``generate_completion``. OUT: used for generating summaries.
+            tail_token_budget (int | None): IN: explicit token budget for the
+                tail (recent) messages. OUT: computed automatically if omitted.
+        """
         super().__init__(
             target_tokens=target_tokens,
             model=model,
@@ -244,14 +254,16 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
         messages: list[dict[str, str]],
         metadata: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact messages using advanced Hermes-style compression.
+        """Compact messages by pruning tools and summarizing older turns.
 
         Args:
-            messages: List of message dictionaries.
-            metadata: Optional metadata.
+            messages (list[dict[str, str]]): IN: conversation history in
+                OpenAI-style dict format.
+            metadata (dict[str, Any] | None): IN: optional metadata (unused).
 
         Returns:
-            Compacted messages and statistics.
+            tuple[list[dict[str, str]], dict[str, Any]]: OUT: compacted
+            messages and statistics about the compaction.
         """
         stats = {
             "original_count": len(messages),
@@ -324,9 +336,14 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
         messages: list[dict[str, Any]],
         previous_summary: str | None,
     ) -> str:
-        """Generate a structured summary of *messages*.
+        """Generate a summary of the provided messages.
 
-        Falls back to a simple concatenation if no LLM client is available.
+        Args:
+            messages (list[dict[str, Any]]): IN: messages to summarize.
+            previous_summary (str | None): IN: prior summary to update.
+
+        Returns:
+            str: OUT: LLM-generated summary or a fallback line-based summary.
         """
         prompt = _build_summary_prompt(messages, previous_summary)
 
@@ -347,7 +364,14 @@ class HermesCompressionStrategy(BaseCompactionStrategy):
         return "\n".join(lines)
 
     def _call_llm(self, prompt: str) -> str | None:
-        """Call the LLM client synchronously."""
+        """Invoke the LLM client to generate a summary.
+
+        Args:
+            prompt (str): IN: summarization prompt.
+
+        Returns:
+            str | None: OUT: generated text, or ``None`` on failure.
+        """
         if self.llm_client is None:
             return None
         try:

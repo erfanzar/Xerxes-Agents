@@ -1,16 +1,30 @@
-#!/usr/bin/env python3
-"""Polymarket CLI helper — query prediction market data.
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Polymarket module for Xerxes.
 
-Usage:
-    python3 polymarket.py search "bitcoin"
-    python3 polymarket.py trending [--limit 10]
-    python3 polymarket.py market <slug>
-    python3 polymarket.py event <slug>
-    python3 polymarket.py price <token_id>
-    python3 polymarket.py book <token_id>
-    python3 polymarket.py history <condition_id> [--interval all] [--fidelity 50]
-    python3 polymarket.py trades [--limit 10] [--market CONDITION_ID]
-"""
+Exports:
+    - GAMMA
+    - CLOB
+    - DATA
+    - cmd_search
+    - cmd_trending
+    - cmd_market
+    - cmd_event
+    - cmd_price
+    - cmd_book
+    - cmd_history
+    - ... and 2 more."""
 
 import json
 import sys
@@ -25,7 +39,13 @@ DATA = "https://data-api.polymarket.com"
 
 
 def _get(url: str) -> dict | list:
-    """GET request, return parsed JSON."""
+    """Internal helper to get.
+
+    Args:
+        url (str): IN: url. OUT: Consumed during execution.
+    Returns:
+        dict | list: OUT: Result of the operation."""
+
     req = urllib.request.Request(url, headers={"User-Agent": "hermes-agent/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -39,7 +59,13 @@ def _get(url: str) -> dict | list:
 
 
 def _parse_json_field(val):
-    """Parse double-encoded JSON fields (outcomePrices, outcomes, clobTokenIds)."""
+    """Internal helper to parse json field.
+
+    Args:
+        val (Any): IN: val. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     if isinstance(val, str):
         try:
             return json.loads(val)
@@ -49,7 +75,13 @@ def _parse_json_field(val):
 
 
 def _fmt_pct(price_str: str) -> str:
-    """Format price string as percentage."""
+    """Internal helper to fmt pct.
+
+    Args:
+        price_str (str): IN: price str. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     try:
         return f"{float(price_str) * 100:.1f}%"
     except (ValueError, TypeError):
@@ -57,7 +89,13 @@ def _fmt_pct(price_str: str) -> str:
 
 
 def _fmt_volume(vol) -> str:
-    """Format volume as human-readable."""
+    """Internal helper to fmt volume.
+
+    Args:
+        vol (Any): IN: vol. OUT: Consumed during execution.
+    Returns:
+        str: OUT: Result of the operation."""
+
     try:
         v = float(vol)
         if v >= 1_000_000:
@@ -70,7 +108,14 @@ def _fmt_volume(vol) -> str:
 
 
 def _print_market(m: dict, indent: str = ""):
-    """Print a market summary."""
+    """Internal helper to print market.
+
+    Args:
+        m (dict): IN: m. OUT: Consumed during execution.
+        indent (str, optional): IN: indent. Defaults to ''. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     question = m.get("question", "?")
     prices = _parse_json_field(m.get("outcomePrices", "[]"))
     outcomes = _parse_json_field(m.get("outcomes", "[]"))
@@ -94,7 +139,13 @@ def _print_market(m: dict, indent: str = ""):
 
 
 def cmd_search(query: str):
-    """Search for markets."""
+    """Cmd search.
+
+    Args:
+        query (str): IN: query. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     q = urllib.parse.quote(query)
     data = _get(f"{GAMMA}/public-search?q={q}")
     events = data.get("events", [])
@@ -112,7 +163,13 @@ def cmd_search(query: str):
 
 
 def cmd_trending(limit: int = 10):
-    """Show trending events by volume."""
+    """Cmd trending.
+
+    Args:
+        limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     events = _get(f"{GAMMA}/events?limit={limit}&active=true&closed=false&order=volume&ascending=false")
     print(f"Top {len(events)} trending events:\n")
     for i, evt in enumerate(events, 1):
@@ -128,7 +185,13 @@ def cmd_trending(limit: int = 10):
 
 
 def cmd_market(slug: str):
-    """Get market details by slug."""
+    """Cmd market.
+
+    Args:
+        slug (str): IN: slug. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     markets = _get(f"{GAMMA}/markets?slug={urllib.parse.quote(slug)}")
     if not markets:
         print(f"No market found with slug: {slug}")
@@ -150,7 +213,13 @@ def cmd_market(slug: str):
 
 
 def cmd_event(slug: str):
-    """Get event details by slug."""
+    """Cmd event.
+
+    Args:
+        slug (str): IN: slug. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     events = _get(f"{GAMMA}/events?slug={urllib.parse.quote(slug)}")
     if not events:
         print(f"No event found with slug: {slug}")
@@ -166,7 +235,13 @@ def cmd_event(slug: str):
 
 
 def cmd_price(token_id: str):
-    """Get current price for a token."""
+    """Cmd price.
+
+    Args:
+        token_id (str): IN: token id. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     buy = _get(f"{CLOB}/price?token_id={token_id}&side=buy")
     mid = _get(f"{CLOB}/midpoint?token_id={token_id}")
     spread = _get(f"{CLOB}/spread?token_id={token_id}")
@@ -177,7 +252,13 @@ def cmd_price(token_id: str):
 
 
 def cmd_book(token_id: str):
-    """Get orderbook for a token."""
+    """Cmd book.
+
+    Args:
+        token_id (str): IN: token id. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     book = _get(f"{CLOB}/book?token_id={token_id}")
     bids = book.get("bids", [])
     asks = book.get("asks", [])
@@ -185,7 +266,7 @@ def cmd_book(token_id: str):
     print(f"Orderbook for {token_id[:30]}...")
     print(f"Last trade: {_fmt_pct(last)}  |  Tick size: {book.get('tick_size', '?')}")
     print(f"\n  Top bids ({len(bids)} total):")
-    # Show bids sorted by price descending (best bids first)
+
     sorted_bids = sorted(bids, key=lambda x: float(x.get("price", 0)), reverse=True)
     for b in sorted_bids[:10]:
         print(f"    {_fmt_pct(b['price']):>7}  |  Size: {float(b['size']):>10.2f}")
@@ -196,7 +277,15 @@ def cmd_book(token_id: str):
 
 
 def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
-    """Get price history for a market."""
+    """Cmd history.
+
+    Args:
+        condition_id (str): IN: condition id. OUT: Consumed during execution.
+        interval (str, optional): IN: interval. Defaults to 'all'. OUT: Consumed during execution.
+        fidelity (int, optional): IN: fidelity. Defaults to 50. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     data = _get(f"{CLOB}/prices-history?market={condition_id}&interval={interval}&fidelity={fidelity}")
     history = data.get("history", [])
     if not history:
@@ -213,7 +302,14 @@ def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
 
 
 def cmd_trades(limit: int = 10, market: str | None = None):
-    """Get recent trades."""
+    """Cmd trades.
+
+    Args:
+        limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
+        market (str | None, optional): IN: market. Defaults to None. OUT: Consumed during execution.
+    Returns:
+        Any: OUT: Result of the operation."""
+
     url = f"{DATA}/trades?limit={limit}"
     if market:
         url += f"&market={market}"
@@ -233,6 +329,10 @@ def cmd_trades(limit: int = 10, market: str | None = None):
 
 
 def main():
+    """Main.
+
+    Returns:
+        Any: OUT: Result of the operation."""
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__)

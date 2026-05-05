@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,15 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Trigger logic that decides whether a tool sequence is worth authoring.
 
-"""Trigger heuristic for autonomous skill authoring.
-
-Decides whether a finished :class:`SkillCandidate` is "skill-worthy".
-Hermes uses ~5+ tool calls + success + novelty as its bar; Xerxes's
-trigger exposes the thresholds via :class:`SkillAuthoringConfig`.
+``SkillAuthoringTrigger`` applies configurable thresholds (minimum tool calls,
+retry limits, uniqueness requirements) to a ``SkillCandidate``.
 """
 
 from __future__ import annotations
@@ -30,16 +30,20 @@ if tp.TYPE_CHECKING:
 
 @dataclass
 class SkillAuthoringConfig:
-    """Knobs for the trigger heuristic.
+    """Thresholds for auto-authoring a skill from a turn.
 
     Attributes:
-        min_tool_calls: Minimum events in the candidate (Hermes default: 5).
-        require_success: Require zero non-success events when ``True``.
-        max_retries_allowed: Reject candidates with more retries than this.
-        min_unique_tools: Reject candidates that hammer one tool repeatedly.
-        skip_if_skill_signature_exists: Avoid drafting if the registry
-            already has a skill whose ``tags`` cover the same tools.
-        enabled: Master switch.
+        min_tool_calls (int): IN: Minimum events required. OUT: Checked by
+            ``should_author``.
+        require_success (bool): IN: Whether failures disqualify. OUT: Checked
+            by ``should_author``.
+        max_retries_allowed (int): IN: Retry tolerance. OUT: Checked by
+            ``should_author``.
+        min_unique_tools (int): IN: Minimum distinct tools. OUT: Checked by
+            ``should_author``.
+        skip_if_skill_signature_exists (bool): IN: Duplicate detection. OUT:
+            Checked by ``should_author``.
+        enabled (bool): IN: Master switch. OUT: Checked by ``should_author``.
     """
 
     min_tool_calls: int = 5
@@ -51,27 +55,36 @@ class SkillAuthoringConfig:
 
 
 class SkillAuthoringTrigger:
-    """Pure-function trigger evaluator.
-
-    Holds the optional skill registry reference for novelty checks.
-
-    Example:
-        >>> trig = SkillAuthoringTrigger(SkillAuthoringConfig())
-        >>> if trig.should_author(candidate):
-        ...     drafter.draft(candidate)
-    """
+    """Evaluates a ``SkillCandidate`` against authoring rules."""
 
     def __init__(
         self,
         config: SkillAuthoringConfig | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
-        """Initialise with optional config and registry."""
+        """Initialize with config and optional registry for duplicate checks.
+
+        Args:
+            config (SkillAuthoringConfig | None): IN: Thresholds. OUT: Defaults
+                to a new ``SkillAuthoringConfig``.
+            skill_registry (SkillRegistry | None): IN: Registry for duplicate
+                detection. OUT: Used by ``_has_existing_skill``.
+        """
+
         self.config = config or SkillAuthoringConfig()
         self.skill_registry = skill_registry
 
     def should_author(self, candidate: SkillCandidate) -> bool:
-        """Return ``True`` if *candidate* meets the authoring threshold."""
+        """Return whether ``candidate`` meets all authoring thresholds.
+
+        Args:
+            candidate (SkillCandidate): IN: Observed turn data. OUT: Evaluated
+                against every config threshold.
+
+        Returns:
+            bool: OUT: ``True`` if the candidate qualifies for skill creation.
+        """
+
         cfg = self.config
         if not cfg.enabled:
             return False
@@ -94,7 +107,16 @@ class SkillAuthoringTrigger:
         return True
 
     def reason(self, candidate: SkillCandidate) -> str:
-        """Human-readable explanation of the trigger decision."""
+        """Return a human-readable explanation of the authoring decision.
+
+        Args:
+            candidate (SkillCandidate): IN: Observed turn data. OUT: Evaluated
+                to produce the message.
+
+        Returns:
+            str: OUT: Reason string; ``"skill-worthy"`` if all checks pass.
+        """
+
         cfg = self.config
         if not cfg.enabled:
             return "skill authoring disabled"
@@ -111,7 +133,16 @@ class SkillAuthoringTrigger:
         return "skill-worthy"
 
     def _terminal_failures(self, candidate: SkillCandidate) -> list[int]:
-        """Indices of failures that were never recovered by a later retry."""
+        """Identify event indices that failed and were not later retried.
+
+        Args:
+            candidate (SkillCandidate): IN: Observed turn data. OUT: Scanned
+                for failures and recoveries.
+
+        Returns:
+            list[int]: OUT: Indices of unrecovered failures.
+        """
+
         recovered: set[int] = set()
         for ev in candidate.events:
             if ev.retry_of is not None and ev.status == "success":
@@ -126,7 +157,17 @@ class SkillAuthoringTrigger:
         return out
 
     def _has_existing_skill(self, candidate: SkillCandidate) -> bool:
-        """Return ``True`` if the registry already covers this tool set."""
+        """Check whether a skill already covers the candidate's tool set.
+
+        Args:
+            candidate (SkillCandidate): IN: Observed turn data. OUT: Compared
+                against registry skills.
+
+        Returns:
+            bool: OUT: ``True`` if an existing skill's tags or required_tools
+            superset the candidate's unique tools.
+        """
+
         if self.skill_registry is None:
             return False
         try:

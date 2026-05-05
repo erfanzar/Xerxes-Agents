@@ -1,4 +1,4 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -6,19 +6,15 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 #
+# Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Config module for Xerxes.
 
-
-"""Configuration and shared constants for Xerxes operator tooling.
-
-Defines the three operator tool-name sets
-(:data:`SAFE_OPERATOR_TOOLS`, :data:`HIGH_POWER_OPERATOR_TOOLS`, and
-:data:`ALL_OPERATOR_TOOLS`) used by the policy engine to gate tool
-access, as well as the :class:`OperatorRuntimeConfig` dataclass that
-holds all runtime-tuneable knobs.
-"""
+Exports:
+    - OperatorRuntimeConfig"""
 
 from __future__ import annotations
 
@@ -33,9 +29,6 @@ SAFE_OPERATOR_TOOLS: frozenset[str] = frozenset(
         "update_plan",
     }
 )
-"""Operator tools that are always allowed, regardless of the
-``power_tools_enabled`` flag.  These are low-risk, read-only or
-informational tools."""
 
 HIGH_POWER_OPERATOR_TOOLS: frozenset[str] = frozenset(
     {
@@ -59,48 +52,25 @@ HIGH_POWER_OPERATOR_TOOLS: frozenset[str] = frozenset(
         "web.sports",
     }
 )
-"""Operator tools that require explicit ``power_tools_enabled`` to be
-active.  They can execute shell commands, modify files, spawn agents,
-or interact with external services."""
 
 ALL_OPERATOR_TOOLS: frozenset[str] = SAFE_OPERATOR_TOOLS | HIGH_POWER_OPERATOR_TOOLS
-"""Union of safe and high-power operator tool names."""
 
 
 @dataclass
 class OperatorRuntimeConfig:
-    """Opt-in runtime configuration for operator-style tools.
-
-    Encapsulates every knob that controls how the operator subsystem
-    behaves: whether it is enabled at all, which power level is active,
-    browser and shell defaults, and sub-agent profile settings.
+    """Operator runtime config.
 
     Attributes:
-        enabled: Master switch that activates operator tooling in the
-            runtime.  When ``False``, none of the operator tools are
-            registered.
-        power_tools_enabled: When ``True``, high-power tools (shell,
-            patch, browser navigation, sub-agents) are made available.
-            Defaults to ``True`` so newly created agents and spawned
-            sub-agents can use the full operator toolset unless a
-            caller opts into a narrower policy.
-        browser_headless: Whether the Playwright browser runs without a
-            visible window.
-        browser_screenshot_dir: Optional directory for browser
-            screenshots.  When ``None``, temporary directories are used.
-        shell_default_workdir: Default working directory for new PTY
-            sessions.  ``None`` means the process working directory.
-        shell_default_yield_ms: Default milliseconds to wait for
-            initial PTY output before returning.
-        shell_default_max_output_chars: Default maximum characters
-            captured per PTY read operation.
-        subagent_default_profile: Default prompt profile applied to
-            newly spawned sub-agents.
-        subagent_default_timeout_ms: Default timeout in milliseconds
-            when waiting for sub-agent completion.
-        allowed_tool_names: Set of tool names the policy engine should
-            permit.  Defaults to :data:`ALL_OPERATOR_TOOLS`.
-    """
+        enabled (bool): enabled.
+        power_tools_enabled (bool): power tools enabled.
+        browser_headless (bool): browser headless.
+        browser_screenshot_dir (str | None): browser screenshot dir.
+        shell_default_workdir (str | None): shell default workdir.
+        shell_default_yield_ms (int): shell default yield ms.
+        shell_default_max_output_chars (int): shell default max output chars.
+        subagent_default_profile (PromptProfile | str): subagent default profile.
+        subagent_default_timeout_ms (int): subagent default timeout ms.
+        allowed_tool_names (set[str]): allowed tool names."""
 
     enabled: bool = False
     power_tools_enabled: bool = True

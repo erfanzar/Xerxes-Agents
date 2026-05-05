@@ -1,7 +1,20 @@
-# Copyright 2025 The EasyDeL/Xerxes Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Feishu (Lark) channel adapter.
 
-# Licensed under the Apache License, Version 2.0 (the "License")
-"""Feishu / Lark adapter (ByteDance enterprise IM)."""
+Connects to the Feishu Open Platform for messaging.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +26,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class FeishuChannel(WebhookChannel):
-    """Feishu (Lark) bot adapter via app webhook + open-API send.
-
-    Expects a tenant access token to be supplied directly or via an
-    ``token_provider`` callable that returns the current token (the
-    Feishu token expires every 2 h; the provider lets the caller cache
-    + refresh out-of-band).
-    """
+    """Channel implementation for Feishu (Lark)."""
 
     name = "feishu"
 
@@ -31,14 +38,18 @@ class FeishuChannel(WebhookChannel):
         api_base: str = "https://open.feishu.cn",
         http_client: tp.Any = None,
     ) -> None:
-        """Configure the adapter with a static or refreshable tenant token.
+        """Initialize the Feishu channel.
 
         Args:
-            tenant_access_token: Static tenant access token (used when no
-                ``token_provider`` is supplied).
-            token_provider: Callable returning the current tenant token.
-            api_base: Feishu / Lark open-API base URL.
-            http_client: Optional injected HTTP callable for tests.
+            tenant_access_token (str): IN: static tenant access token.
+                OUT: fallback token when ``token_provider`` is not given.
+            token_provider (Callable | None): IN: optional callable that
+                returns a fresh access token. OUT: takes precedence over the
+                static token.
+            api_base (str): IN: base URL for Feishu open APIs.
+                OUT: stored with trailing slash removed.
+            http_client (Any): IN: optional HTTP client override.
+                OUT: forwarded to ``http_post``.
         """
         super().__init__()
         self.tenant_access_token = tenant_access_token
@@ -47,7 +58,12 @@ class FeishuChannel(WebhookChannel):
         self._http = http_client
 
     def _resolve_token(self) -> str:
-        """Return the current tenant token, preferring ``token_provider``."""
+        """Resolve the current access token.
+
+        Returns:
+            str: OUT: token from ``token_provider`` if available, otherwise
+            the static ``tenant_access_token``.
+        """
         if self.token_provider is not None:
             tok = self.token_provider()
             if tok:
@@ -55,11 +71,15 @@ class FeishuChannel(WebhookChannel):
         return self.tenant_access_token
 
     def _parse_inbound(self, headers, body):
-        """Decode a Feishu event envelope into a :class:`ChannelMessage`.
+        """Parse a Feishu webhook payload into ``ChannelMessage``.
 
-        Drops ``url_verification`` handshakes. Feishu nests the text body
-        as a JSON-encoded string under ``event.message.content``; it is
-        parsed here to recover the plain ``text`` field.
+        Args:
+            headers (dict[str, str]): IN: HTTP headers (unused).
+            body (bytes): IN: raw JSON webhook body.
+
+        Returns:
+            list[ChannelMessage]: OUT: parsed inbound messages. Empty for
+            URL-verification events.
         """
         data = parse_json_body(body)
         if not data:
@@ -89,7 +109,12 @@ class FeishuChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """POST a text message to the IM open API addressed by ``chat_id``."""
+        """Send a text message via the Feishu API.
+
+        Args:
+            message (ChannelMessage): IN: message to send. ``room_id`` is used
+                as the target chat ID and ``text`` as the message body.
+        """
         url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"
         body = {
             "receive_id": message.room_id,
