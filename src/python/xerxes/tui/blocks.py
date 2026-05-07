@@ -385,9 +385,6 @@ class _SubToolCall:
         return _prompt_text_to_ansi(markup)
 
 
-MAX_SUBAGENT_TOOL_CALLS = 4
-
-
 class _ToolCallBlock:
     """Accumulates and renders a single tool call and its sub-tool calls.
 
@@ -515,12 +512,8 @@ class _ToolCallBlock:
         lines = [f"{icon} [bold cyan]{status_word} {self.name}[/bold cyan] ([dim]{self.key_arg}[/dim]) — {duration}"]
 
         sub_lines: list[str] = []
-        for sub in self._sub_tool_calls[:MAX_SUBAGENT_TOOL_CALLS]:
+        for sub in self._sub_tool_calls:
             sub_lines.append(sub.compose())
-
-        overflow = len(self._sub_tool_calls) - MAX_SUBAGENT_TOOL_CALLS
-        if overflow > 0:
-            lines.append(f"  [dim]... and {overflow} more sub-agent tool calls[/dim]")
 
         if self._status == "done" and self._result:
             result_lines = self._result.strip().split("\n")[: self.MAX_RESULT_LINES]

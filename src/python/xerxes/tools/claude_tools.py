@@ -245,13 +245,24 @@ def _has_ripgrep() -> bool:
 _agent_manager = None
 
 
-def _build_subagent_system_prompt(base: str = "You are a helpful AI assistant.") -> str:
+def _build_subagent_system_prompt(
+    base: str = "You are a helpful AI assistant.",
+    *,
+    include_active_skills: bool = False,
+) -> str:
     """Internal helper to build subagent system prompt.
 
     Args:
         base (str, optional): IN: base. Defaults to 'You are a helpful AI assistant.'. OUT: Consumed during execution.
+        include_active_skills (bool, optional): IN: Whether active top-level skills
+            should be prepended. Defaults to False so skills such as deepscan do
+            not recursively instruct child agents to spawn more child agents.
+            OUT: Consumed during prompt construction.
     Returns:
         str: OUT: Result of the operation."""
+
+    if not include_active_skills:
+        return base
 
     from ..extensions.skills import get_active_skills
     from ..tools.agent_meta_tools import _skill_registry
@@ -283,7 +294,11 @@ def _get_agent_manager():
         from ..agents.subagent_manager import SubAgentManager
         from ..runtime.bridge import build_tool_executor, populate_registry
 
-        _agent_manager = SubAgentManager()
+        try:
+            max_concurrent = int(os.environ.get("XERXES_SUBAGENT_MAX_CONCURRENT", "16"))
+        except ValueError:
+            max_concurrent = 16
+        _agent_manager = SubAgentManager(max_concurrent=max(1, max_concurrent))
         registry = populate_registry()
         _agent_manager._tool_executor = build_tool_executor(registry=registry)
         _agent_manager._tool_schemas = registry.tool_schemas()
@@ -472,6 +487,7 @@ class SpawnAgents(AgentBaseFn):
             return f"[Error: agents must be a list, got {type(agents).__name__}]"
 
         mgr = _get_agent_manager()
+        mgr.ensure_capacity(len(agents))
         config: dict[str, Any] = get_inheritable()
         tasks = []
 

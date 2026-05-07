@@ -101,13 +101,7 @@ class GenericDisplayBlock:
     content: str = ""
 
 
-DisplayBlock = (
-    BriefDisplayBlock
-    | DiffDisplayBlock
-    | TodoDisplayBlock
-    | BackgroundTaskDisplayBlock
-    | GenericDisplayBlock
-)
+DisplayBlock = BriefDisplayBlock | DiffDisplayBlock | TodoDisplayBlock | BackgroundTaskDisplayBlock | GenericDisplayBlock
 
 
 @dataclass(frozen=True)

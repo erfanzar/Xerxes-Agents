@@ -32,7 +32,6 @@ import uuid
 from collections.abc import AsyncIterator, Generator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
 
 from xerxes.types.function_execution_types import ReinvokeSignal
 from xerxes.types.messages import ChatMessage, MessagesHistory, SystemMessage, UserMessage
@@ -402,42 +401,18 @@ class Xerxes:
                 cancel_check (Any): IN: cancel check. OUT: Consumed during execution.
             Returns:
                 Any: OUT: Result of the operation."""
+            from .agents.subagent_manager import _filter_subagent_tools
             from .streaming.events import AgentState, TextChunk
             from .streaming.loop import run
 
             state = AgentState()
             output_parts = []
-            eff_tool_executor = tool_executor
-            eff_tool_schemas = registry.tool_schemas()
-
-            all_names = {s.get("name") for s in eff_tool_schemas}
-
-            whitelist = config.get("_tools_whitelist")
-            allowed_tools = config.get("_tools_allowed")
-            excluded_tools = config.get("_tools_excluded") or []
-
-            allowed = set(whitelist) if whitelist else all_names.copy()
-            if allowed_tools:
-                allowed &= set(allowed_tools)
-            if excluded_tools:
-                allowed -= set(excluded_tools)
-
-            if allowed != all_names:
-                eff_tool_schemas = [s for s in eff_tool_schemas if s.get("name") in allowed]
-
-                def _filtered_executor(tool_name: str, tool_input: dict[str, Any]) -> str:
-                    """Internal helper to filtered executor.
-
-                    Args:
-                        tool_name (str): IN: tool name. OUT: Consumed during execution.
-                        tool_input (dict[str, Any]): IN: tool input. OUT: Consumed during execution.
-                    Returns:
-                        str: OUT: Result of the operation."""
-                    if tool_name not in allowed:
-                        return f"Error: tool '{tool_name}' is not allowed for this agent."
-                    return tool_executor(tool_name, tool_input)
-
-                eff_tool_executor = _filtered_executor
+            eff_tool_schemas, eff_tool_executor = _filter_subagent_tools(
+                tool_schemas=registry.tool_schemas(),
+                tool_executor=tool_executor,
+                config=config,
+                is_subagent=depth > 0,
+            )
 
             for event in run(
                 user_message=prompt,

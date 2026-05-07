@@ -141,10 +141,7 @@ def _ensure_deps():
 
     import importlib.util
 
-    if (
-        importlib.util.find_spec("google_auth_oauthlib") is None
-        or importlib.util.find_spec("googleapiclient") is None
-    ):
+    if importlib.util.find_spec("google_auth_oauthlib") is None or importlib.util.find_spec("googleapiclient") is None:
         if not install_deps():
             sys.exit(1)
 

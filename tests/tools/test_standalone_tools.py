@@ -38,6 +38,13 @@ class TestReadFile:
         assert len(result) < 200
         assert "truncated" in result
 
+    def test_read_large_file_not_truncated_by_default(self, tmp_path):
+        f = tmp_path / "big.txt"
+        content = "x" * 10000
+        f.write_text(content)
+        result = ReadFile.static_call(str(f))
+        assert result == content
+
     def test_read_no_truncation(self, tmp_path):
         f = tmp_path / "small.txt"
         f.write_text("hello")

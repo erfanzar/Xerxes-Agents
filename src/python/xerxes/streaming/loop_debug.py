@@ -319,10 +319,9 @@ def run(
             duration_ms = 0.0
             if not permitted:
                 result = "Denied: user rejected this operation."
-                truncated_result = result
                 yield ToolEnd(
                     name=tc_name,
-                    result=truncated_result,
+                    result=result,
                     permitted=False,
                     tool_call_id=tc_id,
                 )
@@ -336,11 +335,10 @@ def run(
                 else:
                     result = f"Tool '{tc_name}' executed (no executor configured)."
                 duration_ms = (time.monotonic() - t0) * 1000
-                truncated_result = result[:2000] if len(result) > 2000 else result
 
                 yield ToolEnd(
                     name=tc_name,
-                    result=truncated_result,
+                    result=result,
                     permitted=True,
                     tool_call_id=tc_id,
                     duration_ms=duration_ms,
@@ -349,7 +347,7 @@ def run(
                 {
                     "name": tc_name,
                     "inputs": tc_input,
-                    "result": truncated_result,
+                    "result": result,
                     "duration_ms": duration_ms if permitted else 0.0,
                     "permitted": permitted,
                     "tool_call_id": tc_id,
@@ -361,7 +359,7 @@ def run(
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "name": tc_name,
-                    "content": truncated_result,
+                    "content": result,
                 }
             )
 

@@ -20,6 +20,8 @@ back to truncation if the LLM is unavailable.
 
 from typing import Any
 
+FALLBACK_TRUNCATE_CHARS = 2000
+
 
 class CompactionAgent:
     """Summarizes conversation context to reduce token usage.
@@ -117,14 +119,14 @@ COMPACTED SUMMARY:"""
                     return response
                 return str(response)
             else:
-                return self._fallback_truncate(context)
+                return self._fallback_truncate(context, FALLBACK_TRUNCATE_CHARS)
 
         except Exception as e:
             print(f"Error during summarization: {e}")
             import traceback
 
             traceback.print_exc()
-            return self._fallback_truncate(context)
+            return self._fallback_truncate(context, FALLBACK_TRUNCATE_CHARS)
 
     def summarize_messages(
         self,
@@ -174,7 +176,7 @@ COMPACTED SUMMARY:"""
 
         return compacted
 
-    def _fallback_truncate(self, context: str, max_chars: int = 2000) -> str:
+    def _fallback_truncate(self, context: str, max_chars: int) -> str:
         """Truncate context as a last-resort fallback.
 
         Args:

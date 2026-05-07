@@ -41,7 +41,7 @@ class ReadFile(AgentBaseFn):
     @staticmethod
     def static_call(
         file_path: str,
-        max_chars: int | None = 4_096,
+        max_chars: int | None = None,
         encoding: str = "utf-8",
         errors: str = "ignore",
         **context_variables,
@@ -50,7 +50,9 @@ class ReadFile(AgentBaseFn):
 
         Args:
             file_path (str): IN: file path. OUT: Consumed during execution.
-            max_chars (int | None, optional): IN: max chars. Defaults to 4096. OUT: Consumed during execution.
+            max_chars (int | None, optional): IN: Optional maximum characters to
+                return. Defaults to None, which returns the full file. OUT:
+                Consumed during execution.
             encoding (str, optional): IN: encoding. Defaults to 'utf-8'. OUT: Consumed during execution.
             errors (str, optional): IN: errors. Defaults to 'ignore'. OUT: Consumed during execution.
             **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
