@@ -100,6 +100,15 @@ class BridgeServer:
         self._current_tool_call_id = ""
         self._step_count = 0
 
+        self._subagent_text_buffers: dict[str, str] = {}
+        self._subagent_thinking_buffers: dict[str, str] = {}
+        self._subagent_buffer_lock = threading.Lock()
+        self._subagent_parent_tool: dict[str, str] = {}
+        self._subagent_tool_id_fifo: dict[str, list[str]] = {}
+        self._SUBAGENT_FLUSH_THRESHOLD = 400
+
+        self._pending_resume_replays: list[dict[str, Any]] = []
+
         self._skill_registry = SkillRegistry()
         self._skills_dir = xerxes_subdir("skills")
         self._skills_dir.mkdir(parents=True, exist_ok=True)
@@ -302,7 +311,13 @@ class BridgeServer:
         )
 
     def _emit_subagent_summary(self, event_type: str, data: dict[str, Any]) -> None:
-        """Emit a wire notification summarizing a sub-agent event.
+        """Emit wire events summarizing a sub-agent event.
+
+        Text and thinking chunks are aggregated per-task and flushed on natural
+        boundaries (paragraph breaks, threshold size, tool calls, completion) so
+        the TUI sees coherent prose rather than per-token noise. Sub-agent tool
+        calls are additionally wrapped in ``SubagentEvent`` so they nest under
+        the parent ``AgentTool`` block in the TUI.
 
         Args:
             event_type (str): IN: Sub-agent event type (e.g., ``"agent_spawn"``). OUT:
@@ -310,49 +325,200 @@ class BridgeServer:
             data (dict[str, Any]): IN: Event payload. OUT: Used to build the summary.
         """
         agent_name = data.get("agent_name") or data.get("agent_type") or "subagent"
+        agent_type = data.get("agent_type") or ""
         task_id = data.get("task_id", "")
         short_id = (task_id[:8] + "…") if len(task_id) > 8 else task_id
         prefix = f"{agent_name}#{short_id}" if short_id else agent_name
 
         if event_type == "agent_spawn":
+            if task_id and self._current_tool_call_id:
+                with self._subagent_buffer_lock:
+                    self._subagent_parent_tool[task_id] = self._current_tool_call_id
             body = f"{prefix} spawned (depth={data.get('depth', '?')}): {data.get('prompt', '')[:140]}"
-            severity = "info"
-        elif event_type == "agent_text":
-            text = (data.get("text") or "").strip()
-            if not text:
-                return
-            body = f"{prefix}: {text[:200]}"
-            severity = "info"
-        elif event_type == "agent_thinking":
-            text = (data.get("text") or "").strip()
-            if not text:
-                return
-            body = f"{prefix} (thinking): {text[:200]}"
-            severity = "info"
-        elif event_type == "agent_tool_start":
-            inputs = data.get("inputs") or {}
-            key = next(iter(inputs.values()), "") if isinstance(inputs, dict) else ""
-            body = f"{prefix} ◐ {data.get('tool_name', 'tool')}({str(key)[:80]})"
-            severity = "info"
-        elif event_type == "agent_tool_end":
-            mark = "✓" if data.get("permitted", True) else "✗"
-            body = f"{prefix} {mark} {data.get('tool_name', 'tool')} — {data.get('duration_ms', 0):.0f}ms"
-            severity = "info"
-        elif event_type == "agent_done":
-            status = data.get("status", "completed")
-            body = f"{prefix} {status}: {(data.get('result') or '')[:200]}"
-            severity = "info" if status == "completed" else "warning"
-        else:
+            self._emit_wire_notification(
+                notification_id=str(uuid.uuid4()),
+                category="subagent",
+                type_=event_type,
+                severity="info",
+                title="",
+                body=body,
+            )
+            self._emit_subagent_stream(task_id, prefix, "starting…")
             return
 
+        if event_type == "agent_text":
+            self._stream_subagent_chunk(task_id, prefix, data.get("text") or "", kind="text")
+            return
+
+        if event_type == "agent_thinking":
+            self._stream_subagent_chunk(task_id, prefix, data.get("text") or "", kind="thinking")
+            return
+
+        if event_type == "agent_tool_start":
+            self._emit_subagent_tool_event(task_id, agent_type, data, kind="start")
+            inputs = data.get("inputs") or {}
+            key = next(iter(inputs.values()), "") if isinstance(inputs, dict) else ""
+            self._emit_subagent_stream(
+                task_id,
+                prefix,
+                f"◐ {data.get('tool_name', 'tool')}({str(key)[:80]})",
+            )
+            return
+
+        if event_type == "agent_tool_end":
+            self._emit_subagent_tool_event(task_id, agent_type, data, kind="end")
+            mark = "✓" if data.get("permitted", True) else "✗"
+            self._emit_subagent_stream(
+                task_id,
+                prefix,
+                f"{mark} {data.get('tool_name', 'tool')} — {data.get('duration_ms', 0):.0f}ms",
+            )
+            return
+
+        if event_type == "agent_done":
+            with self._subagent_buffer_lock:
+                self._subagent_parent_tool.pop(task_id, None)
+                self._subagent_tool_id_fifo.pop(task_id, None)
+                self._subagent_text_buffers.pop(task_id, None)
+                self._subagent_thinking_buffers.pop(task_id, None)
+            self._emit_subagent_stream(task_id, prefix, "")
+            return
+
+    SUBAGENT_PREVIEW_CHARS = 100
+
+    def _stream_subagent_chunk(self, task_id: str, prefix: str, text: str, *, kind: str) -> None:
+        """Update the live preview line for a sub-agent with a new text/thinking chunk.
+
+        Accumulates the per-task text in a rolling buffer (capped at
+        ``SUBAGENT_PREVIEW_CHARS`` so it never grows unbounded) and emits a
+        single ``subagent_stream`` notification carrying the latest tail. The
+        TUI replaces the previous preview line for the same task — nothing is
+        appended to the conversation history.
+
+        Args:
+            task_id (str): IN: Task identifier the chunk belongs to.
+            prefix (str): IN: Display prefix (``agent#shortid``).
+            text (str): IN: Raw chunk text. Empty chunks are ignored.
+            kind (str): IN: ``"text"`` or ``"thinking"``.
+        """
+        if not text or not task_id:
+            return
+        buffers = self._subagent_text_buffers if kind == "text" else self._subagent_thinking_buffers
+        cap = self.SUBAGENT_PREVIEW_CHARS
+        with self._subagent_buffer_lock:
+            merged = (buffers.get(task_id, "") + text)
+            if len(merged) > cap * 2:
+                merged = merged[-cap * 2 :]
+            buffers[task_id] = merged
+            tail = " ".join(merged.split())
+        if not tail:
+            return
+        if len(tail) > cap:
+            tail = "…" + tail[-cap:]
+        label_suffix = " (thinking)" if kind == "thinking" else ""
+        self._emit_subagent_stream(task_id, f"{prefix}{label_suffix}", tail)
+
+    def _emit_subagent_stream(self, task_id: str, label: str, body: str) -> None:
+        """Emit a transient ``subagent_stream`` notification for the live preview.
+
+        An empty ``body`` signals the TUI to clear the preview for ``task_id``.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier.
+            label (str): IN: Display label shown in the preview line.
+            body (str): IN: Latest preview content. Empty string clears the line.
+        """
         self._emit_wire_notification(
             notification_id=str(uuid.uuid4()),
-            category="subagent",
-            type_=event_type,
-            severity=severity,
+            category="subagent_stream",
+            type_="subagent_stream",
+            severity="info",
             title="",
             body=body,
+            payload={"task_id": task_id, "label": label},
         )
+
+    def _emit_subagent_tool_event(
+        self,
+        task_id: str,
+        agent_type: str,
+        data: dict[str, Any],
+        *,
+        kind: str,
+    ) -> bool:
+        """Emit a ``subagent_event`` wrapping a sub-agent's inner tool call/result.
+
+        The TUI uses ``parent_tool_call_id`` to nest the inner call inside the
+        parent ``AgentTool`` block. Returns ``True`` if the event was emitted
+        with a known parent (so the caller can suppress the chronological
+        fallback notification), or ``False`` if the parent or inner tool-call
+        id is missing — in which case the caller should fall back to a flat
+        notification so the user still sees activity.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier.
+            agent_type (str): IN: Agent definition name (e.g., ``"coder"``).
+            data (dict[str, Any]): IN: Original ``agent_tool_*`` payload.
+            kind (str): IN: ``"start"`` or ``"end"``.
+
+        Returns:
+            bool: OUT: ``True`` if the inline nested event was emitted with a
+                resolvable parent block; ``False`` otherwise.
+        """
+        with self._subagent_buffer_lock:
+            parent_id = self._subagent_parent_tool.get(task_id) or self._current_tool_call_id
+            raw_inner = data.get("tool_call_id")
+            if kind == "start":
+                if raw_inner:
+                    inner_id = str(raw_inner)
+                else:
+                    inner_id = f"sub_{uuid.uuid4().hex[:12]}"
+                self._subagent_tool_id_fifo.setdefault(task_id, []).append(inner_id)
+            else:
+                if raw_inner:
+                    inner_id = str(raw_inner)
+                    fifo = self._subagent_tool_id_fifo.get(task_id) or []
+                    if inner_id in fifo:
+                        fifo.remove(inner_id)
+                else:
+                    fifo = self._subagent_tool_id_fifo.get(task_id) or []
+                    inner_id = fifo.pop(0) if fifo else ""
+        if not parent_id or not inner_id:
+            return False
+        if kind == "start":
+            inputs = data.get("inputs") or {}
+            try:
+                arguments_str = json.dumps(inputs, default=str)
+            except Exception:
+                arguments_str = ""
+            inner = {
+                "type": "ToolCall",
+                "payload": {
+                    "id": inner_id,
+                    "name": data.get("tool_name", ""),
+                    "arguments": arguments_str,
+                },
+            }
+        else:
+            inner = {
+                "type": "ToolResult",
+                "payload": {
+                    "tool_call_id": inner_id,
+                    "return_value": data.get("result") or "",
+                    "display_blocks": [],
+                },
+            }
+        self._emit_wire_event(
+            "subagent_event",
+            {
+                "id": str(uuid.uuid4()),
+                "parent_tool_call_id": parent_id,
+                "agent_id": task_id,
+                "subagent_type": agent_type,
+                "event": inner,
+            },
+        )
+        return True
 
     def _emit_wire_event(self, event_type: str, payload: dict[str, Any]) -> None:
         """Emit a wire-protocol event (JSON-RPC method call).
@@ -480,11 +646,16 @@ class BridgeServer:
 
         Args:
             tool_call_id (str): IN: Unique tool call identifier. OUT: Stored and
-                included in the event.
+                included in the event. If empty/None (some providers omit IDs),
+                a synthetic ``call_<uuid12>`` id is generated so downstream
+                consumers (TUI tool blocks, sub-agent nesting) always have a
+                stable key to correlate on.
             name (str): IN: Tool name. OUT: Included in the event.
             arguments (dict[str, Any]): IN: Tool arguments. OUT: JSON-serialized
                 and included.
         """
+        if not tool_call_id:
+            tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
         self._current_tool_call_id = tool_call_id
         self._emit_wire_event(
             "tool_call",
@@ -514,6 +685,8 @@ class BridgeServer:
             permitted (bool): IN: Whether the tool was permitted. OUT: Currently
                 not included in the wire payload.
         """
+        if not tool_call_id:
+            tool_call_id = self._current_tool_call_id
         self._emit_wire_event(
             "tool_result",
             {
@@ -546,7 +719,6 @@ class BridgeServer:
             {
                 "id": request_id,
                 "tool_call_id": tool_call_id,
-                "sender": "xerxes",
                 "action": name,
                 "description": description,
             },
@@ -634,6 +806,7 @@ class BridgeServer:
         severity: str,
         title: str,
         body: str,
+        payload: dict[str, Any] | None = None,
     ) -> None:
         """Emit a generic notification via the wire protocol.
 
@@ -644,6 +817,9 @@ class BridgeServer:
             severity (str): IN: Severity level. OUT: Included.
             title (str): IN: Notification title. OUT: Included.
             body (str): IN: Notification body text. OUT: Included.
+            payload (dict[str, Any] | None): IN: Optional structured side-channel data
+                consumers can read (e.g. ``task_id`` for transient sub-agent stream
+                updates). Defaults to an empty dict on the wire.
         """
         self._emit_wire_event(
             "notification",
@@ -654,7 +830,7 @@ class BridgeServer:
                 "severity": severity,
                 "title": title,
                 "body": body,
-                "payload": {},
+                "payload": payload or {},
             },
         )
 
@@ -704,7 +880,9 @@ class BridgeServer:
             data = json.loads(path.read_text())
             self._session_id = data["session_id"]
             self._created_at = data.get("created_at", "")
-            self.state.messages = data.get("messages", [])
+            sanitized, replays = self._sanitize_resumed_messages(data.get("messages", []))
+            self.state.messages = sanitized
+            self._pending_resume_replays = replays
             self.state.turn_count = data.get("turn_count", 0)
             self.state.total_input_tokens = data.get("total_input_tokens", 0)
             self.state.total_output_tokens = data.get("total_output_tokens", 0)
@@ -713,6 +891,167 @@ class BridgeServer:
             return True
         except (json.JSONDecodeError, KeyError):
             return False
+
+    _RESUME_STUB_CONTENT = "[interrupted: pending replay]"
+
+    @classmethod
+    def _sanitize_resumed_messages(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Repair an interrupted message history so providers accept it.
+
+        Walks the message list and ensures every ``tool_calls`` entry on an
+        assistant message has a matching ``role="tool"`` reply before the next
+        non-tool message. Missing replies are filled with a stub carrying the
+        ``_RESUME_STUB_CONTENT`` marker so :meth:`_replay_pending_tool_calls`
+        can locate and replace them with real results once the executor is
+        ready. Orphan tool replies (no matching prior ``tool_call_id``) are
+        dropped.
+
+        Args:
+            messages (list[dict[str, Any]]): IN: Raw persisted messages from disk.
+
+        Returns:
+            tuple[list[dict[str, Any]], list[dict[str, Any]]]: OUT:
+                ``(sanitized_messages, pending_replays)``. Each pending replay
+                is ``{"tool_call_id": str, "name": str, "arguments": str}``.
+        """
+        if not messages:
+            return [], []
+
+        outstanding: dict[str, dict[str, str]] = {}
+        repaired: list[dict[str, Any]] = []
+        replays: list[dict[str, Any]] = []
+
+        def _flush_outstanding() -> None:
+            for tid, meta in list(outstanding.items()):
+                repaired.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "content": cls._RESUME_STUB_CONTENT,
+                    }
+                )
+                replays.append({"tool_call_id": tid, **meta})
+            outstanding.clear()
+
+        for msg in messages:
+            role = msg.get("role")
+
+            if role == "assistant":
+                if outstanding:
+                    _flush_outstanding()
+                repaired.append(msg)
+                for tc in msg.get("tool_calls") or []:
+                    tid = tc.get("id") or ""
+                    if not tid:
+                        continue
+                    fn = tc.get("function") or {}
+                    name = fn.get("name", "") or tc.get("name", "")
+                    raw_args = fn.get("arguments", "")
+                    if not raw_args:
+                        tc_input = tc.get("input")
+                        if isinstance(tc_input, dict):
+                            try:
+                                raw_args = json.dumps(tc_input)
+                            except Exception:
+                                raw_args = ""
+                        elif isinstance(tc_input, str):
+                            raw_args = tc_input
+                    outstanding[tid] = {"name": name, "arguments": raw_args or ""}
+                continue
+
+            if role == "tool":
+                tid = msg.get("tool_call_id", "")
+                if tid and tid in outstanding:
+                    outstanding.pop(tid, None)
+                    repaired.append(msg)
+                continue
+
+            if outstanding:
+                _flush_outstanding()
+            repaired.append(msg)
+
+        if outstanding:
+            _flush_outstanding()
+
+        return repaired, replays
+
+    def _replay_pending_tool_calls(self) -> None:
+        """Re-execute tool calls that had no captured result on resume.
+
+        Walks ``self._pending_resume_replays``, invokes the live tool executor
+        for each, and replaces the matching stub message (identified by
+        ``_RESUME_STUB_CONTENT``) with the real result. Skipped entirely when
+        ``XERXES_NO_RESUME_REPLAY=1`` — the stubs stay in place so the history
+        is still structurally valid, just opaque.
+
+        Replay errors are caught per-call and written into the message as
+        ``[replay error: ...]`` so one failing tool can't poison the resume.
+        """
+        if os.environ.get("XERXES_NO_RESUME_REPLAY") == "1":
+            self._pending_resume_replays = []
+            return
+        if self.tool_executor is None:
+            return
+
+        replays = self._pending_resume_replays
+        self._pending_resume_replays = []
+
+        if self._wire_mode:
+            self._emit_wire_notification(
+                notification_id=str(uuid.uuid4()),
+                category="subagent",
+                type_="resume_replay_begin",
+                severity="info",
+                title="",
+                body=f"Replaying {len(replays)} interrupted tool call(s) from previous session…",
+            )
+
+        by_tid: dict[str, dict[str, Any]] = {}
+        for entry in replays:
+            tid = entry.get("tool_call_id") or ""
+            if tid:
+                by_tid[tid] = entry
+
+        for msg in self.state.messages:
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("content") != self._RESUME_STUB_CONTENT:
+                continue
+            tid = msg.get("tool_call_id", "")
+            entry = by_tid.get(tid)
+            if entry is None:
+                continue
+
+            name = entry.get("name", "")
+            raw_args = entry.get("arguments", "")
+            try:
+                tool_input = json.loads(raw_args) if isinstance(raw_args, str) and raw_args else (raw_args or {})
+                if not isinstance(tool_input, dict):
+                    tool_input = {"value": tool_input}
+            except Exception as exc:
+                msg["content"] = f"[replay error: invalid arguments — {exc}]"
+                continue
+
+            try:
+                result = self.tool_executor(name, tool_input)
+            except Exception as exc:
+                msg["content"] = f"[replay error: {exc}]"
+                continue
+
+            msg["content"] = str(result) if result is not None else ""
+
+            if self._wire_mode:
+                self._emit_wire_notification(
+                    notification_id=str(uuid.uuid4()),
+                    category="subagent",
+                    type_="resume_replay_done",
+                    severity="info",
+                    title="",
+                    body=f"replayed {name}({tid[:12]}…) — {len(str(result or ''))} chars",
+                )
 
     def _list_sessions(self) -> list[dict[str, Any]]:
         """List all saved sessions with metadata previews.
@@ -796,6 +1135,13 @@ class BridgeServer:
         if api_key:
             self.config["api_key"] = api_key
 
+        if base_url and not params.get("model", ""):
+            try:
+                available = profiles.fetch_models(base_url, api_key)
+            except Exception:
+                available = []
+            self._auto_switch_stale_model(available)
+
         boot = bootstrap(model=self.config["model"])
         self.system_prompt = boot.system_prompt
 
@@ -808,11 +1154,18 @@ class BridgeServer:
         self.tool_schemas = registry.tool_schemas()
 
         try:
-            from ..agents.definitions import list_agent_definition_load_errors, list_agent_definitions
+            from ..agents.definitions import (
+                get_agent_definition,
+                list_agent_definition_load_errors,
+                list_agent_definitions,
+            )
 
             agent_defs = list_agent_definitions()
             agent_errors = list_agent_definition_load_errors()
             self.config["_agent_definitions"] = [d.name for d in agent_defs]
+            default_agent = get_agent_definition("default")
+            if default_agent:
+                self.tool_schemas = self._filter_tool_schemas_for_agent(self.tool_schemas, default_agent)
         except Exception as exc:
             agent_defs = []
             agent_errors = [f"Failed to load agent definitions: {exc}"]
@@ -882,7 +1235,11 @@ class BridgeServer:
         set_global_config(self.config)
         set_event_callback(self._on_agent_event)
 
-        provider = detect_provider(model)
+        if self._pending_resume_replays:
+            self._replay_pending_tool_calls()
+
+        active_model = self.config.get("model", "")
+        provider = detect_provider(active_model)
         skill_names = sorted(self._skill_registry.skill_names)
 
         self._emit_wire_init_done()
@@ -892,7 +1249,7 @@ class BridgeServer:
         self._emit(
             "ready",
             {
-                "model": model,
+                "model": active_model,
                 "provider": provider,
                 "tools": len(self.tool_schemas),
                 "permission_mode": self.config["permission_mode"],
@@ -1081,6 +1438,17 @@ class BridgeServer:
 
         self._emit("query_done", {})
         self._emit_state()
+
+    @staticmethod
+    def _filter_tool_schemas_for_agent(tool_schemas: list[dict[str, Any]], agent_def: Any) -> list[dict[str, Any]]:
+        """Filter model-visible tool schemas according to an agent definition."""
+        names = {schema.get("name", "") for schema in tool_schemas}
+        allowed = set(getattr(agent_def, "tools", None) or names)
+        explicit_allowed = getattr(agent_def, "allowed_tools", None)
+        if explicit_allowed:
+            allowed &= set(explicit_allowed)
+        allowed -= set(getattr(agent_def, "exclude_tools", None) or [])
+        return [schema for schema in tool_schemas if schema.get("name", "") in allowed]
 
     def _maybe_compact_context(self) -> None:
         """Auto-compact conversation context in legacy mode when near the token limit.
@@ -1430,6 +1798,12 @@ class BridgeServer:
     def handle_cancel(self) -> None:
         """Cancel the current query."""
         self._cancel = True
+        try:
+            from ..tools.claude_tools import _get_agent_manager
+
+            _get_agent_manager().cancel_all()
+        except Exception as exc:
+            logger.warning("Failed to cancel sub-agents: %s", exc)
 
     def handle_cancel_all(self) -> None:
         """Cancel the current query and all running sub-agents."""
@@ -1468,6 +1842,30 @@ class BridgeServer:
             return
         self._emit("models_list", {"models": models, "base_url": base_url})
 
+    def _switch_model(self, model: str, *, persist_active_profile: bool = True) -> None:
+        """Switch the runtime model and optionally persist it on the active profile."""
+        self.config["model"] = model
+        if persist_active_profile:
+            profiles.update_active_model(model)
+        set_global_config(self.config)
+        self._emit("model_changed", {"model": model, "provider": detect_provider(model)})
+        if self._wire_mode and self._initialized:
+            self._emit_wire_init_done()
+            self._emit_wire_status()
+
+    def _auto_switch_stale_model(self, available: list[str]) -> str:
+        """Use the sole fetched provider model when the configured model is stale."""
+        current = self.config.get("model", "")
+        if len(available) != 1:
+            return ""
+        model = available[0]
+        if current == model:
+            return ""
+        if current and current in available:
+            return ""
+        self._switch_model(model)
+        return model
+
     def handle_provider_save(self, params: dict[str, Any]) -> None:
         """Save a provider profile and activate it.
 
@@ -1499,6 +1897,10 @@ class BridgeServer:
         if api_key:
             self.config["api_key"] = api_key
         set_global_config(self.config)
+        self._emit("model_changed", {"model": model, "provider": detect_provider(model)})
+        if self._wire_mode and self._initialized:
+            self._emit_wire_init_done()
+            self._emit_wire_status()
 
         self._emit(
             "provider_saved",
@@ -2099,9 +2501,7 @@ class BridgeServer:
 
         if cmd == "model":
             if args:
-                self.config["model"] = args
-                set_global_config(self.config)
-                self._emit("model_changed", {"model": args, "provider": detect_provider(args)})
+                self._switch_model(args)
                 return f"Model set to: {args}"
 
             current = self.config.get("model", "(none)")
@@ -2115,6 +2515,12 @@ class BridgeServer:
                     lines.append(f"Could not fetch models from {base_url}/models: {exc}")
                     return "\n".join(lines)
                 if available:
+                    switched = self._auto_switch_stale_model(available)
+                    if switched:
+                        previous = current
+                        current = switched
+                        lines[0] = f"Current model: {current}"
+                        lines.append(f"Switched from unavailable model '{previous}' to '{current}'.")
                     lines.append(f"\nAvailable models ({len(available)}):")
                     for m in available:
                         marker = " (active)" if m == current else ""

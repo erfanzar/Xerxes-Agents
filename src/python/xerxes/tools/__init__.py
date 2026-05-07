@@ -317,7 +317,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "TempFileManager",
     ],
     "execution": ["ExecutePythonCode", "ExecuteShell", "ProcessManager"],
-    "web": ["GoogleSearch", "DuckDuckGoSearch", "WebScraper", "APIClient", "RSSReader", "URLAnalyzer"],
+    "web": ["DuckDuckGoSearch", "APIClient", "RSSReader", "URLAnalyzer"],
     "data": ["JSONProcessor", "CSVProcessor", "TextProcessor", "DataConverter", "DateTimeProcessor"],
     "ai": ["TextEmbedder", "TextSimilarity", "TextClassifier", "TextSummarizer", "EntityExtractor"],
     "math": ["Calculator", "StatisticalAnalyzer", "MathematicalFunctions", "NumberTheory", "UnitConverter"],

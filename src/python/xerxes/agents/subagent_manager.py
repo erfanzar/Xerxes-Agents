@@ -25,6 +25,7 @@ import os
 import queue
 import subprocess
 import tempfile
+import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ from typing import Any
 from .definitions import AgentDefinition
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 @dataclass
@@ -67,6 +70,7 @@ class SubAgentTask:
     _cancel_flag: bool = field(default=False, repr=False)
     _future: Future | None = field(default=None, repr=False)
     _inbox: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
         """Return a serializable snapshot of the task state.
@@ -276,6 +280,7 @@ class SubAgentManager:
             task.status = "failed"
             task.error = f"Max depth ({self.max_depth}) exceeded"
             task.result = task.error
+            task._done_event.set()
             return task
 
         eff_config = dict(config)
@@ -304,6 +309,7 @@ class SubAgentManager:
                 task.status = "failed"
                 task.error = "isolation='worktree' requires a git repository"
                 task.result = task.error
+                task._done_event.set()
                 return task
             try:
                 worktree_path, worktree_branch = _create_worktree(git_root)
@@ -319,6 +325,7 @@ class SubAgentManager:
                 task.status = "failed"
                 task.error = f"Failed to create worktree: {e}"
                 task.result = task.error
+                task._done_event.set()
                 return task
 
         runner = self._agent_runner
@@ -406,6 +413,8 @@ class SubAgentManager:
                 task.result = f"Error: {e}"
                 logger.error("Sub-agent %s failed: %s", task_id, e)
             finally:
+                if task.status in _TERMINAL_STATUSES:
+                    task._done_event.set()
                 emit_event(
                     "agent_done",
                     {
@@ -430,7 +439,7 @@ class SubAgentManager:
         Args:
             task_id (str): IN: Task identifier. OUT: Looked up in the task registry.
             timeout (float | None): IN: Maximum seconds to wait. OUT: Passed to
-                ``Future.result``.
+                the task completion event.
 
         Returns:
             SubAgentTask | None: OUT: The task object, or ``None`` if not found.
@@ -438,11 +447,9 @@ class SubAgentManager:
         task = self.tasks.get(task_id)
         if task is None:
             return None
-        if task._future is not None:
-            try:
-                task._future.result(timeout=timeout)
-            except Exception:
-                pass
+        if task._done_event.is_set():
+            return task
+        task._done_event.wait(timeout=timeout)
         return task
 
     def wait_all(
@@ -522,6 +529,9 @@ class SubAgentManager:
             return False
         if task.status in ("running", "pending"):
             task._cancel_flag = True
+            task.status = "cancelled"
+            task.result = task.result or "[Sub-agent was cancelled.]"
+            task._done_event.set()
             return True
         return False
 
@@ -535,6 +545,9 @@ class SubAgentManager:
         for task in self.tasks.values():
             if task.status in ("running", "pending"):
                 task._cancel_flag = True
+                task.status = "cancelled"
+                task.result = task.result or "[Sub-agent was cancelled.]"
+                task._done_event.set()
                 n += 1
         return n
 
@@ -662,6 +675,8 @@ def _run_streaming_loop(
                 {
                     "task_id": task.id,
                     "agent_name": task.name,
+                    "agent_type": task.agent_def_name,
+                    "tool_call_id": event.tool_call_id,
                     "tool_name": event.name,
                     "inputs": event.inputs,
                 },
@@ -672,6 +687,8 @@ def _run_streaming_loop(
                 {
                     "task_id": task.id,
                     "agent_name": task.name,
+                    "agent_type": task.agent_def_name,
+                    "tool_call_id": event.tool_call_id,
                     "tool_name": event.name,
                     "result": event.result[:500] if len(event.result) > 500 else event.result,
                     "permitted": event.permitted,

@@ -19,12 +19,10 @@ synthesis, and knowledge extraction tasks.
 
 from ..tools import (
     EntityExtractor,
-    GoogleSearch,
     ReadFile,
     TextProcessor,
     TextSummarizer,
     URLAnalyzer,
-    WebScraper,
     WriteFile,
 )
 from ..types import Agent
@@ -52,8 +50,6 @@ Research Principles:
 6. Identify knowledge gaps and uncertainties
 7. Present balanced perspectives on controversial topics""",
     functions=[
-        GoogleSearch,
-        WebScraper,
         URLAnalyzer,
         EntityExtractor,
         TextSummarizer,

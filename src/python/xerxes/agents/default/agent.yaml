@@ -11,7 +11,6 @@ agent:
     - GlobTool
     - GrepTool
     - ExecuteShell
-    - GoogleSearch
     - DuckDuckGoSearch
     - AgentTool
     - SpawnAgents

@@ -507,11 +507,12 @@ class _ToolCallBlock:
         """
         from .console import _prompt_text_to_ansi
 
-        elapsed = int(time.monotonic() - self._started_at)
+        elapsed_s = int(time.monotonic() - self._started_at)
+        duration = f"{elapsed_s}s" if self._status == "running" else f"{self._duration_ms:.0f}ms"
         icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self._status, "·")
         status_word = "Using" if self._status == "running" else "Used"
 
-        lines = [f"{icon} [bold cyan]{status_word} {self.name}[/bold cyan] ([dim]{self.key_arg}[/dim]) — {elapsed}ms"]
+        lines = [f"{icon} [bold cyan]{status_word} {self.name}[/bold cyan] ([dim]{self.key_arg}[/dim]) — {duration}"]
 
         sub_lines: list[str] = []
         for sub in self._sub_tool_calls[:MAX_SUBAGENT_TOOL_CALLS]:
@@ -565,7 +566,7 @@ class _NotificationBlock:
         self.title = title
         self.body = body
 
-    PROSE_CATEGORIES = ("slash", "history", "subagent")
+    PROSE_CATEGORIES = ("slash", "history")
 
     def compose(self) -> str:
         """Render the notification into an ANSI-escaped string.
@@ -674,11 +675,13 @@ class ApprovalRequestPanel:
             self._expanded = not self._expanded
 
     def compose(self) -> str:
-        """Render the approval panel into a markup string.
+        """Render the approval panel into an ANSI-escaped string.
 
         Returns:
-            str: OUT: Rich-style markup string for the panel.
+            str: OUT: Formatted approval panel with options and optional diff.
         """
+        from .console import _prompt_text_to_ansi
+
         lines = [
             "[yellow bold]? Permission required[/yellow bold]",
             "",
@@ -698,7 +701,7 @@ class ApprovalRequestPanel:
             lines.append("[dim]--- diff (Ctrl+E to collapse) ---[/dim]")
             lines.append(self.diff)
 
-        return "\n".join(lines)
+        return _prompt_text_to_ansi("\n".join(lines))
 
 
 class QuestionRequestPanel:

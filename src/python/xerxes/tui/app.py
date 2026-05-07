@@ -207,6 +207,7 @@ class XerxesTUI:
 
         self._approval_panel: ApprovalRequestPanel | None = None
         self._question_panel: QuestionRequestPanel | None = None
+        self._pending_approval_request_id: str | None = None
 
         self._pending_question_panel: QuestionRequestPanel | None = None
         self._pending_question_request_id: str | None = None
@@ -325,7 +326,23 @@ class XerxesTUI:
                 continue
 
             if raw_input == "/interrupt":
-                await self._client.cancel()
+                await self._interrupt_current_turn()
+                continue
+
+            if self._approval_panel is not None:
+                response = self._resolve_approval_input(raw_input)
+                if response is None:
+                    self._prompt.refresh_active_approval()
+                    continue
+                request_id = self._pending_approval_request_id or ""
+                self._approval_panel = None
+                self._current_request_id = None
+                self._pending_approval_request_id = None
+                self._prompt.clear_active_approval()
+                await self._client.permission_response(
+                    request_id=request_id,
+                    response=response,
+                )
                 continue
 
             if self._pending_question_panel is not None:
@@ -474,7 +491,12 @@ class XerxesTUI:
         if self._prompt:
             self._prompt.commit_streaming()
             self._prompt.clear_thinking()
+            if self._approval_panel is not None:
+                self._prompt.clear_active_approval()
             self._prompt.set_running(False)
+        self._approval_panel = None
+        self._current_request_id = None
+        self._pending_approval_request_id = None
         self._turn_done_event.set()
 
     def _on_step_begin(self, n: int) -> None:
@@ -518,6 +540,8 @@ class XerxesTUI:
             name (str): IN: Tool name. OUT: Stored in the tool block.
             arguments (str | None): IN: Raw tool arguments JSON. OUT: Stored in the tool block.
         """
+        if self._prompt:
+            self._prompt.commit_streaming()
         block = _ToolCallBlock(
             block_id=tool_call_id,
             tool_call_id=tool_call_id,
@@ -528,6 +552,7 @@ class XerxesTUI:
         self._tool_blocks[tool_call_id] = block
         if self._prompt:
             self._prompt.set_spinner_label(f"Running {name}")
+            self._prompt.reset_spinner_timer()
             self._prompt.set_active_tool(tool_call_id, block.compose)
 
     def _on_tool_call_part(self, arguments_part: str) -> None:
@@ -550,9 +575,11 @@ class XerxesTUI:
         """
         block = self._tool_blocks.get(tool_call_id)
         if block:
-            block.set_result(return_value, duration_ms=0.0)
+            display_value = "" if block.name in {"AgentTool", "TaskCreateTool", "SpawnAgents"} else return_value
+            block.set_result(display_value, duration_ms=0.0)
             if self._prompt:
                 self._prompt.commit_active_tool(tool_call_id, block.compose())
+                self._prompt.set_spinner_label("Thinking")
 
     def _on_subagent_event(self, event: Any) -> None:
         """Handle a nested subagent event associated with a parent tool call.
@@ -605,23 +632,41 @@ class XerxesTUI:
         )
         self._approval_panel = panel
         self._current_request_id = event.id
+        self._pending_approval_request_id = event.id
+        if self._prompt:
+            self._prompt.set_active_approval(panel)
+        return
 
-        from .console import print_markdown
+    def _resolve_approval_input(self, text: str) -> str | None:
+        """Resolve prompt input against the pending approval panel.
 
-        print_markdown(panel.compose())
+        Args:
+            text (str): IN: Raw user input or approval sentinel. OUT: Converted
+                to a bridge approval response.
 
-        response = self._wait_for_approval_response(panel)
+        Returns:
+            str | None: OUT: ``"approve"``, ``"approve_for_session"``,
+                ``"reject"``, or ``None`` if the panel should keep waiting.
+        """
+        panel = self._approval_panel
+        if panel is None or self._prompt is None:
+            return None
 
-        if self._client and self._current_request_id:
-            self._pending_permission_task = asyncio.create_task(
-                self._client.permission_response(
-                    request_id=self._current_request_id,
-                    response=response,
-                )
-            )
-
-        self._approval_panel = None
-        self._current_request_id = None
+        stripped = text.strip().lower()
+        if text == self._prompt.APPROVAL_SENTINEL or stripped in {"", "y", "yes", "approve"}:
+            return panel.selected_response
+        if stripped in {"a", "all", "approve_all", "approve-all", "session"}:
+            return "approve_for_session"
+        if stripped in {"r", "reject", "n", "no", "/cancel", "/abort"}:
+            return "reject"
+        if stripped in {"up", "k"}:
+            panel.move_cursor_up()
+            return None
+        if stripped in {"down", "j"}:
+            panel.move_cursor_down()
+            return None
+        self._prompt.append_line("\x1b[31mApproval response must be Enter, A, or R.\x1b[0m")
+        return None
 
     def _wait_for_approval_response(self, panel: ApprovalRequestPanel) -> str:
         """Block synchronously for an approval response from the user.
@@ -763,12 +808,30 @@ class XerxesTUI:
         return panel._answers
 
     def _on_notification(self, event: Any) -> None:
-        """Handle a notification event by appending it to the status.
+        """Handle a notification event.
+
+        Notifications with ``category == "subagent_stream"`` are treated as
+        transient live updates: the body replaces a per-task preview line that
+        sits above the input bar (next to the spinner) and is cleared when the
+        sub-agent finishes. Empty bodies signal "clear this preview". All other
+        notifications are appended to the prompt history as before.
 
         Args:
             event (Any): IN: Notification event with id, category, severity, title,
-                and body. OUT: Used to build and display a notification block.
+                body, and payload. OUT: Used to build and display a notification block.
         """
+        if event.category == "subagent_stream":
+            payload = getattr(event, "payload", {}) or {}
+            task_id = str(payload.get("task_id") or event.id)
+            label = str(payload.get("label") or "")
+            body = (event.body or "").strip()
+            if self._prompt is None:
+                return
+            if not body:
+                self._prompt.clear_subagent_preview(task_id)
+            else:
+                self._prompt.set_subagent_preview(task_id, label, body)
+            return
 
         block = _NotificationBlock(
             notification_id=event.id,
@@ -886,7 +949,13 @@ class XerxesTUI:
             try:
                 await asyncio.wait_for(self._turn_done_event.wait(), timeout=900)
             except TimeoutError:
+                await self._client.cancel()
+                self._approval_panel = None
+                self._current_request_id = None
+                self._pending_approval_request_id = None
                 if self._prompt:
+                    self._prompt.clear_active_approval()
+                    self._prompt.set_running(False)
                     self._prompt.append_line("\x1b[31mTurn timed out after 900s.\x1b[0m")
 
             if self._queued_inputs:
@@ -911,7 +980,7 @@ class XerxesTUI:
 
         cmd = text.split()[0].lower() if text.startswith("/") else ""
         if cmd == "/interrupt":
-            await self._client.cancel()
+            await self._interrupt_current_turn()
         elif cmd == "/btw":
             content = text[len("/btw") :].strip()
             if content:
@@ -945,9 +1014,9 @@ class XerxesTUI:
         cmd = text.split()[0].lower() if text else ""
 
         if cmd == "/cancel":
-            await self._client.cancel()
+            await self._interrupt_current_turn()
         elif cmd == "/cancel-all":
-            await self._client.cancel_all()
+            await self._interrupt_current_turn(cancel_all=True)
         elif cmd == "/btw":
             content = text[len("/btw") :].strip()
             await self._client.steer(content)
@@ -976,11 +1045,52 @@ class XerxesTUI:
                 cancellation of the current turn.
         """
         if self._running:
-            self._running = False
-            if self._client:
-                self._pending_cancel_task = asyncio.create_task(self._client.cancel())
-            if self._prompt:
-                self._prompt.set_running(False)
+            self._pending_cancel_task = asyncio.create_task(self._interrupt_current_turn())
+
+    async def _interrupt_current_turn(self, *, cancel_all: bool = True) -> None:
+        """Cancel the active turn and clear local running UI immediately."""
+        if self._client:
+            if cancel_all:
+                await self._client.cancel_all()
+            else:
+                await self._client.cancel()
+
+        self._approval_panel = None
+        self._current_request_id = None
+        self._pending_approval_request_id = None
+        self._pending_question_panel = None
+        self._pending_question_request_id = None
+        self._active_tool = None
+
+        if self._prompt:
+            self._prompt.clear_active_approval()
+            self._prompt.clear_active_question()
+            self._prompt.clear_active_tools()
+            self._prompt.clear_subagent_previews()
+            self._prompt.clear_thinking()
+            self._prompt.set_running(False)
+            self._prompt.append_line("\x1b[2mInterrupted.\x1b[0m")
+
+        self._turn_done_event.set()
+        await self._restart_bridge_after_interrupt()
+
+    async def _restart_bridge_after_interrupt(self) -> None:
+        """Restart the bridge subprocess so blocked provider streams are aborted."""
+        old_client = self._client
+        if old_client is not None:
+            await asyncio.to_thread(old_client.close)
+
+        self._client = BridgeClient(python_executable=self._python_executable)
+        self._client.spawn()
+        consumer = asyncio.create_task(self._event_consumer())
+        self._tasks.append(consumer)
+        await self._client.initialize(
+            model=self._model,
+            base_url=self._base_url,
+            api_key=self._api_key,
+            permission_mode=self._permission_mode,
+            resume_session_id=self._resume_session_id,
+        )
 
     async def wait_until_done(self) -> None:
         """Wait for all background tasks to complete.

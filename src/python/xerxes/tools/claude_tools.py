@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -289,6 +290,20 @@ def _get_agent_manager():
     return _agent_manager
 
 
+def _spawn_agents_wait_timeout(value: float | int | str | None = None) -> float | None:
+    """Return the bounded wait for SpawnAgents joins."""
+    raw = value if value is not None else os.environ.get("XERXES_SPAWN_AGENTS_WAIT_TIMEOUT", "120")
+    if raw is None:
+        return 120.0
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return 120.0
+    if timeout <= 0:
+        return None
+    return timeout
+
+
 class AgentTool(AgentBaseFn):
     """Agent tool.
 
@@ -340,7 +355,7 @@ class AgentTool(AgentBaseFn):
         )
 
         if wait and task.status not in ("failed",):
-            mgr.wait(task.id, timeout=300)
+            mgr.wait(task.id, timeout=None)
 
         if task.status == "completed" and task.result is not None:
             return task.result
@@ -431,6 +446,7 @@ class SpawnAgents(AgentBaseFn):
     def static_call(
         agents: list[dict[str, str]] | str,
         wait: bool = True,
+        timeout: float | None = None,
         **context_variables,
     ) -> str:
         """Static call.
@@ -438,6 +454,8 @@ class SpawnAgents(AgentBaseFn):
         Args:
             agents (list[dict[str, str]] | str): IN: agents. OUT: Consumed during execution.
             wait (bool, optional): IN: wait. Defaults to True. OUT: Consumed during execution.
+            timeout (float | None, optional): IN: max seconds to wait for all agents. Defaults to env or 120.
+                OUT: Prevents the parent tool call from occupying the TUI indefinitely.
             **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
             str: OUT: Result of the operation."""
@@ -477,14 +495,23 @@ class SpawnAgents(AgentBaseFn):
             return json.dumps([t.snapshot() for t in tasks], indent=2, default=str)
 
         results = []
+        wait_timeout = _spawn_agents_wait_timeout(timeout)
+        deadline = None if wait_timeout is None else time.monotonic() + wait_timeout
         for task in tasks:
-            mgr.wait(task.id, timeout=300)
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            mgr.wait(task.id, timeout=remaining)
             results.append(
                 {
+                    "id": task.id,
                     "name": task.name,
                     "status": task.status,
                     "result": task.result or "",
                     "error": task.error or "",
+                    "note": (
+                        "Agent is still running; use TaskGetTool or TaskListTool to check it later."
+                        if task.status in ("pending", "running")
+                        else ""
+                    ),
                 }
             )
         return json.dumps(results, indent=2, default=str)
@@ -1169,7 +1196,7 @@ your specialization ({target_agent}) is better suited for this work.
             name=f"handoff-{target_agent}",
         )
 
-        mgr.wait(task.id, timeout=300)
+        mgr.wait(task.id, timeout=None)
 
         if task.status == "completed" and task.result:
             return task.result
@@ -1314,7 +1341,7 @@ Rules:
                 tasks.append((step, task))
 
             for step, task in tasks:
-                mgr.wait(task.id, timeout=300)
+                mgr.wait(task.id, timeout=None)
                 result = task.result or f"(failed: {task.error})"
                 completed[step["id"]] = result
                 results.append(f"\n## Step {step['id']} [{step['agent']}]: {step['description']}")

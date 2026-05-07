@@ -170,6 +170,25 @@ def update_sampling(name: str, sampling: dict[str, Any]) -> dict[str, Any] | Non
     return store["profiles"][name]
 
 
+def update_active_model(model: str) -> dict[str, Any] | None:
+    """Update the active profile's default model.
+
+    Args:
+        model (str): IN: Model identifier to persist. OUT: Stored on the active profile.
+
+    Returns:
+        dict[str, Any] | None: OUT: Updated active profile, or ``None`` when no
+            active profile exists.
+    """
+    store = _load_store()
+    active = store.get("active")
+    if not active or active not in store.get("profiles", {}):
+        return None
+    store["profiles"][active]["model"] = model
+    _save_store(store)
+    return store["profiles"][active]
+
+
 def delete_profile(name: str) -> bool:
     """Delete a profile by name.
 

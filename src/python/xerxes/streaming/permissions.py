@@ -60,6 +60,7 @@ SAFE_TOOLS: frozenset[str] = frozenset(
         "TaskGetTool",
         "TaskOutputTool",
         "ToolSearchTool",
+        "AskUserQuestionTool",
         "JSONProcessor",
         "CSVProcessor",
         "TextProcessor",
@@ -73,6 +74,7 @@ SAFE_TOOLS: frozenset[str] = frozenset(
 
 _SAFE_BASH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\s*(ls|pwd|whoami|date|uname|cat|head|tail|wc|file|which|type|echo)\b"),
+    re.compile(r"^\s*cd(?:\s+(?:--\s+)?[^\n;&|`$()<>]+)?\s*(?:&&\s*pwd\s*)?$"),
     re.compile(r"^\s*git\s+(status|log|diff|branch|show|remote|tag|stash\s+list)\b"),
     re.compile(r"^\s*(find|grep|rg|fd|ag|ack|tree)\b"),
     re.compile(r"^\s*(python|python3|node|ruby|go|cargo|rustc)\s+--version\b"),
@@ -97,6 +99,12 @@ def is_safe_bash(command: str) -> bool:
         command (str): IN: command. OUT: Consumed during execution.
     Returns:
         bool: OUT: Result of the operation."""
+
+    command = command.strip()
+
+    cd_prefix = re.match(r"^cd(?:\s+(?:--\s+)?[^\n;&|`$()<>]+)?\s*&&\s*(.+)$", command)
+    if cd_prefix:
+        return is_safe_bash(cd_prefix.group(1))
 
     for pattern in _DANGEROUS_BASH_PATTERNS:
         if pattern.search(command):

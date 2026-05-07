@@ -152,7 +152,7 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Cite specific file paths and line numbers\n"
             "- Be concise and focused\n"
         ),
-        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir", "GoogleSearch"],
+        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir", "DuckDuckGoSearch"],
         source="built-in",
     ),
     "tester": AgentDefinition(
