@@ -47,13 +47,14 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return text[:max_len].rstrip("-") or "skill"
 
 
-def _summarise_args(args: dict[str, tp.Any], max_chars: int = 120) -> str:
+def _summarise_args(args: dict[str, tp.Any], max_chars: int | None = None) -> str:
     """Format a dict of arguments into a compact human-readable string.
 
     Args:
         args (dict[str, tp.Any]): IN: Tool arguments. OUT: Stringified and
-            truncated.
-        max_chars (int): IN: Maximum output length. OUT: Enforced.
+            optionally truncated.
+        max_chars (int | None): IN: Optional maximum output length. OUT:
+            Enforced only when supplied.
 
     Returns:
         str: OUT: Compact summary like ``"key=value, ..."``.
@@ -68,7 +69,7 @@ def _summarise_args(args: dict[str, tp.Any], max_chars: int = 120) -> str:
             sval = sval[:27] + "..."
         parts.append(f"{k}={sval}")
     out = ", ".join(parts)
-    if len(out) > max_chars:
+    if max_chars is not None and len(out) > max_chars:
         out = out[: max_chars - 3] + "..."
     return out
 

@@ -36,6 +36,12 @@ from .definitions import AgentDefinition
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_SUBAGENT_BLOCKED_TOOLS = {
+    "AgentTool",
+    "SpawnAgents",
+    "TaskCreateTool",
+    "SkillTool",
+}
 
 
 @dataclass
@@ -204,7 +210,7 @@ class SubAgentManager:
     optionally be isolated in git worktrees.
     """
 
-    def __init__(self, max_concurrent: int = 5, max_depth: int = 5):
+    def __init__(self, max_concurrent: int = 8, max_depth: int = 5):
         """Initialize the sub-agent manager.
 
         Args:
@@ -221,6 +227,27 @@ class SubAgentManager:
         self._agent_runner: Any = None
         self._tool_executor: Any = None
         self._tool_schemas: list[dict[str, Any]] | None = None
+
+    def ensure_capacity(self, min_concurrent: int) -> bool:
+        """Increase worker capacity before a new batch is submitted.
+
+        ``ThreadPoolExecutor`` cannot resize in place, so this swaps in a new
+        executor for future submissions. Existing and queued futures in the old
+        executor are left to finish.
+
+        Args:
+            min_concurrent (int): IN: Minimum worker count needed. OUT: Used to
+                decide whether to replace the executor.
+
+        Returns:
+            bool: OUT: ``True`` if capacity is now at least ``min_concurrent``.
+        """
+        if min_concurrent <= self.max_concurrent:
+            return True
+        self._pool.shutdown(wait=False, cancel_futures=False)
+        self.max_concurrent = min_concurrent
+        self._pool = ThreadPoolExecutor(max_workers=min_concurrent)
+        return True
 
     def set_runner(self, runner: Any) -> None:
         """Set the agent runner callable used to execute sub-agent prompts.
@@ -638,14 +665,20 @@ def _run_streaming_loop(
 
     state = AgentState()
     output_parts: list[str] = []
+    eff_tool_schemas, eff_tool_executor = _filter_subagent_tools(
+        tool_schemas=tool_schemas,
+        tool_executor=tool_executor,
+        config=config,
+        is_subagent=depth > 0,
+    )
 
     for event in run(
         user_message=prompt,
         state=state,
         config=config,
         system_prompt=system_prompt,
-        tool_executor=tool_executor,
-        tool_schemas=tool_schemas,
+        tool_executor=eff_tool_executor,
+        tool_schemas=eff_tool_schemas,
         depth=depth,
         cancel_check=lambda: task._cancel_flag,
     ):
@@ -697,6 +730,47 @@ def _run_streaming_loop(
             )
 
     return "".join(output_parts)
+
+
+def _filter_subagent_tools(
+    *,
+    tool_schemas: list[dict[str, Any]] | None,
+    tool_executor: Any,
+    config: dict[str, Any],
+    is_subagent: bool,
+) -> tuple[list[dict[str, Any]] | None, Any]:
+    """Apply agent-definition tool limits and block recursive delegation tools.
+
+    Sub-agents should execute the task assigned by the parent. They should not
+    inherit top-level orchestration tools that let them spawn their own agent
+    swarms or re-trigger active skills such as deepscan.
+    """
+    if tool_schemas is None:
+        return None, tool_executor
+
+    all_names = {str(schema.get("name", "")) for schema in tool_schemas if schema.get("name")}
+    whitelist = config.get("_tools_whitelist")
+    allowed_tools = config.get("_tools_allowed")
+    excluded_tools = set(config.get("_tools_excluded") or [])
+
+    allowed = set(whitelist) if whitelist else all_names.copy()
+    if allowed_tools:
+        allowed &= set(allowed_tools)
+    allowed -= excluded_tools
+
+    if is_subagent and not config.get("_allow_subagent_delegation"):
+        allowed -= _SUBAGENT_BLOCKED_TOOLS
+
+    filtered_schemas = [schema for schema in tool_schemas if schema.get("name", "") in allowed]
+    if allowed == all_names or tool_executor is None:
+        return filtered_schemas, tool_executor
+
+    def _filtered_executor(tool_name: str, tool_input: dict[str, Any]) -> str:
+        if tool_name not in allowed:
+            return f"Error: tool '{tool_name}' is not allowed for this agent."
+        return tool_executor(tool_name, tool_input)
+
+    return filtered_schemas, _filtered_executor
 
 
 __all__ = [

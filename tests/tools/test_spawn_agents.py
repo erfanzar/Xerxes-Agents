@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 
-from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask
+from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask, _filter_subagent_tools
 from xerxes.tools import claude_tools
 from xerxes.tools.claude_tools import SpawnAgents
 
@@ -51,6 +52,68 @@ def test_spawn_agents_bounded_wait_returns_pending_snapshots(monkeypatch):
     mgr.shutdown()
 
 
+def test_spawn_agents_grows_pool_to_batch_size(monkeypatch):
+    agent_count = 12
+    ready = threading.Barrier(agent_count + 1)
+    release = threading.Event()
+    started: list[str] = []
+
+    def runner(prompt, config, system_prompt, depth, cancel_check):
+        started.append(prompt)
+        ready.wait(timeout=2)
+        release.wait(timeout=2)
+        return f"done: {prompt}"
+
+    mgr = SubAgentManager(max_concurrent=5)
+    mgr.set_runner(runner)
+    monkeypatch.setattr(claude_tools, "_agent_manager", mgr)
+
+    specs = [{"prompt": f"agent-{idx}", "name": f"a{idx}"} for idx in range(agent_count)]
+    raw = SpawnAgents.static_call(specs, wait=False)
+
+    ready.wait(timeout=2)
+    release.set()
+    rows = json.loads(raw)
+
+    assert mgr.max_concurrent == agent_count
+    assert len(rows) == agent_count
+    assert len(started) == agent_count
+
+    mgr.shutdown()
+
+
+def test_subagent_manager_can_grow_capacity_while_tasks_are_active():
+    release = threading.Event()
+    started: list[str] = []
+
+    def runner(prompt, config, system_prompt, depth, cancel_check):
+        started.append(prompt)
+        release.wait(timeout=2)
+        return f"done: {prompt}"
+
+    mgr = SubAgentManager(max_concurrent=1)
+    mgr.set_runner(runner)
+    first = mgr.spawn(prompt="first", config={}, system_prompt="sys")
+    time.sleep(0.05)
+
+    assert first.status == "running"
+    assert mgr.ensure_capacity(3) is True
+
+    more = [mgr.spawn(prompt=f"next-{idx}", config={}, system_prompt="sys") for idx in range(2)]
+    deadline = time.monotonic() + 2
+    while len(started) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    release.set()
+
+    assert mgr.max_concurrent == 3
+    assert set(started) == {"first", "next-0", "next-1"}
+    assert mgr.wait(first.id, timeout=2) is first
+    for task in more:
+        assert mgr.wait(task.id, timeout=2) is task
+
+    mgr.shutdown()
+
+
 def test_cancel_all_wakes_waiting_spawn_agents(monkeypatch):
     def runner(prompt, config, system_prompt, depth, cancel_check):
         while not cancel_check():
@@ -72,3 +135,40 @@ def test_cancel_all_wakes_waiting_spawn_agents(monkeypatch):
     assert task.status == "cancelled"
 
     mgr.shutdown()
+
+
+def test_subagent_tool_filter_blocks_recursive_delegation_tools():
+    schemas = [
+        {"name": "ReadFile"},
+        {"name": "SpawnAgents"},
+        {"name": "AgentTool"},
+        {"name": "SkillTool"},
+    ]
+    calls: list[str] = []
+
+    def executor(tool_name, tool_input):
+        calls.append(tool_name)
+        return "ok"
+
+    filtered, filtered_executor = _filter_subagent_tools(
+        tool_schemas=schemas,
+        tool_executor=executor,
+        config={},
+        is_subagent=True,
+    )
+
+    assert [schema["name"] for schema in filtered or []] == ["ReadFile"]
+    assert filtered_executor("ReadFile", {}) == "ok"
+    assert filtered_executor("SpawnAgents", {}) == "Error: tool 'SpawnAgents' is not allowed for this agent."
+    assert calls == ["ReadFile"]
+
+
+def test_subagent_system_prompt_does_not_include_active_skills_by_default(monkeypatch):
+    class _Skill:
+        def to_prompt_section(self):
+            return "DEEPSCAN SpawnAgents instructions"
+
+    monkeypatch.setattr(claude_tools, "get_active_skills", lambda: ["deepscan"], raising=False)
+    monkeypatch.setattr(claude_tools, "_skill_registry", {"deepscan": _Skill()}, raising=False)
+
+    assert claude_tools._build_subagent_system_prompt("base") == "base"

@@ -406,7 +406,7 @@ class BridgeServer:
         buffers = self._subagent_text_buffers if kind == "text" else self._subagent_thinking_buffers
         cap = self.SUBAGENT_PREVIEW_CHARS
         with self._subagent_buffer_lock:
-            merged = (buffers.get(task_id, "") + text)
+            merged = buffers.get(task_id, "") + text
             if len(merged) > cap * 2:
                 merged = merged[-cap * 2 :]
             buffers[task_id] = merged
@@ -1374,9 +1374,7 @@ class BridgeServer:
 
             elif isinstance(event, PermissionRequest):
                 if self._wire_mode:
-                    self._emit_wire_permission_request(
-                        self._current_tool_call_id, event.tool_name, event.description
-                    )
+                    self._emit_wire_permission_request(self._current_tool_call_id, event.tool_name, event.description)
 
                     event.granted = self._wait_for_permission()
                 else:

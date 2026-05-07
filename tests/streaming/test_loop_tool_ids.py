@@ -49,3 +49,48 @@ def test_run_assigns_tool_id_when_provider_omits_one() -> None:
     assert starts[0].tool_call_id
     assert ends[0].tool_call_id == starts[0].tool_call_id
 
+
+def test_run_preserves_full_tool_result_for_model_context() -> None:
+    original = loop._stream_llm
+    long_result = "x" * 5000
+    calls = {"n": 0}
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {
+                        "id": "call_read",
+                        "name": "ReadFile",
+                        "input": {"file_path": "big.txt"},
+                    }
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("done")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: long_result,
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+    tool_messages = [msg for msg in state.messages if msg.get("role") == "tool"]
+
+    assert ends[0].result == long_result
+    assert tool_messages[0]["content"] == long_result

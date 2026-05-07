@@ -20,4 +20,3 @@ def test_wire_tool_result_reuses_generated_tool_call_id() -> None:
 
     assert tool_call["id"]
     assert tool_result["tool_call_id"] == tool_call["id"]
-

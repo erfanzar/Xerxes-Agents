@@ -73,4 +73,3 @@ def test_subagent_done_only_clears_transient_preview() -> None:
     assert len(payloads) == 1
     assert payloads[0]["category"] == "subagent_stream"
     assert payloads[0]["body"] == ""
-

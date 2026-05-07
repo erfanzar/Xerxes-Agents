@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from xerxes.tui.app import XerxesTUI
+from xerxes.tui.blocks import _ToolCallBlock
 
 
 class _PromptStub:
@@ -35,3 +36,15 @@ def test_agent_tool_result_is_not_rendered_in_tui_history() -> None:
     assert "Used AgentTool" in prompt.committed[0][1]
     assert "large completed sub-agent output" not in prompt.committed[0][1]
 
+
+def test_tool_block_renders_all_subagent_tool_calls_without_overflow_cap() -> None:
+    block = _ToolCallBlock("block", "parent", "SpawnAgents", '{"agents":[]}')
+
+    for idx in range(12):
+        block.append_sub_tool_call(f"sub-{idx}", f"Tool{idx}", "{}")
+
+    rendered = block.compose()
+
+    for idx in range(12):
+        assert f"Tool{idx}" in rendered
+    assert "more sub-agent tool calls" not in rendered

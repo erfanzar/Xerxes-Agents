@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 __CTX_VARS_NAME__ = "context_variables"
 SEP = "  "
+
+
 def add_depth(x, ep=False):
     return SEP + x.replace("\n", f"\n{SEP}") if ep else x.replace("\n", f"\n{SEP}")
 
