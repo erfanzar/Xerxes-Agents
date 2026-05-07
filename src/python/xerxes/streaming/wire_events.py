@@ -441,12 +441,14 @@ class ToolResult(WireEvent):
         event_type (str): IN: fixed "tool_result". OUT: identifies the event kind.
         tool_call_id (str): IN: identifier of the matching tool call. OUT: used for correlation.
         return_value (str): IN: serialised return value. OUT: displayed or fed back to the model.
+        duration_ms (float): IN: tool execution duration. OUT: displayed in the UI.
         display_blocks (list[DisplayBlock]): IN: rich display blocks. OUT: rendered in the UI.
     """
 
     event_type: str = "tool_result"
     tool_call_id: str = ""
     return_value: str = ""
+    duration_ms: float = 0.0
     display_blocks: list[DisplayBlock] = field(default_factory=list)
 
 

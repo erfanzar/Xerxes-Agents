@@ -37,21 +37,31 @@ if tp.TYPE_CHECKING:
 
 
 class AgentBaseFn(ABCMeta):
-    """Agent base fn.
+    """Abstract base class for agent-defined static function calls.
 
-    Inherits from: ABCMeta
+    Subclass this to define a named tool that can be registered with an agent.
+    The subclass must implement ``static_call``, which is the entry point invoked
+    when the tool is selected by the LLM.
+
+    Inherits from:
+        ABCMeta: Enables ``@abstractmethod`` decorator enforcement.
     """
 
     @staticmethod
     @abstractmethod
     def static_call(*args, **kwargs) -> tp.Any:
-        """Static call.
+        """Entry point invoked when this tool is selected by the LLM.
+
+        Implement this method in a subclass to define the behavior of the tool.
+        It is called with the arguments extracted from the LLM's function call request.
 
         Args:
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            *args: Positional arguments provided by the LLM.
+            **kwargs: Keyword arguments provided by the LLM.
+
         Returns:
-            tp.Any: OUT: Result of the operation."""
+            tp.Any: The result of the tool execution, which is passed back to the LLM.
+        """
         ...
 
 
@@ -59,12 +69,17 @@ _WRAPPED_MARKER = "__xerxes_wrapped_static_call__"
 
 
 def _wrap_static_call(cls: type[AgentBaseFn]) -> tp.Callable:
-    """Internal helper to wrap static call.
+    """Wrap an AgentBaseFn subclass so it can be used as a plain callable.
+
+    Transforms ``cls.static_call`` into a standalone callable (the ``__call__``
+    proxy) while preserving the function's name, docstring, and module metadata.
 
     Args:
-        cls: IN: The class. OUT: Used for class-level operations.
+        cls: The ``AgentBaseFn`` subclass to wrap.
+
     Returns:
-        tp.Callable: OUT: Result of the operation."""
+        tp.Callable: A callable that delegates to ``cls.static_call``.
+    """
 
     if getattr(cls, _WRAPPED_MARKER, False):
         return cls
@@ -73,13 +88,7 @@ def _wrap_static_call(cls: type[AgentBaseFn]) -> tp.Callable:
 
     @functools.wraps(static_fn)
     def _proxy(*args, **kwargs):
-        """Internal helper to proxy.
-
-        Args:
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Proxy callable that delegates to ``cls.static_call``."""
         return static_fn(*args, **kwargs)
 
     _proxy.__name__ = cls.__name__
@@ -94,44 +103,50 @@ AgentFunction = tp.Callable[[], tp.Union[str, "Agent", dict]] | AgentBaseFn
 
 
 class Agent(BaseModel):
-    """Agent.
+    """Configuration for an agent, including its identity, tools, and sampling parameters.
 
-    Inherits from: BaseModel
+    An ``Agent`` wraps the system prompt, tools, capabilities, and LLM sampling
+    settings needed to run an autonomous agent. It can be registered with a
+    ``Xerxes`` instance and executed with a user prompt.
+
+    Inherits from:
+        BaseModel: Pydantic base model for serialization and validation.
 
     Attributes:
-        model (str | None): model.
-        id (str | None): id.
-        name (str | None): name.
-        instructions (str | tp.Callable[[], str] | None): instructions.
-        rules (list[str] | tp.Callable[[], list[str]] | None): rules.
-        examples (list[str] | None): examples.
-        functions (list[tp.Callable | AgentBaseFn]): functions.
-        capabilities (list[AgentCapability]): capabilities.
-        function_call_strategy (FunctionCallStrategy): function call strategy.
-        tool_choice (str | list[str] | None): tool choice.
-        parallel_tool_calls (bool): parallel tool calls.
-        function_timeout (float | None): function timeout.
-        max_function_retries (int): max function retries.
-        top_p (float): top p.
-        max_tokens (int): max tokens.
-        temperature (float): temperature.
-        top_k (int): top k.
-        min_p (float): min p.
-        presence_penalty (float): presence penalty.
-        frequency_penalty (float): frequency penalty.
-        repetition_penalty (float): repetition penalty.
-        extra_body (dict | None): extra body.
-        stop (str | list[str] | None): stop.
-        auto_compact (bool): auto compact.
-        compact_threshold (float): compact threshold.
-        compact_target (float): compact target.
-        max_context_tokens (int | None): max context tokens.
-        compaction_strategy (CompactionStrategy): compaction strategy.
-        preserve_system_prompt (bool): preserve system prompt.
-        preserve_recent_messages (int): preserve recent messages.
-        switch_triggers (list[AgentSwitchTrigger]): switch triggers.
-        fallback_agent_id (str | None): fallback agent id.
-        model_config (Any): model config."""
+        model: Identifier for the LLM (e.g., ``"gpt-4"``).
+        id: Unique identifier for the agent.
+        name: Human-readable display name.
+        instructions: System prompt text or a callable that returns one.
+        rules: Behavioral rules or a callable returning rule strings.
+        examples: Example conversations embedded in the prompt.
+        functions: Callable tools or ``AgentBaseFn`` subclasses available to this agent.
+        capabilities: Declared capabilities for routing and introspection.
+        function_call_strategy: Strategy for selecting and ordering tool calls.
+        tool_choice: Force a specific tool or set of tools.
+        parallel_tool_calls: Whether to issue multiple tool calls concurrently.
+        function_timeout: Seconds before a tool call is considered stalled.
+        max_function_retries: Number of retries on tool failure.
+        top_p: Nucleus sampling threshold.
+        max_tokens: Maximum tokens in the LLM response.
+        temperature: Sampling temperature controlling randomness.
+        top_k: Top-k sampling cutoff.
+        min_p: Minimum probability threshold for token sampling.
+        presence_penalty: Penalty for repeating tokens already in the prompt.
+        frequency_penalty: Penalty proportional to token frequency in prior output.
+        repetition_penalty: General repetition penalty multiplier.
+        extra_body: Additional provider-specific parameters.
+        stop: Stop sequences that halt generation.
+        auto_compact: Whether to auto-compact conversation history.
+        compact_threshold: Token ratio that triggers compaction.
+        compact_target: Target token ratio after compaction.
+        max_context_tokens: Maximum context token budget for compaction.
+        compaction_strategy: Strategy for compaction (summarize, truncate, etc.).
+        preserve_system_prompt: Whether to keep the system prompt during compaction.
+        preserve_recent_messages: Number of recent messages to preserve during compaction.
+        switch_triggers: Conditions that cause this agent to hand off to another.
+        fallback_agent_id: Agent to switch to when triggers fire.
+        model_config: Pydantic model configuration.
+    """
 
     model: str | None = None
     id: str | None = None
@@ -173,11 +188,10 @@ class Agent(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def set_model(self, model_id: str) -> None:
-        """Set the model.
+        """Set the model identifier for this agent.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model_id (str): IN: model id. OUT: Consumed during execution."""
+            model_id: The model identifier to assign (e.g., ``"gpt-4"``)."""
 
         self.model = model_id
 
@@ -192,18 +206,21 @@ class Agent(BaseModel):
         frequency_penalty: float | None = None,
         repetition_penalty: float | None = None,
     ) -> None:
-        """Set the sampling params.
+        """Set LLM sampling parameters for this agent.
+
+        Only provided arguments are updated; omitted parameters retain their
+        current values.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            top_k (int | None, optional): IN: top k. Defaults to None. OUT: Consumed during execution.
-            min_p (float | None, optional): IN: min p. Defaults to None. OUT: Consumed during execution.
-            presence_penalty (float | None, optional): IN: presence penalty. Defaults to None. OUT: Consumed during execution.
-            frequency_penalty (float | None, optional): IN: frequency penalty. Defaults to None. OUT: Consumed during execution.
-            repetition_penalty (float | None, optional): IN: repetition penalty. Defaults to None. OUT: Consumed during execution."""
+            top_p: Nucleus sampling threshold.
+            max_tokens: Maximum tokens in the LLM response.
+            temperature: Sampling temperature.
+            top_k: Top-k sampling cutoff.
+            min_p: Minimum probability threshold.
+            presence_penalty: Penalty for tokens already in the prompt.
+            frequency_penalty: Penalty proportional to prior token frequency.
+            repetition_penalty: General repetition penalty multiplier.
+        """
 
         if top_p is not None:
             self.top_p = top_p
@@ -224,13 +241,20 @@ class Agent(BaseModel):
 
     @field_validator("functions")
     def _resolve_static_calls(cls, v: list) -> list[tp.Callable]:
-        """Internal helper to resolve static calls.
+        """Validate and normalize the functions list.
+
+        Wraps any ``AgentBaseFn`` subclasses in a callable proxy and checks
+        for duplicate function names.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            v (list): IN: v. OUT: Consumed during execution.
+            v: The raw list of function items from the model field.
+
         Returns:
-            list[tp.Callable]: OUT: Result of the operation."""
+            A list of validated, deduplicated callables.
+
+        Raises:
+            ValueError: If a function is not callable or a duplicate name is detected.
+        """
 
         processed: list[tp.Callable] = []
         seen_names: set[str] = set()
@@ -249,42 +273,41 @@ class Agent(BaseModel):
         return processed
 
     def add_capability(self, capability: AgentCapability) -> None:
-        """Add capability.
+        """Add a capability to this agent.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (AgentCapability): IN: capability. OUT: Consumed during execution."""
+            capability: The capability to register with this agent.
+        """
 
         self.capabilities.append(capability)
 
     def has_capability(self, capability_name: str) -> bool:
-        """Check whether capability.
+        """Check whether this agent declares a given capability.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability_name (str): IN: capability name. OUT: Consumed during execution.
+            capability_name: The name of the capability to check.
+
         Returns:
-            bool: OUT: Result of the operation."""
+            True if a matching capability is found, False otherwise.
+        """
 
         return any(cap.name == capability_name for cap in self.capabilities)
 
     def get_available_functions(self) -> list[str]:
-        """Retrieve the available functions.
+        """Return the public names of all available functions.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            list[str]: OUT: Result of the operation."""
+            A list of function names as strings.
+        """
 
         return [get_callable_public_name(func) for func in self.functions]
 
     def get_functions_mapping(self) -> dict[str, tp.Callable]:
-        """Retrieve the functions mapping.
+        """Return a mapping from function names to callables.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Callable]: OUT: Result of the operation."""
+            A dictionary mapping each function's public name to the callable itself.
+        """
 
         return {get_callable_public_name(func): func for func in self.functions}
 
@@ -293,12 +316,14 @@ class Agent(BaseModel):
         mcp_servers: MCPManager | MCPServerConfig | list,
         server_names: list[str] | None = None,
     ) -> None:
-        """Attach mcp.
+        """Attach MCP servers and expose their tools to this agent.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            mcp_servers (MCPManager | MCPServerConfig | list): IN: mcp servers. OUT: Consumed during execution.
-            server_names (list[str] | None, optional): IN: server names. Defaults to None. OUT: Consumed during execution."""
+            mcp_servers: An ``MCPManager``, a single ``MCPServerConfig``, or a list
+                of configurations.
+            server_names: Optional subset of server names to include. All servers
+                are included if not specified.
+        """
 
         from xerxes.core.utils import run_sync
         from xerxes.mcp import MCPManager, MCPServerConfig
@@ -327,14 +352,16 @@ class Agent(BaseModel):
 
 
 class Response(BaseModel):
-    """Response.
+    """The result of an agent execution, including messages and context.
 
-    Inherits from: BaseModel
+    Inherits from:
+        BaseModel: Pydantic base model for serialization and validation.
 
     Attributes:
-        messages (list): messages.
-        agent (Agent | None): agent.
-        context_variables (dict): context variables."""
+        messages: The list of messages exchanged during the execution.
+        agent: The agent that produced this response.
+        context_variables: Arbitrary key-value context carried through execution.
+    """
 
     messages: list = Field(default_factory=list)
     agent: Agent | None = None
@@ -342,14 +369,16 @@ class Response(BaseModel):
 
 
 class Result(BaseModel):
-    """Result.
+    """A simple result wrapper with a value, agent reference, and context.
 
-    Inherits from: BaseModel
+    Inherits from:
+        BaseModel: Pydantic base model for serialization and validation.
 
     Attributes:
-        value (str): value.
-        agent (Agent | None): agent.
-        context_variables (dict): context variables."""
+        value: The primary result value as a string.
+        agent: The agent that produced this result.
+        context_variables: Arbitrary key-value context carried through execution.
+    """
 
     value: str = ""
     agent: Agent | None = None

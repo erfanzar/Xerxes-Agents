@@ -208,8 +208,8 @@ class CortexAgent:
         """Return the internal agent's function list.
 
         Returns:
-            list[Callable]: The list of callable tools/functions.
-                OUT: Empty if the internal agent is not initialized.
+            list[Callable]: The list of callable tools/functions. Empty if the
+                internal agent is not initialized.
         """
 
         if self._internal_agent is None:
@@ -222,8 +222,6 @@ class CortexAgent:
 
         Args:
             value (list[Callable] | None): The new function list.
-                IN: Replaces the existing functions.
-                OUT: Assigned to ``self._internal_agent.functions``.
         """
 
         if self._internal_agent is None:
@@ -235,7 +233,6 @@ class CortexAgent:
 
         Returns:
             dict[str, Any] | None: Compaction metrics, or ``None`` if disabled.
-                OUT: Delegated to ``AutoCompactAgent.get_statistics``.
         """
 
         if self._auto_compact_agent:
@@ -247,7 +244,6 @@ class CortexAgent:
 
         Returns:
             dict[str, Any] | None: Usage metrics, or ``None`` if disabled.
-                OUT: Delegated to ``AutoCompactAgent.check_usage``.
         """
 
         if self._auto_compact_agent:
@@ -259,7 +255,6 @@ class CortexAgent:
 
         Returns:
             bool: ``True`` if the request may proceed, ``False`` if rate limited.
-                OUT: Compares recent requests against ``max_rpm``.
         """
 
         if not self.max_rpm:
@@ -287,8 +282,6 @@ class CortexAgent:
 
         Args:
             inputs (dict): Mapping of template variable names to values.
-                IN: Applied to the original (uninterpolated) versions of text fields.
-                OUT: Updates the agent's descriptive fields and internal agent instructions.
         """
 
         if self._original_role is None:
@@ -315,11 +308,7 @@ class CortexAgent:
 
         Args:
             mcp_servers (Any): An ``MCPManager``, ``MCPServerConfig``, or list of configs.
-                IN: Used to set up MCP tool access.
-                OUT: Tools are added to the internal agent via ``add_mcp_tools_to_agent``.
             server_names (list[str] | None): Optional subset of server names to include.
-                IN: Filters which MCP servers contribute tools.
-                OUT: Passed to ``add_mcp_tools_to_agent``.
 
         Raises:
             TypeError: If *mcp_servers* is not a recognized type.
@@ -361,12 +350,9 @@ class CortexAgent:
 
         Args:
             start_time (float): The execution start timestamp.
-                IN: Compared against the current time.
-                OUT: Used to compute elapsed duration.
 
         Returns:
             bool: ``True`` if the timeout has been exceeded.
-                OUT: Triggers a ``TimeoutError`` in the caller.
         """
 
         if not self.max_execution_time:
@@ -384,8 +370,6 @@ class CortexAgent:
 
         Args:
             step_info (dict): Information about the current execution step.
-                IN: Passed to ``self.step_callback``.
-                OUT: Enables external observation of agent execution progress.
         """
 
         if self.step_callback and callable(self.step_callback):
@@ -400,12 +384,10 @@ class CortexAgent:
 
         Args:
             task_description (str): The current task (unused but kept for API consistency).
-                IN: Reserved for future relevance filtering.
-                OUT: Not currently used in context assembly.
 
         Returns:
-            str: A formatted knowledge context string.
-                OUT: Empty if no knowledge or sources are configured.
+            str: A formatted knowledge context string, or empty if no knowledge
+                or sources are configured.
         """
 
         if not self.knowledge and not self.knowledge_sources:
@@ -430,12 +412,10 @@ class CortexAgent:
 
         Args:
             output_model: A ``BaseModel`` subclass or ``None``.
-                IN: Its JSON schema drives the generated guidance.
-                OUT: Used to create an example and formatting rules.
 
         Returns:
-            str: Format instructions for the LLM, or an empty string.
-                OUT: XML or JSON guidance depending on ``output_format_preference``.
+            str: Format instructions for the LLM, or an empty string if
+                ``auto_format_guidance`` is disabled.
         """
 
         if not output_model or not self.auto_format_guidance:
@@ -496,15 +476,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             schema (dict): The schema dict that may contain ``$ref``.
-                IN: Walked recursively to resolve references.
-                OUT: Returns a copy with all ``$ref`` values inlined.
             definitions (dict | None): The schema's definitions or ``$defs``.
-                IN: Used to look up referenced types.
-                OUT: Passed down during recursive resolution.
 
         Returns:
             dict: A schema with all references resolved.
-                OUT: Safe for example generation and validation.
         """
 
         if definitions is None:
@@ -534,12 +509,9 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             schema (dict): A JSON schema dict with ``properties``.
-                IN: Used to infer field types and generate realistic examples.
-                OUT: Resolved for ``$ref`` before traversal.
 
         Returns:
             dict: A dictionary with example values for each property.
-                OUT: Suitable for embedding in LLM prompts.
         """
 
         resolved_schema = self._resolve_schema_refs(schema)
@@ -609,15 +581,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             schema (dict): The nested object's JSON schema.
-                IN: Should have a ``properties`` key.
-                OUT: Used to generate example values per field.
             index (int): A numeric index to vary example values.
-                IN: Used to rotate through example data sets.
-                OUT: Produces distinct examples for array items.
 
         Returns:
             dict: A dictionary with example values for the nested object.
-                OUT: Suitable for embedding in LLM prompts.
         """
 
         properties = schema.get("properties", {})
@@ -675,12 +642,9 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             schema (dict): A JSON schema dict.
-                IN: Inspected for nested array-of-object structures.
-                OUT: Used to decide whether to add extra formatting guidance.
 
         Returns:
             int: The number of nested array-of-object fields.
-                OUT: A positive count triggers stronger formatting rules.
         """
 
         count = 0
@@ -699,12 +663,9 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             data (dict): The dictionary to serialize.
-                IN: Typically an example generated from a schema.
-                OUT: Rendered as a pretty-printed JSON string.
 
         Returns:
-            str: Indented JSON or ``str(data)`` on failure.
-                OUT: Suitable for embedding in LLM prompts.
+            str: Indented JSON, or ``str(data)`` on serialization failure.
         """
 
         import json
@@ -726,25 +687,14 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task to execute.
-                IN: Rendered into a prompt and sent to the LLM.
-                OUT: Drives the agent's response generation.
             context (str | None): Additional context for the task.
-                IN: Combined with knowledge and memory context.
-                OUT: Appended to the task prompt.
             streamer_buffer (StreamerBuffer | None): Optional buffer for streaming.
-                IN: If provided, the agent streams its response.
-                OUT: Receives chunks during execution.
             stream_callback (Callable | None): Callback for streamed chunks.
-                IN: Invoked for each chunk during streaming.
-                OUT: Enables real-time observation.
             use_thread (bool): Whether to execute in a background thread.
-                IN: If ``True``, returns ``(StreamerBuffer, Thread)``.
-                OUT: Delegates to ``_execute_threaded``.
 
         Returns:
             str | tuple[StreamerBuffer, threading.Thread]: The result string, or
                 streaming handles when *use_thread* is ``True``.
-                OUT: ``str`` on normal completion; tuple for threaded execution.
 
         Raises:
             ValueError: If the agent is not connected to a Xerxes instance.
@@ -1017,22 +967,13 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task to execute.
-                IN: Rendered into a prompt and sent to the LLM in the thread.
-                OUT: Drives the agent's response generation.
             context (str | None): Additional context for the task.
-                IN: Combined with knowledge and memory context.
-                OUT: Appended to the task prompt.
             streamer_buffer (StreamerBuffer | None): Optional pre-existing buffer.
-                IN: Used for streaming if provided.
-                OUT: Passed to ``xerxes_instance.thread_run``.
             stream_callback (Callable | None): Callback for streamed chunks.
-                IN: If provided, a consumer thread is started to forward chunks.
-                OUT: Invoked for each chunk from the buffer.
 
         Returns:
             tuple[StreamerBuffer, threading.Thread]: The streaming buffer and
-                the execution thread. OUT: The buffer yields chunks; the thread
-                runs the agent.
+                the execution thread.
 
         Raises:
             ValueError: If the agent is not connected to a Xerxes instance.
@@ -1079,11 +1020,7 @@ Ensure your response is valid JSON that can be parsed directly.
         if stream_callback:
 
             def consume_and_callback() -> None:
-                """Consume the buffer stream and forward chunks to the callback.
-
-                Args:
-                    None: Closure over *buffer* and *stream_callback*.
-                """
+                """Consume the buffer stream and forward chunks to the callback."""
                 for chunk in buffer.stream():
                     stream_callback(chunk)
 
@@ -1098,15 +1035,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The original task.
-                IN: Used as a complexity heuristic (word count).
-                OUT: Tasks longer than 50 words may trigger delegation.
             initial_response (str): The agent's initial output.
-                IN: Scanned for delegation indicators.
-                OUT: Matched against a list of submissive phrases.
 
         Returns:
             tuple[bool, str]: Whether delegation is recommended and a reason string.
-                OUT: ``(False, "")`` when delegation is unnecessary.
         """
 
         if not self.allow_delegation or not self.cortex_instance or self._delegation_count >= 3:
@@ -1138,15 +1070,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task requiring delegation.
-                IN: Included in the selection prompt sent to the LLM.
-                OUT: Used to evaluate which peer is best suited.
             reason (str): Why delegation was triggered.
-                IN: Included in the selection prompt.
-                OUT: Provides context for the LLM's selection.
 
         Returns:
             CortexAgent | None: The selected peer agent, or ``None`` if unavailable.
-                OUT: Falls back to the first available agent if LLM selection fails.
         """
 
         if not self.cortex_instance:
@@ -1211,18 +1138,11 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task to execute.
-                IN: Passed to ``execute`` with ``use_thread=True``.
-                OUT: Drives the agent's response generation.
             context (str | None): Additional context for the task.
-                IN: Passed to ``execute``.
-                OUT: Included in the agent's prompt.
             callback (Callable | None): Callback for each streamed chunk.
-                IN: Invoked for every chunk received from the stream.
-                OUT: Enables real-time observation.
 
         Returns:
             str: The concatenated final output.
-                OUT: Extracted from the buffer after the thread completes.
         """
 
         from xerxes.types import StreamChunk
@@ -1255,15 +1175,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task to delegate.
-                IN: Passed to the selected delegate agent's ``execute`` method.
-                OUT: Drives the delegate's response generation.
             context (str | None): Additional context for the delegate.
-                IN: Included in the delegate's prompt.
-                OUT: Prepended with delegation metadata.
 
         Returns:
             str: The result from the delegate agent.
-                OUT: Empty or error message if delegation is unavailable.
         """
 
         if not self.allow_delegation or not self.cortex_instance:
@@ -1316,15 +1231,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             task_description (str): The task to execute.
-                IN: First executed directly; then evaluated for delegation need.
-                OUT: May be forwarded to a delegate agent.
             context (str | None): Additional context.
-                IN: Passed to both initial and delegated execution.
-                OUT: Included in all prompts.
 
         Returns:
             str: The final result, potentially from a delegate agent.
-                OUT: Combines initial and delegated insights when delegation occurs.
         """
 
         initial_result = self.execute(task_description, context)
@@ -1384,7 +1294,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Returns:
             dict: Contains ``times_executed``, average/min/max execution times,
-                and recent execution times. OUT: Empty averages if no executions yet.
+                and recent execution times. Returns empty averages if no executions yet.
         """
 
         if not self._execution_times:
@@ -1418,11 +1328,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             key (str): The knowledge entry key.
-                IN: Used as the dictionary key.
-                OUT: Retrievable via ``self.knowledge``.
             value (str): The knowledge entry value.
-                IN: Stored as the dictionary value.
-                OUT: Included in ``_build_knowledge_context``.
         """
 
         self.knowledge[key] = value
@@ -1432,8 +1338,6 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             source (str): A knowledge source string.
-                IN: Appended to ``self.knowledge_sources`` if unique.
-                OUT: Included in ``_build_knowledge_context``.
         """
 
         if source not in self.knowledge_sources:
@@ -1444,11 +1348,7 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             key (str): The configuration key.
-                IN: Used as the dictionary key.
-                OUT: Stored in ``self.config``.
             value (Any): The configuration value.
-                IN: Stored as the dictionary value.
-                OUT: Retrievable via ``get_config``.
         """
 
         self.config[key] = value
@@ -1458,15 +1358,10 @@ Ensure your response is valid JSON that can be parsed directly.
 
         Args:
             key (str): The configuration key to look up.
-                IN: Used for dictionary lookup.
-                OUT: Matched against ``self.config`` keys.
             default (Any): Value to return if the key is absent.
-                IN: Fallback when *key* is not found.
-                OUT: Returned instead of raising ``KeyError``.
 
         Returns:
             Any: The stored configuration value, or *default*.
-                OUT: Direct result from ``self.config.get``.
         """
 
         return self.config.get(key, default)

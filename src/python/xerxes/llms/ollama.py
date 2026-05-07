@@ -36,20 +36,23 @@ except ImportError:
 
 
 class OllamaLLM(BaseLLM):
-    """Ollama llm.
+    """Ollama LLM client using the Ollama REST API.
 
-    Inherits from: BaseLLM
+    Connects to a local or remote Ollama server to provide completion
+    and streaming support for models served via Ollama.
+
+    Attributes:
+        client: The underlying httpx AsyncClient for API requests.
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Ollama LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration. If None, defaults to "llama2"
+                with the local Ollama endpoint (http://localhost:11434).
+            **kwargs: Additional configuration fields forwarded to LLMConfig.
+        """
 
         if not HAS_HTTPX:
             raise ImportError("httpx library required for Ollama. Install with: pip install httpx")
@@ -66,10 +69,7 @@ class OllamaLLM(BaseLLM):
         super().__init__(config)
 
     def _initialize_client(self) -> None:
-        """Internal helper to initialize client.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Initialize the httpx AsyncClient for the Ollama API endpoint."""
 
         self.client = httpx.AsyncClient(
             base_url=self.config.base_url or "",
@@ -88,20 +88,21 @@ class OllamaLLM(BaseLLM):
         stream: bool | None = None,
         **kwargs,
     ) -> Any:
-        """Asynchronously Generate completion.
+        """Generate a completion response from the Ollama API.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str | list[dict[str, str]]): IN: prompt. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            stop (list[str] | None, optional): IN: stop. Defaults to None. OUT: Consumed during execution.
-            stream (bool | None, optional): IN: stream. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            prompt: A string prompt or a list of message dicts to send.
+            model: Override the default model for this request.
+            temperature: Override sampling temperature.
+            max_tokens: Override maximum tokens to generate.
+            top_p: Override nucleus sampling threshold.
+            stop: Override stop sequences.
+            stream: Whether to return a streaming response.
+            **kwargs: Additional provider-specific parameters.
+
         Returns:
-            Any: OUT: Result of the operation."""
+            A dict response from the API, or an async iterator if stream=True.
+        """
 
         use_stream = stream if stream is not None else self.config.stream
 
@@ -153,14 +154,15 @@ class OllamaLLM(BaseLLM):
             raise RuntimeError(f"Ollama API request failed: {e}") from e
 
     async def _stream_completion(self, endpoint: str, payload: dict) -> AsyncIterator[dict]:
-        """Asynchronously Internal helper to stream completion.
+        """Yield streaming response lines from the Ollama API.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            endpoint (str): IN: endpoint. OUT: Consumed during execution.
-            payload (dict): IN: payload. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict]: OUT: Result of the operation."""
+            endpoint: The API endpoint to call.
+            payload: The request payload with streaming enabled.
+
+        Yields:
+            Parsed JSON dictionaries from each line of the response.
+        """
 
         assert self.client is not None
         async with self.client.stream("POST", endpoint, json=payload) as response:
@@ -170,13 +172,14 @@ class OllamaLLM(BaseLLM):
                     yield json.loads(line)
 
     def extract_content(self, response: Any) -> str:
-        """Extract content.
+        """Extract text content from an Ollama API response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
+            response: The raw API response dict.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The extracted text from "message.content" or "response" fields.
+        """
 
         if isinstance(response, dict):
             if "message" in response:
@@ -190,14 +193,15 @@ class OllamaLLM(BaseLLM):
         response: Any,
         callback: Callable[[str, Any], None],
     ) -> str:
-        """Asynchronously Process streaming response.
+        """Process a streaming response and invoke a callback for each text chunk.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            callback (Callable[[str, Any], None]): IN: callback. OUT: Consumed during execution.
+            response: The streaming response iterator from generate_completion.
+            callback: Callable invoked with (text_chunk, raw_chunk) for each chunk.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The concatenated text of all streamed chunks.
+        """
 
         accumulated_content = ""
 
@@ -220,14 +224,16 @@ class OllamaLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream completion.
+        """Yield structured chunks from a streaming Ollama response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Iterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         buffered_content = ""
 
@@ -262,20 +268,24 @@ class OllamaLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Astream completion.
+        """Yield structured chunks from a streaming Ollama response asynchronously.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw async streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         async def _gen() -> AsyncIterator[dict[str, Any]]:
-            """Asynchronously Internal helper to gen.
+            """Internal async generator that yields structured chunks.
 
-            Returns:
-                AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            Yields:
+                Dictionaries containing "content", "buffered_content", "function_calls",
+                "is_final", and "raw_chunk".
+            """
             buffered_content = ""
 
             async for chunk in response:
@@ -307,23 +317,26 @@ class OllamaLLM(BaseLLM):
         return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
-        """Parse tool calls.
+        """Extract tool calls from an Ollama API response.
+
+        The default implementation returns an empty list since Ollama's API
+        does not natively support structured tool calls.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_data (Any): IN: raw data. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+            raw_data: The raw response object.
 
+        Returns:
+            An empty list.
+        """
         return []
 
     def fetch_model_info(self) -> dict[str, Any]:
-        """Fetch model info.
+        """Return model metadata by querying the Ollama API's /api/show endpoint.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            A dict with "max_model_len", "parameter_size", "family",
+            and "quantization_level" if available.
+        """
 
         try:
             with httpx.Client(base_url=self.config.base_url or "", timeout=10.0) as client:
@@ -348,10 +361,7 @@ class OllamaLLM(BaseLLM):
         return {}
 
     async def close(self) -> None:
-        """Asynchronously Close.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Close the HTTP client and release resources."""
 
         if self.client:
             await self.client.aclose()

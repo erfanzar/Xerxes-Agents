@@ -21,6 +21,7 @@ interface for the Xerxes agent system.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import signal
@@ -217,6 +218,7 @@ class XerxesTUI:
         self._queued_inputs: list[str] = []
         self._turn_task: asyncio.Task[None] | None = None
         self._plan_mode = False
+        self._activity_mode = "code"
 
     async def run(self) -> XerxesTUI:
         """Start the TUI, bridge client, and event loops.
@@ -327,6 +329,10 @@ class XerxesTUI:
 
             if raw_input == "/interrupt":
                 await self._interrupt_current_turn()
+                continue
+
+            if raw_input == self._prompt.PLAN_TOGGLE_SENTINEL:
+                await self._toggle_plan_mode()
                 continue
 
             if self._approval_panel is not None:
@@ -442,7 +448,7 @@ class XerxesTUI:
         elif isinstance(event, ToolCallPart):
             self._on_tool_call_part(event.arguments_part)
         elif isinstance(event, ToolResult):
-            self._on_tool_result(event.tool_call_id, event.return_value)
+            self._on_tool_result(event.tool_call_id, event.return_value, event.duration_ms)
         elif isinstance(event, ApprovalRequest):
             self._on_approval_request(event)
         elif isinstance(event, QuestionRequest):
@@ -542,6 +548,7 @@ class XerxesTUI:
         """
         if self._prompt:
             self._prompt.commit_streaming()
+        self._set_activity_mode(self._infer_activity_mode(name, arguments))
         block = _ToolCallBlock(
             block_id=tool_call_id,
             tool_call_id=tool_call_id,
@@ -565,18 +572,20 @@ class XerxesTUI:
         if self._active_tool:
             self._active_tool.append_args_part(arguments_part)
 
-    def _on_tool_result(self, tool_call_id: str, return_value: str) -> None:
+    def _on_tool_result(self, tool_call_id: str, return_value: str, duration_ms: float = 0.0) -> None:
         """Handle a tool result event.
 
         Args:
             tool_call_id (str): IN: Tool call identifier. OUT: Used to look up the
                 matching tool block.
             return_value (str): IN: Tool result string. OUT: Stored in the tool block.
+            duration_ms (float): IN: Tool execution duration. OUT: Displayed in
+                the completed tool block.
         """
         block = self._tool_blocks.get(tool_call_id)
         if block:
             display_value = "" if block.name in {"AgentTool", "TaskCreateTool", "SpawnAgents"} else return_value
-            block.set_result(display_value, duration_ms=0.0)
+            block.set_result(display_value, duration_ms=duration_ms)
             if self._prompt:
                 self._prompt.commit_active_tool(tool_call_id, block.compose())
                 self._prompt.set_spinner_label("Thinking")
@@ -601,6 +610,9 @@ class XerxesTUI:
         sub_event = event.event
 
         from ..streaming.wire_events import ToolCall, ToolResult
+
+        if event.subagent_type:
+            self._set_activity_mode(event.subagent_type)
 
         if isinstance(sub_event, ToolCall):
             key_arg = getattr(sub_event, "arguments", "") or ""
@@ -890,6 +902,8 @@ class XerxesTUI:
         if self._prompt is None:
             return
         self._prompt.set_context(event.context_tokens, event.max_context)
+        self._plan_mode = bool(getattr(event, "plan_mode", self._plan_mode))
+        self._sync_prompt_mode()
 
     def _on_compaction_begin(self) -> None:
         """Handle the start of a context compaction event."""
@@ -943,8 +957,11 @@ class XerxesTUI:
                 self._prompt.set_running(True)
                 self._prompt.set_queue_count(len(self._queued_inputs))
 
+            turn_plan_mode = self._plan_mode
+            if not turn_plan_mode:
+                self._set_activity_mode("code")
             self._turn_done_event.clear()
-            await self._client.query(current, plan_mode=self._plan_mode)
+            await self._client.query(current, plan_mode=turn_plan_mode)
 
             try:
                 await asyncio.wait_for(self._turn_done_event.wait(), timeout=900)
@@ -957,6 +974,9 @@ class XerxesTUI:
                     self._prompt.clear_active_approval()
                     self._prompt.set_running(False)
                     self._prompt.append_line("\x1b[31mTurn timed out after 900s.\x1b[0m")
+
+            if turn_plan_mode and self._plan_mode:
+                await self._set_plan_mode(False, notify=True)
 
             if self._queued_inputs:
                 current = self._queued_inputs.pop(0)
@@ -1022,13 +1042,7 @@ class XerxesTUI:
             await self._client.steer(content)
         elif cmd == "/plan":
             content = text[len("/plan") :].strip()
-            self._plan_mode = not self._plan_mode if not content else True
-            if self._prompt:
-                self._prompt.set_plan_mode(self._plan_mode)
-            await self._client._send_jsonrpc(
-                method="set_plan_mode",
-                params={"enabled": self._plan_mode},
-            )
+            await self._set_plan_mode(not self._plan_mode if not content else True)
             if content:
                 await self._client.steer(f"/plan {content}")
         else:
@@ -1036,6 +1050,105 @@ class XerxesTUI:
                 method="slash",
                 params={"command": text},
             )
+
+    async def _toggle_plan_mode(self) -> None:
+        """Toggle plan mode for subsequent turns."""
+        await self._set_plan_mode(not self._plan_mode)
+
+    async def _set_plan_mode(self, enabled: bool, *, notify: bool = True) -> None:
+        """Set plan mode and synchronize the bridge runtime config.
+
+        Args:
+            enabled (bool): IN: Desired plan mode state. OUT: Reflected in the
+                prompt UI and sent to the bridge.
+            notify (bool): IN: Whether to append a visible mode-change line.
+                OUT: Controls prompt history noise.
+        """
+        self._plan_mode = enabled
+        if self._prompt:
+            self._sync_prompt_mode()
+            if notify:
+                self._prompt.append_line(
+                    "\x1b[36mPlan mode ON\x1b[0m" if enabled else "\x1b[2mCode mode ON\x1b[0m"
+                )
+        if self._client:
+            await self._client._send_jsonrpc(
+                method="set_plan_mode",
+                params={"enabled": self._plan_mode},
+            )
+
+    def _set_activity_mode(self, mode: str) -> None:
+        """Update inferred non-plan activity mode.
+
+        Args:
+            mode (str): IN: Inferred mode label. OUT: Displayed in the footer
+                when plan mode is inactive.
+        """
+        normalized = (mode or "code").strip().lower()
+        aliases = {
+            "research": "researcher",
+            "coding": "code",
+            "agent": "code",
+            "general-purpose": "code",
+            "plan": "planner",
+        }
+        self._activity_mode = aliases.get(normalized, normalized)
+        self._sync_prompt_mode()
+
+    def _sync_prompt_mode(self) -> None:
+        """Synchronize plan/activity mode state into the prompt renderers."""
+        if not self._prompt:
+            return
+        self._prompt.set_plan_mode(self._plan_mode)
+        self._prompt.set_activity_mode("plan" if self._plan_mode else self._activity_mode)
+
+    @staticmethod
+    def _infer_activity_mode(tool_name: str, arguments: str | None = None) -> str:
+        """Infer a user-visible mode from a tool or sub-agent call."""
+        if tool_name in {"AgentTool", "TaskCreateTool"}:
+            try:
+                args = json.loads(arguments or "{}")
+            except Exception:
+                args = {}
+            subagent_type = str(args.get("subagent_type") or args.get("agent_type") or "").strip()
+            return subagent_type or "agents"
+
+        if tool_name == "SpawnAgents":
+            try:
+                args = json.loads(arguments or "{}")
+            except Exception:
+                args = {}
+            agents = args.get("agents") if isinstance(args, dict) else None
+            types = {
+                str(agent.get("subagent_type") or agent.get("agent_type") or "").strip()
+                for agent in agents or []
+                if isinstance(agent, dict)
+            }
+            types.discard("")
+            return next(iter(types)) if len(types) == 1 else "agents"
+
+        research_tools = {
+            "ReadFile",
+            "GlobTool",
+            "GrepTool",
+            "ListDir",
+            "DuckDuckGoSearch",
+            "URLAnalyzer",
+            "APIClient",
+            "RSSReader",
+        }
+        code_tools = {
+            "WriteFile",
+            "AppendFile",
+            "FileEditTool",
+            "ExecuteShell",
+            "ExecutePythonCode",
+        }
+        if tool_name in research_tools:
+            return "researcher"
+        if tool_name in code_tools:
+            return "code"
+        return "code"
 
     def _handle_signal(self, sig: int) -> None:
         """Handle OS signals by shutting down the running turn.

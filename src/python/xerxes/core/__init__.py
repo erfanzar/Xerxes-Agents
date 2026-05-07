@@ -86,10 +86,10 @@ def __getattr__(name: str) -> object:
     """Lazy-load core objects from their respective submodules.
 
     Args:
-        name (str): IN: attribute name being requested.
+        name (str): Attribute name being requested.
 
     Returns:
-        object: OUT: the requested object.
+        The requested object from the appropriate submodule.
 
     Raises:
         AttributeError: If the name is not a known export.

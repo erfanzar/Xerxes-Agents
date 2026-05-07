@@ -27,27 +27,32 @@ from typing import Any
 
 @dataclass
 class LLMConfig:
-    """Llmconfig.
+    """Configuration for LLM client interactions.
+
+    Encapsulates all parameters needed to initialize and control an LLM
+    client, including model selection, sampling parameters, authentication,
+    and networking options.
 
     Attributes:
-        model (str): model.
-        temperature (float): temperature.
-        max_tokens (int): max tokens.
-        top_p (float): top p.
-        top_k (int | None): top k.
-        min_p (float): min p.
-        frequency_penalty (float): frequency penalty.
-        presence_penalty (float): presence penalty.
-        repetition_penalty (float): repetition penalty.
-        stop (list[str] | None): stop.
-        stream (bool): stream.
-        api_key (str | None): api key.
-        base_url (str | None): base url.
-        timeout (float): timeout.
-        retry_attempts (int): retry attempts.
-        extra_params (dict[str, Any]): extra params.
-        max_model_len (int | None): max model len.
-        model_metadata (dict[str, Any]): model metadata."""
+        model: The model identifier (e.g., "gpt-4o").
+        temperature: Sampling temperature controlling randomness.
+        max_tokens: Maximum tokens to generate in a response.
+        top_p: Nucleus sampling threshold.
+        top_k: Top-k sampling parameter.
+        min_p: Minimum probability threshold for sampling.
+        frequency_penalty: Penalty for token frequency in responses.
+        presence_penalty: Penalty for token presence in responses.
+        repetition_penalty: Repetition penalty multiplier.
+        stop: List of stop sequences to halt generation.
+        stream: Whether streaming responses are enabled by default.
+        api_key: API key for the provider (or resolved from environment).
+        base_url: Base URL for the provider's API endpoint.
+        timeout: Request timeout in seconds.
+        retry_attempts: Number of retries on transient failures.
+        extra_params: Additional provider-specific parameters.
+        max_model_len: Maximum context window length for the model.
+        model_metadata: Additional metadata about the model.
+    """
 
     model: str
     temperature: float = 0.7
@@ -70,31 +75,36 @@ class LLMConfig:
 
 
 class BaseLLM(ABC):
-    """Base llm.
+    """Abstract base class for LLM client implementations.
 
-    Inherits from: ABC
+    Defines the interface that all provider-specific LLM clients must implement,
+    including synchronous and asynchronous completion, streaming, tool call parsing,
+    and lifecycle management. Subclasses handle provider-specific HTTP clients,
+    authentication, and response parsing.
+
+    Attributes:
+        config: The LLM configuration used by this client.
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the LLM client with the given configuration.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+            config: Optional LLM configuration. If None, creates a default config
+                with model="default" and any provided kwargs.
+            **kwargs: Additional configuration fields passed to LLMConfig if
+                config is not provided.
+        """
         self.config = config or LLMConfig(model="default", **kwargs)
         self._initialize_client()
 
     @abstractmethod
     def _initialize_client(self) -> None:
-        """Internal helper to initialize client.
+        """Initialize the provider-specific HTTP client.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        Subclasses should create and configure their client instance here,
+        including setting authentication headers and timeouts.
+        """
         pass
 
     @abstractmethod
@@ -109,33 +119,34 @@ class BaseLLM(ABC):
         stream: bool | None = None,
         **kwargs,
     ) -> Any:
-        """Asynchronously Generate completion.
+        """Generate a completion response from the LLM.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str | list[dict[str, str]]): IN: prompt. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            stop (list[str] | None, optional): IN: stop. Defaults to None. OUT: Consumed during execution.
-            stream (bool | None, optional): IN: stream. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            prompt: A string prompt or a list of message dicts in OpenAI format.
+            model: Override the default model for this request.
+            temperature: Override sampling temperature for this request.
+            max_tokens: Override maximum tokens to generate.
+            top_p: Override nucleus sampling threshold.
+            stop: Override stop sequences.
+            stream: Whether to stream the response.
+            **kwargs: Additional provider-specific parameters.
 
+        Returns:
+            The raw response from the provider (a dict or streaming iterator,
+            depending on the provider and stream flag).
+        """
         pass
 
     @abstractmethod
     def extract_content(self, response: Any) -> str:
-        """Extract content.
+        """Extract the text content from an LLM response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            response: The raw response from generate_completion.
 
+        Returns:
+            The extracted text string from the response.
+        """
         pass
 
     @abstractmethod
@@ -144,15 +155,16 @@ class BaseLLM(ABC):
         response: Any,
         callback: Callable[[str, Any], None],
     ) -> str:
-        """Asynchronously Process streaming response.
+        """Process a streaming response, invoking a callback for each chunk.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            callback (Callable[[str, Any], None]): IN: callback. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            response: The streaming response iterator.
+            callback: A callable invoked with (text_chunk, raw_chunk) for each
+                streamed text segment.
 
+        Returns:
+            The concatenated text of all streamed chunks.
+        """
         pass
 
     @abstractmethod
@@ -161,15 +173,16 @@ class BaseLLM(ABC):
         response: Any,
         agent: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream completion.
+        """Yield structured chunks from a streaming completion response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Iterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw streaming response from the provider.
+            agent: Optional agent context for the stream.
 
+        Yields:
+            Dictionaries containing "content", "buffered_content",
+            "function_calls", "tool_calls", "is_final", and other fields.
+        """
         pass
 
     @abstractmethod
@@ -178,34 +191,41 @@ class BaseLLM(ABC):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Astream completion.
+        """Yield structured chunks from a streaming completion response asynchronously.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw async streaming response from the provider.
+            agent: Optional agent context for the stream.
 
+        Yields:
+            Dictionaries containing "content", "buffered_content",
+            "function_calls", "tool_calls", "is_final", and other fields.
+        """
         pass
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
-        """Parse tool calls.
+        """Extract structured tool calls from a response.
+
+        The default implementation returns an empty list. Subclasses should
+        override this if the provider supports function/tool calling.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_data (Any): IN: raw data. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+            raw_data: The raw response or parsed response object.
 
+        Returns:
+            A list of tool call dicts with "id", "name", and "arguments" keys.
+        """
         return []
 
     def validate_config(self) -> None:
-        """Validate config.
+        """Validate the current configuration values.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Checks that model, temperature, max_tokens, and top_p are within
+        acceptable ranges.
 
+        Raises:
+            ValueError: If any configuration value is invalid.
+        """
         if not self.config.model:
             raise ValueError("Model name is required")
 
@@ -219,47 +239,32 @@ class BaseLLM(ABC):
             raise ValueError("top_p must be between 0 and 1")
 
     async def __aenter__(self):
-        """Asynchronously Dunder method for aenter.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+        """Enter the async context manager, returning self."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Asynchronously Dunder method for aexit.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            exc_type (Any): IN: exc type. OUT: Consumed during execution.
-            exc_val (Any): IN: exc val. OUT: Consumed during execution.
-            exc_tb (Any): IN: exc tb. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+        """Exit the async context manager, closing the client."""
         await self.close()
 
     @abstractmethod
     async def close(self) -> None:
-        """Asynchronously Close.
+        """Close the HTTP client and release resources.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        Should be called when the LLM client is no longer needed, either
+        explicitly or via the async context manager protocol.
+        """
         pass
 
     def format_messages(self, messages: list[dict[str, str]], system_prompt: str | None = None) -> list[dict[str, str]]:
-        """Format messages.
+        """Prepend a system prompt to a message list.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            messages (list[dict[str, str]]): IN: messages. OUT: Consumed during execution.
-            system_prompt (str | None, optional): IN: system prompt. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, str]]: OUT: Result of the operation."""
+            messages: The list of message dicts to format.
+            system_prompt: Optional system prompt to prepend.
 
+        Returns:
+            The messages with system prompt inserted at the front if provided.
+        """
         formatted = []
 
         if system_prompt:
@@ -269,21 +274,22 @@ class BaseLLM(ABC):
         return formatted
 
     def fetch_model_info(self) -> dict[str, Any]:
-        """Fetch model info.
+        """Retrieve metadata about the configured model.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
+        Subclasses can override this to query the provider for model-specific
+        information such as context limits.
+
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+            A dictionary with model metadata fields (e.g., "max_model_len").
+        """
         return {}
 
     def _auto_fetch_model_info(self) -> None:
-        """Internal helper to auto fetch model info.
+        """Fetch model info and populate the configuration with the results.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        Called automatically during initialization to set max_model_len and
+        other metadata if available.
+        """
         try:
             info = self.fetch_model_info()
             if info.get("max_model_len"):
@@ -293,13 +299,12 @@ class BaseLLM(ABC):
             pass
 
     def get_model_info(self) -> dict[str, Any]:
-        """Retrieve the model info.
+        """Return a summary of the current model configuration.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+            A dictionary containing provider, model name, temperature, max_tokens,
+            max_model_len, and stream settings.
+        """
         return {
             "provider": self.__class__.__name__.replace("LLM", ""),
             "model": self.config.model,
@@ -310,12 +315,6 @@ class BaseLLM(ABC):
         }
 
     def __repr__(self) -> str:
-        """Dunder method for repr.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Return a human-readable representation of the LLM client."""
         info = self.get_model_info()
         return f"{info['provider']}(model='{info['model']}', temperature={info['temperature']})"

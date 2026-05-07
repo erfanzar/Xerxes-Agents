@@ -47,21 +47,25 @@ except ImportError:
 
 
 class AnthropicLLM(BaseLLM):
-    """Anthropic llm.
+    """Anthropic LLM client using the Messages API.
 
-    Inherits from: BaseLLM
+    Wraps the Anthropic HTTP API to provide completion, streaming,
+    and tool call support for Claude models.
+
+    Attributes:
+        version: The Anthropic API version string.
+        client: The underlying httpx AsyncClient for API requests.
     """
 
     def __init__(self, config: LLMConfig | None = None, version: str = "2023-06-01", **kwargs):
-        """Initialize the instance.
+        """Initialize the Anthropic LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            version (str, optional): IN: version. Defaults to '2023-06-01'. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration. If None, defaults to
+                "claude-3-opus-20240229" with the Anthropic API endpoint.
+            version: The Anthropic API version header value.
+            **kwargs: Additional configuration fields forwarded to LLMConfig.
+        """
 
         if not HAS_HTTPX:
             raise ImportError("httpx library required for Anthropic. Install with: pip install httpx")
@@ -79,10 +83,11 @@ class AnthropicLLM(BaseLLM):
         super().__init__(config)
 
     def _initialize_client(self) -> None:
-        """Internal helper to initialize client.
+        """Initialize the httpx AsyncClient with Anthropic authentication headers.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Reads the API key from the ANTHROPIC_API_KEY environment variable and
+        configures the base URL and headers for all requests.
+        """
 
         api_key = self.config.api_key or os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -110,20 +115,22 @@ class AnthropicLLM(BaseLLM):
         stream: bool | None = None,
         **kwargs,
     ) -> Any:
-        """Asynchronously Generate completion.
+        """Generate a completion response from the Anthropic API.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str | list[dict[str, str]]): IN: prompt. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            stop (list[str] | None, optional): IN: stop. Defaults to None. OUT: Consumed during execution.
-            stream (bool | None, optional): IN: stream. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            prompt: A string prompt or a list of message dicts to send.
+            model: Override the default model for this request.
+            temperature: Override sampling temperature.
+            max_tokens: Override maximum tokens to generate.
+            top_p: Override nucleus sampling threshold.
+            stop: Override stop sequences.
+            stream: Whether to return a streaming response.
+            **kwargs: Additional provider-specific parameters.
+
         Returns:
-            Any: OUT: Result of the operation."""
+            A dict response from the API, or an async iterator of streaming events
+            if stream=True.
+        """
 
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
@@ -160,13 +167,14 @@ class AnthropicLLM(BaseLLM):
             raise RuntimeError(f"Anthropic API request failed: {e}") from e
 
     async def _stream_completion(self, payload: dict) -> AsyncIterator[dict]:
-        """Asynchronously Internal helper to stream completion.
+        """Yield streaming events from the Anthropic API.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            payload (dict): IN: payload. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict]: OUT: Result of the operation."""
+            payload: The request payload with streaming enabled.
+
+        Yields:
+            Parsed JSON dictionaries from each SSE data line.
+        """
 
         payload["stream"] = True
         assert self.client is not None
@@ -180,13 +188,17 @@ class AnthropicLLM(BaseLLM):
                         yield json.loads(data)
 
     def _convert_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
-        """Internal helper to convert messages.
+        """Convert OpenAI-style messages to Anthropic message format.
+
+        Moves system messages to the first user message or prepends a user
+        message containing the system content.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            messages (list[dict[str, str]]): IN: messages. OUT: Consumed during execution.
+            messages: List of OpenAI-style message dicts.
+
         Returns:
-            list[dict[str, str]]: OUT: Result of the operation."""
+            A list of messages formatted for the Anthropic API.
+        """
 
         converted = []
         system_content = None
@@ -210,13 +222,14 @@ class AnthropicLLM(BaseLLM):
         return converted
 
     def extract_content(self, response: Any) -> str:
-        """Extract content.
+        """Extract text content from an Anthropic API response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
+            response: The raw API response dict.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The concatenated text from all "text" type content blocks.
+        """
 
         if isinstance(response, dict):
             content = response.get("content", [])
@@ -233,14 +246,16 @@ class AnthropicLLM(BaseLLM):
         response: Any,
         callback: Callable[[str, Any], None],
     ) -> str:
-        """Asynchronously Process streaming response.
+        """Process a streaming response and invoke a callback for each text chunk.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            callback (Callable[[str, Any], None]): IN: callback. OUT: Consumed during execution.
+            response: The streaming response iterator from generate_completion.
+            callback: Callable invoked with (text_chunk, raw_chunk) for each
+                "content_block_delta" event.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The concatenated text of all streamed chunks.
+        """
 
         accumulated_content = ""
 
@@ -258,14 +273,16 @@ class AnthropicLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream completion.
+        """Yield structured chunks from a streaming Anthropic response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Iterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         buffered_content = ""
         function_calls: list[dict[str, Any]] = []
@@ -311,20 +328,24 @@ class AnthropicLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Astream completion.
+        """Yield structured chunks from a streaming Anthropic response asynchronously.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw async streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         async def _gen() -> AsyncIterator[dict[str, Any]]:
-            """Asynchronously Internal helper to gen.
+            """Internal async generator that yields structured chunks.
 
-            Returns:
-                AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            Yields:
+                Dictionaries containing "content", "buffered_content", "function_calls",
+                "is_final", and "raw_chunk".
+            """
             buffered_content = ""
             function_calls: list[dict[str, Any]] = []
 
@@ -367,14 +388,14 @@ class AnthropicLLM(BaseLLM):
         return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
-        """Parse tool calls.
+        """Extract tool calls from an Anthropic API response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_data (Any): IN: raw data. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+            raw_data: The raw response dict containing content blocks.
 
+        Returns:
+            A list of tool call dicts with "id", "name", and "arguments" keys.
+        """
         tool_calls = []
         if isinstance(raw_data, dict) and "content" in raw_data:
             for block in raw_data["content"]:
@@ -389,13 +410,14 @@ class AnthropicLLM(BaseLLM):
         return tool_calls
 
     def fetch_model_info(self) -> dict[str, Any]:
-        """Fetch model info.
+        """Return model metadata based on the configured model name.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
+        Looks up the model prefix in ANTHROPIC_CONTEXT_LENGTHS to determine
+        the maximum context window size.
+
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+            A dict containing "max_model_len" if a match is found.
+        """
         model = self.config.model
         for prefix, context_len in ANTHROPIC_CONTEXT_LENGTHS.items():
             if model.startswith(prefix):
@@ -403,10 +425,6 @@ class AnthropicLLM(BaseLLM):
         return {}
 
     async def close(self) -> None:
-        """Asynchronously Close.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Close the HTTP client and release resources."""
         if self.client:
             await self.client.aclose()

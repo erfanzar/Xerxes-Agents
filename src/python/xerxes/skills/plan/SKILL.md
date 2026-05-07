@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan mode for Xerxes — inspect context, write a markdown plan into the active workspace's `.xerxes/plans/` directory, and do not execute the work.
+description: Plan mode for Xerxes — inspect context, write a markdown plan into `~/xerxes-agent/plans/`, and do not execute the work.
 version: 1.0.0
 author: Xerxes Agent
 license: MIT
@@ -19,10 +19,10 @@ Use this skill when the user wants a plan instead of execution.
 For this turn, you are planning only.
 
 - Do not implement code.
-- Do not edit project files except the plan markdown file.
+- Do not edit project files. The only file you may write is the plan markdown file under `~/xerxes-agent/plans/`.
 - Do not run mutating terminal commands, commit, push, or perform external actions.
 - You may inspect the repo or other context with read-only commands/tools when needed.
-- Your deliverable is a markdown plan saved inside the active workspace under `.xerxes/plans/`.
+- Your deliverable is a markdown plan saved under the user's home `xerxes-agent` folder, not inside the current working directory or active project.
 
 ## Output requirements
 
@@ -42,12 +42,12 @@ If the task is code-related, include exact file paths, likely test targets, and 
 ## Save location
 
 Save the plan with `write_file` under:
-- `.xerxes/plans/YYYY-MM-DD_HHMMSS-<slug>.md`
+- `~/xerxes-agent/plans/YYYY-MM-DD_HHMMSS-<slug>.md`
 
-Treat that as relative to the active working directory / backend workspace. Xerxes file tools are backend-aware, so using this relative path keeps the plan with the workspace on local, docker, ssh, modal, and daytona backends.
+Treat that as an absolute home-relative path. Do not save plans under `.xerxes/`, `./plans/`, `tmp-files/`, or any other directory inside the active project.
 
 If the runtime provides a specific target path, use that exact path.
-If not, create a sensible timestamped filename yourself under `.xerxes/plans/`.
+If not, create a sensible timestamped filename yourself under `~/xerxes-agent/plans/`.
 
 ## Interaction style
 

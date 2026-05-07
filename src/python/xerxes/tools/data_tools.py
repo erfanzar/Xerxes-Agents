@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Data tools module for Xerxes.
+"""Data processing tools for JSON, CSV, text manipulation, conversion, and datetime operations.
 
-Exports:
-    - JSONProcessor
-    - CSVProcessor
-    - TextProcessor
-    - DataConverter
-    - DateTimeProcessor"""
+This module provides utilities for working with structured data formats, performing
+text transformations, converting between data formats, and processing dates and times.
+
+Example:
+    >>> from xerxes.tools.data_tools import JSONProcessor, CSVProcessor, TextProcessor
+    >>> JSONProcessor.static_call(operation="load", file_path="config.json")
+    >>> CSVProcessor.static_call(operation="read", file_path="data.csv")
+"""
 
 from __future__ import annotations
 
@@ -34,9 +36,13 @@ from ..types import AgentBaseFn
 
 
 class JSONProcessor(AgentBaseFn):
-    """Jsonprocessor.
+    """Process and manipulate JSON data including loading, saving, validation, and querying.
 
-    Inherits from: AgentBaseFn
+    Provides comprehensive JSON operations for agents working with structured data.
+
+    Example:
+        >>> JSONProcessor.static_call(operation="load", file_path="data.json")
+        >>> JSONProcessor.static_call(operation="query", data={"users": [{"name": "Alice"}]}, query="users.0.name")
     """
 
     @staticmethod
@@ -48,18 +54,31 @@ class JSONProcessor(AgentBaseFn):
         pretty: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Perform JSON operations on data or files.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            data (Any, optional): IN: data. Defaults to None. OUT: Consumed during execution.
-            file_path (str | None, optional): IN: file path. Defaults to None. OUT: Consumed during execution.
-            query (str | None, optional): IN: query. Defaults to None. OUT: Consumed during execution.
-            pretty (bool, optional): IN: pretty. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options are:
+                - 'load': Load JSON from file
+                - 'save': Save data to JSON file
+                - 'validate': Validate JSON string or data
+                - 'query': Query nested data using dot notation
+                - 'transform': Analyze and format data
+            data: Data to operate on. Required for save, validate, query, transform.
+            file_path: Path for load/save operations.
+            query: Dot-notation path for query (e.g., "users.0.name").
+            pretty: Format JSON with indentation. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+
+        Example:
+            >>> JSONProcessor.static_call(
+            ...     operation="query",
+            ...     data={"config": {"debug": True}},
+            ...     query="config.debug"
+            ... )
+        """
         result: dict[str, Any] = {}
 
         if operation == "load":
@@ -126,9 +145,13 @@ class JSONProcessor(AgentBaseFn):
 
 
 class CSVProcessor(AgentBaseFn):
-    """Csvprocessor.
+    """Read, write, and analyze CSV data.
 
-    Inherits from: AgentBaseFn
+    Provides CSV operations for tabular data processing.
+
+    Example:
+        >>> CSVProcessor.static_call(operation="read", file_path="data.csv")
+        >>> CSVProcessor.static_call(operation="write", file_path="output.csv", data=[{"name": "Alice"}])
     """
 
     @staticmethod
@@ -142,20 +165,25 @@ class CSVProcessor(AgentBaseFn):
         max_rows: int | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Perform CSV operations on data or files.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            file_path (str | None, optional): IN: file path. Defaults to None. OUT: Consumed during execution.
-            data (list[dict] | None, optional): IN: data. Defaults to None. OUT: Consumed during execution.
-            delimiter (str, optional): IN: delimiter. Defaults to ','. OUT: Consumed during execution.
-            headers (list[str] | None, optional): IN: headers. Defaults to None. OUT: Consumed during execution.
-            has_header (bool, optional): IN: has header. Defaults to True. OUT: Consumed during execution.
-            max_rows (int | None, optional): IN: max rows. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options are:
+                - 'read': Read CSV file into list of dictionaries
+                - 'write': Write list of dictionaries to CSV file
+                - 'analyze': Get statistics and sample data
+                - 'convert': Convert CSV to JSON format
+            file_path: Path for file operations.
+            data: List of dictionaries for write operation.
+            delimiter: Column separator. Defaults to comma.
+            headers: Custom header list (used when has_header=False).
+            has_header: First row contains headers. Defaults to True.
+            max_rows: Limit number of rows read.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "read":
@@ -243,9 +271,13 @@ class CSVProcessor(AgentBaseFn):
 
 
 class TextProcessor(AgentBaseFn):
-    """Text processor.
+    """Process and transform text with various operations including statistics, cleaning, and extraction.
 
-    Inherits from: AgentBaseFn
+    Provides comprehensive text manipulation capabilities for NLP tasks.
+
+    Example:
+        >>> TextProcessor.static_call(text="Hello World", operation="stats")
+        >>> TextProcessor.static_call(text="email: test@example.com", operation="extract", pattern="emails")
     """
 
     @staticmethod
@@ -257,18 +289,25 @@ class TextProcessor(AgentBaseFn):
         case_sensitive: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Perform text processing operations.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            operation (str): IN: operation. OUT: Consumed during execution.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-            replacement (str | None, optional): IN: replacement. Defaults to None. OUT: Consumed during execution.
-            case_sensitive (bool, optional): IN: case sensitive. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text: Input text to process.
+            operation: Operation to perform. Options are:
+                - 'stats': Calculate text statistics
+                - 'clean': Remove unwanted characters
+                - 'extract': Extract patterns (emails, urls, phones, numbers)
+                - 'replace': Find and replace text
+                - 'split': Split text by pattern
+                - 'format': Format text (title, upper, lower, etc.)
+            pattern: Regex pattern for extract/replace/split operations.
+            replacement: Replacement text for replace operation.
+            case_sensitive: Case-sensitive matching. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "stats":
@@ -366,9 +405,12 @@ class TextProcessor(AgentBaseFn):
 
 
 class DataConverter(AgentBaseFn):
-    """Data converter.
+    """Convert data between various formats including JSON, YAML, Base64, and hexadecimal.
 
-    Inherits from: AgentBaseFn
+    Provides format conversion for data interoperability.
+
+    Example:
+        >>> DataConverter.static_call(data="{'key': 'value'}", from_format="json", to_format="yaml")
     """
 
     @staticmethod
@@ -379,17 +421,18 @@ class DataConverter(AgentBaseFn):
         encoding: str = "utf-8",
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Convert data between formats.
 
         Args:
-            data (Any): IN: data. OUT: Consumed during execution.
-            from_format (str): IN: from format. OUT: Consumed during execution.
-            to_format (str): IN: to format. OUT: Consumed during execution.
-            encoding (str, optional): IN: encoding. Defaults to 'utf-8'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            data: Data to convert. Can be string or Python object.
+            from_format: Source format ('json', 'yaml', 'base64', 'hex').
+            to_format: Target format ('json', 'yaml', 'base64', 'hex', 'hash').
+            encoding: Text encoding. Defaults to 'utf-8'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with converted data or error.
+        """
         result: dict[str, Any] = {}
 
         try:
@@ -473,9 +516,13 @@ class DataConverter(AgentBaseFn):
 
 
 class DateTimeProcessor(AgentBaseFn):
-    """Date time processor.
+    """Process and manipulate dates and times including parsing, formatting, and arithmetic.
 
-    Inherits from: AgentBaseFn
+    Provides datetime operations for temporal data handling.
+
+    Example:
+        >>> DateTimeProcessor.static_call(operation="now")
+        >>> DateTimeProcessor.static_call(operation="delta", delta_days=7)
     """
 
     @staticmethod
@@ -489,20 +536,25 @@ class DateTimeProcessor(AgentBaseFn):
         delta_minutes: int = 0,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Perform datetime operations.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            date_string (str | None, optional): IN: date string. Defaults to None. OUT: Consumed during execution.
-            fmt (str | None, optional): IN: format. Defaults to None. OUT: Consumed during execution.
-            timezone (str | None, optional): IN: timezone. Defaults to None. OUT: Consumed during execution.
-            delta_days (int, optional): IN: delta days. Defaults to 0. OUT: Consumed during execution.
-            delta_hours (int, optional): IN: delta hours. Defaults to 0. OUT: Consumed during execution.
-            delta_minutes (int, optional): IN: delta minutes. Defaults to 0. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options are:
+                - 'now': Get current datetime
+                - 'parse': Parse date string to datetime
+                - 'delta': Calculate new datetime with offset
+                - 'format': Format datetime to string
+            date_string: Date string to parse.
+            fmt: Custom format string for parse/format.
+            timezone: Timezone for operations.
+            delta_days: Days to add/subtract.
+            delta_hours: Hours to add/subtract.
+            delta_minutes: Minutes to add/subtract.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "now":
@@ -593,7 +645,7 @@ class DateTimeProcessor(AgentBaseFn):
             try:
                 dt = datetime.fromisoformat(date_string.replace("Z", "+00:00"))
 
-                if not format:
+                if not fmt:
                     result["formats"] = {
                         "iso": dt.isoformat(),
                         "date": dt.strftime("%Y-%m-%d"),
@@ -605,7 +657,7 @@ class DateTimeProcessor(AgentBaseFn):
                         "timestamp": dt.timestamp(),
                     }
                 else:
-                    result["formatted"] = dt.strftime(format)
+                    result["formatted"] = dt.strftime(fmt)
 
             except Exception as e:
                 return {"error": f"Failed to format date: {e!s}"}

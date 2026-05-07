@@ -54,15 +54,22 @@ except ImportError:
 
 
 def _instantiate_provider(provider_impl, config: LLMConfig | None, kwargs: dict) -> BaseLLM:
-    """Internal helper to instantiate provider.
+    """Instantiate a provider class or return an existing instance.
+
+    Handles BaseLLM instances directly, classes deriving from BaseLLM,
+    and callable providers that accept config and kwargs.
 
     Args:
-        provider_impl (Any): IN: provider impl. OUT: Consumed during execution.
-        config (LLMConfig | None): IN: config. OUT: Consumed during execution.
-        kwargs (dict): IN: kwargs. OUT: Consumed during execution.
-    Returns:
-        BaseLLM: OUT: Result of the operation."""
+        provider_impl: Provider class, instance, or factory callable.
+        config: Optional LLM configuration.
+        kwargs: Additional keyword arguments passed to the provider.
 
+    Returns:
+        An initialized BaseLLM instance.
+
+    Raises:
+        ValueError: If the provider implementation type is unsupported.
+    """
     if isinstance(provider_impl, BaseLLM):
         return provider_impl
 
@@ -115,15 +122,25 @@ def create_llm(
     plugin_registry: Any | None = None,
     **kwargs,
 ) -> BaseLLM:
-    """Create llm.
+    """Factory function that creates an LLM client for the specified provider.
+
+    Routes the provider name to the appropriate LLM implementation class,
+    applies configuration overrides from kwargs, and delegates to a plugin
+    registry if one is provided.
 
     Args:
-        provider (Literal['openai', 'anthropic', 'claude', 'gemini', 'google', 'ollama', 'local', 'deepseek', 'kimi', 'moonshot', 'qwen', 'dashscope', 'zhipu', 'glm', 'lmstudio', 'minimax', 'custom'] | str): IN: provider. OUT: Consumed during execution.
-        config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-        plugin_registry (Any | None, optional): IN: plugin registry. Defaults to None. OUT: Consumed during execution.
-        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+        provider: The name of the LLM provider (e.g., "openai", "anthropic").
+        config: Optional shared LLM configuration applied before kwargs.
+        plugin_registry: Optional plugin registry consulted before built-in providers.
+        **kwargs: Additional parameters forwarded to the LLM constructor
+            (e.g., model, temperature, api_key).
+
     Returns:
-        BaseLLM: OUT: Result of the operation."""
+        An initialized LLM client instance.
+
+    Raises:
+        ValueError: If the provider name is not recognized.
+    """
 
     provider = provider.lower()
 

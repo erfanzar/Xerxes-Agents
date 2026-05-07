@@ -6,7 +6,7 @@ import time
 
 from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask, _filter_subagent_tools
 from xerxes.tools import claude_tools
-from xerxes.tools.claude_tools import SpawnAgents
+from xerxes.tools.claude_tools import AgentTool, SpawnAgents
 
 
 class _BlockingFuture:
@@ -48,6 +48,28 @@ def test_spawn_agents_bounded_wait_returns_pending_snapshots(monkeypatch):
     assert {row["name"] for row in rows} == {"a", "b"}
     assert any(row["status"] in {"pending", "running"} for row in rows)
     assert all("id" in row for row in rows)
+
+    mgr.shutdown()
+
+
+def test_agent_tool_bounded_wait_returns_running_snapshot(monkeypatch):
+    def runner(prompt, config, system_prompt, depth, cancel_check):
+        time.sleep(0.2)
+        return f"done: {prompt}"
+
+    mgr = SubAgentManager(max_concurrent=1)
+    mgr.set_runner(runner)
+    monkeypatch.setattr(claude_tools, "_agent_manager", mgr)
+
+    started = time.monotonic()
+    raw = AgentTool.static_call("slow task", name="slow", wait=True, timeout=0.01)
+    elapsed = time.monotonic() - started
+
+    row = json.loads(raw)
+    assert elapsed < 0.15
+    assert row["name"] == "slow"
+    assert row["status"] in {"pending", "running"}
+    assert "still running" in row["note"]
 
     mgr.shutdown()
 

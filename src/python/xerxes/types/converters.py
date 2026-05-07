@@ -26,26 +26,24 @@ from .tool_calls import Tool
 
 
 def convert_openai_messages(messages: list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]) -> list[ChatMessage]:
-    """Convert openai messages.
+    """Convert OpenAI-style message dictionaries into Xerxes ``ChatMessage`` objects.
+
+    Each message is classified by its ``role`` field and dispatched to the
+    appropriate message constructor (``UserMessage``, ``AssistantMessage``, etc.).
 
     Args:
-        messages (list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]): IN: messages. OUT: Consumed during execution.
+        messages: A list of message dictionaries conforming to the OpenAI
+            ``messages`` API format.
+
     Returns:
-        list[ChatMessage]: OUT: Result of the operation."""
+        A list of Xerxes ``ChatMessage`` subclasses corresponding to each input
+        message.
+
+    Raises:
+        ValueError: If a message has an unrecognized ``role`` value.
+    """
 
     converted_messages: list[ChatMessage] = []
-    """Convert openai messages.
-
-    Args:
-        messages (list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[ChatMessage]: OUT: Result of the operation."""
-    """Convert openai messages.
-
-    Args:
-        messages (list[dict[str, str | list[dict[str, str | dict[str, Any]]]]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[ChatMessage]: OUT: Result of the operation."""
     for openai_message in messages:
         message_role = openai_message.get("role")
         message: ChatMessage
@@ -64,47 +62,36 @@ def convert_openai_messages(messages: list[dict[str, str | list[dict[str, str | 
 
 
 def convert_openai_tools(tools: list[dict[str, Any]]) -> list[Tool]:
-    """Convert openai tools.
+    """Convert OpenAI-style tool definitions into Xerxes ``Tool`` objects.
 
     Args:
-        tools (list[dict[str, Any]]): IN: tools. OUT: Consumed during execution.
+        tools: A list of tool dictionaries in OpenAI's ``tools`` format.
+
     Returns:
-        list[Tool]: OUT: Result of the operation."""
+        A list of Xerxes ``Tool`` instances.
+    """
 
     converted_tools = [Tool.from_openai(openai_tool) for openai_tool in tools]
-    """Convert openai tools.
-
-    Args:
-        tools (list[dict[str, Any]]): IN: tools. OUT: Consumed during execution.
-    Returns:
-        list[Tool]: OUT: Result of the operation."""
-    """Convert openai tools.
-
-    Args:
-        tools (list[dict[str, Any]]): IN: tools. OUT: Consumed during execution.
-    Returns:
-        list[Tool]: OUT: Result of the operation."""
     return converted_tools
 
 
 def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> None:
-    """Check openai fields names.
+    """Validate that field names are compatible with OpenAI completion APIs.
+
+    Checks each name in *names* against the set of OpenAI completion parameters
+    and the provided valid field names. Raises ``ValueError`` if any names are
+    not recognized.
 
     Args:
-        valid_fields_names (set[str]): IN: valid fields names. OUT: Consumed during execution.
-        names (set[str]): IN: names. OUT: Consumed during execution."""
+        valid_fields_names: The set of field names that are valid for this context.
+        names: The field names to validate.
+
+    Raises:
+        ValueError: If any field names are not in ``valid_fields_names`` or
+            ``_OPENAI_COMPLETION_FIELDS``.
+    """
 
     openai_valid_params = set()
-    """Check openai fields names.
-
-    Args:
-        valid_fields_names (set[str]): IN: valid fields names. OUT: Consumed during execution.
-        names (set[str]): IN: names. OUT: Consumed during execution."""
-    """Check openai fields names.
-
-    Args:
-        valid_fields_names (set[str]): IN: valid fields names. OUT: Consumed during execution.
-        names (set[str]): IN: names. OUT: Consumed during execution."""
     non_valid_params = set()
 
     for name in names:
@@ -124,26 +111,16 @@ def check_openai_fields_names(valid_fields_names: set[str], names: set[str]) -> 
 
 
 def is_openai_field_name(name: str) -> bool:
-    """Check whether openai field name.
+    """Return whether *name* is a valid OpenAI completion parameter.
 
     Args:
-        name (str): IN: name. OUT: Consumed during execution.
+        name: The field name to check.
+
     Returns:
-        bool: OUT: Result of the operation."""
+        True if *name* is in ``_OPENAI_COMPLETION_FIELDS``, False otherwise.
+    """
 
     return name in _OPENAI_COMPLETION_FIELDS
-    """Check whether openai field name.
-
-    Args:
-        name (str): IN: name. OUT: Consumed during execution.
-    Returns:
-        bool: OUT: Result of the operation."""
-    """Check whether openai field name.
-
-    Args:
-        name (str): IN: name. OUT: Consumed during execution.
-    Returns:
-        bool: OUT: Result of the operation."""
 
 
 _OPENAI_COMPLETION_FIELDS: set[str] = {

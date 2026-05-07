@@ -11,14 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ai tools module for Xerxes.
+"""AI text processing tools including embedding, similarity, classification, summarization, and entity extraction.
 
-Exports:
-    - TextEmbedder
-    - TextSimilarity
-    - TextClassifier
-    - TextSummarizer
-    - EntityExtractor"""
+This module provides various NLP tools for text processing tasks that agents can use
+to analyze, transform, and extract information from text data.
+
+Example:
+    >>> from xerxes.tools.ai_tools import TextEmbedder, TextSimilarity
+    >>> embedder = TextEmbedder()
+    >>> result = embedder.static_call(text="Hello world", method="tfidf")
+    >>> similarity = TextSimilarity.static_call(text1="Hello", text2="Hi")
+"""
 
 from __future__ import annotations
 
@@ -31,9 +34,21 @@ from ..types import AgentBaseFn
 
 
 class TextEmbedder(AgentBaseFn):
-    """Text embedder.
+    """Generate vector embeddings for text using various methods.
 
-    Inherits from: AgentBaseFn
+    This class provides text embedding capabilities using TF-IDF, sentence-transformers,
+    or OpenAI embeddings. Embeddings are useful for semantic search, similarity comparison,
+    and as features for downstream ML tasks.
+
+    Attributes:
+        None: This is a utility class with no instance attributes.
+
+    Example:
+        >>> result = TextEmbedder.static_call(
+        ...     text="The quick brown fox",
+        ...     method="tfidf"
+        ... )
+        >>> print(result["embeddings"])
     """
 
     @staticmethod
@@ -44,17 +59,40 @@ class TextEmbedder(AgentBaseFn):
         max_length: int = 512,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Generate text embeddings using the specified method.
+
+        Converts text into numerical vectors suitable for machine learning tasks.
+        The method parameter determines the embedding algorithm used.
 
         Args:
-            text (str | list[str]): IN: text. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'tfidf'. OUT: Consumed during execution.
-            model_name (str | None, optional): IN: model name. Defaults to None. OUT: Consumed during execution.
-            max_length (int, optional): IN: max length. Defaults to 512. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text: A single string or list of strings to embed.
+            method: Embedding algorithm to use. Options are 'tfidf' (default),
+                'sentence-transformers', or 'openai'.
+            model_name: Specific model name for methods that support it.
+                For sentence-transformers, defaults to 'all-MiniLM-L6-v2'.
+                For OpenAI, defaults to 'text-embedding-ada-002'.
+            max_length: Maximum character length per text input. Longer texts
+                are truncated. Defaults to 512.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            A dictionary containing:
+            - embeddings: List of embedding vectors
+            - shape: Tuple of (num_texts, embedding_dim)
+            - features: Top feature names (for TF-IDF only)
+            - model: Model name used (for other methods)
+
+        Raises:
+            ImportError: If required packages are not installed.
+
+        Example:
+            >>> emb = TextEmbedder.static_call(
+            ...     text=["hello world", "goodbye world"],
+            ...     method="tfidf"
+            ... )
+            >>> len(emb["embeddings"])
+            2
+        """
         result: dict[str, Any] = {}
 
         if isinstance(text, str):
@@ -133,9 +171,21 @@ class TextEmbedder(AgentBaseFn):
 
 
 class TextSimilarity(AgentBaseFn):
-    """Text similarity.
+    """Calculate similarity scores between two text strings.
 
-    Inherits from: AgentBaseFn
+    This class provides multiple methods for computing text similarity including
+    cosine similarity, Jaccard index, Levenshtein distance, and semantic similarity.
+    Useful for duplicate detection, plagiarism checking, and relevance scoring.
+
+    Attributes:
+        None: This is a utility class with no instance attributes.
+
+    Example:
+        >>> result = TextSimilarity.static_call(
+        ...     text1="The cat sat on the mat",
+        ...     text2="A feline resting on a rug"
+        ... )
+        >>> print(result["similarity"])
     """
 
     @staticmethod
@@ -145,16 +195,39 @@ class TextSimilarity(AgentBaseFn):
         method: str = "cosine",
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Compute similarity between two text strings.
+
+        Measures how similar two texts are using various algorithms. Higher scores
+        indicate greater similarity, with 1.0 meaning identical (depending on method).
 
         Args:
-            text1 (str): IN: text1. OUT: Consumed during execution.
-            text2 (str): IN: text2. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'cosine'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text1: The first text string to compare.
+            text2: The second text string to compare.
+            method: Similarity algorithm. Options are:
+                - 'cosine': Word frequency cosine similarity (default)
+                - 'jaccard': Set intersection over union
+                - 'levenshtein': Edit distance based similarity
+                - 'semantic': Deep learning semantic similarity
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            A dictionary containing:
+            - similarity: Similarity score (0-1 for most methods, -1 to 1 for semantic)
+            - method: The algorithm used
+            - scale: Description of the score range
+            - interpretation: Human-readable interpretation (very high to very low)
+            - common_words: List of shared words (jaccard method only)
+            - distance: Edit distance (levenshtein method only)
+
+        Example:
+            >>> result = TextSimilarity.static_call(
+            ...     text1="machine learning",
+            ...     text2="deep learning",
+            ...     method="cosine"
+            ... )
+            >>> result["similarity"]
+            0.5
+        """
         result: dict[str, Any] = {}
 
         if method == "cosine":
@@ -194,15 +267,19 @@ class TextSimilarity(AgentBaseFn):
             result["common_words"] = list(intersection)[:20]
 
         elif method == "levenshtein":
+            def levenshtein_distance(s1: str, s2: str) -> int:
+                """Calculate the minimum number of single-character edits.
 
-            def levenshtein_distance(s1, s2):
-                """Levenshtein distance.
+                Computes the edit distance by counting insertions, deletions,
+                and substitutions needed to transform s1 into s2.
 
                 Args:
-                    s1 (Any): IN: s1. OUT: Consumed during execution.
-                    s2 (Any): IN: s2. OUT: Consumed during execution.
+                    s1: Source string to transform from.
+                    s2: Target string to transform to.
+
                 Returns:
-                    Any: OUT: Result of the operation."""
+                    Integer count of minimum edits required.
+                """
                 if len(s1) < len(s2):
                     return levenshtein_distance(s2, s1)
 
@@ -265,9 +342,20 @@ class TextSimilarity(AgentBaseFn):
 
 
 class TextClassifier(AgentBaseFn):
-    """Text classifier.
+    """Classify text into categories or analyze its properties.
 
-    Inherits from: AgentBaseFn
+    This class provides text classification capabilities including keyword-based
+    classification, sentiment analysis, language detection, and topic categorization.
+    Useful for content moderation, routing, and analysis tasks.
+
+    Attributes:
+        None: This is a utility class with no instance attributes.
+
+    Example:
+        >>> result = TextClassifier.static_call(
+        ...     text="I love this product!",
+        ...     method="sentiment"
+        ... )
     """
 
     @staticmethod
@@ -277,16 +365,52 @@ class TextClassifier(AgentBaseFn):
         method: str = "keyword",
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Classify or analyze text using the specified method.
+
+        Performs various text classification and analysis tasks depending on the method.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            categories (list[str] | None, optional): IN: categories. Defaults to None. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'keyword'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text: The input text to classify or analyze.
+            categories: List of category names for keyword classification.
+                Required when method='keyword'.
+            method: Classification method. Options are:
+                - 'keyword': Match text against category keywords
+                - 'sentiment': Analyze positive/negative sentiment
+                - 'language': Detect the language of the text
+                - 'topic': Categorize into predefined topics
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            For 'keyword' method:
+            - category: The most likely category
+            - confidence: Score from 0 to 1
+            - scores: Dictionary of all category scores
+
+            For 'sentiment' method:
+            - sentiment: 'positive', 'negative', or 'neutral'
+            - confidence: Score from 0 to 1
+            - positive_score: Count of positive words
+            - negative_score: Count of negative words
+
+            For 'language' method:
+            - language: Detected language code
+            - confidence: Score from 0 to 1
+            - scores: Dictionary of language scores
+
+            For 'topic' method:
+            - topic: The detected topic
+            - confidence: Score from 0 to 1
+            - scores: Dictionary of topic scores
+
+        Example:
+            >>> result = TextClassifier.static_call(
+            ...     text="Python is great for data science",
+            ...     categories=["technology", "sports", "business"],
+            ...     method="keyword"
+            ... )
+            >>> result["category"]
+            'technology'
+        """
         result: dict[str, Any] = {}
 
         if method == "keyword":
@@ -473,9 +597,21 @@ class TextClassifier(AgentBaseFn):
 
 
 class TextSummarizer(AgentBaseFn):
-    """Text summarizer.
+    """Generate summaries from text using various methods.
 
-    Inherits from: AgentBaseFn
+    This class provides text summarization capabilities including extractive summarization
+    (selecting important sentences), keyword extraction, and statistical analysis.
+    Useful for condensing long documents and extracting key information.
+
+    Attributes:
+        None: This is a utility class with no instance attributes.
+
+    Example:
+        >>> result = TextSummarizer.static_call(
+        ...     text="Long article text...",
+        ...     method="extractive",
+        ...     max_sentences=3
+        ... )
     """
 
     @staticmethod
@@ -486,17 +622,44 @@ class TextSummarizer(AgentBaseFn):
         max_length: int | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Generate a summary of the input text.
+
+        Creates a condensed version of the text that captures the main points.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'extractive'. OUT: Consumed during execution.
-            max_sentences (int, optional): IN: max sentences. Defaults to 3. OUT: Consumed during execution.
-            max_length (int | None, optional): IN: max length. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text: The input text to summarize.
+            method: Summarization approach. Options are:
+                - 'extractive': Selects most important sentences (default)
+                - 'keywords': Extracts key terms and phrases
+                - 'statistics': Provides text statistics without summarization
+            max_sentences: Maximum number of sentences in extractive summary.
+                Defaults to 3.
+            max_length: Maximum character length of output. Truncates with "..."
+                if exceeded. Defaults to None (no limit).
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            For 'extractive' method:
+            - summary: The generated summary string
+            - original_length: Character count of input
+            - summary_length: Character count of output
+            - compression_ratio: Ratio of summary to original length
+
+            For 'keywords' method:
+            - keywords: List of top keyword strings
+            - key_phrases: List of top two-word phrases
+            - summary: Formatted string of key topics
+
+            For 'statistics' method:
+            - summary: Dictionary containing various text statistics
+
+        Example:
+            >>> result = TextSummarizer.static_call(
+            ...     text="Article text...",
+            ...     max_sentences=2
+            ... )
+            >>> print(result["summary"])
+        """
         result: dict[str, Any] = {}
 
         if method == "extractive":
@@ -627,9 +790,20 @@ class TextSummarizer(AgentBaseFn):
 
 
 class EntityExtractor(AgentBaseFn):
-    """Entity extractor.
+    """Extract structured entities from unstructured text.
 
-    Inherits from: AgentBaseFn
+    This class identifies and extracts various types of entities from text including
+    emails, URLs, phone numbers, dates, names, and more. Useful for information
+    extraction and data mining tasks.
+
+    Attributes:
+        None: This is a utility class with no instance attributes.
+
+    Example:
+        >>> result = EntityExtractor.static_call(
+        ...     text="Contact us at info@example.com or call 555-1234",
+        ...     entity_types=["emails", "phone_numbers"]
+        ... )
     """
 
     @staticmethod
@@ -638,15 +812,30 @@ class EntityExtractor(AgentBaseFn):
         entity_types: list[str] | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Extract structured entities from the input text.
+
+        Identifies and extracts various entity types using regex patterns.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            entity_types (list[str] | None, optional): IN: entity types. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            text: The input text to extract entities from.
+            entity_types: List of entity types to extract. If None, extracts all types.
+                Supported types: 'emails', 'urls', 'phone_numbers', 'dates', 'times',
+                'numbers', 'hashtags', 'mentions', 'currency', 'names'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            A dictionary containing:
+            - entities: Nested dictionary of extracted entities by type
+            - total_entities: Total count of all extracted entities
+
+        Example:
+            >>> result = EntityExtractor.static_call(
+            ...     text="Email john@example.com or visit https://example.com",
+            ...     entity_types=["emails", "urls"]
+            ... )
+            >>> result["entities"]["emails"]
+            ['john@example.com']
+        """
         result: dict[str, Any] = {"entities": {}}
 
         patterns = {

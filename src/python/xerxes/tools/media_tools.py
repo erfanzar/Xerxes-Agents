@@ -11,17 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Media tools module for Xerxes.
+"""Media generation and processing tools for image generation, vision analysis, and text-to-speech.
 
-Exports:
-    - logger
-    - MediaConfig
-    - configure_media
-    - get_media_config
-    - set_media_client
-    - image_generate
-    - vision_analyze
-    - text_to_speech"""
+This module provides tools for generating images, analyzing images with vision models,
+and converting text to speech. These tools enable agents to work with visual and audio media.
+
+Example:
+    >>> from xerxes.tools.media_tools import image_generate, vision_analyze, text_to_speech
+    >>> image_generate.static_call(prompt="A sunset over mountains")
+    >>> vision_analyze.static_call(image_url="https://example.com/image.jpg")
+"""
 
 from __future__ import annotations
 
@@ -40,15 +39,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MediaConfig:
-    """Media config.
+    """Configuration for media generation tools.
 
     Attributes:
-        base_url (str): base url.
-        api_key (str): api key.
-        image_model (str): image model.
-        vision_model (str): vision model.
-        tts_model (str): tts model.
-        tts_voice (str): tts voice."""
+        base_url: API base URL (defaults to OpenAI API).
+        api_key: API key for authentication.
+        image_model: Model for image generation.
+        vision_model: Model for vision analysis.
+        tts_model: Model for text-to-speech.
+        tts_voice: Default voice for TTS.
+    """
 
     base_url: str = ""
     api_key: str = ""
@@ -75,18 +75,22 @@ def configure_media(
     tts_model: str | None = None,
     tts_voice: str | None = None,
 ) -> MediaConfig:
-    """Configure media.
+    """Configure media tool settings.
 
     Args:
-        base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution.
-        api_key (str | None, optional): IN: api key. Defaults to None. OUT: Consumed during execution.
-        image_model (str | None, optional): IN: image model. Defaults to None. OUT: Consumed during execution.
-        vision_model (str | None, optional): IN: vision model. Defaults to None. OUT: Consumed during execution.
-        tts_model (str | None, optional): IN: tts model. Defaults to None. OUT: Consumed during execution.
-        tts_voice (str | None, optional): IN: tts voice. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        MediaConfig: OUT: Result of the operation."""
+        base_url: API base URL. Defaults to OPENAI_BASE_URL or OpenAI default.
+        api_key: API key for authentication.
+        image_model: Default model for image generation.
+        vision_model: Default model for vision analysis.
+        tts_model: Default model for text-to-speech.
+        tts_voice: Default voice for TTS.
 
+    Returns:
+        Updated MediaConfig instance.
+
+    Example:
+        >>> configure_media(api_key="sk-...", image_model="dall-e-3")
+    """
     global _config
     with _lock:
         _config = MediaConfig(
@@ -101,36 +105,37 @@ def configure_media(
 
 
 def get_media_config() -> MediaConfig:
-    """Retrieve the media config.
+    """Get the current media configuration.
 
     Returns:
-        MediaConfig: OUT: Result of the operation."""
-
+        The current MediaConfig instance.
+    """
     with _lock:
         return _config
 
 
 def set_media_client(client: tp.Any | None) -> None:
-    """Set the media client.
+    """Set a custom HTTP client for media requests.
 
     Args:
-        client (tp.Any | None): IN: client. OUT: Consumed during execution."""
-
+        client: Custom HTTP client instance, or None to use default.
+    """
     global _http_client
     with _lock:
         _http_client = client
 
 
 def _post(url: str, *, json_body: dict[str, tp.Any], expect: str = "json") -> tp.Any:
-    """Internal helper to post.
+    """Send POST request to media API.
 
     Args:
-        url (str): IN: url. OUT: Consumed during execution.
-        json_body (dict[str, tp.Any]): IN: json body. OUT: Consumed during execution.
-        expect (str, optional): IN: expect. Defaults to 'json'. OUT: Consumed during execution.
-    Returns:
-        tp.Any: OUT: Result of the operation."""
+        url: Full URL to POST to.
+        json_body: JSON body for the request.
+        expect: Expected response type ('json' or 'bytes').
 
+    Returns:
+        Response data.
+    """
     cfg = get_media_config()
     headers = {"Content-Type": "application/json"}
     if cfg.api_key:
@@ -150,14 +155,15 @@ def _post(url: str, *, json_body: dict[str, tp.Any], expect: str = "json") -> tp
 
 
 def _coerce(resp: tp.Any, *, expect: str) -> tp.Any:
-    """Internal helper to coerce.
+    """Coerce response to expected format.
 
     Args:
-        resp (tp.Any): IN: resp. OUT: Consumed during execution.
-        expect (str): IN: expect. OUT: Consumed during execution.
-    Returns:
-        tp.Any: OUT: Result of the operation."""
+        resp: HTTP response object.
+        expect: Expected type ('json' or 'bytes').
 
+    Returns:
+        Coerced response data.
+    """
     if expect == "bytes":
         if isinstance(resp, bytes | bytearray):
             return bytes(resp)
@@ -179,9 +185,12 @@ def _coerce(resp: tp.Any, *, expect: str) -> tp.Any:
 
 
 class image_generate(AgentBaseFn):
-    """Image generate.
+    """Generate images from text prompts using AI models.
 
-    Inherits from: AgentBaseFn
+    Creates images based on textual descriptions using configured image generation models.
+
+    Example:
+        >>> image_generate.static_call(prompt="A beautiful sunset over the ocean")
     """
 
     @staticmethod
@@ -192,17 +201,18 @@ class image_generate(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Generate images from text prompts.
 
         Args:
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            size (str, optional): IN: size. Defaults to '1024x1024'. OUT: Consumed during execution.
-            n (int, optional): IN: n. Defaults to 1. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            prompt: Text description of the desired image.
+            size: Image dimensions. Defaults to "1024x1024".
+            n: Number of images to generate. Defaults to 1.
+            model: Override the default image generation model.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with generated images as base64-encoded data.
+        """
         cfg = get_media_config()
         body = {
             "model": model or cfg.image_model,
@@ -229,9 +239,15 @@ class image_generate(AgentBaseFn):
 
 
 class vision_analyze(AgentBaseFn):
-    """Vision analyze.
+    """Analyze images using vision models.
 
-    Inherits from: AgentBaseFn
+    Provides visual understanding of images through AI vision capabilities.
+
+    Example:
+        >>> vision_analyze.static_call(
+        ...     image_url="https://example.com/photo.jpg",
+        ...     question="What is in this image?"
+        ... )
     """
 
     @staticmethod
@@ -242,17 +258,18 @@ class vision_analyze(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Analyze images with vision model.
 
         Args:
-            image_url (str | None, optional): IN: image url. Defaults to None. OUT: Consumed during execution.
-            image_b64 (str | None, optional): IN: image b64. Defaults to None. OUT: Consumed during execution.
-            question (str, optional): IN: question. Defaults to 'Describe this image in detail.'. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            image_url: URL of the image to analyze.
+            image_b64: Base64-encoded image data.
+            question: Question or prompt about the image. Defaults to general description.
+            model: Override the default vision model.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with vision analysis results.
+        """
         if not image_url and not image_b64:
             return {"error": "either image_url or image_b64 is required"}
         cfg = get_media_config()
@@ -282,9 +299,15 @@ class vision_analyze(AgentBaseFn):
 
 
 class text_to_speech(AgentBaseFn):
-    """Text to speech.
+    """Convert text to speech audio.
 
-    Inherits from: AgentBaseFn
+    Generates spoken audio from text using AI voice synthesis.
+
+    Example:
+        >>> text_to_speech.static_call(
+        ...     text="Hello, this is a test of the text to speech system.",
+        ...     voice="alloy"
+        ... )
     """
 
     @staticmethod
@@ -295,17 +318,18 @@ class text_to_speech(AgentBaseFn):
         model: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Generate speech audio from text.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            voice (str | None, optional): IN: voice. Defaults to None. OUT: Consumed during execution.
-            audio_format (str, optional): IN: audio format. Defaults to 'mp3'. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            text: Text to convert to speech.
+            voice: Voice to use. Common options: alloy, echo, fable, onyx, nova, shimmer.
+            audio_format: Output format. Defaults to "mp3".
+            model: Override the default TTS model.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with base64-encoded audio data.
+        """
         legacy_format = context_variables.pop("format", None)
         if legacy_format:
             audio_format = legacy_format

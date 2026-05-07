@@ -11,20 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Browser tools module for Xerxes.
+"""Browser automation tools for navigating, interacting with, and capturing web pages.
 
-Exports:
-    - logger
-    - BrowserSession
-    - browser_navigate
-    - browser_back
-    - browser_snapshot
-    - browser_vision
-    - browser_get_images
-    - browser_console
-    - browser_click
-    - browser_type
-    - ... and 2 more."""
+This module provides browser automation capabilities using Playwright with an HTTP fallback.
+Agents can use these tools to scrape web content, interact with web forms, and capture
+screenshots of web pages.
+
+Example:
+    >>> from xerxes.tools.browser_tools import browser_navigate, browser_snapshot
+    >>> browser_navigate.static_call("https://example.com")
+    >>> page = browser_snapshot.static_call()
+"""
 
 from __future__ import annotations
 
@@ -43,15 +40,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _Element:
-    """Element.
+    """Internal representation of a DOM element discovered during page parsing.
 
     Attributes:
-        ref (str): ref.
-        tag (str): tag.
-        role (str): role.
-        name (str): name.
-        href (str): href.
-        attrs (dict[str, str]): attrs."""
+        ref: Unique reference identifier for the element.
+        tag: HTML tag name (e.g., 'a', 'button', 'input').
+        role: ARIA role of the element (e.g., 'link', 'button', 'textbox').
+        name: Display name extracted from text, placeholder, or aria-label.
+        href: Resolved absolute URL for anchor elements.
+        attrs: Dictionary of HTML attributes.
+    """
 
     ref: str
     tag: str
@@ -63,17 +61,18 @@ class _Element:
 
 @dataclass
 class _Page:
-    """Page.
+    """Internal representation of the current browser page state.
 
     Attributes:
-        url (str): url.
-        title (str): title.
-        text (str): text.
-        elements (list[_Element]): elements.
-        images (list[dict[str, str]]): images.
-        console (list[str]): console.
-        history (list[str]): history.
-        scroll_y (int): scroll y."""
+        url: Current page URL.
+        title: Page title text.
+        text: Extracted visible text content.
+        elements: List of interactive elements found on the page.
+        images: List of image metadata (src, alt).
+        console: Console log messages captured during page execution.
+        history: Navigation history stack.
+        scroll_y: Current vertical scroll position in pixels.
+    """
 
     url: str = ""
     title: str = ""
@@ -86,20 +85,31 @@ class _Page:
 
 
 class BrowserSession:
-    """Browser session.
+    """Manages a singleton browser session for web automation tasks.
+
+    This class provides a thread-safe interface to browser automation, supporting
+    both Playwright (for full JavaScript support) and HTTP fallback (for simple
+    scraping). The session maintains page state including navigation history,
+    parsed elements, and console logs.
+
+    The session is shared across all tool calls to avoid resource exhaustion.
+    Use reset() to clear state between independent browsing tasks.
 
     Attributes:
-        _instance (BrowserSession | None): instance."""
+        _instance: Class-level singleton instance.
+        _instance_lock: Thread synchronization lock for singleton access.
+
+    Example:
+        >>> session = BrowserSession.instance()
+        >>> session.navigate("https://example.com")
+        >>> session.click("e1")
+    """
 
     _instance: BrowserSession | None = None
     _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Initialize a new browser session with empty state."""
         self._lock = threading.RLock()
         self._page = _Page()
         self._http_client: tp.Any | None = None
@@ -109,13 +119,11 @@ class BrowserSession:
 
     @classmethod
     def instance(cls) -> BrowserSession:
-        """Instance.
+        """Get the singleton BrowserSession instance, creating it if necessary.
 
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
         Returns:
-            BrowserSession: OUT: Result of the operation."""
-
+            The shared BrowserSession instance.
+        """
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
@@ -123,11 +131,10 @@ class BrowserSession:
 
     @classmethod
     def reset(cls) -> None:
-        """Reset.
+        """Reset the singleton instance, closing any open browser and clearing state.
 
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations."""
-
+        Use this between independent browsing tasks to ensure clean state.
+        """
         with cls._instance_lock:
             if cls._instance is not None:
                 cls._instance.close()
@@ -135,14 +142,16 @@ class BrowserSession:
 
     @classmethod
     def install_for_test(cls, http_client: tp.Any) -> BrowserSession:
-        """Install for test.
+        """Install a test HTTP client and reset the singleton.
+
+        Used for testing without requiring actual HTTP requests.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            http_client (tp.Any): IN: http client. OUT: Consumed during execution.
-        Returns:
-            BrowserSession: OUT: Result of the operation."""
+            http_client: Mock HTTP client to use for requests.
 
+        Returns:
+            The new BrowserSession instance with test client installed.
+        """
         with cls._instance_lock:
             if cls._instance is not None:
                 cls._instance.close()
@@ -152,11 +161,7 @@ class BrowserSession:
             return inst
 
     def close(self) -> None:
-        """Close.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Close the browser, playwright process, and clear all state."""
         try:
             if self._playwright_page is not None:
                 self._playwright_page.close()
@@ -173,13 +178,14 @@ class BrowserSession:
         self._playwright = None
 
     def _ensure_playwright(self) -> bool:
-        """Internal helper to ensure playwright.
+        """Ensure Playwright is initialized and running.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
+        Initializes Playwright browser if not already done. Falls back to HTTP
+        client if Playwright fails to start.
+
         Returns:
-            bool: OUT: Result of the operation."""
-
+            True if Playwright is available and running, False if using fallback.
+        """
         if self._http_client is not None:
             return False
         if self._playwright_page is not None:
@@ -212,14 +218,14 @@ class BrowserSession:
             return False
 
     def _http_get(self, url: str) -> tuple[str, str, int]:
-        """Internal helper to http get.
+        """Fetch URL content using the HTTP client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            url (str): IN: url. OUT: Consumed during execution.
-        Returns:
-            tuple[str, str, int]: OUT: Result of the operation."""
+            url: The URL to fetch.
 
+        Returns:
+            Tuple of (final_url, html_content, status_code).
+        """
         if self._http_client is not None:
             resp = self._http_client.get(url, follow_redirects=True)
             return str(getattr(resp, "url", url)), resp.text, int(resp.status_code)
@@ -232,14 +238,17 @@ class BrowserSession:
         return str(resp.url), resp.text, resp.status_code
 
     def navigate(self, url: str) -> dict[str, tp.Any]:
-        """Navigate.
+        """Navigate to a URL and parse the resulting page.
+
+        Loads the page, waits for DOM content to be ready, extracts text and
+        interactive elements, and clears console logs.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            url (str): IN: url. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            url: The URL to navigate to.
 
+        Returns:
+            Dictionary with 'url', 'title', and 'elements' count.
+        """
         with self._lock:
             if self._ensure_playwright():
                 self._page.console.clear()
@@ -259,13 +268,11 @@ class BrowserSession:
             return {"url": final_url, "title": self._page.title, "elements": len(self._page.elements)}
 
     def back(self) -> dict[str, tp.Any]:
-        """Back.
+        """Navigate back in browser history.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
-
+            Result of navigating to the previous URL in history.
+        """
         with self._lock:
             if len(self._page.history) < 2:
                 return {"ok": False, "reason": "no history"}
@@ -274,13 +281,12 @@ class BrowserSession:
             return self.navigate(target) | {"ok": True}
 
     def snapshot(self) -> dict[str, tp.Any]:
-        """Snapshot.
+        """Capture current page state without making a network request.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
-
+            Dictionary with url, title, text (truncated to 4000 chars),
+            element list, and scroll position.
+        """
         with self._lock:
             return {
                 "url": self._page.url,
@@ -294,13 +300,12 @@ class BrowserSession:
             }
 
     def vision(self) -> dict[str, tp.Any]:
-        """Vision.
+        """Capture a screenshot of the current page.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
-
+            Dictionary with url, base64-encoded PNG image, format,
+            and summary text. Returns empty image if Playwright unavailable.
+        """
         with self._lock:
             if self._ensure_playwright():
                 assert self._playwright_page is not None
@@ -320,36 +325,32 @@ class BrowserSession:
             }
 
     def get_images(self) -> dict[str, tp.Any]:
-        """Retrieve the images.
+        """Retrieve metadata for images on the current page.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
-
+            Dictionary with url and list of image objects (src, alt).
+        """
         with self._lock:
             return {"url": self._page.url, "images": list(self._page.images[:200])}
 
     def console_log(self) -> dict[str, tp.Any]:
-        """Console log.
+        """Retrieve JavaScript console messages captured during page execution.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
-
+            Dictionary with url and list of console messages.
+        """
         with self._lock:
             return {"url": self._page.url, "console": list(self._page.console[-200:])}
 
     def click(self, ref: str) -> dict[str, tp.Any]:
-        """Click.
+        """Click an element by its reference ID.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref (str): IN: ref. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            ref: The element reference to click.
 
+        Returns:
+            Dictionary with 'ok' status and 'ref' or 'reason' for errors.
+        """
         with self._lock:
             elem = self._find(ref)
             if elem is None:
@@ -367,16 +368,16 @@ class BrowserSession:
             return {"ok": True, "ref": ref, "note": "click had no effect (no JS)"}
 
     def type_text(self, ref: str, text: str, *, submit: bool = False) -> dict[str, tp.Any]:
-        """Type text.
+        """Type text into an input element.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref (str): IN: ref. OUT: Consumed during execution.
-            text (str): IN: text. OUT: Consumed during execution.
-            submit (bool, optional): IN: submit. Defaults to False. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            ref: The element reference to type into.
+            text: The text string to type.
+            submit: Whether to press Enter after typing.
 
+        Returns:
+            Dictionary with 'ok' status, 'ref', and 'submitted' flag.
+        """
         with self._lock:
             elem = self._find(ref)
             if elem is None:
@@ -396,14 +397,14 @@ class BrowserSession:
             return {"ok": True, "ref": ref, "submitted": submit, "note": "no JS in fallback"}
 
     def press(self, key: str) -> dict[str, tp.Any]:
-        """Press.
+        """Press a keyboard key.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            key: Key name (e.g., 'Enter', 'Escape', 'ArrowDown').
 
+        Returns:
+            Dictionary with 'ok' status and 'key'.
+        """
         with self._lock:
             if self._playwright_page is not None:
                 try:
@@ -415,14 +416,14 @@ class BrowserSession:
             return {"ok": True, "key": key, "note": "no JS in fallback"}
 
     def scroll(self, dy: int) -> dict[str, tp.Any]:
-        """Scroll.
+        """Scroll the page vertically.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            dy (int): IN: dy. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            dy: Number of pixels to scroll. Positive scrolls down, negative up.
 
+        Returns:
+            Dictionary with 'ok' status and new 'scroll_y' position.
+        """
         with self._lock:
             if self._playwright_page is not None:
                 try:
@@ -435,11 +436,7 @@ class BrowserSession:
             return {"ok": True, "scroll_y": self._page.scroll_y}
 
     def _sync_from_playwright(self) -> None:
-        """Internal helper to sync from playwright.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Synchronize internal page state from Playwright after interactions."""
         try:
             assert self._playwright_page is not None
             self._page.url = self._playwright_page.url
@@ -450,28 +447,28 @@ class BrowserSession:
             pass
 
     def _find(self, ref: str) -> _Element | None:
-        """Internal helper to find.
+        """Find an element by its reference ID.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref (str): IN: ref. OUT: Consumed during execution.
-        Returns:
-            _Element | None: OUT: Result of the operation."""
+            ref: The element reference to search for.
 
+        Returns:
+            The matching _Element or None if not found.
+        """
         for e in self._page.elements:
             if e.ref == ref:
                 return e
         return None
 
     def _element_selector(self, elem: _Element) -> str:
-        """Internal helper to element selector.
+        """Build a CSS selector for an element.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            elem (_Element): IN: elem. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            elem: The element to create a selector for.
 
+        Returns:
+            A CSS selector string targeting the element.
+        """
         if elem.attrs.get("id"):
             return f"#{elem.attrs['id']}"
         if elem.attrs.get("name"):
@@ -481,12 +478,13 @@ class BrowserSession:
         return elem.tag
 
     def _parse_html(self, html: str) -> None:
-        """Internal helper to parse html.
+        """Parse HTML content and extract page information.
+
+        Populates self._page with title, text, elements, and images.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            html (str): IN: html. OUT: Consumed during execution."""
-
+            html: Raw HTML content to parse.
+        """
         try:
             from bs4 import BeautifulSoup, Tag
         except ImportError:
@@ -543,13 +541,17 @@ class BrowserSession:
 
 
 def _ensure_url(url: str) -> str:
-    """Internal helper to ensure url.
+    """Validate that a URL uses http or https scheme.
 
     Args:
-        url (str): IN: url. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        url: The URL string to validate.
 
+    Returns:
+        The validated URL.
+
+    Raises:
+        ValueError: If the URL doesn't use http/https scheme.
+    """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError(f"browser tools only accept http(s) URLs; got {url!r}")
@@ -557,137 +559,174 @@ def _ensure_url(url: str) -> str:
 
 
 class browser_navigate(AgentBaseFn):
-    """Browser navigate.
+    """Navigate to a URL and load the page content.
 
-    Inherits from: AgentBaseFn
+    Navigates to the specified URL, waits for the DOM to load, and parses
+    the page to extract interactive elements and text content.
+
+    Example:
+        >>> browser_navigate.static_call("https://news.ycombinator.com")
     """
 
     @staticmethod
     def static_call(url: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Navigate to a URL and parse the resulting page.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            url: The URL to navigate to. Must use http or https scheme.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing url, title, and element count.
+        """
         return BrowserSession.instance().navigate(_ensure_url(url))
 
 
 class browser_back(AgentBaseFn):
-    """Browser back.
+    """Navigate back to the previous URL in browser history.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> browser_back.static_call()
     """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Navigate to the previous URL in history.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'ok' status, or 'reason' if no history available.
+        """
         return BrowserSession.instance().back()
 
 
 class browser_snapshot(AgentBaseFn):
-    """Browser snapshot.
+    """Capture the current page state without making a network request.
 
-    Inherits from: AgentBaseFn
+    Returns the URL, title, text content, and list of interactive elements.
+
+    Example:
+        >>> state = browser_snapshot.static_call()
+        >>> print(state["title"])
     """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Get current page state.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with url, title, text (truncated), elements, and scroll_y.
+        """
         return BrowserSession.instance().snapshot()
 
 
 class browser_vision(AgentBaseFn):
-    """Browser vision.
+    """Take a screenshot of the current page.
 
-    Inherits from: AgentBaseFn
+    Returns a base64-encoded PNG image of the viewport. Requires Playwright
+    for actual screenshot capture; returns text summary otherwise.
+
+    Example:
+        >>> result = browser_vision.static_call()
+        >>> image_data = result["image_b64"]
     """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Capture a screenshot of the current page.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with url, image_b64 (base64 PNG), format, and summary.
+        """
         return BrowserSession.instance().vision()
 
 
 class browser_get_images(AgentBaseFn):
-    """Browser get images.
+    """Retrieve metadata for all images on the current page.
 
-    Inherits from: AgentBaseFn
+    Returns a list of image objects with src and alt attributes.
+
+    Example:
+        >>> images = browser_get_images.static_call()
+        >>> for img in images["images"]:
+        ...     print(img["src"])
     """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Get image metadata from current page.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with url and list of image objects (src, alt).
+        """
         return BrowserSession.instance().get_images()
 
 
 class browser_console(AgentBaseFn):
-    """Browser console.
+    """Retrieve JavaScript console messages from page execution.
 
-    Inherits from: AgentBaseFn
+    Useful for debugging page scripts and understanding client-side behavior.
+
+    Example:
+        >>> logs = browser_console.static_call()
+        >>> for msg in logs["console"]:
+        ...     print(msg)
     """
 
     @staticmethod
     def static_call(**context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Get console messages from page execution.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with url and list of console message strings.
+        """
         return BrowserSession.instance().console_log()
 
 
 class browser_click(AgentBaseFn):
-    """Browser click.
+    """Click an element on the current page by its reference ID.
 
-    Inherits from: AgentBaseFn
+    For links, triggers navigation. For buttons/inputs, triggers click handlers.
+
+    Example:
+        >>> browser_click.static_call("e1")
     """
 
     @staticmethod
     def static_call(ref: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Click an element by its reference ID.
 
         Args:
-            ref (str): IN: ref. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            ref: Element reference from snapshot (e.g., 'e1', 'e2').
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'ok' status, 'ref', or 'reason' for errors.
+        """
         return BrowserSession.instance().click(ref)
 
 
 class browser_type(AgentBaseFn):
-    """Browser type.
+    """Type text into an input field.
 
-    Inherits from: AgentBaseFn
+    Supports textareas and input elements. Can optionally submit by pressing Enter.
+
+    Example:
+        >>> browser_type.static_call("e5", "search query")
     """
 
     @staticmethod
@@ -697,54 +736,61 @@ class browser_type(AgentBaseFn):
         submit: bool = False,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Type text into an element.
 
         Args:
-            ref (str): IN: ref. OUT: Consumed during execution.
-            text (str): IN: text. OUT: Consumed during execution.
-            submit (bool, optional): IN: submit. Defaults to False. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            ref: Element reference from snapshot.
+            text: The text to type.
+            submit: Whether to press Enter after typing.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'ok' status, 'ref', and 'submitted' flag.
+        """
         return BrowserSession.instance().type_text(ref, text, submit=submit)
 
 
 class browser_press(AgentBaseFn):
-    """Browser press.
+    """Press a keyboard key on the page.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> browser_press.static_call("Escape")
     """
 
     @staticmethod
     def static_call(key: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Press a keyboard key.
 
         Args:
-            key (str): IN: key. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            key: Key name (e.g., 'Enter', 'Escape', 'ArrowDown', 'Tab').
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'ok' status and 'key'.
+        """
         return BrowserSession.instance().press(key)
 
 
 class browser_scroll(AgentBaseFn):
-    """Browser scroll.
+    """Scroll the page vertically.
 
-    Inherits from: AgentBaseFn
+    Use to reveal content below the viewport or load lazy-loaded content.
+
+    Example:
+        >>> browser_scroll.static_call(dy=500)  # Scroll down 500px
     """
 
     @staticmethod
     def static_call(dy: int = 400, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Scroll the page vertically.
 
         Args:
-            dy (int, optional): IN: dy. Defaults to 400. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            dy: Pixels to scroll. Positive = down, negative = up. Defaults to 400.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'ok' status and new 'scroll_y' position.
+        """
         return BrowserSession.instance().scroll(int(dy))
 
 

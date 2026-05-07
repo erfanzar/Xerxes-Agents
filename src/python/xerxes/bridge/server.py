@@ -676,6 +676,7 @@ class BridgeServer:
         tool_call_id: str,
         return_value: str,
         permitted: bool = True,
+        duration_ms: float = 0.0,
     ) -> None:
         """Emit a tool result event via the wire protocol.
 
@@ -684,6 +685,8 @@ class BridgeServer:
             return_value (str): IN: Tool return value. OUT: Included in the event.
             permitted (bool): IN: Whether the tool was permitted. OUT: Currently
                 not included in the wire payload.
+            duration_ms (float): IN: Tool execution duration. OUT: Included in
+                the wire payload for TUI rendering.
         """
         if not tool_call_id:
             tool_call_id = self._current_tool_call_id
@@ -692,6 +695,7 @@ class BridgeServer:
             {
                 "tool_call_id": tool_call_id,
                 "return_value": return_value,
+                "duration_ms": duration_ms,
                 "display_blocks": [],
             },
         )
@@ -1286,6 +1290,10 @@ class BridgeServer:
             self._emit_error("Empty query.")
             return
 
+        if "plan_mode" in params:
+            self.config["plan_mode"] = bool(params.get("plan_mode"))
+            set_global_config(self.config)
+
         if self._pending_skill_name:
             skill_name = self._pending_skill_name
             self._pending_skill_name = ""
@@ -1360,7 +1368,12 @@ class BridgeServer:
                 )
                 self._pending_tool_inputs = None
                 if self._wire_mode:
-                    self._emit_wire_tool_result(event.tool_call_id, event.result, event.permitted)
+                    self._emit_wire_tool_result(
+                        event.tool_call_id,
+                        event.result,
+                        event.permitted,
+                        event.duration_ms,
+                    )
                 self._emit(
                     "tool_end",
                     {

@@ -11,15 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Standalone module for Xerxes.
+"""Standalone file system tools for basic file operations and shell execution.
 
-Exports:
-    - ReadFile
-    - WriteFile
-    - ListDir
-    - ExecutePythonCode
-    - ExecuteShell
-    - AppendFile"""
+This module provides simple, standalone file and shell tools that don't require
+external dependencies. These tools are always available for basic file operations.
+
+Example:
+    >>> from xerxes.tools.standalone import ReadFile, WriteFile, ExecuteShell
+    >>> ReadFile.static_call(file_path="config.json")
+    >>> ExecuteShell.static_call(command="ls -la")
+"""
 
 from __future__ import annotations
 
@@ -33,9 +34,13 @@ from ..types import AgentBaseFn
 
 
 class ReadFile(AgentBaseFn):
-    """Read file.
+    """Read the contents of a file from the file system.
 
-    Inherits from: AgentBaseFn
+    Provides simple file reading with optional character limit truncation.
+
+    Example:
+        >>> ReadFile.static_call(file_path="README.md")
+        >>> ReadFile.static_call(file_path="large_file.txt", max_chars=1000)
     """
 
     @staticmethod
@@ -46,19 +51,21 @@ class ReadFile(AgentBaseFn):
         errors: str = "ignore",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Read file contents.
 
         Args:
-            file_path (str): IN: file path. OUT: Consumed during execution.
-            max_chars (int | None, optional): IN: Optional maximum characters to
-                return. Defaults to None, which returns the full file. OUT:
-                Consumed during execution.
-            encoding (str, optional): IN: encoding. Defaults to 'utf-8'. OUT: Consumed during execution.
-            errors (str, optional): IN: errors. Defaults to 'ignore'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            file_path: Path to the file to read.
+            max_chars: Optional maximum characters to return. Truncates with "..." if exceeded.
+            encoding: Text encoding. Defaults to 'utf-8'.
+            errors: How to handle encoding errors ('ignore', 'replace', etc.).
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            File contents as string, or error message if file not found.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+        """
         p = Path(file_path).expanduser().resolve()
         if not p.exists() or not p.is_file():
             raise FileNotFoundError(f"File '{p}' does not exist")
@@ -70,9 +77,12 @@ class ReadFile(AgentBaseFn):
 
 
 class WriteFile(AgentBaseFn):
-    """Write file.
+    """Write content to a file, creating parent directories as needed.
 
-    Inherits from: AgentBaseFn
+    Creates files with support for atomic writes and parent directory creation.
+
+    Example:
+        >>> WriteFile.static_call(file_path="output.txt", content="Hello, World!")
     """
 
     @staticmethod
@@ -83,17 +93,21 @@ class WriteFile(AgentBaseFn):
         encoding: str = "utf-8",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Write content to a file.
 
         Args:
-            file_path (str): IN: file path. OUT: Consumed during execution.
-            content (str): IN: content. OUT: Consumed during execution.
-            overwrite (bool, optional): IN: overwrite. Defaults to False. OUT: Consumed during execution.
-            encoding (str, optional): IN: encoding. Defaults to 'utf-8'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            file_path: Path to the file to write.
+            content: Text content to write.
+            overwrite: Allow overwriting existing files. Defaults to False.
+            encoding: Text encoding. Defaults to 'utf-8'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message with file path and character count.
+
+        Raises:
+            FileExistsError: If file exists and overwrite is False.
+        """
         p = Path(file_path).expanduser().resolve()
         if p.exists() and not overwrite:
             raise FileExistsError(f"File '{p}' already exists. Pass overwrite=True to replace it.")
@@ -103,9 +117,13 @@ class WriteFile(AgentBaseFn):
 
 
 class ListDir(AgentBaseFn):
-    """List dir.
+    """List directory contents with optional file extension filtering.
 
-    Inherits from: AgentBaseFn
+    Simple directory listing tool that returns file and subdirectory names.
+
+    Example:
+        >>> ListDir.static_call(directory_path="src")
+        >>> ListDir.static_call(directory_path="src", extension_filter=".py")
     """
 
     @staticmethod
@@ -114,15 +132,19 @@ class ListDir(AgentBaseFn):
         extension_filter: str | None = None,
         **context_variables,
     ) -> list[str]:
-        """Static call.
+        """List directory contents.
 
         Args:
-            directory_path (str, optional): IN: directory path. Defaults to '.'. OUT: Consumed during execution.
-            extension_filter (str | None, optional): IN: extension filter. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+            directory_path: Path to the directory. Defaults to current directory.
+            extension_filter: Optional extension to filter by (e.g., ".py").
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Sorted list of file and directory names.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist.
+        """
         p = Path(directory_path).expanduser().resolve()
         if not p.exists() or not p.is_dir():
             raise FileNotFoundError(f"Directory '{p}' does not exist")
@@ -141,9 +163,12 @@ class ListDir(AgentBaseFn):
 
 
 class ExecutePythonCode(AgentBaseFn):
-    """Execute python code.
+    """Execute Python code in a subprocess.
 
-    Inherits from: AgentBaseFn
+    Safely runs Python code with output capture.
+
+    Example:
+        >>> ExecutePythonCode.static_call(code="print(2 + 2)")
     """
 
     @staticmethod
@@ -152,15 +177,16 @@ class ExecutePythonCode(AgentBaseFn):
         timeout: float | None = 10.0,
         **context_variables,
     ) -> dict[str, str]:
-        """Static call.
+        """Execute Python code.
 
         Args:
-            code (str): IN: code. OUT: Consumed during execution.
-            timeout (float | None, optional): IN: timeout. Defaults to 10.0. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, str]: OUT: Result of the operation."""
+            code: Python code to execute.
+            timeout: Maximum execution time in seconds. Defaults to 10.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'stdout' and 'stderr' strings.
+        """
         wrapped = textwrap.dedent(code).strip()
 
         proc = subprocess.run(
@@ -173,16 +199,14 @@ class ExecutePythonCode(AgentBaseFn):
 
 
 class ExecuteShell(AgentBaseFn):
-    """Execute shell.
+    """Execute shell commands in a subprocess.
 
-    Inherits from: AgentBaseFn
+    Runs shell commands with configurable timeout and working directory.
 
-    The timeout the agent passes is honored as-is. If unset, falls back to
-    ``XERXES_SHELL_TIMEOUT`` (env), then ``DEFAULT_TIMEOUT_SECS``. Pass
-    ``timeout=0`` to wait forever (no cap) for intentional long-running work.
-
-    Attributes:
-        DEFAULT_TIMEOUT_SECS (float): default timeout when none requested."""
+    Example:
+        >>> ExecuteShell.static_call(command="ls -la")
+        >>> ExecuteShell.static_call(command="git status", timeout=30)
+    """
 
     DEFAULT_TIMEOUT_SECS: float = 30.0
 
@@ -193,19 +217,18 @@ class ExecuteShell(AgentBaseFn):
         cwd: str | None = None,
         **context_variables,
     ) -> dict[str, str]:
-        """Static call.
+        """Execute a shell command.
 
         Args:
-            command (str): IN: command. OUT: Consumed during execution.
-            timeout (float | None, optional): IN: Timeout in seconds. ``None``
-                uses the default (env override ``XERXES_SHELL_TIMEOUT`` or
-                ``DEFAULT_TIMEOUT_SECS``). ``0`` disables the timeout entirely.
-                Any positive value is used verbatim.
-            cwd (str | None, optional): IN: cwd. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, str]: OUT: Result of the operation."""
+            command: Shell command string to execute.
+            timeout: Timeout in seconds. Uses XERXES_SHELL_TIMEOUT env or DEFAULT_TIMEOUT_SECS
+                if not specified. Set to 0 for no timeout. Defaults to None.
+            cwd: Working directory for command execution.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with 'stdout', 'stderr', and 'returncode'.
+        """
         import os as _os
 
         effective: float | None
@@ -248,9 +271,12 @@ class ExecuteShell(AgentBaseFn):
 
 
 class AppendFile(AgentBaseFn):
-    """Append file.
+    """Append content to a file.
 
-    Inherits from: AgentBaseFn
+    Creates the file if it doesn't exist, appends content otherwise.
+
+    Example:
+        >>> AppendFile.static_call(file_path="log.txt", lines="Processing complete")
     """
 
     @staticmethod
@@ -261,17 +287,18 @@ class AppendFile(AgentBaseFn):
         newline: str = "\n",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Append content to a file.
 
         Args:
-            file_path (str): IN: file path. OUT: Consumed during execution.
-            lines (str): IN: lines. OUT: Consumed during execution.
-            encoding (str, optional): IN: encoding. Defaults to 'utf-8'. OUT: Consumed during execution.
-            newline (str, optional): IN: newline. Defaults to '\n'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            file_path: Path to the file to append to.
+            lines: Text content to append.
+            encoding: Text encoding. Defaults to 'utf-8'.
+            newline: Newline character. Defaults to '\\n'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message with file path and character count.
+        """
         p = Path(file_path).expanduser().resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding=encoding) as f:
