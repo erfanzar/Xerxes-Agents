@@ -14,7 +14,6 @@ agent:
     - FileEditTool
     - GlobTool
     - GrepTool
-    - GoogleSearch
     - DuckDuckGoSearch
   exclude_tools:
     - AgentTool

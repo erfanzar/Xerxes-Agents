@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
 from typing import Any
 
@@ -161,6 +163,35 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_TURNS = 50
 
 
+def _request_timeout(config: dict[str, Any]) -> float:
+    """Return the provider request timeout in seconds."""
+    raw = config.get("llm_timeout") or config.get("request_timeout") or os.environ.get("XERXES_LLM_TIMEOUT")
+    try:
+        return max(1.0, float(raw)) if raw is not None else 60.0
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _request_connect_timeout(config: dict[str, Any]) -> float:
+    """Return the provider connection timeout in seconds."""
+    raw = config.get("connect_timeout") or os.environ.get("XERXES_LLM_CONNECT_TIMEOUT")
+    try:
+        return max(0.5, float(raw)) if raw is not None else 5.0
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def _request_max_retries(config: dict[str, Any], *, explicit_base_url: bool) -> int:
+    """Return SDK retry count, defaulting custom endpoints to fail fast."""
+    raw = config.get("max_retries") or os.environ.get("XERXES_LLM_MAX_RETRIES")
+    if raw is None:
+        return 0 if explicit_base_url else 2
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0 if explicit_base_url else 2
+
+
 def run(
     user_message: str,
     state: AgentState,
@@ -292,7 +323,8 @@ def run(
             break
 
         for tc in tool_calls:
-            tc_id = tc.get("id", "")
+            tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+            tc["id"] = tc_id
             tc_name = tc.get("name", "")
             tc_input = tc.get("input", {})
 
@@ -477,7 +509,7 @@ def _stream_anthropic(
     from xerxes.llms.registry import get_api_key
 
     api_key = get_api_key(provider_name, config)
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=_request_timeout(config))
 
     system_parts = [system] if system else []
     conversation_messages: list[dict[str, Any]] = []
@@ -603,8 +635,26 @@ def _stream_openai_compat(
     api_key = config.get("api_key") or get_api_key(provider_name, config)
     prov = PROVIDERS.get(provider_name, PROVIDERS["openai"])
 
+    explicit_base_url = bool(config.get("base_url") or config.get("custom_base_url"))
     base_url = config.get("base_url") or config.get("custom_base_url") or prov.base_url or "https://api.openai.com/v1"
-    client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+    timeout = _request_timeout(config)
+    client_kwargs: dict[str, Any] = {
+        "api_key": api_key or "dummy",
+        "base_url": base_url,
+        "timeout": timeout,
+        "max_retries": _request_max_retries(config, explicit_base_url=explicit_base_url),
+    }
+    if explicit_base_url:
+        import httpx
+
+        client_kwargs["http_client"] = httpx.Client(
+            timeout=httpx.Timeout(
+                timeout,
+                connect=min(timeout, _request_connect_timeout(config)),
+            ),
+            trust_env=False,
+        )
+    client = OpenAI(**client_kwargs)
 
     oai_messages = messages_to_openai(messages, system=system)
 

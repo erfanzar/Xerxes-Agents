@@ -256,19 +256,26 @@ def _get_rich_console() -> RichConsole:
 def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
     """Render Markdown text to ANSI-escaped plain text.
 
-    Uses a temporary Rich console to capture rendered output.
+    Uses a temporary Rich console to capture rendered output. The default width
+    is the live terminal column count — rendering at a fixed wide canvas (e.g.
+    1000) causes Rich to pad code-block backgrounds and rule lines far past the
+    visible area, which then wrap and stack as vertical glitches when displayed.
 
     Args:
         text (str): IN: Markdown source text. OUT: Rendered to ANSI via Rich.
         columns (int | None): IN: Optional column width for wrapping. OUT: Passed
-            to the temporary Rich console. Defaults to 1000 if not provided.
+            to the temporary Rich console. Defaults to the current terminal
+            width (clamped to a sensible minimum) when not provided.
 
     Returns:
         str: OUT: ANSI-escaped plain text with trailing whitespace stripped.
     """
     import io
 
-    width = columns if columns and columns > 0 else 1000
+    if columns and columns > 0:
+        width = columns
+    else:
+        width = max(40, shutil.get_terminal_size((100, 24)).columns)
     buf = io.StringIO()
     console = RichConsole(
         file=buf,
@@ -280,8 +287,18 @@ def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
     )
     console.print(RichMarkdown(text, code_theme="monokai"))
 
-    cleaned = "\n".join(line.rstrip(" ") for line in buf.getvalue().split("\n"))
-    return cleaned.rstrip("\n")
+    lines = [line.rstrip(" ") for line in buf.getvalue().split("\n")]
+    collapsed: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if line == "":
+            blank_run += 1
+            if blank_run <= 1:
+                collapsed.append(line)
+        else:
+            blank_run = 0
+            collapsed.append(line)
+    return "\n".join(collapsed).rstrip("\n")
 
 
 def print_markdown(text: str, *, file: IO[str] | None = None) -> None:

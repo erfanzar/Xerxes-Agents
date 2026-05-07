@@ -25,6 +25,7 @@ import json
 import subprocess
 import sys
 import threading
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -57,6 +58,9 @@ class BridgeClient:
         self._write_lock = asyncio.Lock()
         self._event_queue: asyncio.Queue[WireEvent] = asyncio.Queue()
         self._read_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_lines: deque[str] = deque(maxlen=200)
+        self._stderr_lock = threading.Lock()
         self._running = False
         self._pending_requests: dict[str, asyncio.Future[WireEvent]] = {}
         self._model: str = ""
@@ -87,6 +91,8 @@ class BridgeClient:
 
         self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._read_thread.start()
+        self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
+        self._stderr_thread.start()
 
     def close(self) -> None:
         """Terminate the bridge subprocess and clean up resources."""
@@ -98,6 +104,11 @@ class BridgeClient:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
             self._proc = None
+
+    def stderr_tail(self) -> list[str]:
+        """Return recent stderr lines captured from the bridge subprocess."""
+        with self._stderr_lock:
+            return list(self._stderr_lines)
 
     async def initialize(
         self,
@@ -415,6 +426,24 @@ class BridgeClient:
                     if self._loop is None:
                         continue
                     self._loop.call_soon_threadsafe(lambda f, ev: f.set_result(ev), future, wire_event)
+
+    def _read_stderr_loop(self) -> None:
+        """Drain bridge stderr so subprocess logging cannot block the backend."""
+        assert self._proc is not None and self._proc.stderr is not None
+        reader = self._proc.stderr
+
+        while self._running:
+            try:
+                line = reader.readline()
+            except Exception:
+                break
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip()
+            if not text:
+                continue
+            with self._stderr_lock:
+                self._stderr_lines.append(text)
 
     def __enter__(self) -> BridgeClient:
         """Enter the runtime context, spawning the bridge process.

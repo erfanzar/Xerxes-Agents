@@ -202,6 +202,6 @@ class TestRegistryWiring:
     def test_listed_in_web_category(self):
         from xerxes.tools import TOOL_CATEGORIES
 
-        assert "GoogleSearch" in TOOL_CATEGORIES["web"]
-
-        assert TOOL_CATEGORIES["web"][0] == "GoogleSearch"
+        assert "GoogleSearch" not in TOOL_CATEGORIES["web"]
+        assert "WebScraper" not in TOOL_CATEGORIES["web"]
+        assert TOOL_CATEGORIES["web"][0] == "DuckDuckGoSearch"

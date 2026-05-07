@@ -21,6 +21,7 @@ renderers, and the :class:`PersistentPrompt` orchestrator.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -167,6 +168,8 @@ class StatusRenderer:
 
         self._active_tools: dict[str, Callable[[], str]] = {}
 
+        self._subagent_previews: dict[str, str] = {}
+
         self._spinner_frame: int = 0
         self._spinner_started_at: float = 0.0
         self._spinner_label: str = "Working"
@@ -186,13 +189,26 @@ class StatusRenderer:
             self._spinner_started_at = time.monotonic()
             self._spinner_frame = 0
 
+    def reset_spinner_timer(self) -> None:
+        """Restart the spinner elapsed counter from zero.
+
+        Called whenever a new tool call begins or the active label changes so
+        the spinner shows the current step's runtime, not the whole turn's.
+        """
+        import time
+
+        self._spinner_started_at = time.monotonic()
+
     def set_spinner_label(self, label: str) -> None:
         """Set the descriptive label shown next to the spinner.
 
         Args:
             label (str): IN: Spinner label text. OUT: Stored internally.
         """
-        self._spinner_label = label or "Working"
+        new_label = label or "Working"
+        if new_label != self._spinner_label:
+            self.reset_spinner_timer()
+        self._spinner_label = new_label
 
     def set_queue_count(self, count: int) -> None:
         """Set the number of queued user inputs.
@@ -302,6 +318,31 @@ class StatusRenderer:
         """Remove all active tool render functions."""
         self._active_tools.clear()
 
+    def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
+        """Set or update the live preview line for a sub-agent.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier (key for the preview).
+            label (str): IN: Display label (e.g., ``"telegram-planner#abc"``).
+            text (str): IN: Latest preview text. Replaces any prior content for
+                the same ``task_id`` — never appended.
+        """
+        if not task_id:
+            return
+        self._subagent_previews[task_id] = f"{label}: {text}" if text else label
+
+    def clear_subagent_preview(self, task_id: str) -> None:
+        """Remove the live preview line for a finished sub-agent.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier whose preview to drop.
+        """
+        self._subagent_previews.pop(task_id, None)
+
+    def clear_subagent_previews(self) -> None:
+        """Remove all live sub-agent preview lines."""
+        self._subagent_previews.clear()
+
     def _terminal_columns(self) -> int:
         """Return the current terminal column count.
 
@@ -358,6 +399,11 @@ class StatusRenderer:
             parts.append(tool_text)
             if not tool_text.endswith("\n"):
                 parts.append("\n")
+
+        if self._subagent_previews:
+            spin_frame = self.SPINNER_FRAMES[self._spinner_frame % len(self.SPINNER_FRAMES)]
+            for preview in self._subagent_previews.values():
+                parts.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m\n")
 
         if self._streaming_text:
             parts.append(self._streaming_text)
@@ -626,6 +672,7 @@ class PersistentPrompt:
         self._exit_armed = False
 
         self._active_question: Any = None
+        self._active_approval: Any = None
 
         self._scroll_y: int | None = None
         self._kb = self._build_key_bindings()
@@ -770,6 +817,30 @@ class PersistentPrompt:
         return ""
 
     SELECT_SENTINEL = "\x00__select_active_question__\x00"
+    APPROVAL_SENTINEL = "\x00__select_active_approval__\x00"
+
+    def set_active_approval(self, panel: Any) -> None:
+        """Display an approval panel in the status area.
+
+        Args:
+            panel (Any): IN: Approval panel object with a ``compose`` method. OUT:
+                Rendered and set as the active panel.
+        """
+        self._active_approval = panel
+        self._status.set_active_panel(panel.compose() if panel else "")
+        self._invalidate()
+
+    def clear_active_approval(self) -> None:
+        """Remove the active approval panel from the status area."""
+        self._active_approval = None
+        self._status.clear_active_panel()
+        self._invalidate()
+
+    def refresh_active_approval(self) -> None:
+        """Re-render the active approval panel."""
+        if self._active_approval is not None:
+            self._status.set_active_panel(self._active_approval.compose())
+            self._invalidate()
 
     def set_active_question(self, panel: Any) -> None:
         """Display a question panel in the status area.
@@ -802,6 +873,10 @@ class PersistentPrompt:
                 submission, and exit handling.
         """
         kb = KeyBindings()
+
+        def _queue_interrupt() -> None:
+            self._input_queue.put_nowait("/interrupt")
+            self._exit_armed = False
 
         @kb.add(Keys.PageUp, eager=True)
         def _pgup(event: KeyPressEvent) -> None:
@@ -852,6 +927,10 @@ class PersistentPrompt:
                 self._active_question.move_up()
                 self.refresh_active_question()
                 return
+            if self._active_approval is not None:
+                self._active_approval.move_cursor_up()
+                self.refresh_active_approval()
+                return
 
             buffer.history_backward()
 
@@ -868,6 +947,10 @@ class PersistentPrompt:
             if self._active_question is not None:
                 self._active_question.move_down()
                 self.refresh_active_question()
+                return
+            if self._active_approval is not None:
+                self._active_approval.move_cursor_down()
+                self.refresh_active_approval()
                 return
             buffer.history_forward()
 
@@ -898,22 +981,25 @@ class PersistentPrompt:
             if self._active_question is not None and not buffer.text.strip():
                 self._input_queue.put_nowait(self.SELECT_SENTINEL)
                 return
+            if self._active_approval is not None and not buffer.text.strip():
+                self._input_queue.put_nowait(self.APPROVAL_SENTINEL)
+                return
             buffer.validate_and_handle()
 
-        @kb.add(Keys.Escape)
+        @kb.add(Keys.Escape, eager=True)
         def _esc(event: KeyPressEvent) -> None:
             """Internal helper to esc.
 
             Args:
                 event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
             if self._running:
-                self._input_queue.put_nowait("/interrupt")
+                _queue_interrupt()
                 return
             buffer = event.app.current_buffer
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
 
-        @kb.add(Keys.ControlC)
+        @kb.add(Keys.ControlC, eager=True)
         def _ctrl_c(event: KeyPressEvent) -> None:
             """Internal helper to ctrl c.
 
@@ -922,8 +1008,7 @@ class PersistentPrompt:
             buffer = event.app.current_buffer
 
             if self._running:
-                self._input_queue.put_nowait("/interrupt")
-                self._exit_armed = False
+                _queue_interrupt()
                 return
 
             if buffer.text:
@@ -937,6 +1022,11 @@ class PersistentPrompt:
                 self._invalidate()
                 return
             event.app.exit()
+
+        @kb.add("c-c", eager=True)
+        def _ctrl_c_alias(event: KeyPressEvent) -> None:
+            """Handle terminals that report Ctrl+C as c-c."""
+            _ctrl_c(event)
 
         @kb.add(Keys.ControlD)
         def _ctrl_d(event: KeyPressEvent) -> None:
@@ -1015,6 +1105,11 @@ class PersistentPrompt:
             label (str): IN: New spinner label. OUT: Passed to status renderer.
         """
         self._status.set_spinner_label(label)
+        self._invalidate()
+
+    def reset_spinner_timer(self) -> None:
+        """Reset the spinner elapsed counter to zero."""
+        self._status.reset_spinner_timer()
         self._invalidate()
 
     def set_stats(self, tokens: str = "", cost: str = "") -> None:
@@ -1154,6 +1249,36 @@ class PersistentPrompt:
             self._status.append_line(final_text)
         self._invalidate()
 
+    def clear_active_tools(self) -> None:
+        """Remove all active tool renderers from the live status area."""
+        self._status.clear_active_tools()
+        self._invalidate()
+
+    def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
+        """Set or update a transient sub-agent preview line.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier.
+            label (str): IN: Display label.
+            text (str): IN: Latest preview text (replaces, doesn't append).
+        """
+        self._status.set_subagent_preview(task_id, label, text)
+        self._invalidate()
+
+    def clear_subagent_preview(self, task_id: str) -> None:
+        """Remove a sub-agent preview line once the task ends.
+
+        Args:
+            task_id (str): IN: Sub-agent task identifier.
+        """
+        self._status.clear_subagent_preview(task_id)
+        self._invalidate()
+
+    def clear_subagent_previews(self) -> None:
+        """Remove all transient sub-agent preview lines."""
+        self._status.clear_subagent_previews()
+        self._invalidate()
+
     def _invalidate(self) -> None:
         """Trigger a redraw of the prompt application if running."""
         if self._app:
@@ -1169,11 +1294,11 @@ class PersistentPrompt:
             self._layout,
             key_bindings=self._kb,
             erase_when_done=True,
-            mouse_support=True,
+            mouse_support=os.environ.get("XERXES_MOUSE", "0") == "1",
             full_screen=True,
             refresh_interval=0.1,
         )
-        await self._app.run_async()
+        await self._app.run_async(handle_sigint=False)
         return self._app
 
     def stop(self) -> None:

@@ -175,15 +175,19 @@ class ExecuteShell(AgentBaseFn):
 
     Inherits from: AgentBaseFn
 
-    Attributes:
-        MAX_TIMEOUT_SECS (float): max timeout secs."""
+    The timeout the agent passes is honored as-is. If unset, falls back to
+    ``XERXES_SHELL_TIMEOUT`` (env), then ``DEFAULT_TIMEOUT_SECS``. Pass
+    ``timeout=0`` to wait forever (no cap) for intentional long-running work.
 
-    MAX_TIMEOUT_SECS: float = 60.0
+    Attributes:
+        DEFAULT_TIMEOUT_SECS (float): default timeout when none requested."""
+
+    DEFAULT_TIMEOUT_SECS: float = 30.0
 
     @staticmethod
     def static_call(
         command: str,
-        timeout: float | None = 10.0,
+        timeout: float | None = None,
         cwd: str | None = None,
         **context_variables,
     ) -> dict[str, str]:
@@ -191,20 +195,30 @@ class ExecuteShell(AgentBaseFn):
 
         Args:
             command (str): IN: command. OUT: Consumed during execution.
-            timeout (float | None, optional): IN: timeout. Defaults to 10.0. OUT: Consumed during execution.
+            timeout (float | None, optional): IN: Timeout in seconds. ``None``
+                uses the default (env override ``XERXES_SHELL_TIMEOUT`` or
+                ``DEFAULT_TIMEOUT_SECS``). ``0`` disables the timeout entirely.
+                Any positive value is used verbatim.
             cwd (str | None, optional): IN: cwd. Defaults to None. OUT: Consumed during execution.
             **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
         Returns:
             dict[str, str]: OUT: Result of the operation."""
 
-        effective = ExecuteShell.MAX_TIMEOUT_SECS
-        if timeout is not None:
+        import os as _os
+
+        effective: float | None
+        if timeout is None:
+            env_default = _os.environ.get("XERXES_SHELL_TIMEOUT")
+            try:
+                effective = float(env_default) if env_default else ExecuteShell.DEFAULT_TIMEOUT_SECS
+            except (TypeError, ValueError):
+                effective = ExecuteShell.DEFAULT_TIMEOUT_SECS
+        else:
             try:
                 t = float(timeout)
-                if 0 < t < effective:
-                    effective = t
             except (TypeError, ValueError):
-                pass
+                t = ExecuteShell.DEFAULT_TIMEOUT_SECS
+            effective = None if t <= 0 else t
 
         try:
             proc = subprocess.run(
@@ -223,9 +237,10 @@ class ExecuteShell(AgentBaseFn):
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            cap = f"{effective:.0f}s" if effective is not None else "no-cap"
             return {
                 "stdout": stdout,
-                "stderr": (stderr + f"\n[ExecuteShell] command timed out after {effective:.0f}s").strip(),
+                "stderr": (stderr + f"\n[ExecuteShell] command timed out after {cap}").strip(),
                 "returncode": "124",
             }
 
