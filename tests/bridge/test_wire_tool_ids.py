@@ -12,7 +12,7 @@ def test_wire_tool_result_reuses_generated_tool_call_id() -> None:
     server._stdout = output
 
     server._emit_wire_tool_start("", "ExecuteShell", {"command": "cd /tmp && pwd"})
-    server._emit_wire_tool_result("", "ok")
+    server._emit_wire_tool_result("", "ok", duration_ms=123.0)
 
     lines = [json.loads(line) for line in output.getvalue().splitlines()]
     tool_call = lines[0]["params"]["payload"]
@@ -20,3 +20,4 @@ def test_wire_tool_result_reuses_generated_tool_call_id() -> None:
 
     assert tool_call["id"]
     assert tool_result["tool_call_id"] == tool_call["id"]
+    assert tool_result["duration_ms"] == 123.0

@@ -38,9 +38,13 @@ from .registry import (
 
 
 class OpenAICompatLLM(OpenAILLM):
-    """Open aicompat llm.
+    """OpenAI-compatible LLM client for third-party providers.
 
-    Inherits from: OpenAILLM
+    Subclass of OpenAILLM that auto-detects provider settings (base URL,
+    API key environment variable, context limits) from the registry.
+
+    Attributes:
+        provider_name: The detected or specified provider name.
     """
 
     def __init__(
@@ -51,17 +55,15 @@ class OpenAICompatLLM(OpenAILLM):
         async_client: Any | None = None,
         **kwargs,
     ):
-        """Initialize the instance.
+        """Initialize the OpenAI-compatible LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            provider (str | None, optional): IN: provider. Defaults to None. OUT: Consumed during execution.
-            client (Any | None, optional): IN: client. Defaults to None. OUT: Consumed during execution.
-            async_client (Any | None, optional): IN: async client. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            provider: Provider name for registry lookup. If None, inferred from model name.
+            client: Optional pre-configured sync OpenAI client.
+            async_client: Optional pre-configured async OpenAI client.
+            **kwargs: Additional configuration fields forwarded to LLMConfig.
+        """
 
         model = config.model if config else kwargs.get("model", "")
         self.provider_name = provider or detect_provider(model)
@@ -86,24 +88,13 @@ class OpenAICompatLLM(OpenAILLM):
         super().__init__(config=config, client=client, async_client=async_client)
 
     def get_model_info(self) -> dict[str, Any]:
-        """Retrieve the model info.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+        """Return model information with the provider name capitalized."""
         info = super().get_model_info()
         info["provider"] = self.provider_name.capitalize()
         return info
 
     def __repr__(self) -> str:
-        """Dunder method for repr.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return a human-readable representation of the client."""
         return (
             f"OpenAICompatLLM(provider='{self.provider_name}', "
             f"model='{self.config.model}', "
@@ -112,128 +103,118 @@ class OpenAICompatLLM(OpenAILLM):
 
 
 class DeepSeekLLM(OpenAICompatLLM):
-    """Deep seek llm.
+    """DeepSeek LLM client using the OpenAI-compatible API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="deepseek".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the DeepSeek LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="deepseek", **kwargs)
 
 
 class MiniMaxLLM(OpenAICompatLLM):
-    """Mini max llm.
+    """MiniMax LLM client using the OpenAI-compatible API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="minimax".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the MiniMax LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="minimax", **kwargs)
 
 
 class KimiLLM(OpenAICompatLLM):
-    """Kimi llm.
+    """Kimi (Moonshot) LLM client using the OpenAI-compatible API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="kimi".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Kimi LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="kimi", **kwargs)
 
 
 class QwenLLM(OpenAICompatLLM):
-    """Qwen llm.
+    """Qwen (Alibaba DashScope) LLM client using the OpenAI-compatible API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="qwen".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Qwen LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="qwen", **kwargs)
 
 
 class ZhipuLLM(OpenAICompatLLM):
-    """Zhipu llm.
+    """Zhipu (GLM) LLM client using the OpenAI-compatible API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="zhipu".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Zhipu LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="zhipu", **kwargs)
 
 
 class LMStudioLLM(OpenAICompatLLM):
-    """Lmstudio llm.
+    """LM Studio LLM client using the OpenAI-compatible local API.
 
-    Inherits from: OpenAICompatLLM
+    Inherits from OpenAICompatLLM with provider="lmstudio".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the LM Studio LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
         super().__init__(config=config, provider="lmstudio", **kwargs)
 
 
 class CustomLLM(OpenAICompatLLM):
-    """Custom llm.
+    """Custom LLM client for user-defined OpenAI-compatible endpoints.
 
-    Inherits from: OpenAICompatLLM
+    Requires a base_url to be provided. Inherits from OpenAICompatLLM
+    with provider="custom".
     """
 
     def __init__(self, config: LLMConfig | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Custom LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+
+        Raises:
+            ValueError: If no base_url is provided via config or kwargs.
+        """
         if config and not config.base_url and "base_url" not in kwargs:
             raise ValueError("CustomLLM requires a base_url. Pass it via LLMConfig or as a kwarg.")
         super().__init__(config=config, provider="custom", **kwargs)

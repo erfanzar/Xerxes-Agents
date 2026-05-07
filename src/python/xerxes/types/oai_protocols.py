@@ -35,13 +35,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIBaseModel(BaseModel):
-    """Open aibase model.
+    """Extended BaseModel for OpenAI-compatible protocol objects.
 
-    Inherits from: BaseModel
+    Allows extra fields via ``model_config`` and tracks declared field names
+    as a class variable for validation.
 
     Attributes:
-        model_config (Any): model config.
-        field_names (tp.ClassVar[set[str] | None]): field names."""
+        field_names: Cached set of declared field names (including aliases) for
+            this class. Lazily populated on first validation.
+
+    Inherits from:
+        BaseModel: Pydantic base for serialization and validation.
+    """
 
     model_config = ConfigDict(extra="allow")
     field_names: tp.ClassVar[set[str] | None] = None
@@ -49,32 +54,8 @@ class OpenAIBaseModel(BaseModel):
     @model_validator(mode="wrap")
     @classmethod
     def __log_extra_fields__(cls, data, handler):
-        """Dunder method for log extra fields.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (Any): IN: data. OUT: Consumed during execution.
-            handler (Any): IN: handler. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+        """Validate and normalize input data, building the field-names cache if needed."""
         result = handler(data)
-        """Dunder method for log extra fields.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (Any): IN: data. OUT: Consumed during execution.
-            handler (Any): IN: handler. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-        """Dunder method for log extra fields.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (Any): IN: data. OUT: Consumed during execution.
-            handler (Any): IN: handler. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
         if not isinstance(data, dict):
             return result
         field_names = cls.field_names

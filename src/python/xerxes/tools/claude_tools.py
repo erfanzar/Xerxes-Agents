@@ -11,20 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Claude tools module for Xerxes.
+"""Claude-style coding and agent tools for task execution, subagent management, and workflow orchestration.
 
-Exports:
-    - FileEditTool
-    - GlobTool
-    - GrepTool
-    - AgentTool
-    - SendMessageTool
-    - TaskCreateTool
-    - SpawnAgents
-    - TaskGetTool
-    - TaskListTool
-    - TaskOutputTool
-    - ... and 20 more."""
+This module provides comprehensive tools for file editing, code search, subagent spawning,
+task management, and workflow control. These tools enable agents to perform complex
+multi-step operations and delegate work to specialized subagents.
+
+Example:
+    >>> from xerxes.tools.claude_tools import FileEditTool, AgentTool
+    >>> FileEditTool.static_call(file_path="main.py", old_string="x=1", new_string="x=2")
+    >>> AgentTool.static_call(prompt="Write a test for this function")
+"""
 
 from __future__ import annotations
 
@@ -43,16 +40,17 @@ from ..types import AgentBaseFn
 
 
 def _unified_diff(old: str, new: str, filename: str = "", context: int = 3) -> str:
-    """Internal helper to unified diff.
+    """Generate a unified diff string between two text contents.
 
     Args:
-        old (str): IN: old. OUT: Consumed during execution.
-        new (str): IN: new. OUT: Consumed during execution.
-        filename (str, optional): IN: filename. Defaults to ''. OUT: Consumed during execution.
-        context (int, optional): IN: context. Defaults to 3. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        old: Original text content.
+        new: Modified text content.
+        filename: Optional filename for diff headers.
+        context: Number of context lines around changes.
 
+    Returns:
+        Formatted unified diff string.
+    """
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
     diff = difflib.unified_diff(
@@ -70,9 +68,17 @@ def _unified_diff(old: str, new: str, filename: str = "", context: int = 3) -> s
 
 
 class FileEditTool(AgentBaseFn):
-    """File edit tool.
+    """Edit a file by replacing text with new content.
 
-    Inherits from: AgentBaseFn
+    Provides precise text replacement in files with support for multiple occurrences
+    and automatic diff generation for transparency.
+
+    Example:
+        >>> FileEditTool.static_call(
+        ...     file_path="config.py",
+        ...     old_string="DEBUG = True",
+        ...     new_string="DEBUG = False"
+        ... )
     """
 
     @staticmethod
@@ -83,17 +89,22 @@ class FileEditTool(AgentBaseFn):
         replace_all: bool = False,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Replace text in a file with new content.
 
         Args:
-            file_path (str): IN: file path. OUT: Consumed during execution.
-            old_string (str): IN: old string. OUT: Consumed during execution.
-            new_string (str): IN: new string. OUT: Consumed during execution.
-            replace_all (bool, optional): IN: replace all. Defaults to False. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            file_path: Path to the file to edit.
+            old_string: Text to find and replace. Must be an exact match.
+            new_string: Replacement text.
+            replace_all: If True, replace all occurrences. Defaults to False.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message with diff summary, or error message.
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist.
+            ValueError: If old_string is not found or matches new_string.
+        """
         p = Path(file_path).expanduser().resolve()
         if not p.exists():
             return f"Error: file not found: {file_path}"
@@ -124,9 +135,12 @@ class FileEditTool(AgentBaseFn):
 
 
 class GlobTool(AgentBaseFn):
-    """Glob tool.
+    """Find files matching a glob pattern.
 
-    Inherits from: AgentBaseFn
+    Recursively or non-recursively searches for files matching the pattern.
+
+    Example:
+        >>> GlobTool.static_call(pattern="**/*.py")
     """
 
     @staticmethod
@@ -135,15 +149,16 @@ class GlobTool(AgentBaseFn):
         path: str | None = None,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Find files matching a glob pattern.
 
         Args:
-            pattern (str): IN: pattern. OUT: Consumed during execution.
-            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            pattern: Glob pattern (e.g., "*.py", "**/*.txt").
+            path: Directory to search in. Defaults to current working directory.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            List of matching file paths, or message if no matches found.
+        """
         base = Path(path).expanduser().resolve() if path else Path.cwd()
         try:
             matches = sorted(base.glob(pattern))
@@ -159,9 +174,12 @@ class GlobTool(AgentBaseFn):
 
 
 class GrepTool(AgentBaseFn):
-    """Grep tool.
+    """Search file contents using pattern matching.
 
-    Inherits from: AgentBaseFn
+    Supports both ripgrep (preferred) and standard grep with various output formats.
+
+    Example:
+        >>> GrepTool.static_call(pattern="TODO", case_insensitive=True)
     """
 
     @staticmethod
@@ -174,19 +192,21 @@ class GrepTool(AgentBaseFn):
         context: int = 0,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Search file contents for a pattern.
 
         Args:
-            pattern (str): IN: pattern. OUT: Consumed during execution.
-            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
-            glob (str | None, optional): IN: glob. Defaults to None. OUT: Consumed during execution.
-            output_mode (str, optional): IN: output mode. Defaults to 'files_with_matches'. OUT: Consumed during execution.
-            case_insensitive (bool, optional): IN: case insensitive. Defaults to False. OUT: Consumed during execution.
-            context (int, optional): IN: context. Defaults to 0. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            pattern: Regex or literal string to search for.
+            path: Directory or file to search. Defaults to current directory.
+            glob: Filter files by glob pattern (e.g., "*.py").
+            output_mode: Output format. Options: 'files_with_matches' (default),
+                'count', 'content' (line numbers).
+            case_insensitive: Make search case-insensitive.
+            context: Number of lines of context around matches.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Matching lines or file list, depending on output_mode.
+        """
         use_rg = _has_ripgrep()
         cmd: list[str] = ["rg" if use_rg else "grep", "--no-heading"]
 
@@ -230,11 +250,11 @@ class GrepTool(AgentBaseFn):
 
 
 def _has_ripgrep() -> bool:
-    """Internal helper to has ripgrep.
+    """Check if ripgrep is available on the system.
 
     Returns:
-        bool: OUT: Result of the operation."""
-
+        True if ripgrep (rg) is installed and accessible.
+    """
     try:
         subprocess.run(["rg", "--version"], capture_output=True, check=True)
         return True
@@ -250,17 +270,15 @@ def _build_subagent_system_prompt(
     *,
     include_active_skills: bool = False,
 ) -> str:
-    """Internal helper to build subagent system prompt.
+    """Build system prompt for spawned subagents.
 
     Args:
-        base (str, optional): IN: base. Defaults to 'You are a helpful AI assistant.'. OUT: Consumed during execution.
-        include_active_skills (bool, optional): IN: Whether active top-level skills
-            should be prepended. Defaults to False so skills such as deepscan do
-            not recursively instruct child agents to spawn more child agents.
-            OUT: Consumed during prompt construction.
-    Returns:
-        str: OUT: Result of the operation."""
+        base: Base system prompt.
+        include_active_skills: Whether to include active skills in prompt.
 
+    Returns:
+        Complete system prompt for subagent.
+    """
     if not include_active_skills:
         return base
 
@@ -284,11 +302,11 @@ def _build_subagent_system_prompt(
 
 
 def _get_agent_manager():
-    """Internal helper to get agent manager.
+    """Get or create the global agent manager singleton.
 
     Returns:
-        Any: OUT: Result of the operation."""
-
+        The SubAgentManager instance.
+    """
     global _agent_manager
     if _agent_manager is None:
         from ..agents.subagent_manager import SubAgentManager
@@ -305,9 +323,20 @@ def _get_agent_manager():
     return _agent_manager
 
 
-def _spawn_agents_wait_timeout(value: float | int | str | None = None) -> float | None:
-    """Return the bounded wait for SpawnAgents joins."""
-    raw = value if value is not None else os.environ.get("XERXES_SPAWN_AGENTS_WAIT_TIMEOUT", "120")
+def _subagent_wait_timeout(value: float | int | str | None = None) -> float | None:
+    """Return the bounded wait timeout for sub-agent joins.
+
+    Args:
+        value: Timeout value from caller or environment.
+
+    Returns:
+        Timeout in seconds, or None for no timeout.
+    """
+    raw = value
+    if raw is None:
+        raw = os.environ.get("XERXES_SUBAGENT_WAIT_TIMEOUT")
+    if raw is None:
+        raw = os.environ.get("XERXES_SPAWN_AGENTS_WAIT_TIMEOUT", "120")
     if raw is None:
         return 120.0
     try:
@@ -319,10 +348,21 @@ def _spawn_agents_wait_timeout(value: float | int | str | None = None) -> float 
     return timeout
 
 
-class AgentTool(AgentBaseFn):
-    """Agent tool.
+def _spawn_agents_wait_timeout(value: float | int | str | None = None) -> float | None:
+    """Return the bounded wait timeout for SpawnAgents joins."""
+    return _subagent_wait_timeout(value)
 
-    Inherits from: AgentBaseFn
+
+class AgentTool(AgentBaseFn):
+    """Spawn a subagent to execute a task independently.
+
+    Creates and runs a specialized subagent for complex or specialized tasks.
+
+    Example:
+        >>> AgentTool.static_call(
+        ...     prompt="Refactor the auth module",
+        ...     subagent_type="coder"
+        ... )
     """
 
     @staticmethod
@@ -333,21 +373,24 @@ class AgentTool(AgentBaseFn):
         name: str = "",
         model: str = "",
         wait: bool = True,
+        timeout: float | None = None,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Spawn a subagent to execute a task.
 
         Args:
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            subagent_type (str, optional): IN: subagent type. Defaults to 'general-purpose'. OUT: Consumed during execution.
-            isolation (str, optional): IN: isolation. Defaults to ''. OUT: Consumed during execution.
-            name (str, optional): IN: name. Defaults to ''. OUT: Consumed during execution.
-            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-            wait (bool, optional): IN: wait. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            prompt: Task description for the subagent.
+            subagent_type: Type of agent to spawn (e.g., 'coder', 'reviewer').
+            isolation: Optional isolation mode (e.g., 'docker', 'vm').
+            name: Optional name for the subagent.
+            model: Optional model override.
+            wait: Whether to wait for completion. Defaults to True.
+            timeout: Maximum seconds to wait before returning a running snapshot.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            The subagent's result or error message.
+        """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import get_inheritable
 
@@ -370,7 +413,7 @@ class AgentTool(AgentBaseFn):
         )
 
         if wait and task.status not in ("failed",):
-            mgr.wait(task.id, timeout=None)
+            mgr.wait(task.id, timeout=_subagent_wait_timeout(timeout))
 
         if task.status == "completed" and task.result is not None:
             return task.result
@@ -379,13 +422,18 @@ class AgentTool(AgentBaseFn):
         if task.status == "cancelled":
             return "[Sub-agent was cancelled.]"
 
-        return json.dumps(task.snapshot(), indent=2)
+        snapshot = task.snapshot()
+        snapshot["note"] = "Agent is still running; use TaskGetTool or TaskListTool to check it later."
+        return json.dumps(snapshot, indent=2, default=str)
 
 
 class SendMessageTool(AgentBaseFn):
-    """Send message tool.
+    """Send a message to a running subagent.
 
-    Inherits from: AgentBaseFn
+    Allows communication with running subagents for follow-up tasks.
+
+    Example:
+        >>> SendMessageTool.static_call(target="my-agent", message="Continue with next step")
     """
 
     @staticmethod
@@ -394,15 +442,16 @@ class SendMessageTool(AgentBaseFn):
         message: str,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Send a message to a running subagent.
 
         Args:
-            target (str): IN: target. OUT: Consumed during execution.
-            message (str): IN: message. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            target: Agent name or task ID.
+            message: Message content to send.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Confirmation or error message.
+        """
         mgr = _get_agent_manager()
         task_id = mgr._by_name.get(target, target)
         task = mgr.tasks.get(task_id)
@@ -421,9 +470,15 @@ class SendMessageTool(AgentBaseFn):
 
 
 class TaskCreateTool(AgentBaseFn):
-    """Task create tool.
+    """Create a subagent task without waiting for completion.
 
-    Inherits from: AgentBaseFn
+    Spawns an agent that runs in the background for later retrieval.
+
+    Example:
+        >>> task_id = TaskCreateTool.static_call(
+        ...     prompt="Generate monthly report",
+        ...     name="monthly-report"
+        ... )
     """
 
     @staticmethod
@@ -433,16 +488,17 @@ class TaskCreateTool(AgentBaseFn):
         subagent_type: str = "general-purpose",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Create a subagent task for background execution.
 
         Args:
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            name (str, optional): IN: name. Defaults to ''. OUT: Consumed during execution.
-            subagent_type (str, optional): IN: subagent type. Defaults to 'general-purpose'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            prompt: Task description for the subagent.
+            name: Optional name for the task.
+            subagent_type: Type of agent to spawn.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Task ID or error message.
+        """
         return AgentTool.static_call(
             prompt=prompt,
             subagent_type=subagent_type,
@@ -452,9 +508,17 @@ class TaskCreateTool(AgentBaseFn):
 
 
 class SpawnAgents(AgentBaseFn):
-    """Spawn agents.
+    """Spawn multiple subagents in parallel.
 
-    Inherits from: AgentBaseFn
+    Creates and manages multiple agents simultaneously for parallel task execution.
+
+    Example:
+        >>> SpawnAgents.static_call(
+        ...     agents=[
+        ...         {"prompt": "Task 1", "name": "agent-1"},
+        ...         {"prompt": "Task 2", "name": "agent-2"}
+        ...     ]
+        ... )
     """
 
     @staticmethod
@@ -464,17 +528,18 @@ class SpawnAgents(AgentBaseFn):
         timeout: float | None = None,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Spawn multiple subagents in parallel.
 
         Args:
-            agents (list[dict[str, str]] | str): IN: agents. OUT: Consumed during execution.
-            wait (bool, optional): IN: wait. Defaults to True. OUT: Consumed during execution.
-            timeout (float | None, optional): IN: max seconds to wait for all agents. Defaults to env or 120.
-                OUT: Prevents the parent tool call from occupying the TUI indefinitely.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            agents: List of agent specifications with 'prompt' key,
+                optionally 'name' and 'subagent_type'.
+            wait: Wait for all agents to complete. Defaults to True.
+            timeout: Maximum seconds to wait. Defaults to 120 or env setting.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            JSON array of results for each agent.
+        """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import get_inheritable
 
@@ -534,21 +599,23 @@ class SpawnAgents(AgentBaseFn):
 
 
 class TaskGetTool(AgentBaseFn):
-    """Task get tool.
+    """Get the current status and result of a task.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> TaskGetTool.static_call(task_id="abc123")
     """
 
     @staticmethod
     def static_call(task_id: str, **context_variables) -> str:
-        """Static call.
+        """Get task status and snapshot.
 
         Args:
-            task_id (str): IN: task id. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            task_id: ID or name of the task to query.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            JSON snapshot of task status and result.
+        """
         mgr = _get_agent_manager()
         task = mgr.tasks.get(task_id) or mgr.get_by_name(task_id)
         if not task:
@@ -557,20 +624,22 @@ class TaskGetTool(AgentBaseFn):
 
 
 class TaskListTool(AgentBaseFn):
-    """Task list tool.
+    """List all active and recent tasks.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> TaskListTool.static_call()
     """
 
     @staticmethod
     def static_call(**context_variables) -> str:
-        """Static call.
+        """List all tasks.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Formatted list of tasks with status.
+        """
         mgr = _get_agent_manager()
         tasks = mgr.list_tasks()
         if not tasks:
@@ -583,21 +652,23 @@ class TaskListTool(AgentBaseFn):
 
 
 class TaskOutputTool(AgentBaseFn):
-    """Task output tool.
+    """Get the output result of a completed task.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> TaskOutputTool.static_call(task_id="abc123")
     """
 
     @staticmethod
     def static_call(task_id: str, **context_variables) -> str:
-        """Static call.
+        """Get task output result.
 
         Args:
-            task_id (str): IN: task id. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            task_id: ID or name of the task.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            The task's result or status message.
+        """
         mgr = _get_agent_manager()
         result = mgr.get_result(task_id)
         if result is None:
@@ -608,30 +679,33 @@ class TaskOutputTool(AgentBaseFn):
 
 
 class TaskStopTool(AgentBaseFn):
-    """Task stop tool.
+    """Cancel a running task.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> TaskStopTool.static_call(task_id="abc123")
     """
 
     @staticmethod
     def static_call(task_id: str, **context_variables) -> str:
-        """Static call.
+        """Stop a running task.
 
         Args:
-            task_id (str): IN: task id. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            task_id: ID of the task to stop.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Confirmation or error message.
+        """
         mgr = _get_agent_manager()
         ok = mgr.cancel(task_id)
         return f"Task '{task_id}' cancelled." if ok else f"Could not cancel task '{task_id}'."
 
 
 class TaskUpdateTool(AgentBaseFn):
-    """Task update tool.
+    """Send an update message to a running task.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> TaskUpdateTool.static_call(task_id="abc123", message="New requirements...")
     """
 
     @staticmethod
@@ -640,15 +714,16 @@ class TaskUpdateTool(AgentBaseFn):
         message: str,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Send a message to a running task.
 
         Args:
-            task_id (str): IN: task id. OUT: Consumed during execution.
-            message (str): IN: message. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            task_id: Target task ID.
+            message: Message to send.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Result from SendMessageTool.
+        """
         return SendMessageTool.static_call(target=task_id, message=message)
 
 
@@ -656,9 +731,17 @@ _todo_items: list[dict[str, str]] = []
 
 
 class TodoWriteTool(AgentBaseFn):
-    """Todo write tool.
+    """Manage a persistent todo list.
 
-    Inherits from: AgentBaseFn
+    Tracks tasks with status indicators (pending, in_progress, completed).
+
+    Example:
+        >>> TodoWriteTool.static_call(
+        ...     todos=[
+        ...         {"content": "Write tests", "status": "in_progress"},
+        ...         {"content": "Deploy", "status": "pending"}
+        ...     ]
+        ... )
     """
 
     @staticmethod
@@ -666,14 +749,16 @@ class TodoWriteTool(AgentBaseFn):
         todos: str | list[dict[str, str]],
         **context_variables,
     ) -> str:
-        """Static call.
+        """Update the todo list.
 
         Args:
-            todos (str | list[dict[str, str]]): IN: todos. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            todos: JSON array of todo items with 'content' and 'status' keys,
+                or a JSON string to be parsed.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Formatted todo list with progress summary.
+        """
         global _todo_items
         if isinstance(todos, str):
             try:
@@ -702,19 +787,22 @@ _ask_user_question_callback: Callable[[str], str] | None = None
 
 
 def set_ask_user_question_callback(cb: Callable[[str], str] | None) -> None:
-    """Set the ask user question callback.
+    """Set the callback for user questions.
 
     Args:
-        cb (Callable[[str], str] | None): IN: cb. OUT: Consumed during execution."""
-
+        cb: Callback function that takes a question string and returns an answer.
+    """
     global _ask_user_question_callback
     _ask_user_question_callback = cb
 
 
 class AskUserQuestionTool(AgentBaseFn):
-    """Ask user question tool.
+    """Ask a question to the human user.
 
-    Inherits from: AgentBaseFn
+    Pauses execution and waits for user input.
+
+    Example:
+        >>> AskUserQuestionTool.static_call(question="Should I proceed with deployment?")
     """
 
     @staticmethod
@@ -722,14 +810,15 @@ class AskUserQuestionTool(AgentBaseFn):
         question: str,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Ask the user a question.
 
         Args:
-            question (str): IN: question. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            question: The question to ask.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            User's response or the question itself in non-interactive mode.
+        """
         global _ask_user_question_callback
         if _ask_user_question_callback is not None:
             return _ask_user_question_callback(question)
@@ -737,45 +826,54 @@ class AskUserQuestionTool(AgentBaseFn):
 
 
 class EnterPlanModeTool(AgentBaseFn):
-    """Enter plan mode tool.
+    """Enter plan mode where actions are described but not executed.
 
-    Inherits from: AgentBaseFn
+    Use for reviewing and validating task plans before execution.
+
+    Example:
+        >>> EnterPlanModeTool.static_call()
     """
 
     @staticmethod
     def static_call(**context_variables) -> str:
-        """Static call.
+        """Enter plan mode.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Confirmation message.
+        """
         return "Entered plan mode. Describe your plan without executing actions."
 
 
 class ExitPlanModeTool(AgentBaseFn):
-    """Exit plan mode tool.
+    """Exit plan mode and resume normal action execution.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ExitPlanModeTool.static_call()
     """
 
     @staticmethod
     def static_call(**context_variables) -> str:
-        """Static call.
+        """Exit plan mode.
 
         Args:
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Confirmation message.
+        """
         return "Exited plan mode. Resuming normal execution."
 
 
 class EnterWorktreeTool(AgentBaseFn):
-    """Enter worktree tool.
+    """Create a git worktree for isolated task execution.
 
-    Inherits from: AgentBaseFn
+    Provides a separate working directory with its own branch.
+
+    Example:
+        >>> EnterWorktreeTool.static_call(branch_name="feature-task")
     """
 
     @staticmethod
@@ -783,14 +881,15 @@ class EnterWorktreeTool(AgentBaseFn):
         branch_name: str = "",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Create a git worktree.
 
         Args:
-            branch_name (str, optional): IN: branch name. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            branch_name: Name for the new branch. Auto-generated if empty.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message with worktree path and branch name, or error.
+        """
         cwd = os.getcwd()
         try:
             git_root = subprocess.check_output(
@@ -820,9 +919,10 @@ class EnterWorktreeTool(AgentBaseFn):
 
 
 class ExitWorktreeTool(AgentBaseFn):
-    """Exit worktree tool.
+    """Remove a git worktree after task completion.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ExitWorktreeTool.static_call(worktree_path="/tmp/xerxes-wt-abc123")
     """
 
     @staticmethod
@@ -831,15 +931,16 @@ class ExitWorktreeTool(AgentBaseFn):
         force: bool = False,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Remove a git worktree.
 
         Args:
-            worktree_path (str): IN: worktree path. OUT: Consumed during execution.
-            force (bool, optional): IN: force. Defaults to False. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            worktree_path: Path to the worktree to remove.
+            force: Force removal even with uncommitted changes.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message or error.
+        """
         cmd = ["git", "worktree", "remove"]
         if force:
             cmd.append("--force")
@@ -853,9 +954,10 @@ class ExitWorktreeTool(AgentBaseFn):
 
 
 class ToolSearchTool(AgentBaseFn):
-    """Tool search tool.
+    """Search available tools by name or description.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ToolSearchTool.static_call(query="file edit")
     """
 
     @staticmethod
@@ -863,14 +965,15 @@ class ToolSearchTool(AgentBaseFn):
         query: str,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Search for matching tools.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            query: Search query for tool names and descriptions.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            List of matching tools with scores.
+        """
         from ..runtime.bridge import populate_registry
 
         registry = populate_registry()
@@ -884,9 +987,12 @@ class ToolSearchTool(AgentBaseFn):
 
 
 class SkillTool(AgentBaseFn):
-    """Skill tool.
+    """Invoke a named skill with optional arguments.
 
-    Inherits from: AgentBaseFn
+    Skills are reusable prompt templates stored in the skills directory.
+
+    Example:
+        >>> SkillTool.static_call(skill_name="code-review", args="Check the auth module")
     """
 
     @staticmethod
@@ -895,15 +1001,16 @@ class SkillTool(AgentBaseFn):
         args: str = "",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Invoke a skill by name.
 
         Args:
-            skill_name (str): IN: skill name. OUT: Consumed during execution.
-            args (str, optional): IN: args. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            skill_name: Name of the skill to invoke.
+            args: Optional arguments to append to skill prompt.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Formatted skill instructions or error.
+        """
         try:
             from ..core.paths import xerxes_subdir
             from ..extensions.skills import SkillRegistry
@@ -935,9 +1042,14 @@ class SkillTool(AgentBaseFn):
 
 
 class NotebookEditTool(AgentBaseFn):
-    """Notebook edit tool.
+    """Edit a Jupyter notebook cell.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> NotebookEditTool.static_call(
+        ...     notebook_path="analysis.ipynb",
+        ...     cell_index=2,
+        ...     new_source="print('Updated!')"
+        ... )
     """
 
     @staticmethod
@@ -948,17 +1060,18 @@ class NotebookEditTool(AgentBaseFn):
         cell_type: str = "code",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Edit a notebook cell.
 
         Args:
-            notebook_path (str): IN: notebook path. OUT: Consumed during execution.
-            cell_index (int): IN: cell index. OUT: Consumed during execution.
-            new_source (str): IN: new source. OUT: Consumed during execution.
-            cell_type (str, optional): IN: cell type. Defaults to 'code'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            notebook_path: Path to the .ipynb file.
+            cell_index: Zero-based index of the cell to edit.
+            new_source: New content for the cell.
+            cell_type: Cell type ('code' or 'markdown').
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Success message or error.
+        """
         p = Path(notebook_path).expanduser().resolve()
         if not p.exists():
             return f"Error: notebook not found: {notebook_path}"
@@ -980,9 +1093,12 @@ class NotebookEditTool(AgentBaseFn):
 
 
 class LSPTool(AgentBaseFn):
-    """Lsptool.
+    """Interface for Language Server Protocol operations.
 
-    Inherits from: AgentBaseFn
+    Provides code navigation, diagnostics, and refactoring via LSP.
+
+    Example:
+        >>> LSPTool.static_call(action="definition", file_path="main.py", line=10)
     """
 
     @staticmethod
@@ -993,17 +1109,18 @@ class LSPTool(AgentBaseFn):
         character: int = 0,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Execute an LSP action.
 
         Args:
-            action (str): IN: action. OUT: Consumed during execution.
-            file_path (str, optional): IN: file path. Defaults to ''. OUT: Consumed during execution.
-            line (int, optional): IN: line. Defaults to 0. OUT: Consumed during execution.
-            character (int, optional): IN: character. Defaults to 0. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            action: LSP action (e.g., 'definition', 'references', 'hover').
+            file_path: File to operate on.
+            line: Line number (1-indexed).
+            character: Character position.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Informational message (LSP requires active server in TUI).
+        """
         return (
             f"[LSP:{action}] file={file_path} line={line} char={character}\n"
             "LSP tool requires an active language server. In the TUI, this is "
@@ -1012,9 +1129,12 @@ class LSPTool(AgentBaseFn):
 
 
 class MCPTool(AgentBaseFn):
-    """Mcptool.
+    """Interface for Model Context Protocol tools.
 
-    Inherits from: AgentBaseFn
+    Allows invoking tools from configured MCP servers.
+
+    Example:
+        >>> MCPTool.static_call(server_name="filesystem", tool_name="read_file")
     """
 
     @staticmethod
@@ -1024,16 +1144,17 @@ class MCPTool(AgentBaseFn):
         arguments: str | dict | None = None,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Call an MCP tool.
 
         Args:
-            server_name (str): IN: server name. OUT: Consumed during execution.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            arguments (str | dict | None, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            server_name: Name of the MCP server.
+            tool_name: Name of the tool to call.
+            arguments: Tool arguments as dict or JSON string.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Tool result or informational message.
+        """
         import importlib.util
 
         if importlib.util.find_spec("xerxes.mcp") is not None:
@@ -1046,21 +1167,23 @@ class MCPTool(AgentBaseFn):
 
 
 class ListMcpResourcesTool(AgentBaseFn):
-    """List mcp resources tool.
+    """List available resources from MCP servers.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ListMcpResourcesTool.static_call(server_name="database")
     """
 
     @staticmethod
     def static_call(server_name: str = "", **context_variables) -> str:
-        """Static call.
+        """List MCP resources.
 
         Args:
-            server_name (str, optional): IN: server name. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            server_name: Filter by server name, or empty for all servers.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            List of available resources.
+        """
         return (
             f"[MCP Resources] server={server_name or '(all)'}\n"
             "Use xerxes.mcp.MCPManager.list_resources() for async MCP resource listing."
@@ -1068,9 +1191,10 @@ class ListMcpResourcesTool(AgentBaseFn):
 
 
 class ReadMcpResourceTool(AgentBaseFn):
-    """Read mcp resource tool.
+    """Read a specific resource from an MCP server.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ReadMcpResourceTool.static_call(server_name="config", uri="file:///settings.json")
     """
 
     @staticmethod
@@ -1079,15 +1203,16 @@ class ReadMcpResourceTool(AgentBaseFn):
         uri: str,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Read an MCP resource.
 
         Args:
-            server_name (str): IN: server name. OUT: Consumed during execution.
-            uri (str): IN: uri. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            server_name: MCP server name.
+            uri: Resource URI to read.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Resource content or error.
+        """
         return (
             f"[MCP Read] server={server_name} uri={uri}\n"
             "Use xerxes.mcp.MCPManager.read_resource() for async MCP resource reading."
@@ -1095,9 +1220,10 @@ class ReadMcpResourceTool(AgentBaseFn):
 
 
 class RemoteTriggerTool(AgentBaseFn):
-    """Remote trigger tool.
+    """Trigger a named remote endpoint.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> RemoteTriggerTool.static_call(trigger_name="notify-slack", payload="Build complete")
     """
 
     @staticmethod
@@ -1106,22 +1232,24 @@ class RemoteTriggerTool(AgentBaseFn):
         payload: str = "",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Trigger a remote endpoint.
 
         Args:
-            trigger_name (str): IN: trigger name. OUT: Consumed during execution.
-            payload (str, optional): IN: payload. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            trigger_name: Name of the trigger to invoke.
+            payload: Data to send with the trigger.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Status message.
+        """
         return f"[RemoteTrigger] name={trigger_name} payload={payload[:100]}\nRemote triggers require configured remote endpoints."
 
 
 class ScheduleCronTool(AgentBaseFn):
-    """Schedule cron tool.
+    """Schedule a task for cron-based execution.
 
-    Inherits from: AgentBaseFn
+    Example:
+        >>> ScheduleCronTool.static_call(schedule="0 9 * * *", prompt="Daily report")
     """
 
     @staticmethod
@@ -1131,16 +1259,17 @@ class ScheduleCronTool(AgentBaseFn):
         name: str = "",
         **context_variables,
     ) -> str:
-        """Static call.
+        """Schedule a cron task.
 
         Args:
-            schedule (str): IN: schedule. OUT: Consumed during execution.
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            name (str, optional): IN: name. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            schedule: Cron expression (e.g., "0 9 * * *").
+            prompt: Task prompt for the scheduled execution.
+            name: Optional name for the scheduled task.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Status message.
+        """
         return (
             f"[ScheduleCron] schedule={schedule} name={name or '(unnamed)'}\n"
             f"Prompt: {prompt[:100]}\n"
@@ -1149,9 +1278,16 @@ class ScheduleCronTool(AgentBaseFn):
 
 
 class HandoffTool(AgentBaseFn):
-    """Handoff tool.
+    """Hand off a task to another specialized agent.
 
-    Inherits from: AgentBaseFn
+    Transfers context and control to a more appropriate agent type.
+
+    Example:
+        >>> HandoffTool.static_call(
+        ...     target_agent="reviewer",
+        ...     reason="Requires code review expertise",
+        ...     context_summary="Auth module changes"
+        ... )
     """
 
     @staticmethod
@@ -1160,19 +1296,22 @@ class HandoffTool(AgentBaseFn):
         reason: str,
         context_summary: str = "",
         prompt: str = "",
+        timeout: float | None = None,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Hand off to another agent type.
 
         Args:
-            target_agent (str): IN: target agent. OUT: Consumed during execution.
-            reason (str): IN: reason. OUT: Consumed during execution.
-            context_summary (str, optional): IN: context summary. Defaults to ''. OUT: Consumed during execution.
-            prompt (str, optional): IN: prompt. Defaults to ''. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            target_agent: Agent type to hand off to.
+            reason: Explanation for the handoff.
+            context_summary: Summary of current context.
+            prompt: Optional specific task for the handoff.
+            timeout: Maximum seconds to wait before returning a running snapshot.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Result from the handoff agent.
+        """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import emit_event, get_inheritable
 
@@ -1212,19 +1351,27 @@ your specialization ({target_agent}) is better suited for this work.
             name=f"handoff-{target_agent}",
         )
 
-        mgr.wait(task.id, timeout=None)
+        mgr.wait(task.id, timeout=_subagent_wait_timeout(timeout))
 
         if task.status == "completed" and task.result:
             return task.result
         if task.status == "failed":
             return f"Handoff to {target_agent} failed: {task.error}"
-        return json.dumps(task.snapshot(), indent=2)
+        snapshot = task.snapshot()
+        snapshot["note"] = "Handoff agent is still running; use TaskGetTool or TaskListTool to check it later."
+        return json.dumps(snapshot, indent=2, default=str)
 
 
 class PlanTool(AgentBaseFn):
-    """Plan tool.
+    """Create and optionally execute a multi-step plan.
 
-    Inherits from: AgentBaseFn
+    Breaks down complex tasks into parallelizable steps with agent assignments.
+
+    Example:
+        >>> PlanTool.static_call(
+        ...     objective="Build and deploy web app",
+        ...     execute=True
+        ... )
     """
 
     @staticmethod
@@ -1233,15 +1380,16 @@ class PlanTool(AgentBaseFn):
         execute: bool = True,
         **context_variables,
     ) -> str:
-        """Static call.
+        """Create and optionally execute a task plan.
 
         Args:
-            objective (str): IN: objective. OUT: Consumed during execution.
-            execute (bool, optional): IN: execute. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            objective: High-level task description.
+            execute: Whether to execute the plan. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Formatted plan and execution results.
+        """
         from ..agents.definitions import get_agent_definition, list_agent_definitions
         from ..runtime.config_context import emit_event, get_inheritable
 
@@ -1316,6 +1464,7 @@ Rules:
         results: list[str] = [plan_summary, "\n# Execution Results\n"]
 
         remaining = list(steps)
+        wait_timeout = _subagent_wait_timeout()
         while remaining:
             ready = [s for s in remaining if all(d.strip() in completed for d in s["depends"].split(",") if d.strip())]
             if not ready:
@@ -1356,13 +1505,20 @@ Rules:
                 )
                 tasks.append((step, task))
 
+            deadline = None if wait_timeout is None else time.monotonic() + wait_timeout
+            still_running = False
             for step, task in tasks:
-                mgr.wait(task.id, timeout=None)
+                remaining_wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+                mgr.wait(task.id, timeout=remaining_wait)
                 result = task.result or f"(failed: {task.error})"
-                completed[step["id"]] = result
                 results.append(f"\n## Step {step['id']} [{step['agent']}]: {step['description']}")
                 results.append(f"Status: {task.status}")
-                results.append(result[:2000])
+                if task.status in ("pending", "running"):
+                    still_running = True
+                    results.append("Still running; use TaskGetTool or TaskListTool to check it later.")
+                else:
+                    completed[step["id"]] = result
+                    results.append(result[:2000])
 
                 emit_event(
                     "plan_step_done",
@@ -1373,18 +1529,22 @@ Rules:
                 )
 
             remaining = [s for s in remaining if s["id"] not in completed]
+            if still_running:
+                results.append("\nPlan execution is still running in background; dependent steps were not started yet.")
+                break
 
         return "\n".join(results)
 
 
 def _parse_plan_xml(xml_text: str) -> list[dict[str, str]]:
-    """Internal helper to parse plan xml.
+    """Parse the <plan> XML format into step dictionaries.
 
     Args:
-        xml_text (str): IN: xml text. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, str]]: OUT: Result of the operation."""
+        xml_text: XML string containing <plan> element.
 
+    Returns:
+        List of step dictionaries with id, agent, depends, description.
+    """
     import re
 
     steps = []

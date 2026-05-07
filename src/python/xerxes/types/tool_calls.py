@@ -32,14 +32,13 @@ from ..core.utils import XerxesBase
 
 
 class Function(XerxesBase):
-    """Function.
-
-    Inherits from: XerxesBase
+    """Describes a callable function with its name, description, and parameter schema.
 
     Attributes:
-        name (str): name.
-        description (str): description.
-        parameters (dict[str, Any]): parameters."""
+        name: The function's identifier used in tool call requests.
+        description: A human-readable description of what the function does.
+        parameters: A JSON Schema dict describing required and optional parameters.
+    """
 
     name: str
     description: str = ""
@@ -47,18 +46,22 @@ class Function(XerxesBase):
 
 
 class ToolTypes(StrEnum):
-    """Tool types.
+    """Discriminator for the type of tool being described.
 
-    Inherits from: StrEnum
+    Attributes:
+        function: A callable function with a JSON Schema.
     """
 
     function = "function"
 
 
 class ToolChoice(StrEnum):
-    """Tool choice.
+    """Controls how the LLM selects tools.
 
-    Inherits from: StrEnum
+    Attributes:
+        auto: Let the model decide.
+        none: Force no tool usage.
+        any: Force at least one tool.
     """
 
     auto = "auto"
@@ -67,62 +70,64 @@ class ToolChoice(StrEnum):
 
 
 class Tool(XerxesBase):
-    """Tool.
-
-    Inherits from: XerxesBase
+    """Wraps a function definition as an OpenAI-compatible tool.
 
     Attributes:
-        type (ToolTypes): type.
-        function (Function): function."""
+        type: Discriminator, currently always ``ToolTypes.function``.
+        function: The function definition.
+    """
 
     type: ToolTypes = ToolTypes.function
     function: Function
 
     def to_openai(self) -> dict[str, Any]:
-        """To openai.
+        """Serialize this tool to an OpenAI ``tool`` object.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+            An OpenAI-compatible ``{"type": "function", "function": {...}}`` dict.
+        """
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, openai_tool: dict[str, Any]) -> "Tool":
-        """From openai.
+        """Construct a Tool from an OpenAI ``tool`` object.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            openai_tool (dict[str, Any]): IN: openai tool. OUT: Consumed during execution.
-        Returns:
-            'Tool': OUT: Result of the operation."""
+            openai_tool: An OpenAI ``{"type": "function", "function": {...}}`` dict.
 
+        Returns:
+            A ``Tool`` instance.
+        """
         return cls.model_validate(openai_tool)
 
 
 class FunctionCall(XerxesBase):
-    """Function call.
-
-    Inherits from: XerxesBase
+    """Represents a function call invocation with a name and arguments.
 
     Attributes:
-        name (str): name.
-        arguments (str): arguments."""
+        name: The name of the function being called.
+        arguments: A JSON string of key-value arguments (or a dict, serialized on assignment).
+    """
 
     name: str
     arguments: str
 
     @field_validator("arguments", mode="before")
     def validate_arguments(cls, v: str | dict[str, Any]) -> str:
-        """Validate arguments.
+        """Ensure ``arguments`` is a valid JSON string.
+
+        If a dict is provided, serialize it to JSON. If a string is provided,
+        validate that it is parseable JSON.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            v (str | dict[str, Any]): IN: v. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            v: Either a JSON string or a dict to be serialized.
 
+        Returns:
+            A JSON string.
+
+        Raises:
+            ValueError: If *v* is a non-empty string that is not valid JSON.
+        """
         if isinstance(v, dict):
             return json.dumps(v)
         if isinstance(v, str):
@@ -136,39 +141,36 @@ class FunctionCall(XerxesBase):
 
 
 class ToolCall(XerxesBase):
-    """Tool call.
-
-    Inherits from: XerxesBase
+    """An OpenAI-compatible tool call with a unique ID and function reference.
 
     Attributes:
-        id (str): id.
-        type (ToolTypes): type.
-        function (FunctionCall): function."""
+        id: A unique identifier for this tool call.
+        type: Discriminator, currently always ``ToolTypes.function``.
+        function: The ``FunctionCall`` specifying which function to invoke and with what arguments.
+    """
 
     id: str = "null"
     type: ToolTypes = ToolTypes.function
     function: FunctionCall
 
     def to_openai(self) -> dict[str, Any]:
-        """To openai.
+        """Serialize this tool call to an OpenAI ``tool_call`` object.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
-
+            An OpenAI-compatible ``{"id": ..., "type": "function", "function": {...}}`` dict.
+        """
         return self.model_dump()
 
     @classmethod
     def from_openai(cls, tool_call: dict[str, Any]) -> "ToolCall":
-        """From openai.
+        """Construct a ToolCall from an OpenAI ``tool_call`` object.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
-        Returns:
-            'ToolCall': OUT: Result of the operation."""
+            tool_call: An OpenAI ``{"id": ..., "type": "function", "function": {...}}`` dict.
 
+        Returns:
+            A ``ToolCall`` instance.
+        """
         return cls.model_validate(tool_call)
 
 

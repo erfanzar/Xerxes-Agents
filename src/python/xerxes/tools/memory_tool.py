@@ -11,20 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Memory tool module for Xerxes.
+"""Memory management tools for saving, searching, and organizing agent memory.
 
-Exports:
-    - MemoryOperation
-    - save_memory
-    - search_memory
-    - consolidate_agent_memories
-    - delete_memory
-    - get_memory_tags_and_terms
-    - get_memory_statistics
-    - get_memory_tool_descriptions
-    - add_memory_tools_to_agent
-    - create_memory_enabled_agent
-    - ... and 1 more."""
+This module provides tools for persistent memory storage, semantic search,
+and memory consolidation for agents to maintain context across sessions.
+
+Example:
+    >>> from xerxes.tools.memory_tool import save_memory, search_memory
+    >>> save_memory(content="User prefers dark mode")
+    >>> results = search_memory(query="user preferences")
+"""
 
 from collections.abc import Callable
 from datetime import datetime
@@ -36,9 +32,15 @@ from ..types import Agent
 
 
 class MemoryOperation(Enum):
-    """Memory operation.
+    """Enumeration of memory operation types.
 
-    Inherits from: Enum
+    Attributes:
+        SAVE: Save a new memory entry.
+        SEARCH: Search for memories matching a query.
+        RETRIEVE: Retrieve specific memories.
+        DELETE: Delete memory entries.
+        SUMMARIZE: Generate summary of memories.
+        CONSOLIDATE: Consolidate memories from different sources.
     """
 
     SAVE = "save"
@@ -57,18 +59,30 @@ def save_memory(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Save memory.
+    """Save a memory entry to the memory store.
+
+    Stores information for later retrieval, enabling agents to remember
+    important facts and context across interactions.
 
     Args:
-        content (str): IN: content. OUT: Consumed during execution.
-        memory_type (str, optional): IN: memory type. Defaults to 'short_term'. OUT: Consumed during execution.
-        tags (list[str] | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
-        metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-        agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        content: The memory content to store.
+        memory_type: Type of memory (short_term, long_term, working,
+            episodic, semantic, procedural). Defaults to "short_term".
+        tags: Optional list of tags for categorization.
+        metadata: Additional metadata dictionary.
+        agent_id: ID of the agent creating this memory.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with status and memory_id on success, or error message.
+
+    Example:
+        >>> save_memory(
+        ...     content="User's name is Alice",
+        ...     tags=["user-info", "preferences"],
+        ...     agent_id="assistant"
+        ... )
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
 
     if memory_store is None:
@@ -113,19 +127,25 @@ def search_memory(
     time_range: dict[str, str] | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Search for memory.
+    """Search for memories matching a query.
+
+    Performs semantic or keyword search across stored memories.
 
     Args:
-        query (str): IN: query. OUT: Consumed during execution.
-        memory_types (list[str] | None, optional): IN: memory types. Defaults to None. OUT: Consumed during execution.
-        tags (list[str] | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
-        limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        time_range (dict[str, str] | None, optional): IN: time range. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        query: Search query string.
+        memory_types: Filter by memory types.
+        tags: Filter by tags (memories must have at least one matching tag).
+        limit: Maximum results to return. Defaults to 10.
+        agent_id: Filter by agent ID.
+        time_range: Filter by time range {"start": "...", "end": "..."}.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with status, count, and memories list.
+
+    Example:
+        >>> search_memory(query="authentication setup", limit=5)
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
@@ -211,15 +231,21 @@ def consolidate_agent_memories(
     max_items: int = 20,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Consolidate agent memories.
+    """Consolidate and summarize an agent's memories.
+
+    Retrieves recent memories and organizes them by category for easier review.
 
     Args:
-        agent_id (str): IN: agent id. OUT: Consumed during execution.
-        max_items (int, optional): IN: max items. Defaults to 20. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        agent_id: ID of the agent whose memories to consolidate.
+        max_items: Maximum memories to include. Defaults to 20.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with status, summary, and statistics.
+
+    Example:
+        >>> consolidate_agent_memories(agent_id="assistant")
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
@@ -272,17 +298,21 @@ def delete_memory(
     older_than: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Delete memory.
+    """Delete memory entries by ID or filter criteria.
 
     Args:
-        memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-        tags (list[str] | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
-        agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        older_than (str | None, optional): IN: older than. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        memory_id: Specific memory ID to delete.
+        tags: Delete memories with these tags.
+        agent_id: Delete memories by this agent.
+        older_than: Delete memories older than this ISO timestamp.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with status and deleted count.
+
+    Example:
+        >>> delete_memory(tags=["temporary"], older_than="2024-01-01T00:00:00")
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
@@ -324,14 +354,18 @@ def get_memory_tags_and_terms(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Retrieve the memory tags and terms.
+    """Get all tags and their usage frequency across memories.
 
     Args:
-        agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        agent_id: Filter by agent ID.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with tags organized by type and frequency.
+
+    Example:
+        >>> get_memory_tags_and_terms(agent_id="assistant")
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
@@ -384,14 +418,18 @@ def get_memory_statistics(
     agent_id: str | None = None,
     context_variables: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Retrieve the memory statistics.
+    """Get statistics about the memory store.
 
     Args:
-        agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict[str, Any] | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+        agent_id: Include agent-specific statistics.
+        context_variables: Context including memory_store reference.
 
+    Returns:
+        Dictionary with memory statistics.
+
+    Example:
+        >>> get_memory_statistics(agent_id="assistant")
+    """
     memory_store = context_variables.get("memory_store") if context_variables else None
     if memory_store is None:
         return {"status": "error", "message": "Memory store not available"}
@@ -426,17 +464,23 @@ MEMORY_TOOLS: list[Callable[..., Any]] = [
 
 
 def get_memory_tool_descriptions() -> list[dict[str, str]]:
-    """Retrieve the memory tool descriptions.
+    """Get descriptions of all available memory tools.
 
     Returns:
-        list[dict[str, str]]: OUT: Result of the operation."""
+        List of dictionaries with tool name, description, and category.
 
+    Example:
+        >>> for tool in get_memory_tool_descriptions():
+        ...     print(f"{tool['name']}: {tool['description']}")
+    """
     descriptions = []
     for tool in MEMORY_TOOLS:
+        doc = tool.__doc__ or ""
+        first_line = doc.strip().split("\n")[0] if doc else ""
         descriptions.append(
             {
                 "name": tool.__name__,
-                "description": tool.__doc__.split("\n")[1].strip() if tool.__doc__ else "",
+                "description": first_line.strip(),
                 "category": "Memory Management",
             }
         )
@@ -448,15 +492,20 @@ def add_memory_tools_to_agent(
     memory_store=None,
     include_tools: list[str] | None = None,
 ) -> Agent:
-    """Add memory tools to agent.
+    """Add memory tools to an agent's function list.
 
     Args:
-        agent (Agent): IN: agent. OUT: Consumed during execution.
-        memory_store (Any, optional): IN: memory store. Defaults to None. OUT: Consumed during execution.
-        include_tools (list[str] | None, optional): IN: include tools. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Agent: OUT: Result of the operation."""
+        agent: Agent instance to add tools to.
+        memory_store: Memory store for tools to use.
+        include_tools: List of tool names to include, or None for all.
 
+    Returns:
+        The modified agent with memory tools attached.
+
+    Example:
+        >>> agent = Agent(id="assistant", instructions="You are helpful")
+        >>> add_memory_tools_to_agent(agent, memory_store=store)
+    """
     current_functions = list(agent.functions) if agent.functions else []
 
     if include_tools is None:
@@ -484,47 +533,59 @@ def create_memory_enabled_agent(
     memory_tools: list[str] | None = None,
     **agent_kwargs,
 ) -> Agent:
-    """Create memory enabled agent.
+    """Create a new agent with memory tools pre-configured.
 
     Args:
-        agent_id (str): IN: agent id. OUT: Consumed during execution.
-        instructions (str): IN: instructions. OUT: Consumed during execution.
-        memory_store (Any, optional): IN: memory store. Defaults to None. OUT: Consumed during execution.
-        memory_tools (list[str] | None, optional): IN: memory tools. Defaults to None. OUT: Consumed during execution.
-        **agent_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Agent: OUT: Result of the operation."""
+        agent_id: Unique identifier for the agent.
+        instructions: System instructions for the agent.
+        memory_store: Memory store for the agent to use.
+        memory_tools: Specific memory tools to include.
+        **agent_kwargs: Additional agent configuration.
 
+    Returns:
+        A new Agent instance with memory tools attached.
+
+    Example:
+        >>> agent = create_memory_enabled_agent(
+        ...     agent_id="assistant",
+        ...     instructions="You are helpful",
+        ...     memory_store=store
+        ... )
+    """
     agent = Agent(id=agent_id, instructions=instructions, functions=[], **agent_kwargs)
     agent = add_memory_tools_to_agent(agent, memory_store=memory_store, include_tools=memory_tools)
     return agent
 
 
 class MemoryToolContext:
-    """Memory tool context."""
+    """Context manager for memory tool execution.
 
-    def __init__(self, memory_store):
-        """Initialize the instance.
+    Provides automatic memory store injection for memory tool calls.
+
+    Example:
+        >>> with MemoryToolContext(memory_store) as ctx:
+        ...     ctx.wrap_function_call(save_memory, content="Hello")
+    """
+
+    def __init__(self, memory_store: Any) -> None:
+        """Initialize with a memory store.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_store (Any): IN: memory store. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+            memory_store: Memory store instance to use.
+        """
         self.memory_store = memory_store
 
-    def wrap_function_call(self, func, *args, **kwargs):
-        """Wrap function call.
+    def wrap_function_call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Wrap a function call to inject memory store.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            func (Any): IN: func. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            func: Function to wrap.
+            *args: Positional arguments for the function.
+            **kwargs: Keyword arguments for the function.
 
+        Returns:
+            Result of the wrapped function call.
+        """
         if "context_variables" not in kwargs:
             kwargs["context_variables"] = {}
 

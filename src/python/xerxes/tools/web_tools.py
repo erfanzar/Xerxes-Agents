@@ -11,13 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Web tools module for Xerxes.
+"""Web tools for scraping, API requests, RSS feeds, and URL analysis.
 
-Exports:
-    - WebScraper
-    - APIClient
-    - RSSReader
-    - URLAnalyzer"""
+This module provides comprehensive web interaction tools including web scraping,
+HTTP API clients, RSS feed readers, and URL analysis utilities.
+
+Example:
+    >>> from xerxes.tools.web_tools import WebScraper, APIClient, RSSReader
+    >>> WebScraper.static_call(url="https://example.com")
+    >>> APIClient.static_call(url="https://api.example.com/data")
+"""
 
 from __future__ import annotations
 
@@ -33,9 +36,14 @@ from ..types import AgentBaseFn
 
 
 class WebScraper(AgentBaseFn):
-    """Web scraper.
+    """Scrape web pages with CSS selector support and content extraction.
 
-    Inherits from: AgentBaseFn
+    Provides web scraping capabilities with optional CSS selector filtering,
+    link extraction, image extraction, and metadata parsing.
+
+    Example:
+        >>> WebScraper.static_call(url="https://news.ycombinator.com")
+        >>> WebScraper.static_call(url="https://example.com", selector="article")
     """
 
     @staticmethod
@@ -48,19 +56,20 @@ class WebScraper(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Asynchronously Async call.
+        """Asynchronously scrape a web page.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
-            extract_links (bool, optional): IN: extract links. Defaults to False. OUT: Consumed during execution.
-            extract_images (bool, optional): IN: extract images. Defaults to False. OUT: Consumed during execution.
-            clean_text (bool, optional): IN: clean text. Defaults to True. OUT: Consumed during execution.
-            timeout (int, optional): IN: timeout. Defaults to 30. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            url: URL to scrape.
+            selector: Optional CSS selector to extract specific elements.
+            extract_links: Include links in results. Defaults to False.
+            extract_images: Include image metadata in results. Defaults to False.
+            clean_text: Remove extra whitespace. Defaults to True.
+            timeout: Request timeout in seconds. Defaults to 30.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with scraped content, metadata, and optional extracted data.
+        """
         try:
             from bs4 import BeautifulSoup
         except ImportError:
@@ -74,7 +83,7 @@ class WebScraper(AgentBaseFn):
                 return {"error": f"Failed to fetch URL: {e!s}"}
 
         soup = BeautifulSoup(response.text, "html.parser")
-        result = {
+        result: dict[str, Any] = {
             "url": str(response.url),
             "status_code": response.status_code,
             "title": soup.title.string if soup.title else None,
@@ -90,28 +99,28 @@ class WebScraper(AgentBaseFn):
         if extract_links:
             links = []
             for link in soup.find_all("a", href=True):
-                tag = cast(Tag, link)
-                href = str(tag["href"])
+                link_tag = cast(Tag, link)
+                href = str(link_tag["href"])
                 absolute_url = urljoin(url, href)
-                links.append({"text": tag.get_text(strip=True), "url": absolute_url})
+                links.append({"text": link_tag.get_text(strip=True), "url": absolute_url})
             result["links"] = links[:100]
 
         if extract_images:
             images = []
             for img in soup.find_all("img", src=True):
-                tag = cast(Tag, img)
-                src = str(tag["src"])
+                img_tag = cast(Tag, img)
+                src = str(img_tag["src"])
                 absolute_url = urljoin(url, src)
-                images.append({"alt": tag.get("alt", ""), "src": absolute_url})
+                images.append({"alt": img_tag.get("alt", ""), "src": absolute_url})
             result["images"] = images[:50]
 
         meta_tags = {}
         for meta in soup.find_all("meta"):
-            tag = cast(Tag, meta)
-            if tag.get("name"):
-                meta_tags[tag["name"]] = tag.get("content", "")
-            elif tag.get("property"):
-                meta_tags[tag["property"]] = tag.get("content", "")
+            meta_tag = cast(Tag, meta)
+            if meta_tag.get("name"):
+                meta_tags[meta_tag["name"]] = meta_tag.get("content", "")
+            elif meta_tag.get("property"):
+                meta_tags[meta_tag["property"]] = meta_tag.get("content", "")
         result["meta"] = meta_tags
 
         return result
@@ -126,28 +135,33 @@ class WebScraper(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Scrape a web page.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
-            extract_links (bool, optional): IN: extract links. Defaults to False. OUT: Consumed during execution.
-            extract_images (bool, optional): IN: extract images. Defaults to False. OUT: Consumed during execution.
-            clean_text (bool, optional): IN: clean text. Defaults to True. OUT: Consumed during execution.
-            timeout (int, optional): IN: timeout. Defaults to 30. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            url: URL to scrape.
+            selector: Optional CSS selector to extract specific elements.
+            extract_links: Include links in results. Defaults to False.
+            extract_images: Include image metadata in results. Defaults to False.
+            clean_text: Remove extra whitespace. Defaults to True.
+            timeout: Request timeout in seconds. Defaults to 30.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with scraped content, metadata, and optional extracted data.
+        """
         return run_sync(
             WebScraper.async_call(url, selector, extract_links, extract_images, clean_text, timeout, **context_variables)
         )
 
 
 class APIClient(AgentBaseFn):
-    """Apiclient.
+    """Make HTTP API requests with support for various methods and data formats.
 
-    Inherits from: AgentBaseFn
+    Provides flexible HTTP client capabilities for interacting with REST APIs.
+
+    Example:
+        >>> APIClient.static_call(url="https://api.example.com/users", method="GET")
+        >>> APIClient.static_call(url="https://api.example.com/users", method="POST", json_data={"name": "Alice"})
     """
 
     @staticmethod
@@ -161,20 +175,21 @@ class APIClient(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Asynchronously Async call.
+        """Asynchronously make an API request.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'GET'. OUT: Consumed during execution.
-            headers (dict[str, str] | None, optional): IN: headers. Defaults to None. OUT: Consumed during execution.
-            params (dict[str, Any] | None, optional): IN: params. Defaults to None. OUT: Consumed during execution.
-            json_data (dict[str, Any] | None, optional): IN: json data. Defaults to None. OUT: Consumed during execution.
-            data (str | None, optional): IN: data. Defaults to None. OUT: Consumed during execution.
-            timeout (int, optional): IN: timeout. Defaults to 30. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            url: Full URL to request.
+            method: HTTP method. Defaults to "GET".
+            headers: Optional request headers.
+            params: Optional query parameters.
+            json_data: Optional JSON body for POST/PUT/PATCH.
+            data: Optional raw string body.
+            timeout: Request timeout in seconds. Defaults to 30.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with status_code, headers, response data, and URL.
+        """
         method = method.upper()
         if method not in ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]:
             return {"error": f"Invalid HTTP method: {method}"}
@@ -224,29 +239,34 @@ class APIClient(AgentBaseFn):
         timeout: int = 30,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Make an API request.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            method (str, optional): IN: method. Defaults to 'GET'. OUT: Consumed during execution.
-            headers (dict[str, str] | None, optional): IN: headers. Defaults to None. OUT: Consumed during execution.
-            params (dict[str, Any] | None, optional): IN: params. Defaults to None. OUT: Consumed during execution.
-            json_data (dict[str, Any] | None, optional): IN: json data. Defaults to None. OUT: Consumed during execution.
-            data (str | None, optional): IN: data. Defaults to None. OUT: Consumed during execution.
-            timeout (int, optional): IN: timeout. Defaults to 30. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            url: Full URL to request.
+            method: HTTP method. Defaults to "GET".
+            headers: Optional request headers.
+            params: Optional query parameters.
+            json_data: Optional JSON body for POST/PUT/PATCH.
+            data: Optional raw string body.
+            timeout: Request timeout in seconds. Defaults to 30.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with status_code, headers, response data, and URL.
+        """
         return run_sync(
             APIClient.async_call(url, method, headers, params, json_data, data, timeout, **context_variables)
         )
 
 
 class RSSReader(AgentBaseFn):
-    """Rssreader.
+    """Read and parse RSS/Atom feeds.
 
-    Inherits from: AgentBaseFn
+    Provides RSS feed parsing with optional content extraction.
+
+    Example:
+        >>> RSSReader.static_call(feed_url="https://example.com/feed.xml")
+        >>> RSSReader.static_call(feed_url="https://news.ycombinator.com/rss", max_items=20)
     """
 
     @staticmethod
@@ -256,16 +276,17 @@ class RSSReader(AgentBaseFn):
         include_content: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Asynchronously Async call.
+        """Asynchronously read an RSS feed.
 
         Args:
-            feed_url (str): IN: feed url. OUT: Consumed during execution.
-            max_items (int, optional): IN: max items. Defaults to 10. OUT: Consumed during execution.
-            include_content (bool, optional): IN: include content. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            feed_url: URL of the RSS or Atom feed.
+            max_items: Maximum number of items to return. Defaults to 10.
+            include_content: Include full content. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with feed metadata and list of items.
+        """
         try:
             import feedparser
         except ImportError:
@@ -277,7 +298,7 @@ class RSSReader(AgentBaseFn):
             if feed.bozo:
                 return {"error": f"Feed parsing error: {feed.bozo_exception}"}
 
-            result = {
+            result: dict[str, Any] = {
                 "title": feed.feed.get("title", ""),
                 "description": feed.feed.get("description", ""),
                 "link": feed.feed.get("link", ""),
@@ -286,7 +307,7 @@ class RSSReader(AgentBaseFn):
             }
 
             for entry in feed.entries[:max_items]:
-                item = {
+                item: dict[str, Any] = {
                     "title": entry.get("title", ""),
                     "link": entry.get("link", ""),
                     "published": entry.get("published", ""),
@@ -314,23 +335,28 @@ class RSSReader(AgentBaseFn):
         include_content: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Read an RSS feed.
 
         Args:
-            feed_url (str): IN: feed url. OUT: Consumed during execution.
-            max_items (int, optional): IN: max items. Defaults to 10. OUT: Consumed during execution.
-            include_content (bool, optional): IN: include content. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            feed_url: URL of the RSS or Atom feed.
+            max_items: Maximum number of items to return. Defaults to 10.
+            include_content: Include full content. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with feed metadata and list of items.
+        """
         return run_sync(RSSReader.async_call(feed_url, max_items, include_content, **context_variables))
 
 
 class URLAnalyzer(AgentBaseFn):
-    """Urlanalyzer.
+    """Analyze URLs and extract metadata.
 
-    Inherits from: AgentBaseFn
+    Provides URL parsing and optional availability checking.
+
+    Example:
+        >>> URLAnalyzer.static_call(url="https://example.com")
+        >>> URLAnalyzer.static_call(url="https://example.com", check_availability=True)
     """
 
     @staticmethod
@@ -340,19 +366,20 @@ class URLAnalyzer(AgentBaseFn):
         extract_metadata: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Analyze a URL.
 
         Args:
-            url (str): IN: url. OUT: Consumed during execution.
-            check_availability (bool, optional): IN: check availability. Defaults to False. OUT: Consumed during execution.
-            extract_metadata (bool, optional): IN: extract metadata. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            url: URL to analyze.
+            check_availability: Check if URL is accessible. Defaults to False.
+            extract_metadata: Extract page metadata. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary with URL components and optional metadata.
+        """
         parsed = urlparse(url)
 
-        result = {
+        result: dict[str, Any] = {
             "url": url,
             "scheme": parsed.scheme,
             "domain": parsed.netloc,
@@ -392,16 +419,17 @@ class URLAnalyzer(AgentBaseFn):
 
                 result["title"] = soup.title.string if soup.title else None
 
-                og_tags = {}
+                og_tags: dict[str, str] = {}
                 for meta in soup.find_all("meta", property=re.compile(r"^og:")):
-                    tag = cast(Tag, meta)
-                    og_tags[tag["property"]] = tag.get("content", "")
+                    meta_tag = cast(Tag, meta)
+                    og_tags[meta_tag["property"]] = meta_tag.get("content", "")
                 if og_tags:
                     result["open_graph"] = og_tags
 
                 description = soup.find("meta", attrs={"name": "description"})
                 if description:
-                    result["description"] = cast(Tag, description).get("content", "")
+                    desc_tag = cast(Tag, description)
+                    result["description"] = desc_tag.get("content", "")
 
             except Exception:
                 pass

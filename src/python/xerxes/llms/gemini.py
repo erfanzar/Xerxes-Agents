@@ -26,21 +26,24 @@ from .base import BaseLLM, LLMConfig
 
 
 class GeminiLLM(BaseLLM):
-    """Gemini llm.
+    """Gemini LLM client using the Google GenerativeAI SDK.
 
-    Inherits from: BaseLLM
+    Wraps the Google GenerativeAI API to provide completion and streaming
+    support for Gemini models.
+
+    Attributes:
+        client: The underlying GenerativeModel instance.
+        genai: The google.generativeai module.
     """
 
     def __init__(self, config: LLMConfig | None = None, client: Any | None = None, **kwargs):
-        """Initialize the instance.
+        """Initialize the Gemini LLM client.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            client (Any | None, optional): IN: client. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            config: Optional LLM configuration. If None, defaults to "gemini-pro".
+            client: Optional pre-configured GenerativeModel instance.
+            **kwargs: Additional configuration fields forwarded to LLMConfig.
+        """
 
         if config is None:
             config = LLMConfig(model=kwargs.pop("model", "gemini-pro"), api_key=kwargs.pop("api_key", None), **kwargs)
@@ -50,10 +53,11 @@ class GeminiLLM(BaseLLM):
         super().__init__(config)
 
     def _initialize_client(self) -> None:
-        """Internal helper to initialize client.
+        """Initialize the Google GenerativeAI client and configure authentication.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Imports google.generativeai, reads the API key from environment or
+        config, and creates a GenerativeModel instance.
+        """
 
         try:
             import google.generativeai as genai
@@ -86,20 +90,21 @@ class GeminiLLM(BaseLLM):
         stream: bool | None = None,
         **kwargs,
     ) -> Any:
-        """Asynchronously Generate completion.
+        """Generate a completion response from the Gemini API.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str | list[dict[str, str]]): IN: prompt. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            stop (list[str] | None, optional): IN: stop. Defaults to None. OUT: Consumed during execution.
-            stream (bool | None, optional): IN: stream. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            prompt: A string prompt or a list of message dicts to send.
+            model: Override the default model for this request.
+            temperature: Override sampling temperature.
+            max_tokens: Override maximum tokens to generate.
+            top_p: Override nucleus sampling threshold.
+            stop: Override stop sequences.
+            stream: Whether to return a streaming response.
+            **kwargs: Additional provider-specific parameters.
+
         Returns:
-            Any: OUT: Result of the operation."""
+            A dict response from the API, or a streaming iterator if stream=True.
+        """
 
         if model and model != self.config.model:
             client = self.genai.GenerativeModel(model)
@@ -135,13 +140,14 @@ class GeminiLLM(BaseLLM):
             raise RuntimeError(f"Gemini API request failed: {e}") from e
 
     def _format_messages_for_gemini(self, messages: list[dict[str, str]]) -> str:
-        """Internal helper to format messages for gemini.
+        """Convert OpenAI-style message list to a Gemini-formatted string.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            messages (list[dict[str, str]]): IN: messages. OUT: Consumed during execution.
+            messages: List of message dicts with role and content.
+
         Returns:
-            str: OUT: Result of the operation."""
+            A formatted string with "Role: content" sections joined by newlines.
+        """
 
         formatted_parts = []
 
@@ -161,13 +167,14 @@ class GeminiLLM(BaseLLM):
         return "\n\n".join(formatted_parts)
 
     def extract_content(self, response: Any) -> str:
-        """Extract content.
+        """Extract text content from a Gemini API response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
+            response: The raw API response object.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The extracted text from the response.
+        """
 
         if hasattr(response, "text"):
             return response.text
@@ -184,14 +191,15 @@ class GeminiLLM(BaseLLM):
         response: Any,
         callback: Callable[[str, Any], None],
     ) -> str:
-        """Asynchronously Process streaming response.
+        """Process a streaming response and invoke a callback for each text chunk.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            callback (Callable[[str, Any], None]): IN: callback. OUT: Consumed during execution.
+            response: The streaming response iterator from generate_completion.
+            callback: Callable invoked with (text_chunk, raw_chunk) for each chunk.
+
         Returns:
-            str: OUT: Result of the operation."""
+            The concatenated text of all streamed chunks.
+        """
 
         accumulated_content = ""
 
@@ -216,14 +224,16 @@ class GeminiLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Stream completion.
+        """Yield structured chunks from a streaming Gemini response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Iterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         buffered_content = ""
 
@@ -267,20 +277,24 @@ class GeminiLLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Astream completion.
+        """Yield structured chunks from a streaming Gemini response asynchronously.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            response: The raw async streaming response from the API.
+            agent: Optional agent context (unused).
+
+        Yields:
+            Dictionaries containing "content", "buffered_content", "function_calls",
+            "is_final", and "raw_chunk".
+        """
 
         async def _gen() -> AsyncIterator[dict[str, Any]]:
-            """Asynchronously Internal helper to gen.
+            """Internal async generator that yields structured chunks.
 
-            Returns:
-                AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            Yields:
+                Dictionaries containing "content", "buffered_content", "function_calls",
+                "is_final", and "raw_chunk".
+            """
             buffered_content = ""
 
             async for chunk in response:
@@ -321,13 +335,14 @@ class GeminiLLM(BaseLLM):
         return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
-        """Parse tool calls.
+        """Extract tool calls from a Gemini API response.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_data (Any): IN: raw data. OUT: Consumed during execution.
+            raw_data: The raw response object containing function call parts.
+
         Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+            A list of tool call dicts with "id", "name", and "arguments" keys.
+        """
 
         tool_calls = []
         if hasattr(raw_data, "candidates") and raw_data.candidates:
@@ -356,12 +371,11 @@ class GeminiLLM(BaseLLM):
         return tool_calls
 
     def fetch_model_info(self) -> dict[str, Any]:
-        """Fetch model info.
+        """Return model metadata from the Gemini API.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
         Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            A dict with "max_model_len" and "output_token_limit" if available.
+        """
 
         try:
             model_info = self.genai.get_model(f"models/{self.config.model}")

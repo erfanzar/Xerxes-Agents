@@ -14,6 +14,12 @@ class _PromptStub:
     def set_spinner_label(self, _label: str) -> None:
         pass
 
+    def set_plan_mode(self, _enabled: bool) -> None:
+        pass
+
+    def set_activity_mode(self, _mode: str) -> None:
+        pass
+
     def reset_spinner_timer(self) -> None:
         pass
 
@@ -30,10 +36,11 @@ def test_agent_tool_result_is_not_rendered_in_tui_history() -> None:
     tui._prompt = prompt  # type: ignore[assignment]
 
     tui._on_tool_call("tool_1", "AgentTool", '{"prompt":"inspect"}')
-    tui._on_tool_result("tool_1", "large completed sub-agent output")
+    tui._on_tool_result("tool_1", "large completed sub-agent output", duration_ms=55.0)
 
     assert prompt.committed
     assert "Used AgentTool" in prompt.committed[0][1]
+    assert "55ms" in prompt.committed[0][1]
     assert "large completed sub-agent output" not in prompt.committed[0][1]
 
 

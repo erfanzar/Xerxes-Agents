@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""System tools module for Xerxes.
+"""System information and management tools for monitoring system resources and processes.
 
-Exports:
-    - SystemInfo
-    - ProcessManager
-    - FileSystemTools
-    - EnvironmentManager
-    - TempFileManager"""
+This module provides tools for gathering system information, managing processes,
+file system operations, environment variables, and temporary file management.
+
+Example:
+    >>> from xerxes.tools.system_tools import SystemInfo, ProcessManager
+    >>> SystemInfo.static_call(info_type="all")
+    >>> ProcessManager.static_call(operation="list")
+"""
 
 from __future__ import annotations
 
@@ -36,9 +38,13 @@ from ..types import AgentBaseFn
 
 
 class SystemInfo(AgentBaseFn):
-    """System info.
+    """Gather system information including OS, CPU, memory, disk, and network.
 
-    Inherits from: AgentBaseFn
+    Provides comprehensive system monitoring capabilities.
+
+    Example:
+        >>> SystemInfo.static_call(info_type="cpu")
+        >>> SystemInfo.static_call(info_type="all")
     """
 
     @staticmethod
@@ -46,14 +52,16 @@ class SystemInfo(AgentBaseFn):
         info_type: str = "all",
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Get system information.
 
         Args:
-            info_type (str, optional): IN: info type. Defaults to 'all'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            info_type: Type of information to retrieve. Options: 'all', 'os', 'cpu',
+                'memory', 'disk', 'network'. Defaults to 'all'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing requested system information.
+        """
         result: dict[str, Any] = {}
 
         if info_type in ["all", "os"]:
@@ -136,9 +144,13 @@ class SystemInfo(AgentBaseFn):
 
 
 class ProcessManager(AgentBaseFn):
-    """Process manager.
+    """Manage system processes including listing, finding, and controlling them.
 
-    Inherits from: AgentBaseFn
+    Provides process monitoring and control capabilities.
+
+    Example:
+        >>> ProcessManager.static_call(operation="list")
+        >>> ProcessManager.static_call(operation="kill", pid=1234)
     """
 
     @staticmethod
@@ -150,18 +162,19 @@ class ProcessManager(AgentBaseFn):
         limit: int = 20,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Manage system processes.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            process_name (str | None, optional): IN: process name. Defaults to None. OUT: Consumed during execution.
-            pid (int | None, optional): IN: pid. Defaults to None. OUT: Consumed during execution.
-            command (str | None, optional): IN: command. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 20. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options: 'list', 'find', 'info', 'run', 'kill'.
+            process_name: Process name for 'find' operation.
+            pid: Process ID for 'info' and 'kill' operations.
+            command: Command to run for 'run' operation.
+            limit: Maximum processes to return for 'list'. Defaults to 20.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "list":
@@ -280,9 +293,13 @@ class ProcessManager(AgentBaseFn):
 
 
 class FileSystemTools(AgentBaseFn):
-    """File system tools.
+    """Perform file system operations including copy, move, delete, search, and tree view.
 
-    Inherits from: AgentBaseFn
+    Provides comprehensive file system management.
+
+    Example:
+        >>> FileSystemTools.static_call(operation="copy", path="src", destination="dst")
+        >>> FileSystemTools.static_call(operation="tree", path=".")
     """
 
     @staticmethod
@@ -294,18 +311,19 @@ class FileSystemTools(AgentBaseFn):
         recursive: bool = False,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Perform file system operations.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
-            destination (str | None, optional): IN: destination. Defaults to None. OUT: Consumed during execution.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-            recursive (bool, optional): IN: recursive. Defaults to False. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options: 'copy', 'move', 'delete', 'search', 'info', 'tree'.
+            path: Source path for copy/move/delete operations, or path for search/info/tree.
+            destination: Destination path for copy/move operations.
+            pattern: Pattern for search operation.
+            recursive: Enable recursive operations. Defaults to False.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "copy":
@@ -426,16 +444,8 @@ class FileSystemTools(AgentBaseFn):
 
             try:
 
-                def build_tree(dir_path: Path, prefix: str = "", max_depth: int = 3, current_depth: int = 0):
-                    """Build tree.
-
-                    Args:
-                        dir_path (Path): IN: dir path. OUT: Consumed during execution.
-                        prefix (str, optional): IN: prefix. Defaults to ''. OUT: Consumed during execution.
-                        max_depth (int, optional): IN: max depth. Defaults to 3. OUT: Consumed during execution.
-                        current_depth (int, optional): IN: current depth. Defaults to 0. OUT: Consumed during execution.
-                    Returns:
-                        Any: OUT: Result of the operation."""
+                def build_tree(dir_path: Path, prefix: str = "", max_depth: int = 3, current_depth: int = 0) -> list[str]:
+                    """Recursively build directory tree representation."""
                     if current_depth >= max_depth:
                         return []
 
@@ -466,9 +476,13 @@ class FileSystemTools(AgentBaseFn):
 
 
 class EnvironmentManager(AgentBaseFn):
-    """Environment manager.
+    """Manage environment variables including getting, setting, listing, and removing them.
 
-    Inherits from: AgentBaseFn
+    Provides environment variable management capabilities.
+
+    Example:
+        >>> EnvironmentManager.static_call(operation="get", key="PATH")
+        >>> EnvironmentManager.static_call(operation="set", key="DEBUG", value="true")
     """
 
     @staticmethod
@@ -478,16 +492,17 @@ class EnvironmentManager(AgentBaseFn):
         value: str | None = None,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Manage environment variables.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            key (str | None, optional): IN: key. Defaults to None. OUT: Consumed during execution.
-            value (str | None, optional): IN: value. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options: 'get', 'set', 'list', 'remove'.
+            key: Variable name for get/set/remove operations.
+            value: Variable value for set operation.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "get":
@@ -556,9 +571,13 @@ class EnvironmentManager(AgentBaseFn):
 
 
 class TempFileManager(AgentBaseFn):
-    """Temp file manager.
+    """Create and manage temporary files and directories.
 
-    Inherits from: AgentBaseFn
+    Provides temporary file and directory management.
+
+    Example:
+        >>> TempFileManager.static_call(operation="create_file", content="temporary data")
+        >>> TempFileManager.static_call(operation="cleanup")
     """
 
     @staticmethod
@@ -570,18 +589,19 @@ class TempFileManager(AgentBaseFn):
         cleanup: bool = True,
         **context_variables,
     ) -> dict[str, Any]:
-        """Static call.
+        """Manage temporary files and directories.
 
         Args:
-            operation (str): IN: operation. OUT: Consumed during execution.
-            content (str | None, optional): IN: content. Defaults to None. OUT: Consumed during execution.
-            suffix (str | None, optional): IN: suffix. Defaults to None. OUT: Consumed during execution.
-            prefix (str | None, optional): IN: prefix. Defaults to None. OUT: Consumed during execution.
-            cleanup (bool, optional): IN: cleanup. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            operation: Operation to perform. Options: 'create_file', 'create_dir', 'cleanup'.
+            content: File content for 'create_file' operation.
+            suffix: File suffix for created files/directories.
+            prefix: File prefix for created files/directories. Defaults to "xerxes_".
+            cleanup: Whether to auto-cleanup. Defaults to True.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Dictionary containing operation results.
+        """
         result: dict[str, Any] = {}
 
         if operation == "create_file":

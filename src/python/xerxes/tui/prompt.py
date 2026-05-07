@@ -473,9 +473,11 @@ class FooterRenderer:
         self._cwd = ""
         self._branch = ""
         self._running = False
+        self._plan_mode = False
+        self._activity_mode = "code"
         self._context_used = 0
         self._context_max = 0
-        self._tip = "ctrl-j: newline"
+        self._tip = "shift-tab: mode  ctrl-j: newline"
 
     def line_count(self) -> int:
         """Count the visible lines in the footer markup.
@@ -512,6 +514,24 @@ class FooterRenderer:
             running (bool): IN: Whether a turn is running. OUT: Stored internally.
         """
         self._running = running
+
+    def set_plan_mode(self, plan_mode: bool) -> None:
+        """Update the active interaction mode shown in the footer.
+
+        Args:
+            plan_mode (bool): IN: Whether plan mode is active. OUT: Stored for
+                footer rendering.
+        """
+        self._plan_mode = plan_mode
+
+    def set_activity_mode(self, mode: str) -> None:
+        """Update the non-plan activity mode shown in the footer.
+
+        Args:
+            mode (str): IN: Mode label such as ``"code"`` or ``"researcher"``.
+                OUT: Stored for rendering when plan mode is inactive.
+        """
+        self._activity_mode = mode or "code"
 
     def set_context(self, used: int, max_: int) -> None:
         """Update context usage numbers in the footer.
@@ -578,6 +598,7 @@ class FooterRenderer:
         spinner = "●" if self._running else "○"
         model = self._model or "—"
         agent = f"agent ({model} {spinner})"
+        mode = f"mode: {'plan' if self._plan_mode else self._activity_mode}"
         columns = self._terminal_columns()
 
         cwd_max = max(20, columns // 3)
@@ -587,6 +608,7 @@ class FooterRenderer:
             left_segments.append(cwd_short)
         if self._branch:
             left_segments.append(self._branch)
+        left_segments.append(mode)
         left_segments.append(self._tip)
         left = "  ".join(left_segments)
 
@@ -818,6 +840,7 @@ class PersistentPrompt:
 
     SELECT_SENTINEL = "\x00__select_active_question__\x00"
     APPROVAL_SENTINEL = "\x00__select_active_approval__\x00"
+    PLAN_TOGGLE_SENTINEL = "\x00__toggle_plan_mode__\x00"
 
     def set_active_approval(self, panel: Any) -> None:
         """Display an approval panel in the status area.
@@ -965,6 +988,14 @@ class PersistentPrompt:
                 buffer.complete_next()
             else:
                 buffer.start_completion(select_first=True)
+
+        @kb.add(Keys.BackTab, eager=True)
+        def _shift_tab(event: KeyPressEvent) -> None:
+            """Toggle plan mode without submitting the current input."""
+            buffer = event.app.current_buffer
+            if buffer.complete_state is not None:
+                buffer.cancel_completion()
+            self._input_queue.put_nowait(self.PLAN_TOGGLE_SENTINEL)
 
         @kb.add(Keys.Enter)
         def _enter(event: KeyPressEvent) -> None:
@@ -1169,6 +1200,16 @@ class PersistentPrompt:
                 status renderer.
         """
         self._status.set_plan_mode(plan_mode)
+        self._footer.set_plan_mode(plan_mode)
+        self._invalidate()
+
+    def set_activity_mode(self, mode: str) -> None:
+        """Update the footer activity mode shown when plan mode is inactive.
+
+        Args:
+            mode (str): IN: Mode label. OUT: Passed to footer renderer.
+        """
+        self._footer.set_activity_mode(mode)
         self._invalidate()
 
     def append_line(self, line: str) -> None:

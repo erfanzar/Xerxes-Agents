@@ -63,6 +63,14 @@ Every step is one action:
 
 ## Plan Document Structure
 
+## Save Location
+
+When you write an implementation plan file, save it under the user's home Xerxes agent folder:
+
+- `~/xerxes-agent/plans/YYYY-MM-DD_HHMMSS-<slug>.md`
+
+Do not save plan documents inside the current working directory, active project, `.xerxes/`, `tmp-files/`, or repo-local `plans/` folders unless the user explicitly asks for a different path.
+
 ### Header (Required)
 
 Every plan MUST start with:

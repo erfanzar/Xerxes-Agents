@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Duckduckgo engine module for Xerxes.
+"""DuckDuckGo search integration for web searches, images, videos, news, and maps.
 
-Exports:
-    - DuckDuckGoSearch"""
+This module provides a comprehensive DuckDuckGo search interface that supports multiple
+search types and filtering options. Useful for gathering information from the web.
+
+Example:
+    >>> from xerxes.tools.duckduckgo_engine import DuckDuckGoSearch
+    >>> results = DuckDuckGoSearch.static_call(query="Python tutorial")
+"""
 
 import typing as tp
 from datetime import datetime
@@ -27,11 +32,14 @@ _DDGS_AVAILABLE = None
 
 
 def _get_ddgs():
-    """Internal helper to get ddgs.
+    """Get or initialize the DuckDuckGo search module.
 
     Returns:
-        Any: OUT: Result of the operation."""
+        The DDGS class for creating search instances.
 
+    Raises:
+        ImportError: If the ddgs package is not installed.
+    """
     global _DDGS, _DDGS_AVAILABLE
     if _DDGS_AVAILABLE is None:
         try:
@@ -47,14 +55,19 @@ def _get_ddgs():
 
 
 class DuckDuckGoSearch(AgentBaseFn):
-    """Duck duck go search.
+    """Perform searches using DuckDuckGo with support for text, images, videos, news, and maps.
 
-    Inherits from: AgentBaseFn
+    This class provides a unified interface to DuckDuckGo's search capabilities with
+    configurable filtering, result limits, and metadata options.
 
     Attributes:
-        SearchType (Any): search type.
-        TimeFilter (Any): time filter.
-        SafeSearch (Any): safe search."""
+        SearchType: Type alias for supported search types.
+        TimeFilter: Type alias for time-based filtering.
+        SafeSearch: Type alias for safe search levels.
+
+    Example:
+        >>> results = DuckDuckGoSearch.static_call(query="AI news", n_results=10)
+    """
 
     SearchType = Literal["text", "images", "videos", "news", "maps"]
 
@@ -64,26 +77,28 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def _maybe_truncate(text: str, limit: int | None) -> str:
-        """Internal helper to maybe truncate.
+        """Truncate text to specified length if limit is set.
 
         Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            limit (int | None): IN: limit. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            text: Text to potentially truncate.
+            limit: Maximum length, or None for no truncation.
 
+        Returns:
+            Original text or truncated version.
+        """
         return text if limit is None else text[:limit]
 
     @staticmethod
     def _filter_by_domain(results: list[dict], domains: list[str] | None) -> list[dict]:
-        """Internal helper to filter by domain.
+        """Filter search results by allowed domains.
 
         Args:
-            results (list[dict]): IN: results. OUT: Consumed during execution.
-            domains (list[str] | None): IN: domains. OUT: Consumed during execution.
-        Returns:
-            list[dict]: OUT: Result of the operation."""
+            results: List of search result dictionaries.
+            domains: List of allowed domain names.
 
+        Returns:
+            Filtered results containing only specified domains.
+        """
         if not domains:
             return results
 
@@ -96,15 +111,16 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def _filter_by_keywords(results: list[dict], keywords: list[str] | None, exclude: bool = False) -> list[dict]:
-        """Internal helper to filter by keywords.
+        """Filter search results by keyword inclusion or exclusion.
 
         Args:
-            results (list[dict]): IN: results. OUT: Consumed during execution.
-            keywords (list[str] | None): IN: keywords. OUT: Consumed during execution.
-            exclude (bool, optional): IN: exclude. Defaults to False. OUT: Consumed during execution.
-        Returns:
-            list[dict]: OUT: Result of the operation."""
+            results: List of search result dictionaries.
+            keywords: Keywords to include or exclude.
+            exclude: If True, exclude results with keywords. If False, include only results with keywords.
 
+        Returns:
+            Filtered results based on keyword criteria.
+        """
         if not keywords:
             return results
 
@@ -125,15 +141,15 @@ class DuckDuckGoSearch(AgentBaseFn):
         title_length_limit: int | None,
         snippet_length_limit: int | None,
     ) -> None:
-        """Internal helper to append text results.
+        """Append text search results to results list with formatting.
 
         Args:
-            results (list[dict]): IN: results. OUT: Consumed during execution.
-            search_results (tp.Iterable[dict]): IN: search results. OUT: Consumed during execution.
-            n_results (int | None): IN: n results. OUT: Consumed during execution.
-            title_length_limit (int | None): IN: title length limit. OUT: Consumed during execution.
-            snippet_length_limit (int | None): IN: snippet length limit. OUT: Consumed during execution."""
-
+            results: List to append formatted results to.
+            search_results: Raw search results from DuckDuckGo.
+            n_results: Maximum number of results to include.
+            title_length_limit: Maximum title length.
+            snippet_length_limit: Maximum snippet length.
+        """
         for r in search_results:
             results.append(
                 {
@@ -148,13 +164,14 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def _is_no_results_error(error: Exception) -> bool:
-        """Internal helper to is no results error.
+        """Check if an error indicates no search results found.
 
         Args:
-            error (Exception): IN: error. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+            error: Exception to check.
 
+        Returns:
+            True if error indicates no results found.
+        """
         return "no results found" in str(error).lower()
 
     @staticmethod
@@ -175,27 +192,31 @@ class DuckDuckGoSearch(AgentBaseFn):
         return_metadata: bool = False,
         **context_variables,
     ) -> list[dict] | dict:
-        """Static call.
+        """Perform a DuckDuckGo search.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            search_type (SearchType, optional): IN: search type. Defaults to 'text'. OUT: Consumed during execution.
-            n_results (int | None, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
-            title_length_limit (int | None, optional): IN: title length limit. Defaults to 200. OUT: Consumed during execution.
-            snippet_length_limit (int | None, optional): IN: snippet length limit. Defaults to 1000. OUT: Consumed during execution.
-            region (str, optional): IN: region. Defaults to 'us-en'. OUT: Consumed during execution.
-            safesearch (SafeSearch, optional): IN: safesearch. Defaults to 'moderate'. OUT: Consumed during execution.
-            timelimit (TimeFilter, optional): IN: timelimit. Defaults to None. OUT: Consumed during execution.
-            allowed_domains (list[str] | None, optional): IN: allowed domains. Defaults to None. OUT: Consumed during execution.
-            excluded_domains (list[str] | None, optional): IN: excluded domains. Defaults to None. OUT: Consumed during execution.
-            must_include_keywords (list[str] | None, optional): IN: must include keywords. Defaults to None. OUT: Consumed during execution.
-            exclude_keywords (list[str] | None, optional): IN: exclude keywords. Defaults to None. OUT: Consumed during execution.
-            file_type (str | None, optional): IN: file type. Defaults to None. OUT: Consumed during execution.
-            return_metadata (bool, optional): IN: return metadata. Defaults to False. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[dict] | dict: OUT: Result of the operation."""
+            query: Search query string.
+            search_type: Type of search to perform. Defaults to 'text'.
+            n_results: Maximum results to return (1-30). Defaults to 5.
+            title_length_limit: Maximum character length for titles.
+            snippet_length_limit: Maximum character length for snippets.
+            region: Geographic region for search. Defaults to 'us-en'.
+            safesearch: Safe search level. Defaults to 'moderate'.
+            timelimit: Time filter for results ('day', 'week', 'month', 'year').
+            allowed_domains: Restrict results to these domains.
+            excluded_domains: Exclude results from these domains.
+            must_include_keywords: Only include results containing these keywords.
+            exclude_keywords: Exclude results containing these keywords.
+            file_type: Filter to specific file types.
+            return_metadata: Include search metadata in response.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            List of result dictionaries, or dict with 'results' and 'metadata' if return_metadata is True.
+
+        Raises:
+            ValueError: If query is empty or n_results is out of range.
+        """
         if not query.strip():
             raise ValueError("Query string must be non-empty")
         if isinstance(n_results, str):
@@ -387,16 +408,23 @@ class DuckDuckGoSearch(AgentBaseFn):
         n_results_per_source: int = 3,
         **kwargs,
     ) -> dict[str, Any]:
-        """Search for multiple sources.
+        """Search across multiple source types in parallel.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            sources (list[SearchType] | None, optional): IN: sources. Defaults to None. OUT: Consumed during execution.
-            n_results_per_source (int, optional): IN: n results per source. Defaults to 3. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+            query: Search query string.
+            sources: List of search types to query. Defaults to ['text', 'news'].
+            n_results_per_source: Results per source type.
+            **kwargs: Additional arguments passed to static_call.
 
+        Returns:
+            Dictionary mapping source types to their results.
+
+        Example:
+            >>> multi = DuckDuckGoSearch.search_multiple_sources(
+            ...     query="Python",
+            ...     sources=["text", "images", "news"]
+            ... )
+        """
         if sources is None:
             sources = ["text", "news"]
         all_results: dict[str, Any] = {}
@@ -414,15 +442,20 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def get_suggestions(query: str, region: str = "us-en", **context_variables) -> list[str]:
-        """Retrieve the suggestions.
+        """Get search suggestions for a query.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            region (str, optional): IN: region. Defaults to 'us-en'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+            query: Partial search query.
+            region: Geographic region for suggestions.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            List of suggested search phrases.
+
+        Example:
+            >>> DuckDuckGoSearch.get_suggestions("Pyth")
+            ['Python tutorial', 'Python download', ...]
+        """
         suggestions = []
 
         with _get_ddgs()() as ddgs:
@@ -438,15 +471,20 @@ class DuckDuckGoSearch(AgentBaseFn):
 
     @staticmethod
     def translate_query(query: str, to_language: str = "en", **context_variables) -> str:
-        """Translate query.
+        """Translate a search query to another language.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            to_language (str, optional): IN: to language. Defaults to 'en'. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+            query: Query to translate.
+            to_language: Target language code. Defaults to 'en'.
+            **context_variables: Additional context passed through to downstream calls.
 
+        Returns:
+            Translated query, or original if translation fails.
+
+        Example:
+            >>> DuckDuckGoSearch.translate_query("Comment programmer en Python", "en")
+            'How to program in Python'
+        """
         with _get_ddgs()() as ddgs:
             try:
                 result = ddgs.translate(query, to=to_language)

@@ -47,25 +47,19 @@ class AutoCompactAgent:
         """Initialize the auto-compaction agent.
 
         Args:
-            llm_client (Any): IN: LLM client used for summarization. OUT: Stored
-                for use during compaction.
-            model (str): IN: Model name for token counting. OUT: Passed to the
-                token counter.
-            auto_compact (bool): IN: Whether compaction is enabled. OUT: Stored
-                as an instance flag.
-            compact_threshold (float): IN: Fraction of max tokens that triggers
-                compaction (e.g., 0.8). OUT: Used to compute ``threshold_tokens``.
-            compact_target (float): IN: Fraction of max tokens to aim for after
-                compaction (e.g., 0.5). OUT: Used to compute ``target_tokens``.
-            max_context_tokens (int): IN: Maximum context token budget. OUT: Used
-                to compute threshold and target token counts.
-            compaction_strategy (str): IN: Strategy name (e.g., ``"summarize"``).
-                OUT: Stored for future strategy selection.
-            preserve_system_prompt (bool): IN: Whether to keep system messages. OUT:
-                Stored and used during compaction.
-            preserve_recent_messages (int): IN: Number of recent messages to keep.
-                OUT: Passed to the compaction logic.
-            **_kwargs (Any): IN: Additional keyword arguments for extensibility. OUT: Ignored.
+            llm_client: LLM client used for summarization.
+            model: Model name for token counting.
+            auto_compact: Whether compaction is enabled.
+            compact_threshold: Fraction of max tokens that triggers compaction
+                (e.g., 0.8). Used to compute ``threshold_tokens``.
+            compact_target: Fraction of max tokens to aim for after compaction
+                (e.g., 0.5). Used to compute ``target_tokens``.
+            max_context_tokens: Maximum context token budget. Used to compute
+                threshold and target token counts.
+            compaction_strategy: Strategy name (e.g., ``"summarize"``).
+            preserve_system_prompt: Whether to keep system messages during compaction.
+            preserve_recent_messages: Number of recent messages to keep verbatim.
+            **_kwargs: Additional keyword arguments for extensibility (ignored).
         """
         self.llm_client = llm_client
         self.model = model
@@ -86,8 +80,7 @@ class AutoCompactAgent:
         """Return compaction statistics.
 
         Returns:
-            dict[str, Any]: OUT: Metrics including compaction count, tokens saved,
-                thresholds, and strategy.
+            Metrics including compaction count, tokens saved, thresholds, and strategy.
         """
         return {
             "compaction_count": self._compaction_count,
@@ -102,7 +95,7 @@ class AutoCompactAgent:
         """Return current usage thresholds.
 
         Returns:
-            dict[str, Any]: OUT: Threshold and target configuration values.
+            Threshold and target configuration values.
         """
         return {
             "max_context_tokens": self.max_context_tokens,
@@ -115,10 +108,8 @@ class AutoCompactAgent:
         """Record the results of a compaction operation.
 
         Args:
-            tokens_before (int): IN: Token count before compaction. OUT: Used to
-                compute tokens saved.
-            tokens_after (int): IN: Token count after compaction. OUT: Used to
-                compute tokens saved.
+            tokens_before: Token count before compaction.
+            tokens_after: Token count after compaction.
         """
         self._compaction_count += 1
         self._tokens_saved += tokens_before - tokens_after
@@ -127,12 +118,10 @@ class AutoCompactAgent:
         """Compact a message list by summarizing older messages.
 
         Args:
-            messages (list[dict[str, str]]): IN: Full conversation history. OUT:
-                Passed to the compaction agent for summarization.
+            messages: Full conversation history to be summarized.
 
         Returns:
-            tuple[list[dict[str, str]], dict[str, Any]]: OUT: Compacted messages
-                and an empty metadata dict.
+            A tuple of the compacted message list and an empty metadata dict.
         """
         from ..agents.compaction_agent import CompactionAgent
 

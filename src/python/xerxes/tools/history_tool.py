@@ -11,10 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""History tool module for Xerxes.
+"""History search tool for querying session and agent interaction history.
 
-Exports:
-    - SearchHistoryTool"""
+This module provides a tool for searching through historical agent interactions,
+enabling agents to recall and build upon previous work.
+
+Example:
+    >>> from xerxes.tools.history_tool import SearchHistoryTool
+    >>> search = SearchHistoryTool(store=my_store)
+    >>> results = search("How did we implement authentication?")
+"""
 
 from __future__ import annotations
 
@@ -26,28 +32,44 @@ if tp.TYPE_CHECKING:
 
 
 class SearchHistoryTool:
-    """Search history tool.
+    """Search through historical agent interactions and session data.
+
+    This tool provides semantic search capabilities over past agent conversations,
+    enabling agents to recall relevant context from previous sessions. It can work
+    with either a session store or a search index.
 
     Attributes:
-        name (str): name."""
+        name: Tool identifier, always "search_history".
+        store: Optional SessionStore instance.
+        index: Optional SessionIndex instance.
+        default_k: Default number of results to return.
+
+    Example:
+        >>> tool = SearchHistoryTool(index=my_index, default_k=10)
+        >>> results = tool("previous authentication implementation")
+        >>> for hit in results["hits"]:
+        ...     print(hit["prompt"])
+    """
 
     name: str = "search_history"
 
     def __init__(
         self,
         *,
-        store: SessionStore | None = None,
-        index: SessionIndex | None = None,
+        store: "SessionStore | None" = None,
+        index: "SessionIndex | None" = None,
         default_k: int = 5,
     ) -> None:
-        """Initialize the instance.
+        """Initialize the search history tool.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            store (SessionStore | None, optional): IN: store. Defaults to None. OUT: Consumed during execution.
-            index (SessionIndex | None, optional): IN: index. Defaults to None. OUT: Consumed during execution.
-            default_k (int, optional): IN: default k. Defaults to 5. OUT: Consumed during execution."""
+            store: Optional session store for search operations.
+            index: Optional search index for semantic search.
+            default_k: Default maximum number of results. Defaults to 5.
 
+        Raises:
+            ValueError: If neither store nor index is provided.
+        """
         if store is None and index is None:
             raise ValueError("SearchHistoryTool requires a store or an index")
         self.store = store
@@ -61,20 +83,29 @@ class SearchHistoryTool:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, tp.Any]:
-        """Dunder method for call.
+        """Search historical interactions matching the query.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int | None, optional): IN: limit. Defaults to None. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            query: Search query string to match against historical prompts.
+            limit: Maximum number of results to return. Defaults to default_k.
+            agent_id: Filter results to specific agent ID.
+            session_id: Filter results to specific session ID.
 
+        Returns:
+            Dictionary containing:
+            - query: The search query used
+            - count: Number of matching results
+            - hits: List of matching history entries with session_id, turn_id,
+              agent_id, prompt, response, score, and timestamp
+
+        Example:
+            >>> tool = SearchHistoryTool(store=store)
+            >>> results = tool("database schema", limit=3)
+            >>> print(f"Found {results['count']} matches")
+        """
         k = limit or self.default_k
         if self.index is not None:
-            hits: list[SearchHit] = self.index.search(query, k=k, agent_id=agent_id, session_id=session_id)
+            hits: list["SearchHit"] = self.index.search(query, k=k, agent_id=agent_id, session_id=session_id)
         else:
             assert self.store is not None
             hits = self.store.search(query, k=k, agent_id=agent_id, session_id=session_id)

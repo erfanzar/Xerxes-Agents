@@ -11,20 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Coding tools module for Xerxes.
+"""File system and code manipulation tools for reading, writing, and analyzing code.
 
-Exports:
-    - read_file
-    - write_file
-    - list_directory
-    - format_size
-    - copy_file
-    - move_file
-    - delete_file
-    - git_status
-    - git_diff
-    - git_apply_patch
-    - ... and 10 more."""
+This module provides comprehensive file system operations including reading and writing
+files, directory listing, git operations, and code analysis. These tools enable agents
+to work with codebases and perform common development tasks.
+
+Example:
+    >>> from xerxes.tools.coding_tools import read_file, write_file, git_status
+    >>> content = read_file("main.py")
+    >>> write_file("test.py", "def test(): pass")
+    >>> print(git_status())
+"""
 
 import difflib
 import re
@@ -37,16 +35,20 @@ from typing import Any
 def read_file(
     file_path: str, start_line: int = 1, end_line: int | None = None, context_variables: dict | None = None
 ) -> str:
-    """Read file.
+    """Read content from a file with optional line range selection.
 
     Args:
-        file_path (str): IN: file path. OUT: Consumed during execution.
-        start_line (int, optional): IN: start line. Defaults to 1. OUT: Consumed during execution.
-        end_line (int | None, optional): IN: end line. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        file_path: Path to the file to read.
+        start_line: First line to include (1-indexed). Defaults to 1.
+        end_line: Last line to include (inclusive). Defaults to None (end of file).
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        File content with line numbers, or error message if file not found.
+
+    Example:
+        >>> read_file("main.py", start_line=10, end_line=20)
+    """
     try:
         path = Path(file_path)
         if not path.exists():
@@ -76,16 +78,20 @@ def read_file(
 
 
 def write_file(file_path: str, content: str, create_dirs: bool = True, context_variables: dict | None = None) -> str:
-    """Write file.
+    """Write content to a file, optionally creating parent directories.
 
     Args:
-        file_path (str): IN: file path. OUT: Consumed during execution.
-        content (str): IN: content. OUT: Consumed during execution.
-        create_dirs (bool, optional): IN: create dirs. Defaults to True. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        file_path: Path to the file to write.
+        content: Text content to write.
+        create_dirs: Whether to create parent directories if missing. Defaults to True.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message with character and line counts, or error message.
+
+    Example:
+        >>> write_file("output.txt", "Hello, World!")
+    """
     try:
         path = Path(file_path)
 
@@ -110,18 +116,22 @@ def list_directory(
     max_depth: int = 3,
     context_variables: dict | None = None,
 ) -> str:
-    """List directory.
+    """List directory contents with optional filtering and recursion.
 
     Args:
-        directory (str, optional): IN: directory. Defaults to '.'. OUT: Consumed during execution.
-        pattern (str, optional): IN: pattern. Defaults to '*'. OUT: Consumed during execution.
-        recursive (bool, optional): IN: recursive. Defaults to False. OUT: Consumed during execution.
-        show_hidden (bool, optional): IN: show hidden. Defaults to False. OUT: Consumed during execution.
-        max_depth (int, optional): IN: max depth. Defaults to 3. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        directory: Path to list. Defaults to current directory.
+        pattern: Glob pattern to filter files. Defaults to "*" (all files).
+        recursive: Whether to list subdirectories recursively. Defaults to False.
+        show_hidden: Whether to include hidden files (starting with .). Defaults to False.
+        max_depth: Maximum recursion depth for recursive listing. Defaults to 3.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Formatted directory listing with file sizes, or error message.
+
+    Example:
+        >>> list_directory("src", pattern="*.py", recursive=True)
+    """
     try:
         path = Path(directory)
         if not path.exists():
@@ -134,15 +144,8 @@ def list_directory(
 
         if recursive:
 
-            def list_recursive(p: Path, depth: int = 0, prefix: str = ""):
-                """List recursive.
-
-                Args:
-                    p (Path): IN: p. OUT: Consumed during execution.
-                    depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
-                    prefix (str, optional): IN: prefix. Defaults to ''. OUT: Consumed during execution.
-                Returns:
-                    Any: OUT: Result of the operation."""
+            def list_recursive(p: Path, depth: int = 0, prefix: str = "") -> None:
+                """Recursively list directory contents."""
                 if depth > max_depth:
                     return
 
@@ -192,13 +195,18 @@ def list_directory(
 
 
 def format_size(size: int | float) -> str:
-    """Format size.
+    """Format byte size as human-readable string.
 
     Args:
-        size (int | float): IN: size. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        size: Size in bytes.
 
+    Returns:
+        Formatted string (e.g., "1.5MB").
+
+    Example:
+        >>> format_size(1536000)
+        '1.5MB'
+    """
     for unit in ["B", "KB", "MB", "GB"]:
         if size < 1024.0:
             return f"{size:.1f}{unit}"
@@ -207,16 +215,20 @@ def format_size(size: int | float) -> str:
 
 
 def copy_file(source: str, destination: str, overwrite: bool = False, context_variables: dict | None = None) -> str:
-    """Copy file.
+    """Copy a file or directory to a new location.
 
     Args:
-        source (str): IN: source. OUT: Consumed during execution.
-        destination (str): IN: destination. OUT: Consumed during execution.
-        overwrite (bool, optional): IN: overwrite. Defaults to False. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        source: Path to source file or directory.
+        destination: Destination path.
+        overwrite: Whether to replace existing files. Defaults to False.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message or error description.
+
+    Example:
+        >>> copy_file("input.txt", "backup/input.txt")
+    """
     try:
         src_path = Path(source)
         dst_path = Path(destination)
@@ -240,16 +252,20 @@ def copy_file(source: str, destination: str, overwrite: bool = False, context_va
 
 
 def move_file(source: str, destination: str, overwrite: bool = False, context_variables: dict | None = None) -> str:
-    """Move file.
+    """Move a file or directory to a new location.
 
     Args:
-        source (str): IN: source. OUT: Consumed during execution.
-        destination (str): IN: destination. OUT: Consumed during execution.
-        overwrite (bool, optional): IN: overwrite. Defaults to False. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        source: Path to source file or directory.
+        destination: Destination path.
+        overwrite: Whether to replace existing files. Defaults to False.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message or error description.
+
+    Example:
+        >>> move_file("old_name.py", "new_name.py")
+    """
     try:
         src_path = Path(source)
         dst_path = Path(destination)
@@ -269,15 +285,19 @@ def move_file(source: str, destination: str, overwrite: bool = False, context_va
 
 
 def delete_file(path: str, force: bool = False, context_variables: dict | None = None) -> str:
-    """Delete file.
+    """Delete a file or directory.
 
     Args:
-        path (str): IN: path. OUT: Consumed during execution.
-        force (bool, optional): IN: force. Defaults to False. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        path: Path to delete.
+        force: Skip confirmation for non-empty directories. Defaults to False.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message or error description.
+
+    Example:
+        >>> delete_file("temp.txt")
+    """
     try:
         file_path = Path(path)
 
@@ -301,14 +321,18 @@ def delete_file(path: str, force: bool = False, context_variables: dict | None =
 
 
 def git_status(repo_path: str = ".", context_variables: dict | None = None) -> str:
-    """Git status.
+    """Get the current git repository status.
 
     Args:
-        repo_path (str, optional): IN: repo path. Defaults to '.'. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        repo_path: Path to the git repository. Defaults to current directory.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Formatted status showing branch, modified files, and staging status.
+
+    Example:
+        >>> git_status()
+    """
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain", "-b"], cwd=repo_path, capture_output=True, text=True, timeout=10
@@ -360,17 +384,21 @@ def git_diff(
     context_lines: int = 3,
     context_variables: dict | None = None,
 ) -> str:
-    """Git diff.
+    """Show changes between commits, working tree, or staged changes.
 
     Args:
-        repo_path (str, optional): IN: repo path. Defaults to '.'. OUT: Consumed during execution.
-        file_path (str | None, optional): IN: file path. Defaults to None. OUT: Consumed during execution.
-        staged (bool, optional): IN: staged. Defaults to False. OUT: Consumed during execution.
-        context_lines (int, optional): IN: context lines. Defaults to 3. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        repo_path: Path to the git repository. Defaults to current directory.
+        file_path: Specific file to diff. Defaults to all files.
+        staged: Show staged changes instead of working tree. Defaults to False.
+        context_lines: Number of context lines around changes. Defaults to 3.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Unified diff output or message if no changes found.
+
+    Example:
+        >>> git_diff(staged=True)
+    """
     try:
         cmd = ["git", "diff", f"-U{context_lines}"]
 
@@ -399,16 +427,20 @@ def git_diff(
 def git_apply_patch(
     patch_content: str, repo_path: str = ".", check_only: bool = False, context_variables: dict | None = None
 ) -> str:
-    """Git apply patch.
+    """Apply a patch file to the repository.
 
     Args:
-        patch_content (str): IN: patch content. OUT: Consumed during execution.
-        repo_path (str, optional): IN: repo path. Defaults to '.'. OUT: Consumed during execution.
-        check_only (bool, optional): IN: check only. Defaults to False. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        patch_content: The patch content to apply.
+        repo_path: Path to the git repository. Defaults to current directory.
+        check_only: Only check if patch applies cleanly without applying. Defaults to False.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message or error description.
+
+    Example:
+        >>> git_apply_patch(patch_content, check_only=True)
+    """
     try:
         cmd = ["git", "apply"]
 
@@ -438,17 +470,21 @@ def git_log(
     file_path: str | None = None,
     context_variables: dict | None = None,
 ) -> str:
-    """Git log.
+    """Show commit history.
 
     Args:
-        repo_path (str, optional): IN: repo path. Defaults to '.'. OUT: Consumed during execution.
-        max_commits (int, optional): IN: max commits. Defaults to 10. OUT: Consumed during execution.
-        oneline (bool, optional): IN: oneline. Defaults to True. OUT: Consumed during execution.
-        file_path (str | None, optional): IN: file path. Defaults to None. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        repo_path: Path to the git repository. Defaults to current directory.
+        max_commits: Maximum number of commits to show. Defaults to 10.
+        oneline: Show each commit on single line. Defaults to True.
+        file_path: Show only commits affecting this file.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Formatted commit log.
+
+    Example:
+        >>> git_log(max_commits=20)
+    """
     try:
         cmd = ["git", "log", f"-{max_commits}"]
 
@@ -477,15 +513,19 @@ def git_log(
 
 
 def git_add(files: list[str], repo_path: str = ".", context_variables: dict | None = None) -> str:
-    """Git add.
+    """Stage files for commit.
 
     Args:
-        files (list[str]): IN: files. OUT: Consumed during execution.
-        repo_path (str, optional): IN: repo path. Defaults to '.'. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        files: List of file paths to stage.
+        repo_path: Path to the git repository. Defaults to current directory.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message or error description.
+
+    Example:
+        >>> git_add(["file1.py", "file2.py"])
+    """
     try:
         if not files:
             return "Error: No files specified"
@@ -506,16 +546,20 @@ def git_add(files: list[str], repo_path: str = ".", context_variables: dict | No
 
 
 def create_diff(original: str, modified: str, file_name: str = "file.txt", context_variables: dict | None = None) -> str:
-    """Create diff.
+    """Generate a unified diff between two text contents.
 
     Args:
-        original (str): IN: original. OUT: Consumed during execution.
-        modified (str): IN: modified. OUT: Consumed during execution.
-        file_name (str, optional): IN: file name. Defaults to 'file.txt'. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        original: Original text content.
+        modified: Modified text content.
+        file_name: Filename for diff headers. Defaults to "file.txt".
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Unified diff string.
+
+    Example:
+        >>> diff = create_diff(old_content, new_content, "main.py")
+    """
     try:
         original_lines = original.splitlines(keepends=True)
         modified_lines = modified.splitlines(keepends=True)
@@ -531,15 +575,19 @@ def create_diff(original: str, modified: str, file_name: str = "file.txt", conte
 
 
 def apply_diff(original: str, diff: str, context_variables: dict | None = None) -> str:
-    """Apply diff.
+    """Apply a unified diff to original content.
 
     Args:
-        original (str): IN: original. OUT: Consumed during execution.
-        diff (str): IN: diff. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        original: Original text content.
+        diff: Unified diff string to apply.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Modified text content, or error message.
+
+    Example:
+        >>> new_content = apply_diff(original, diff_text)
+    """
     try:
         lines = original.splitlines(keepends=True)
         diff_lines = diff.splitlines()
@@ -591,19 +639,23 @@ def find_and_replace(
     backup: bool = True,
     context_variables: dict | None = None,
 ) -> str:
-    """Find and replace.
+    """Find and replace text in a file.
 
     Args:
-        file_path (str): IN: file path. OUT: Consumed during execution.
-        search (str): IN: search. OUT: Consumed during execution.
-        replace (str): IN: replace. OUT: Consumed during execution.
-        regex (bool, optional): IN: regex. Defaults to False. OUT: Consumed during execution.
-        case_sensitive (bool, optional): IN: case sensitive. Defaults to True. OUT: Consumed during execution.
-        backup (bool, optional): IN: backup. Defaults to True. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        file_path: Path to the file.
+        search: Text to find.
+        replace: Replacement text.
+        regex: Treat search as regular expression. Defaults to False.
+        case_sensitive: Case-sensitive search. Defaults to True.
+        backup: Create .bak backup file. Defaults to True.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Success message with replacement count, or error description.
+
+    Example:
+        >>> find_and_replace("main.py", "foo", "bar", regex=False)
+    """
     try:
         path = Path(file_path)
         if not path.exists():
@@ -640,14 +692,18 @@ def find_and_replace(
 
 
 def analyze_code_structure(file_path: str, context_variables: dict | None = None) -> str:
-    """Analyze code structure.
+    """Analyze code structure including functions, classes, and imports.
 
     Args:
-        file_path (str): IN: file path. OUT: Consumed during execution.
-        context_variables (dict | None, optional): IN: context variables. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        file_path: Path to the code file to analyze.
+        context_variables: Additional context for downstream processing.
 
+    Returns:
+        Formatted analysis with language, structure metrics, and code elements.
+
+    Example:
+        >>> print(analyze_code_structure("main.py"))
+    """
     try:
         path = Path(file_path)
         if not path.exists():
@@ -710,13 +766,18 @@ def analyze_code_structure(file_path: str, context_variables: dict | None = None
 
 
 def detect_language(extension: str) -> str:
-    """Detect language.
+    """Detect programming language from file extension.
 
     Args:
-        extension (str): IN: extension. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+        extension: File extension (e.g., ".py", ".js").
 
+    Returns:
+        Language name or "Unknown" if not recognized.
+
+    Example:
+        >>> detect_language(".py")
+        'Python'
+    """
     lang_map = {
         ".py": "Python",
         ".js": "JavaScript",
@@ -751,13 +812,13 @@ def detect_language(extension: str) -> str:
 
 
 def analyze_python(lines: list[str], analysis: dict) -> None:
-    """Analyze python.
+    """Analyze Python code structure.
 
     Args:
-        lines (list[str]): IN: lines. OUT: Consumed during execution.
-        analysis (dict): IN: analysis. OUT: Consumed during execution."""
-
-    for _i, line in enumerate(lines):
+        lines: Source code lines.
+        analysis: Dictionary to populate with analysis results.
+    """
+    for line in lines:
         stripped = line.strip()
 
         if not stripped:
@@ -779,12 +840,12 @@ def analyze_python(lines: list[str], analysis: dict) -> None:
 
 
 def analyze_javascript(lines: list[str], analysis: dict) -> None:
-    """Analyze javascript.
+    """Analyze JavaScript/TypeScript code structure.
 
     Args:
-        lines (list[str]): IN: lines. OUT: Consumed during execution.
-        analysis (dict): IN: analysis. OUT: Consumed during execution."""
-
+        lines: Source code lines.
+        analysis: Dictionary to populate with analysis results.
+    """
     for line in lines:
         stripped = line.strip()
 
@@ -811,12 +872,12 @@ def analyze_javascript(lines: list[str], analysis: dict) -> None:
 
 
 def analyze_java(lines: list[str], analysis: dict) -> None:
-    """Analyze java.
+    """Analyze Java code structure.
 
     Args:
-        lines (list[str]): IN: lines. OUT: Consumed during execution.
-        analysis (dict): IN: analysis. OUT: Consumed during execution."""
-
+        lines: Source code lines.
+        analysis: Dictionary to populate with analysis results.
+    """
     for line in lines:
         stripped = line.strip()
 
