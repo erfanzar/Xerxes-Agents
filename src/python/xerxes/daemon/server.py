@@ -34,14 +34,43 @@ from .channels import ChannelManager, ChannelWebhookServer
 from .config import DaemonConfig, load_config
 from .gateway import EmitFn, WebSocketGateway
 from .log import DaemonLogger
-from .runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
+from .runtime import DaemonSession, RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
 from .socket_channel import SocketChannel
 
 MIGRATED_ERROR = (
     "Old daemon task API was removed; use session.open, turn.submit, turn.cancel, session.list, and runtime.status."
 )
 DAEMON_PROTOCOL_VERSION = (
-    22  # bumped: bare-launch evicts the in-memory tui:default slot so fresh xerxes invocations are clean
+    34  # bumped: assistant tool_call messages now carry reasoning_content (fixes Kimi 400 on next turn)
+)
+
+
+# Sentinel labels used by the ``/provider`` interactive panel. Centralised
+# here so the dispatcher (``_advance_provider_flow``) and the panel emitter
+# (``_emit_provider_main_panel``) stay in sync without stringly-typed magic.
+_PROVIDER_ADD_LABEL = "+ Add new profile…"
+_PROVIDER_EDIT_LABEL = "✎ Edit existing profile…"
+_PROVIDER_REMOVE_LABEL = "✗ Remove existing profile…"
+_PROVIDER_CANCEL_LABEL = "Cancel"
+
+# Inference wire-format tags accepted by :func:`bridge.profiles.save_profile`.
+# Mirrors the values ``_guess_provider`` returns; ``auto`` defers to that
+# heuristic. Surfacing them as a picker lets users override the guess
+# (essential for self-hosted vLLM/SGLang/Ollama endpoints).
+_PROVIDER_TYPE_OPTIONS: tuple[str, ...] = (
+    "auto",
+    "openai",
+    "anthropic",
+    "ollama",
+    "gemini",
+    "deepseek",
+    "groq",
+    "together",
+    "kimi",  # general Kimi chat (api.moonshot.cn)
+    "kimi-code",  # coding-specialised endpoint (api.kimi.com/coding/v1)
+    "minimax",
+    "local",
+    "custom",
 )
 
 
@@ -123,6 +152,9 @@ class DaemonServer:
         # ``_SKILL_CREATE_STEPS`` is asked one at a time; once every key is
         # filled the synthesized draft turn is submitted to the agent.
         self._pending_skill_create: dict[str, Any] | None = None
+        # Active ``/provider`` interactive panel state (``main``/``add``/
+        # ``edit``/``remove`` step). Resolved by ``question_response``.
+        self._provider_flow: dict[str, Any] | None = None
 
     async def run(self) -> None:
         """Start every transport and block until :meth:`shutdown` is invoked.
@@ -281,6 +313,11 @@ class DaemonServer:
                 )
             }
         if method == "question_response":
+            rid = str(params.get("request_id", ""))
+            answers = dict(params.get("answers", {}) or {})
+            flow = self._provider_flow
+            if flow is not None and flow.get("request_id") == rid:
+                await self._advance_provider_flow(answers, emit)
             return {"ok": True}
         if method == "fetch_models":
             return self._fetch_models(params)
@@ -293,6 +330,7 @@ class DaemonServer:
                 str(params.get("provider", "")),
             )
             self.runtime.reload()
+            await self._emit_init_done(emit)
             return {"ok": True, "profile": profile}
         if method == "provider_list":
             return {"ok": True, "profiles": profiles.list_profiles()}
@@ -300,9 +338,20 @@ class DaemonServer:
             ok = profiles.set_active(str(params.get("name", "")))
             if ok:
                 self.runtime.reload()
+                await self._emit_init_done(emit)
             return {"ok": ok}
         if method == "provider_delete":
-            return {"ok": profiles.delete_profile(str(params.get("name", "")))}
+            removed = profiles.delete_profile(str(params.get("name", "")))
+            if removed:
+                # ``delete_profile`` may unset the active profile; reload so
+                # the runtime picks up whichever profile is now active (or
+                # falls back to env vars / nothing).
+                try:
+                    self.runtime.reload()
+                except Exception:
+                    pass
+                await self._emit_init_done(emit)
+            return {"ok": removed}
         if method == "shutdown":
             self._track_task(self.shutdown())
             return {"ok": True}
@@ -339,10 +388,7 @@ class DaemonServer:
                 "session_id": session.id,
                 "cwd": str(Path.cwd()),
                 "git_branch": self._git_branch(),
-                "context_limit": int(
-                    self.runtime.runtime_config.get("context_limit", self.runtime.runtime_config.get("max_context", 0))
-                    or 0
-                ),
+                "context_limit": self._resolve_context_limit(),
                 "agent_name": session.agent_id,
                 "skills": self.runtime.discover_skills(),
             },
@@ -469,10 +515,7 @@ class DaemonServer:
             "status_update",
             {
                 "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
-                "max_context": int(
-                    self.runtime.runtime_config.get("context_limit", self.runtime.runtime_config.get("max_context", 0))
-                    or 0
-                ),
+                "max_context": self._resolve_context_limit(),
                 "mcp_status": {},
                 "plan_mode": self._current_plan_mode,
                 "mode": self._current_mode,
@@ -693,6 +736,10 @@ class DaemonServer:
             await self._emit_slash(emit, json.dumps(self.runtime.status(), indent=2))
             return
 
+        if cmd == "provider":
+            await self._slash_provider(args, emit)
+            return
+
         if cmd in {"exit", "quit", "q"}:
             await self._emit_slash(emit, "(use Ctrl+D or close the terminal to exit)")
             return
@@ -701,6 +748,14 @@ class DaemonServer:
             # Clear is a per-session concern; the TUI handles its own scrollback,
             # so we just acknowledge.
             await self._emit_slash(emit, "Cleared.")
+            return
+
+        # ---- omnibus handler for the rest of COMMAND_REGISTRY ----------------
+        # Dispatched via ``_BULK_SLASH_HANDLERS`` so adding a command means one
+        # line in the registry + one line in the dispatch table below.
+        handler = _BULK_SLASH_HANDLERS.get(cmd)
+        if handler is not None:
+            await handler(self, args, emit)
             return
 
         # ---- skill-name shorthand (supports ``/skill:sub``) --------------
@@ -740,6 +795,16 @@ class DaemonServer:
             await self._slash_skill(composed, emit, run_now=True)
             return
 
+        # If the command is in the registry but slipped through every branch
+        # above, fail honestly so the gap can be caught by a grep rather than
+        # disguised as "unknown command".
+        if resolved is not None:
+            await self._emit_slash(
+                emit,
+                f"`/{cmd}` is registered but not yet wired in the daemon. "
+                "Open an issue with the command name and what you expected.",
+            )
+            return
         await self._emit_slash(emit, f"Unknown command: /{cmd} (type /help)")
 
     def _help_text(self) -> str:
@@ -764,6 +829,615 @@ class DaemonServer:
                 hint = f" {c.args_hint}" if c.args_hint else ""
                 lines.append(f"    `/{c.name}{hint}`  — {c.description}")
         return "\n".join(lines)
+
+    async def _slash_provider(self, args: str, emit: EmitFn) -> None:
+        """Open the interactive provider panel (or quick-switch via ``/provider <name>``).
+
+        Forms:
+          * ``/provider``        — pops a TUI question panel listing every
+            profile plus ``Add``/``Edit``/``Remove``/``Cancel`` actions.
+          * ``/provider <name>`` — quick switch by name (no panel).
+
+        The panel is built on top of the standard ``question_request`` wire
+        event, so the same arrow-key + Enter UX as agent ``ask_user`` prompts
+        applies. Multi-step actions (add/edit/remove) are batched into a
+        single follow-up question_request with one entry per field.
+        """
+        from ..bridge import profiles
+
+        target = args.strip()
+        plist = profiles.list_profiles()
+
+        # Inline quick-switch — bypass the panel entirely.
+        if target:
+            if not any(p.get("name") == target for p in plist):
+                names = ", ".join(f"`{p.get('name', '')}`" for p in plist if p.get("name"))
+                msg = f"No profile named `{target}`."
+                if names:
+                    msg += f" Available: {names}."
+                await self._emit_slash(emit, msg)
+                return
+            if not profiles.set_active(target):
+                await self._emit_slash(emit, f"Failed to switch to `{target}`.")
+                return
+            try:
+                self.runtime.reload({})
+            except Exception:
+                pass
+            switched = profiles.get_active_profile() or {}
+            await self._emit_slash(
+                emit,
+                f"Switched to `{target}` (model: `{switched.get('model', '?')}`).",
+            )
+            await self._emit_init_done(emit)
+            return
+
+        # No profiles + bare /provider — fall back to env-var guidance instead
+        # of popping an empty panel.
+        if not plist:
+            await self._emit_slash(
+                emit,
+                "No provider profiles configured.\n"
+                "Set `XERXES_BASE_URL`, `XERXES_API_KEY`, and `XERXES_MODEL` in the "
+                "environment to start, or run `/provider` again after adding one via "
+                "the `provider_save` JSON-RPC method.\n"
+                "(An add-profile flow inside the panel is also available — type "
+                "`/provider` once at least one profile exists.)",
+            )
+            return
+
+        await self._emit_provider_main_panel(emit)
+
+    async def _emit_provider_main_panel(self, emit: EmitFn) -> None:
+        """Send the top-level provider action question to the TUI."""
+        from ..bridge import profiles
+
+        plist = profiles.list_profiles()
+        active_name = (profiles.get_active_profile() or {}).get("name", "")
+
+        options: list[str] = []
+        # Existing profiles come first — selecting one switches to it.
+        for p in plist:
+            name = p.get("name", "")
+            marker = "  ← active" if name == active_name else ""
+            model = p.get("model", "?")
+            base = p.get("base_url", "")
+            options.append(f"{name}  ({model} @ {base}){marker}")
+        options.append(_PROVIDER_ADD_LABEL)
+        if plist:
+            options.append(_PROVIDER_EDIT_LABEL)
+            options.append(_PROVIDER_REMOVE_LABEL)
+        options.append(_PROVIDER_CANCEL_LABEL)
+
+        rid = uuid.uuid4().hex
+        self._provider_flow = {"step": "main", "request_id": rid}
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "action",
+                        "question": "Provider profiles — pick a profile to switch, or choose an action:",
+                        "options": options,
+                        "allow_free_form": False,
+                    }
+                ],
+            },
+        )
+
+    async def _emit_provider_add_panel(self, emit: EmitFn) -> None:
+        """Stage 1 of the Add flow — ask for name + provider type.
+
+        Stage 2 (``_emit_provider_credentials_panel``) follows once the
+        provider type is known so its base URL and default model can be
+        pre-filled from :data:`xerxes.llms.registry.PROVIDERS`. Without that
+        split the user would have to retype URLs we already know.
+        """
+        rid = uuid.uuid4().hex
+        self._provider_flow = {"step": "add_meta", "request_id": rid}
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "name",
+                        "question": "New profile name (short slug, e.g. `kimi-code` or `openai-prod`):",
+                        "options": [],
+                        "allow_free_form": True,
+                    },
+                    {
+                        "id": "provider_type",
+                        "question": "Inference provider type:",
+                        "options": list(_PROVIDER_TYPE_OPTIONS),
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _emit_provider_credentials_panel(self, emit: EmitFn, name: str, provider_type: str) -> None:
+        """Stage 2 of the Add flow — ask base URL + API key.
+
+        Pre-fills the base URL from :data:`xerxes.llms.registry.PROVIDERS` so
+        users picking a well-known provider can usually just hit Enter and
+        paste an API key. The model is collected separately in stage 3 after
+        we try to enumerate ``/models`` from the actual endpoint.
+        """
+        from ..llms.registry import PROVIDERS
+
+        default_url = ""
+        default_model = ""
+        if provider_type and provider_type not in {"auto", "custom"}:
+            prov_cfg = PROVIDERS.get(provider_type)
+            if prov_cfg is not None:
+                # ``base_url`` is optional on the dataclass (anthropic and a
+                # few others rely on the SDK default). Treat ``None`` as "no
+                # suggestion" rather than letting it crash the f-string.
+                default_url = prov_cfg.base_url or ""
+                default_model = prov_cfg.models[0] if prov_cfg.models else ""
+
+        url_question = "Base URL"
+        if default_url:
+            url_question += f" (press Enter for `{default_url}`)"
+        url_question += ":"
+
+        rid = uuid.uuid4().hex
+        self._provider_flow = {
+            "step": "add_creds",
+            "request_id": rid,
+            "name": name,
+            "provider_type": provider_type,
+            "default_url": default_url,
+            "default_model": default_model,
+        }
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "base_url",
+                        "question": url_question,
+                        "options": [],
+                        "allow_free_form": True,
+                    },
+                    {
+                        "id": "api_key",
+                        "question": "API key (blank uses env var when available):",
+                        "options": [],
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _emit_provider_model_panel(
+        self,
+        emit: EmitFn,
+        *,
+        name: str,
+        provider_type: str,
+        base_url: str,
+        api_key: str,
+        default_model: str,
+    ) -> None:
+        """Stage 3 of the Add flow — try ``GET /models``, then ask the user.
+
+        Network call runs on a worker thread (so the daemon's event loop
+        stays responsive) with a hard 3s timeout. Every failure path falls
+        back to a free-form question with the registry default as a hint —
+        the Add flow never gets stuck because of a flaky provider.
+        """
+        # Sentinel that lets the user open the free-text mode even when a
+        # list of options is offered. Detected in ``_advance_provider_flow``.
+        type_sentinel = "— Type a custom model id —"
+
+        # Pull the model catalogue. ``profiles.fetch_models`` is synchronous
+        # httpx; offload to a thread so we don't block other RPC handlers.
+        models: list[str] = []
+        fetch_error: str = ""
+        try:
+            models = await asyncio.to_thread(profiles.fetch_models, base_url, api_key)
+        except Exception as exc:
+            fetch_error = str(exc)
+        # Order: registry default first (if it's in the list), then alphabetical.
+        if default_model and default_model in models:
+            models = [default_model] + [m for m in models if m != default_model]
+
+        question_text = "Pick a model"
+        if fetch_error:
+            question_text += " (couldn't reach `/models` — type one manually)"
+        elif not models:
+            question_text += " (the endpoint returned no catalogue — type one)"
+        elif default_model:
+            question_text += f" (first option = registry default `{default_model}`)"
+        question_text += ":"
+
+        rid = uuid.uuid4().hex
+        self._provider_flow = {
+            "step": "add_model",
+            "request_id": rid,
+            "name": name,
+            "provider_type": provider_type,
+            "base_url": base_url,
+            "api_key": api_key,
+            "default_model": default_model,
+            "type_sentinel": type_sentinel,
+        }
+        # Always allow free-form so users can paste a model id even when the
+        # provider returns a list. Append the sentinel after real options so
+        # picking it triggers the custom-text follow-up.
+        options = list(models)
+        if options:
+            options.append(type_sentinel)
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "model",
+                        "question": question_text,
+                        "options": options,
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _finalize_provider_add(
+        self,
+        emit: EmitFn,
+        name: str,
+        provider_type: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+    ) -> None:
+        """Save the new profile, reload the runtime, and confirm to the user.
+
+        Called from every terminal branch of the Add flow (model picker,
+        free-text fallback). Handles the same provider-tag resolution and
+        ``init_done`` refresh the old single-shot Add path used to do.
+        """
+        self._provider_flow = None
+        saved_type = "" if provider_type == "auto" else provider_type
+        if not model:
+            await self._emit_slash(
+                emit,
+                f"Add cancelled — no model id given and `{provider_type}` has no default.",
+            )
+            return
+        try:
+            profiles.save_profile(name, base_url, api_key, model, saved_type)
+        except Exception as exc:
+            await self._emit_slash(emit, f"Failed to save profile: `{exc}`")
+            return
+        try:
+            self.runtime.reload({})
+        except Exception:
+            pass
+        saved = next(
+            (p for p in profiles.list_profiles() if p.get("name") == name),
+            {},
+        )
+        resolved_type = saved.get("provider") or saved_type or "custom"
+        await self._emit_slash(
+            emit,
+            f"Added profile `{name}` (type `{resolved_type}`, model `{model}` @ `{base_url}`) and switched to it.",
+        )
+        await self._emit_init_done(emit)
+
+    async def _emit_provider_custom_model_panel(
+        self, emit: EmitFn, name: str, provider_type: str, base_url: str, api_key: str, default_model: str
+    ) -> None:
+        """Fallback panel asking for a free-text model id (used after the user
+        picks the "type custom" sentinel on the model picker)."""
+        rid = uuid.uuid4().hex
+        self._provider_flow = {
+            "step": "add_model_text",
+            "request_id": rid,
+            "name": name,
+            "provider_type": provider_type,
+            "base_url": base_url,
+            "api_key": api_key,
+            "default_model": default_model,
+        }
+        question_text = "Model id"
+        if default_model:
+            question_text += f" (press Enter for `{default_model}`)"
+        question_text += " — e.g. `gpt-4o`, `kimi-for-coding`:"
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "model",
+                        "question": question_text,
+                        "options": [],
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _emit_provider_edit_panel(self, emit: EmitFn) -> None:
+        """Ask which profile + field to edit + the new value (batched)."""
+        from ..bridge import profiles
+
+        names = [p.get("name", "") for p in profiles.list_profiles() if p.get("name")]
+        rid = uuid.uuid4().hex
+        self._provider_flow = {"step": "edit", "request_id": rid}
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "profile",
+                        "question": "Which profile to edit?",
+                        "options": names,
+                        "allow_free_form": False,
+                    },
+                    {
+                        "id": "field",
+                        "question": "Which field?",
+                        "options": ["base_url", "api_key", "model", "name", "provider_type"],
+                        "allow_free_form": False,
+                    },
+                    {
+                        "id": "value",
+                        "question": "New value:",
+                        "options": [],
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _emit_provider_remove_panel(self, emit: EmitFn) -> None:
+        """Ask which profile to remove + confirm."""
+        from ..bridge import profiles
+
+        names = [p.get("name", "") for p in profiles.list_profiles() if p.get("name")]
+        rid = uuid.uuid4().hex
+        self._provider_flow = {"step": "remove", "request_id": rid}
+        await emit(
+            "question_request",
+            {
+                "id": rid,
+                "tool_call_id": "",
+                "questions": [
+                    {
+                        "id": "profile",
+                        "question": "Which profile to remove?",
+                        "options": names,
+                        "allow_free_form": False,
+                    },
+                    {
+                        "id": "confirm",
+                        "question": "Type `yes` to confirm deletion:",
+                        "options": ["yes", "no"],
+                        "allow_free_form": True,
+                    },
+                ],
+            },
+        )
+
+    async def _advance_provider_flow(self, answers: dict[str, str], emit: EmitFn) -> None:
+        """State machine that consumes ``question_response`` answers."""
+        from ..bridge import profiles
+
+        flow = self._provider_flow
+        if flow is None:
+            return
+        step = flow.get("step", "")
+
+        # Cancel sentinel everywhere — bail without touching disk.
+        for v in answers.values():
+            if v == _PROVIDER_CANCEL_LABEL:
+                self._provider_flow = None
+                await self._emit_slash(emit, "Cancelled.")
+                return
+
+        if step == "main":
+            choice = answers.get("action", "")
+            if choice == _PROVIDER_ADD_LABEL:
+                await self._emit_provider_add_panel(emit)
+                return
+            if choice == _PROVIDER_EDIT_LABEL:
+                await self._emit_provider_edit_panel(emit)
+                return
+            if choice == _PROVIDER_REMOVE_LABEL:
+                await self._emit_provider_remove_panel(emit)
+                return
+            # Otherwise the user picked an existing profile row — pull the
+            # name off the front of the rendered label.
+            name = choice.split("  ", 1)[0].strip()
+            self._provider_flow = None
+            if not name:
+                await self._emit_slash(emit, "No profile selected.")
+                return
+            if not profiles.set_active(name):
+                await self._emit_slash(emit, f"Failed to switch to `{name}`.")
+                return
+            try:
+                self.runtime.reload({})
+            except Exception:
+                pass
+            switched = profiles.get_active_profile() or {}
+            await self._emit_slash(
+                emit,
+                f"Switched to `{name}` (model: `{switched.get('model', '?')}`).",
+            )
+            await self._emit_init_done(emit)
+            return
+
+        if step == "add_meta":
+            # Stage 1 → 2: collect name + provider type, then pop the
+            # credentials panel with provider-aware defaults.
+            name = (answers.get("name") or "").strip()
+            provider_type = (answers.get("provider_type") or "").strip() or "auto"
+            if not name:
+                self._provider_flow = None
+                await self._emit_slash(emit, "Add cancelled — profile name is required.")
+                return
+            await self._emit_provider_credentials_panel(emit, name, provider_type)
+            return
+
+        if step == "add_creds":
+            # Stage 2 → 3: capture base_url + api_key, then try to enumerate
+            # models from the endpoint and present the result as a picker.
+            name = flow.get("name", "")
+            provider_type = flow.get("provider_type", "auto")
+            default_url = flow.get("default_url", "")
+            default_model = flow.get("default_model", "")
+            base_url = (answers.get("base_url") or "").strip() or default_url
+            api_key = (answers.get("api_key") or "").strip()
+            if not base_url:
+                self._provider_flow = None
+                await self._emit_slash(
+                    emit,
+                    f"Add cancelled — base_url is required for `{provider_type}` (no registry default to fall back to).",
+                )
+                return
+            await self._emit_provider_model_panel(
+                emit,
+                name=name,
+                provider_type=provider_type,
+                base_url=base_url,
+                api_key=api_key,
+                default_model=default_model,
+            )
+            return
+
+        if step == "add_model":
+            # Stage 3 (picker). The user either picked a real model, picked
+            # the "type custom" sentinel, or typed a free-form id.
+            picked = (answers.get("model") or "").strip()
+            type_sentinel = flow.get("type_sentinel", "")
+            if picked == type_sentinel:
+                await self._emit_provider_custom_model_panel(
+                    emit,
+                    flow.get("name", ""),
+                    flow.get("provider_type", "auto"),
+                    flow.get("base_url", ""),
+                    flow.get("api_key", ""),
+                    flow.get("default_model", ""),
+                )
+                return
+            # Empty picker answer = accept registry default.
+            model = picked or flow.get("default_model", "")
+            await self._finalize_provider_add(
+                emit,
+                flow.get("name", ""),
+                flow.get("provider_type", "auto"),
+                flow.get("base_url", ""),
+                flow.get("api_key", ""),
+                model,
+            )
+            return
+
+        if step == "add_model_text":
+            # Free-text fallback (user picked "type custom" or /models failed).
+            model = (answers.get("model") or "").strip() or flow.get("default_model", "")
+            await self._finalize_provider_add(
+                emit,
+                flow.get("name", ""),
+                flow.get("provider_type", "auto"),
+                flow.get("base_url", ""),
+                flow.get("api_key", ""),
+                model,
+            )
+            return
+
+        if step == "edit":
+            self._provider_flow = None
+            target = (answers.get("profile") or "").strip()
+            field = (answers.get("field") or "").strip()
+            value = (answers.get("value") or "").strip()
+            if not target or not field:
+                await self._emit_slash(emit, "Edit cancelled — no profile or field selected.")
+                return
+            existing = next(
+                (p for p in profiles.list_profiles() if p.get("name") == target),
+                None,
+            )
+            if existing is None:
+                await self._emit_slash(emit, f"No profile named `{target}` (it may have been removed).")
+                return
+            merged = dict(existing)
+            # The user-facing field "provider_type" maps to the underlying
+            # "provider" column on the profile dict.
+            store_key = "provider" if field == "provider_type" else field
+            if field == "name":
+                # Rename: save under the new key and remove the old.
+                new_name = value
+                if not new_name:
+                    await self._emit_slash(emit, "Edit cancelled — new name is empty.")
+                    return
+                profiles.save_profile(
+                    new_name,
+                    merged.get("base_url", ""),
+                    merged.get("api_key", ""),
+                    merged.get("model", ""),
+                    merged.get("provider", ""),
+                )
+                profiles.delete_profile(target)
+                target = new_name
+            else:
+                # ``auto`` for provider_type means "let the URL heuristic
+                # pick" — store as empty so save_profile triggers the guess.
+                stored_value = "" if field == "provider_type" and value == "auto" else value
+                merged[store_key] = stored_value
+                profiles.save_profile(
+                    merged.get("name", ""),
+                    merged.get("base_url", ""),
+                    merged.get("api_key", ""),
+                    merged.get("model", ""),
+                    merged.get("provider", ""),
+                )
+            try:
+                self.runtime.reload({})
+            except Exception:
+                pass
+            shown = "***redacted***" if field == "api_key" else value
+            await self._emit_slash(emit, f"Updated `{target}`: `{field}` = `{shown}`.")
+            await self._emit_init_done(emit)
+            return
+
+        if step == "remove":
+            self._provider_flow = None
+            target = (answers.get("profile") or "").strip()
+            confirm = (answers.get("confirm") or "").strip().lower()
+            if not target:
+                await self._emit_slash(emit, "Remove cancelled.")
+                return
+            if confirm not in {"yes", "y"}:
+                await self._emit_slash(emit, f"Remove cancelled — `{target}` was not deleted.")
+                return
+            if not profiles.delete_profile(target):
+                await self._emit_slash(emit, f"Failed to remove `{target}`.")
+                return
+            try:
+                self.runtime.reload({})
+            except Exception:
+                pass
+            await self._emit_slash(emit, f"Removed profile `{target}`.")
+            await self._emit_init_done(emit)
+            return
+
+        # Unknown step — defensive reset.
+        self._provider_flow = None
 
     async def _slash_skill(self, args: str, emit: EmitFn, *, run_now: bool = True) -> None:
         """Activate (and optionally invoke) a registered skill by name.
@@ -1123,6 +1797,77 @@ class DaemonServer:
         head = text.lstrip()[:64]
         return head.startswith("[Skill") and "activated" in head
 
+    async def _emit_init_done(self, emit: EmitFn) -> None:
+        """Re-emit ``init_done`` so the TUI refreshes its banner / status bar.
+
+        Used after any change that mutates the active model / provider — the
+        TUI's welcome banner and footer cache the model name and only update
+        when an ``init_done`` arrives. Without this, switching provider mid-
+        session leaves the old model name visible in the banner and footer.
+
+        Best-effort: missing attributes (e.g. in unit-test fixtures that bypass
+        the normal constructor) degrade to empty strings rather than crashing.
+        """
+        sessions = getattr(self, "sessions", None)
+        session_key = getattr(self, "_current_session_key", "")
+        session = sessions.get(session_key) if sessions is not None and session_key else None
+        workspaces = getattr(self, "workspaces", None)
+        default_agent = getattr(workspaces, "default_agent_id", "default") if workspaces else "default"
+        try:
+            skills = self.runtime.discover_skills()
+        except Exception:
+            skills = []
+        try:
+            git_branch = self._git_branch()
+        except Exception:
+            git_branch = ""
+        await emit(
+            "init_done",
+            {
+                "model": getattr(self.runtime, "model", ""),
+                "session_id": session.id if session else "",
+                "cwd": str(Path.cwd()),
+                "git_branch": git_branch,
+                "context_limit": self._resolve_context_limit(),
+                "agent_name": (session.agent_id if session else default_agent),
+                "skills": skills,
+            },
+        )
+        # Also push a status_update so the footer's ``context: x/y`` line
+        # picks up the new max immediately — the banner refresh on its own
+        # rewrites the welcome panel but leaves the bottom bar stale.
+        try:
+            await self._emit_status(emit)
+        except Exception:
+            pass
+
+    def _resolve_context_limit(self) -> int:
+        """Return the active model's context window in tokens.
+
+        Resolution order:
+          1. ``runtime_config["context_limit"]`` / ``["max_context"]`` if the
+             operator explicitly overrode it.
+          2. The pricing-table entry for the exact model id.
+          3. The active provider's default context_limit from the registry.
+          4. ``0`` as a last resort (renders as ``0/0`` in the TUI).
+        """
+        cfg = self.runtime.runtime_config
+        override = cfg.get("context_limit") or cfg.get("max_context")
+        if override:
+            try:
+                return int(override)
+            except (TypeError, ValueError):
+                pass
+        try:
+            from ..llms.registry import get_context_limit
+
+            model = getattr(self.runtime, "model", "") or ""
+            if model:
+                return int(get_context_limit(model))
+        except Exception:
+            pass
+        return 0
+
     @staticmethod
     async def _emit_slash(emit: EmitFn, body: str) -> None:
         """Emit a ``slash``-category ``notification`` carrying ``body``."""
@@ -1138,6 +1883,813 @@ class DaemonServer:
                 "payload": {},
             },
         )
+
+    # ============================================================
+    # Bulk slash handlers — one per registered command. Each returns
+    # nothing; they emit user-facing output via ``self._emit_slash``.
+    # ============================================================
+
+    async def _slash_new(self, args: str, emit: EmitFn) -> None:
+        """Drop the cached session and start fresh — like a clean re-launch."""
+        self.sessions.evict(self._current_session_key)
+        session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
+        await self._emit_slash(emit, f"New session `{session.id}` started. Scrollback cleared on TUI side.")
+
+    async def _slash_stop(self, args: str, emit: EmitFn) -> None:
+        """Cancel the currently in-flight tool / turn in this session."""
+        cancelled = self.sessions.cancel(self._current_session_key)
+        await self._emit_slash(emit, "Cancelled." if cancelled else "Nothing running to cancel.")
+
+    async def _slash_cancel_all(self, args: str, emit: EmitFn) -> None:
+        """Cancel every running turn across every session."""
+        count = self.sessions.cancel_all()
+        await self._emit_slash(emit, f"Cancelled {count} running turn{'s' if count != 1 else ''}.")
+
+    async def _slash_compact(self, args: str, emit: EmitFn) -> None:
+        """Compact the conversation by handing it to the agent with a brief.
+
+        We don't run a local summariser — the model can do it cleanly inside a
+        normal turn. The synthetic prompt asks the agent to summarise the
+        thread and then continue with whatever comes next.
+        """
+        prompt = (
+            "Please compact this conversation: summarise the relevant context so far "
+            "in 3-6 bullet points (decisions made, open questions, key file paths) "
+            "and then wait for the user's next instruction. Be terse."
+        )
+        await self._submit_turn({"text": prompt, "_internal_slash": True}, emit)
+        await self._emit_slash(emit, "Compaction turn queued.")
+
+    async def _slash_steer(self, args: str, emit: EmitFn) -> None:
+        """Inject a steering hint into the active turn (``/btw`` and ``/steer``).
+
+        Mid-turn the content is queued on the active session; the streaming
+        loop drains it between tool iterations and prepends it as a synthetic
+        user message before the next LLM request. With no active turn the
+        steer lands directly in ``state.messages`` so the next turn sees it.
+        ``steer_input`` is still emitted so the TUI can render the injection.
+        """
+        content = args.strip()
+        if not content:
+            await self._emit_slash(emit, "Usage: `/steer <hint>` (also `/btw`). Anything after the command is injected.")
+            return
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to steer.")
+            return
+        await emit("steer_input", {"content": content})
+        if session.active_turn_id:
+            session.pending_steers.put(content)
+            await self._emit_slash(emit, "Steer queued — will land before the next tool round.")
+        else:
+            session.state.messages.append(
+                {"role": "user", "content": f"[steer from user]\n{content}"}
+            )
+            await self._emit_slash(emit, "Steer injected — will land on the next turn.")
+
+    async def _slash_model(self, args: str, emit: EmitFn) -> None:
+        """Show the active model or switch to a new one.
+
+        ``/model`` lists the active model + provider. ``/model <id>`` rebinds
+        the runtime to that id (full path or short alias). Profiles are
+        managed separately via ``/provider``.
+        """
+        target = args.strip()
+        if not target:
+            await self._emit_slash(
+                emit,
+                f"Active model: `{self.runtime.model or '(none)'}`\n"
+                f"Base URL:      `{self.runtime.runtime_config.get('base_url', '(provider default)')}`\n"
+                f"Switch with `/model <id>` or pick a profile with `/provider`.",
+            )
+            return
+        try:
+            self.runtime.reload({"model": target})
+        except Exception as exc:
+            await self._emit_slash(emit, f"Failed to switch model: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Model set to `{self.runtime.model}`.")
+        await self._emit_init_done(emit)
+
+    async def _slash_sampling(self, args: str, emit: EmitFn) -> None:
+        """Show or update sampling params (temperature, top_p, max_tokens)."""
+        if not args.strip():
+            cfg = self.runtime.runtime_config
+            lines = ["Sampling:"]
+            for key in ("temperature", "top_p", "top_k", "max_tokens", "presence_penalty", "frequency_penalty"):
+                if key in cfg:
+                    lines.append(f"  `{key}` = `{cfg[key]}`")
+            if len(lines) == 1:
+                lines.append("  (provider defaults — no overrides set)")
+            lines.append("\nUpdate with `/sampling <key> <value>` (e.g. `/sampling temperature 0.7`).")
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            await self._emit_slash(emit, "Usage: `/sampling <key> <value>`")
+            return
+        key, raw = parts[0].strip(), parts[1].strip()
+        # Coerce numerics; non-numeric values are stored as strings.
+        value: Any = raw
+        try:
+            value = float(raw) if "." in raw else int(raw)
+        except ValueError:
+            pass
+        self.runtime.runtime_config[key] = value
+        await self._emit_slash(emit, f"Set sampling `{key}` = `{value}`.")
+
+    async def _slash_config(self, args: str, emit: EmitFn) -> None:
+        """Dump non-underscore runtime config keys, with secrets redacted."""
+        cfg = self.runtime.runtime_config
+        redact_keys = {"api_key", "auth_token", "token", "secret"}
+        lines = ["Runtime config:"]
+        for key in sorted(cfg):
+            if key.startswith("_"):
+                continue
+            value = cfg[key]
+            if any(s in key.lower() for s in redact_keys) and value:
+                value = "***redacted***"
+            lines.append(f"  `{key}` = `{value}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_title(self, args: str, emit: EmitFn) -> None:
+        """Set or clear the current session's title."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet — start chatting first.")
+            return
+        title = args.strip()
+        if not hasattr(session.state, "metadata") or session.state.metadata is None:
+            session.state.metadata = {}
+        if title:
+            session.state.metadata["title"] = title
+            await self._emit_slash(emit, f"Session title set to `{title}`.")
+        else:
+            current = session.state.metadata.get("title", "")
+            await self._emit_slash(emit, f"Session title: `{current or '(unset)'}`.")
+
+    async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
+        """Show the current project directory and the agent workspace path."""
+        session = self.sessions.get(self._current_session_key)
+        ws_path = str(session.workspace.path) if session is not None else "(no session)"
+        lines = [
+            f"Project dir:    `{self.config.project_dir or os.getcwd()}`",
+            f"Agent workspace: `{ws_path}`",
+            f"Agent id:        `{(session.agent_id if session else self.workspaces.default_agent_id)}`",
+        ]
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_save(self, args: str, emit: EmitFn) -> None:
+        """Force-persist the active session to disk right now."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to save.")
+            return
+        self.sessions.save(session)
+        path = self.sessions._session_path(session.id)
+        await self._emit_slash(emit, f"Saved session `{session.id}` to `{path}`.")
+
+    async def _slash_personality(self, args: str, emit: EmitFn) -> None:
+        """Show the path to the workspace's persona file."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        path = session.workspace.path / "AGENTS.md"
+        if not path.exists():
+            await self._emit_slash(emit, f"`AGENTS.md` not found at `{path}`. Run any session prompt to seed it.")
+            return
+        await self._emit_slash(emit, f"Persona / instructions file: `{path}`\nEdit with your `$EDITOR`, then `/reload`.")
+
+    async def _slash_soul(self, args: str, emit: EmitFn) -> None:
+        """Show the path to the workspace's SOUL.md (or memory soul file)."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        path = session.workspace.path / "SOUL.md"
+        if not path.exists():
+            await self._emit_slash(emit, f"`SOUL.md` not found at `{path}`.")
+            return
+        await self._emit_slash(emit, f"Soul / values file: `{path}`\nEdit then `/reload` to pick up changes.")
+
+    async def _slash_tools(self, args: str, emit: EmitFn) -> None:
+        """List the tool names the runtime has registered."""
+        names = sorted(t.get("function", {}).get("name", "") for t in self.runtime.tool_schemas)
+        names = [n for n in names if n]
+        if not names:
+            await self._emit_slash(emit, "No tools loaded.")
+            return
+        lines = [f"Tools ({len(names)}):"]
+        for name in names:
+            lines.append(f"  `{name}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_toolsets(self, args: str, emit: EmitFn) -> None:
+        """List subagent / toolset definitions discovered on disk."""
+        try:
+            from ..agents.definitions import list_agent_definitions
+        except Exception:
+            await self._emit_slash(emit, "Toolset listing unavailable in this build.")
+            return
+        defs = list_agent_definitions()
+        if not defs:
+            await self._emit_slash(emit, "No agent toolsets configured.")
+            return
+        lines = [f"Agent toolsets ({len(defs)}):"]
+        for d in defs:
+            name = getattr(d, "name", str(d))
+            descr = getattr(d, "description", "") or ""
+            lines.append(f"  `{name}` — {descr[:80]}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_agents(self, args: str, emit: EmitFn) -> None:
+        """List agent definitions and any running subagent tasks."""
+        try:
+            from ..agents.definitions import list_agent_definitions
+        except Exception:
+            list_agent_definitions = None  # type: ignore[assignment]
+        defs = list_agent_definitions() if list_agent_definitions else []
+        lines = [f"Agents ({len(defs)}):"]
+        for d in defs:
+            name = getattr(d, "name", str(d))
+            descr = getattr(d, "description", "") or ""
+            lines.append(f"  `{name}` — {descr[:80]}")
+        # Running subagent tasks, if the runtime exposes them.
+        try:
+            mgr = self.runtime.subagent_manager  # may not exist
+            tasks = [t for t in mgr.tasks.values() if t.status in {"pending", "running"}]
+        except Exception:
+            tasks = []
+        if tasks:
+            lines.append("")
+            lines.append(f"Running subagent tasks ({len(tasks)}):")
+            for t in tasks:
+                lines.append(f"  `{t.id}` — `{t.name or t.agent_def_name}` ({t.status})")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_reload(self, args: str, emit: EmitFn) -> None:
+        """Reload tools + skills from disk without restarting the daemon."""
+        try:
+            self.runtime.reload({})
+        except Exception as exc:
+            await self._emit_slash(emit, f"Reload failed: `{exc}`")
+            return
+        skills = self.runtime.discover_skills()
+        await emit("init_done", {"skills": skills})
+        await self._emit_slash(
+            emit,
+            f"Reloaded. Tools: {len(self.runtime.tool_schemas)} · Skills: {len(skills)}.",
+        )
+
+    async def _slash_reload_mcp(self, args: str, emit: EmitFn) -> None:
+        """Reload MCP server connections."""
+        try:
+            from ..mcp.manager import reload_mcp_servers
+        except Exception:
+            await self._emit_slash(emit, "MCP support not available in this build.")
+            return
+        try:
+            count = reload_mcp_servers()
+        except Exception as exc:
+            await self._emit_slash(emit, f"MCP reload failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Reloaded {count} MCP server connection(s).")
+
+    async def _slash_memory(self, args: str, emit: EmitFn) -> None:
+        """Show where the agent's memory files live + their sizes."""
+        from ..runtime.agent_memory import default_global_memory_dir, project_memory_dir_for
+
+        global_dir = default_global_memory_dir()
+        try:
+            project_dir = project_memory_dir_for(self.config.project_dir or os.getcwd())
+        except Exception:
+            project_dir = None
+
+        def _sz(path):
+            try:
+                return path.stat().st_size if path.exists() else 0
+            except OSError:
+                return 0
+
+        lines = ["Memory:"]
+        lines.append(f"  Global scope: `{global_dir}`")
+        for name in ("SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md", "KNOWLEDGE.md", "INSIGHTS.md", "EXPERIENCES.md"):
+            path = global_dir / name
+            lines.append(f"    `{name}` — {_sz(path)} bytes" + ("" if path.exists() else "  (missing)"))
+        if project_dir is not None:
+            lines.append(f"  Project scope: `{project_dir}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_history(self, args: str, emit: EmitFn) -> None:
+        """Show message and turn counts for the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        st = session.state
+        await self._emit_slash(
+            emit,
+            f"Messages: {len(st.messages)}\nTurns: {st.turn_count}\n"
+            f"Input tokens: {st.total_input_tokens}\nOutput tokens: {st.total_output_tokens}",
+        )
+
+    async def _slash_usage(self, args: str, emit: EmitFn) -> None:
+        """Show token usage for the active session (alias-ish for /context)."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        st = session.state
+        total = st.total_input_tokens + st.total_output_tokens
+        lines = [
+            f"Input tokens:        {st.total_input_tokens}",
+            f"Output tokens:       {st.total_output_tokens}",
+            f"Total tokens:        {total}",
+            f"Cache read tokens:   {st.total_cache_read_tokens}",
+            f"Cache create tokens: {st.total_cache_creation_tokens}",
+        ]
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_cost(self, args: str, emit: EmitFn) -> None:
+        """Show the running USD cost for the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        try:
+            cost = session.state.cost
+        except Exception:
+            cost = 0.0
+        await self._emit_slash(emit, f"Estimated cost: `${cost:.4f}` (model: `{self.runtime.model}`).")
+
+    async def _slash_insights(self, args: str, emit: EmitFn) -> None:
+        """Show top tools by call count from the session's execution log."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        counts: dict[str, int] = {}
+        for ex in session.state.tool_executions:
+            name = ex.get("name", "(unknown)")
+            counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            await self._emit_slash(emit, "No tools invoked in this session yet.")
+            return
+        top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        lines = ["Top tools this session:"]
+        for name, n in top:
+            lines.append(f"  `{name}` — {n} call{'s' if n != 1 else ''}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_budget(self, args: str, emit: EmitFn) -> None:
+        """Show context-window usage and remaining headroom."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        from ..llms.registry import get_context_limit
+
+        model = self.runtime.model or ""
+        limit = get_context_limit(model) if model else 0
+        used = session.state.total_input_tokens + session.state.total_output_tokens
+        remaining = max(0, limit - used)
+        pct = (used / limit * 100) if limit else 0.0
+        await self._emit_slash(
+            emit,
+            f"Context window: `{limit or '?'}` tokens for `{model or '(unknown)'}`\n"
+            f"Used: {used} ({pct:.1f}%) · Remaining: {remaining}",
+        )
+
+    async def _slash_doctor(self, args: str, emit: EmitFn) -> None:
+        """Run a quick self-check: provider configured, tools loaded, skills found."""
+        lines = ["Diagnostics:"]
+        ok = True
+        if not self.runtime.model:
+            lines.append("  ✗ No model configured — run `/provider` or set `XERXES_MODEL`.")
+            ok = False
+        else:
+            lines.append(f"  ✓ Model: `{self.runtime.model}`")
+        tools = len(self.runtime.tool_schemas)
+        lines.append(f"  {'✓' if tools else '✗'} Tools loaded: {tools}")
+        skills = len(self.runtime.discover_skills())
+        lines.append(f"  ✓ Skills discovered: {skills}")
+        sessions = len(self.sessions.list())
+        lines.append(f"  ✓ Saved sessions on disk: {sessions}")
+        lines.append("")
+        lines.append("All good." if ok else "Something needs attention — see above.")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_update(self, args: str, emit: EmitFn) -> None:
+        """Show the installed Xerxes version and an update hint."""
+        try:
+            from importlib.metadata import version
+
+            ver = version("xerxes")
+        except Exception:
+            ver = "(unknown — running from source)"
+        await self._emit_slash(
+            emit,
+            f"Xerxes `{ver}`\nUpdate with: `uv pip install -U xerxes` (or your package manager).",
+        )
+
+    async def _slash_nudge(self, args: str, emit: EmitFn) -> None:
+        """Toggle Honcho-style background nudges."""
+        cur = bool(self.runtime.runtime_config.get("nudge", True))
+        action = args.strip().lower()
+        if action == "on":
+            new_value = True
+        elif action == "off":
+            new_value = False
+        else:
+            new_value = not cur
+        self.runtime.runtime_config["nudge"] = new_value
+        await self._emit_slash(emit, f"Nudge: {'ON' if new_value else 'OFF'}.")
+
+    async def _slash_feedback(self, args: str, emit: EmitFn) -> None:
+        """Show where to file feedback / report bugs."""
+        await self._emit_slash(
+            emit,
+            "Feedback / issues:\n"
+            "  • GitHub: https://github.com/erfanzar/Xerxes/issues\n"
+            "  • Anything urgent? Mention it in the daemon log first (`~/.xerxes/daemon.log`).",
+        )
+
+    async def _slash_plugins(self, args: str, emit: EmitFn) -> None:
+        """List loaded plugins and their slash registrations."""
+        try:
+            from ..extensions.plugins import list_loaded_plugins
+        except Exception:
+            list_loaded_plugins = None  # type: ignore[assignment]
+        try:
+            from ..extensions.slash_plugins import registered_slashes
+        except Exception:
+            registered_slashes = None  # type: ignore[assignment]
+
+        lines = ["Plugins:"]
+        plugins = list_loaded_plugins() if list_loaded_plugins else []
+        if plugins:
+            for p in plugins:
+                name = getattr(p, "name", str(p))
+                lines.append(f"  `{name}`")
+        else:
+            lines.append("  (no plugins loaded)")
+        slashes = registered_slashes() if registered_slashes else []
+        if slashes:
+            lines.append("")
+            lines.append("Plugin slash commands:")
+            for s in slashes:
+                lines.append(f"  `/{s.name}` — {getattr(s, 'description', '')}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_platforms(self, args: str, emit: EmitFn) -> None:
+        """List configured messaging channel platforms and their state."""
+        lines = ["Channel platforms:"]
+        for name, ch in self.channels.channels.items():
+            enabled = "on " if ch.enabled else "off"
+            ready = "ready" if ch.instance is not None else "not-started"
+            lines.append(f"  [{enabled}] `{name}` — {ready}")
+        if len(lines) == 1:
+            lines.append("  (none configured)")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_browser(self, args: str, emit: EmitFn) -> None:
+        """List browser sessions managed by the operator subsystem."""
+        sessions = []
+        for sess in self.sessions._sessions.values():
+            ops = getattr(sess, "operator_state", None)
+            if ops is None:
+                continue
+            mgr = getattr(ops, "browser_manager", None)
+            if mgr is None:
+                continue
+            try:
+                sessions.extend(mgr.list_sessions())
+            except Exception:
+                continue
+        if not sessions:
+            await self._emit_slash(emit, "No browser sessions open. Use the `start_browser` tool to create one.")
+            return
+        lines = [f"Browser sessions ({len(sessions)}):"]
+        for s in sessions:
+            lines.append(f"  `{getattr(s, 'id', '?')}` — `{getattr(s, 'url', '')}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_image(self, args: str, emit: EmitFn) -> None:
+        """Generate an image from a prompt via the image-generation tool."""
+        prompt = args.strip()
+        if not prompt:
+            await self._emit_slash(emit, "Usage: `/image <prompt>`")
+            return
+        # Defer to the agent — it has access to the image generation tool and
+        # can pick a provider + model on its own.
+        synthetic = (
+            f"Generate an image matching this brief and report the saved path:\n\n{prompt}\n\n"
+            "Use the `generate_image` tool. Do not write any code; one tool call is enough."
+        )
+        await self._submit_turn({"text": synthetic, "_internal_slash": True}, emit)
+        await self._emit_slash(emit, "Image-generation turn queued.")
+
+    async def _slash_cron(self, args: str, emit: EmitFn) -> None:
+        """List cron jobs (sub-commands ``add``/``remove``/``run`` deferred to JSON-RPC)."""
+        try:
+            from ..cron import jobs as cron_jobs
+        except Exception:
+            await self._emit_slash(emit, "Cron support not available in this build.")
+            return
+        sub = args.strip().split(maxsplit=1)
+        action = sub[0].lower() if sub else "list"
+        if action in ("", "list"):
+            try:
+                items = cron_jobs.list_jobs()
+            except Exception as exc:
+                await self._emit_slash(emit, f"Cron list failed: `{exc}`")
+                return
+            if not items:
+                await self._emit_slash(emit, "No cron jobs scheduled.")
+                return
+            lines = [f"Cron jobs ({len(items)}):"]
+            for j in items:
+                lines.append(
+                    f"  `{getattr(j, 'id', '?')}` — `{getattr(j, 'schedule', '')}` "
+                    f"({'paused' if getattr(j, 'paused', False) else 'active'})"
+                )
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+        await self._emit_slash(
+            emit,
+            f"`/cron {action}` is not yet wired in the daemon. "
+            "Use the corresponding JSON-RPC method, or `/cron list` to view jobs.",
+        )
+
+    async def _slash_fast(self, args: str, emit: EmitFn) -> None:
+        """Toggle fast-mode (cheaper auxiliary model for summaries/titles/etc.)."""
+        cur = bool(self.runtime.runtime_config.get("fast_mode", False))
+        action = args.strip().lower()
+        if action == "on":
+            new_value = True
+        elif action == "off":
+            new_value = False
+        else:
+            new_value = not cur
+        self.runtime.runtime_config["fast_mode"] = new_value
+        await self._emit_slash(emit, f"Fast mode: {'ON' if new_value else 'OFF'}.")
+
+    async def _slash_skin(self, args: str, emit: EmitFn) -> None:
+        """Skin is a pure TUI concern; ack and tell the user to use the TUI command."""
+        await self._emit_slash(emit, "Skin is a TUI-side setting. Use the TUI's `Ctrl+T` or the `xerxes-skin` CLI.")
+
+    async def _slash_statusbar(self, args: str, emit: EmitFn) -> None:
+        """Statusbar is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Statusbar visibility is a TUI-side setting.")
+
+    async def _slash_paste(self, args: str, emit: EmitFn) -> None:
+        """Paste is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Paste is handled in the TUI via `Ctrl+V` / `Alt+V`.")
+
+    async def _slash_voice(self, args: str, emit: EmitFn) -> None:
+        """Voice mode is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Voice mode is TUI-side. Use the `xerxes-voice` CLI or the TUI's voice key.")
+
+    async def _slash_queue(self, args: str, emit: EmitFn) -> None:
+        """The TUI manages its own input queue; ack and tell the user."""
+        await self._emit_slash(
+            emit, "Pending input queue is TUI-side. The footer shows the count when items are queued."
+        )
+
+    async def _slash_background(self, args: str, emit: EmitFn) -> None:
+        """List in-flight daemon background tasks (turn runners + post-turn hooks)."""
+        active = [t for t in self._background_tasks if not t.done()]
+        if not active:
+            await self._emit_slash(emit, "No background tasks running.")
+            return
+        lines = [f"Background tasks ({len(active)}):"]
+        for t in active:
+            lines.append(f"  `{t.get_name()}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_resume(self, args: str, emit: EmitFn) -> None:
+        """List recent saved sessions; resuming requires re-launching with ``-r``."""
+        records = self.sessions.list()
+        if not records:
+            await self._emit_slash(emit, "No saved sessions found.")
+            return
+        lines = ["Recent sessions:"]
+        for r in records[:10]:
+            sid = r.get("session_id", "?")
+            updated = r.get("updated_at", "")
+            turns = r.get("turn_count", 0)
+            lines.append(f"  `{sid}` — {turns} turn(s), updated {updated}")
+        lines.append("")
+        lines.append("Resume from a fresh terminal: `xerxes -r <id>`.")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_restart(self, args: str, emit: EmitFn) -> None:
+        """Schedule a daemon shutdown so the TUI respawns a fresh process on next launch."""
+        await self._emit_slash(emit, "Restarting daemon — re-run `xerxes` after this shuts down.")
+        self._track_task(self.shutdown())
+
+    async def _slash_undo(self, args: str, emit: EmitFn) -> None:
+        """Drop the last user/assistant turn pair from the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None or not session.state.messages:
+            await self._emit_slash(emit, "Nothing to undo.")
+            return
+        msgs = session.state.messages
+        # Pop assistant + matching user (and any intervening tool messages).
+        dropped = 0
+        while msgs and msgs[-1].get("role") != "user":
+            msgs.pop()
+            dropped += 1
+        if msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+            dropped += 1
+        session.state.turn_count = max(0, session.state.turn_count - 1)
+        self.sessions.save(session)
+        await self._emit_slash(emit, f"Undone — dropped {dropped} message(s) from the conversation.")
+
+    async def _slash_retry(self, args: str, emit: EmitFn) -> None:
+        """Resend the most recent user message after dropping the failed reply."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None or not session.state.messages:
+            await self._emit_slash(emit, "Nothing to retry.")
+            return
+        msgs = session.state.messages
+        last_user_text = ""
+        for msg in reversed(msgs):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                last_user_text = content if isinstance(content, str) else str(content)
+                break
+        if not last_user_text:
+            await self._emit_slash(emit, "No prior user message to retry.")
+            return
+        # Drop everything after the last user message so the model retries cleanly.
+        while msgs and msgs[-1].get("role") != "user":
+            msgs.pop()
+        if msgs:
+            msgs.pop()  # remove the user message too — _submit_turn re-appends it
+        await self._emit_slash(emit, "Retrying the last prompt…")
+        await self._submit_turn({"text": last_user_text, "_internal_slash": True}, emit)
+
+    async def _slash_branch(self, args: str, emit: EmitFn) -> None:
+        """Branch / fork the current session — saves a copy under a new id."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to branch.")
+            return
+        import copy
+
+        new_id = uuid.uuid4().hex[:12]
+        clone = DaemonSession(
+            id=new_id,
+            key=new_id,
+            agent_id=session.agent_id,
+            workspace=session.workspace,
+        )
+        clone.state.messages = copy.deepcopy(session.state.messages)
+        clone.state.turn_count = session.state.turn_count
+        self.sessions._sessions[new_id] = clone
+        self.sessions.save(clone)
+        await self._emit_slash(
+            emit,
+            f"Branched to new session `{new_id}` ({len(clone.state.messages)} messages).\n"
+            f"Open in a new terminal with `xerxes -r {new_id}`.",
+        )
+
+    async def _slash_branches(self, args: str, emit: EmitFn) -> None:
+        """List every saved session id grouped by who their last update was."""
+        records = self.sessions.list()
+        if not records:
+            await self._emit_slash(emit, "No branches / saved sessions.")
+            return
+        lines = [f"Branches / saved sessions ({len(records)}):"]
+        for r in records[:20]:
+            sid = r.get("session_id", "?")
+            turns = r.get("turn_count", 0)
+            updated = r.get("updated_at", "")
+            lines.append(f"  `{sid}` — {turns} turn(s), updated {updated}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_snapshot(self, args: str, emit: EmitFn) -> None:
+        """Take a filesystem snapshot of the project working tree."""
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            record = mgr.snapshot(label=args.strip() or "manual")
+        except Exception as exc:
+            await self._emit_slash(emit, f"Snapshot failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Snapshot `{getattr(record, 'id', '?')}` saved.")
+
+    async def _slash_snapshots(self, args: str, emit: EmitFn) -> None:
+        """List recent filesystem snapshots."""
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            items = mgr.list()
+        except Exception as exc:
+            await self._emit_slash(emit, f"Snapshot list failed: `{exc}`")
+            return
+        if not items:
+            await self._emit_slash(emit, "No snapshots yet. Take one with `/snapshot [label]`.")
+            return
+        lines = [f"Snapshots ({len(items)}):"]
+        for s in items[:20]:
+            sid = getattr(s, "id", "?")
+            label = getattr(s, "label", "") or ""
+            when = getattr(s, "created_at", "") or ""
+            lines.append(f"  `{sid}` — `{label}` @ {when}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_rollback(self, args: str, emit: EmitFn) -> None:
+        """Roll the working tree back to a snapshot (use ``/snapshots`` to find ids)."""
+        target = args.strip()
+        if not target:
+            await self._emit_slash(emit, "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.")
+            return
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            mgr.rollback(target)
+        except Exception as exc:
+            await self._emit_slash(emit, f"Rollback failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Rolled back to snapshot `{target}`.")
+
+
+# ----- bulk dispatch table for the rest of COMMAND_REGISTRY ------------------
+# Mapping cmd name → bound-method-style callable so a single
+# ``handler(self, args, emit)`` line in ``_handle_slash`` covers everything.
+# Aliases are duplicated here so resolving the canonical name still hits the
+# right handler (``resolve_command`` already canonicalises before lookup).
+_BULK_SLASH_HANDLERS: dict[str, Any] = {
+    "new": DaemonServer._slash_new,
+    "reset": DaemonServer._slash_new,
+    "stop": DaemonServer._slash_stop,
+    "cancel": DaemonServer._slash_stop,
+    "cancel-all": DaemonServer._slash_cancel_all,
+    "compact": DaemonServer._slash_compact,
+    "compress": DaemonServer._slash_compact,
+    "btw": DaemonServer._slash_steer,
+    "steer": DaemonServer._slash_steer,
+    "model": DaemonServer._slash_model,
+    "sampling": DaemonServer._slash_sampling,
+    "config": DaemonServer._slash_config,
+    "title": DaemonServer._slash_title,
+    "workspace": DaemonServer._slash_workspace,
+    "save": DaemonServer._slash_save,
+    "personality": DaemonServer._slash_personality,
+    "soul": DaemonServer._slash_soul,
+    "tools": DaemonServer._slash_tools,
+    "toolsets": DaemonServer._slash_toolsets,
+    "agents": DaemonServer._slash_agents,
+    "reload": DaemonServer._slash_reload,
+    "reload-mcp": DaemonServer._slash_reload_mcp,
+    "memory": DaemonServer._slash_memory,
+    "history": DaemonServer._slash_history,
+    "usage": DaemonServer._slash_usage,
+    "cost": DaemonServer._slash_cost,
+    "insights": DaemonServer._slash_insights,
+    "budget": DaemonServer._slash_budget,
+    "doctor": DaemonServer._slash_doctor,
+    "update": DaemonServer._slash_update,
+    "nudge": DaemonServer._slash_nudge,
+    "feedback": DaemonServer._slash_feedback,
+    "plugins": DaemonServer._slash_plugins,
+    "platforms": DaemonServer._slash_platforms,
+    "browser": DaemonServer._slash_browser,
+    "image": DaemonServer._slash_image,
+    "cron": DaemonServer._slash_cron,
+    "fast": DaemonServer._slash_fast,
+    "skin": DaemonServer._slash_skin,
+    "statusbar": DaemonServer._slash_statusbar,
+    "paste": DaemonServer._slash_paste,
+    "voice": DaemonServer._slash_voice,
+    "queue": DaemonServer._slash_queue,
+    "background": DaemonServer._slash_background,
+    "resume": DaemonServer._slash_resume,
+    "restart": DaemonServer._slash_restart,
+    "undo": DaemonServer._slash_undo,
+    "retry": DaemonServer._slash_retry,
+    "branch": DaemonServer._slash_branch,
+    "branches": DaemonServer._slash_branches,
+    "snapshot": DaemonServer._slash_snapshot,
+    "snapshots": DaemonServer._slash_snapshots,
+    "rollback": DaemonServer._slash_rollback,
+}
 
 
 def main() -> None:

@@ -30,6 +30,7 @@ from .base import BaseLLM, LLMConfig
 from .compat import (
     CustomLLM,
     DeepSeekLLM,
+    KimiCodeLLM,
     KimiLLM,
     LMStudioLLM,
     MiniMaxLLM,
@@ -51,6 +52,7 @@ from .registry import (
     get_context_limit,
     get_provider_config,
     list_all_models,
+    provider_default_headers,
 )
 
 PluginRegistry: type[Any] | None = None
@@ -104,6 +106,7 @@ def create_llm(
             "deepseek",
             "kimi",
             "moonshot",
+            "kimi-code",
             "qwen",
             "dashscope",
             "zhipu",
@@ -138,6 +141,7 @@ def create_llm(
         "deepseek": DeepSeekLLM,
         "kimi": KimiLLM,
         "moonshot": KimiLLM,
+        "kimi-code": KimiCodeLLM,
         "qwen": QwenLLM,
         "dashscope": QwenLLM,
         "zhipu": ZhipuLLM,
@@ -167,6 +171,7 @@ __all__ = [
     "CustomLLM",
     "DeepSeekLLM",
     "GeminiLLM",
+    "KimiCodeLLM",
     "KimiLLM",
     "LLMConfig",
     "LMStudioLLM",
@@ -186,4 +191,5 @@ __all__ = [
     "get_context_limit",
     "get_provider_config",
     "list_all_models",
+    "provider_default_headers",
 ]

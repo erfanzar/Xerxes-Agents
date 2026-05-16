@@ -323,6 +323,51 @@ def _get_agent_manager():
     return _agent_manager
 
 
+def _parse_agents_payload(raw: str) -> list[dict[str, Any]] | str:
+    """Best-effort parse of ``SpawnAgents.agents`` when the LLM hands us a string.
+
+    LLMs routinely mis-escape the inner prompt of a structured ``agents``
+    argument — single vs double quotes, smart quotes, leading/trailing
+    code-fence markers, or a JSON-in-JSON wrapper. Rather than rejecting the
+    first failure, try a few common cleanups before giving up; this avoids
+    pushing the model back to per-prompt ``AgentTool`` calls (which then
+    block sequentially) just because of a quoting hiccup. Returns the
+    parsed list on success, or the original raw string when every strategy
+    fails (so the caller can surface a precise error).
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return raw
+
+    # Strip code-fence wrapping (```json … ```) the LLM sometimes adds.
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 2:
+            inner = "\n".join(lines[1:-1] if lines[-1].strip().startswith("```") else lines[1:])
+            stripped = inner.strip()
+
+    candidates = [stripped]
+    # Normalise smart quotes to ASCII so json.loads stops choking on copy-pastes.
+    smart_q = {"“": '"', "”": '"', "‘": "'", "’": "'"}
+    norm = "".join(smart_q.get(ch, ch) for ch in stripped)
+    if norm != stripped:
+        candidates.append(norm)
+    # Single-quoted JSON-ish — last-resort retry with quotes flipped.
+    if "'" in norm and '"' not in norm:
+        candidates.append(norm.replace("'", '"'))
+
+    for cand in candidates:
+        try:
+            parsed = json.loads(cand)
+        except Exception:
+            continue
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+    return raw
+
+
 def _subagent_wait_timeout(value: float | int | str | None = None) -> float | None:
     """Return the bounded wait timeout for sub-agent joins.
 
@@ -354,15 +399,28 @@ def _spawn_agents_wait_timeout(value: float | int | str | None = None) -> float 
 
 
 class AgentTool(AgentBaseFn):
-    """Spawn a subagent to execute a task independently.
+    """Spawn a subagent to execute a task. Blocks by default — prefer the async pattern.
 
-    Creates and runs a specialized subagent for complex or specialized tasks.
+    For one quick delegation where you genuinely need the result before
+    proceeding, ``AgentTool`` (with ``wait=True``) is fine. For anything
+    longer, anything parallel, or anything you want to monitor mid-flight,
+    the async pattern is strictly better:
 
-    Example:
-        >>> AgentTool.static_call(
-        ...     prompt="Refactor the auth module",
-        ...     subagent_type="coder"
-        ... )
+        1. ``SpawnAgents(agents=[...], wait=False)`` — fire several at once,
+           returns their ids immediately.
+        2. Keep working, or ``AwaitAgents(agent_ids=[...], wake_on="any",
+           timeout_seconds=N)`` to sleep until one finishes / user wakes us /
+           timeout.
+        3. ``PeekAgent("name")`` or ``CheckAgentMessages()`` to see progress.
+        4. ``ResetAgent("name", new_prompt="…")`` if it drifted off-track,
+           or ``TaskStopTool("name")`` to kill it outright.
+
+    Example (one-off, blocking):
+        >>> AgentTool.static_call(prompt="Run quick lint", wait=True)
+
+    Example (preferred async):
+        >>> SpawnAgents.static_call(agents=[{"name": "lint", "prompt": "..."}], wait=False)
+        >>> AwaitAgents.static_call(agent_ids=["lint"], timeout_seconds=60)
     """
 
     @staticmethod
@@ -376,20 +434,28 @@ class AgentTool(AgentBaseFn):
         timeout: float | None = None,
         **context_variables,
     ) -> str:
-        """Spawn a subagent to execute a task.
+        """Spawn a subagent. Returns the result when ``wait=True``, or a running snapshot otherwise.
+
+        Prefer ``SpawnAgents(wait=False) + AwaitAgents`` for parallel work or
+        anything that might run more than ~15s — that pattern lets you
+        monitor and intervene; ``wait=True`` blocks the whole main turn until
+        the subagent finishes.
 
         Args:
             prompt: Task description for the subagent.
             subagent_type: Type of agent to spawn (e.g., 'coder', 'reviewer').
-            isolation: Optional isolation mode (e.g., 'docker', 'vm').
-            name: Optional name for the subagent.
+            isolation: Optional isolation mode (e.g., 'worktree').
+            name: Optional name for the subagent (lets you address it later
+                with PeekAgent / ResetAgent / TaskStopTool).
             model: Optional model override.
-            wait: Whether to wait for completion. Defaults to True.
+            wait: Whether to block until the subagent finishes. Defaults to
+                True for backward compat — set ``False`` for true async spawn
+                and use ``AwaitAgents`` to coordinate.
             timeout: Maximum seconds to wait before returning a running snapshot.
             **context_variables: Additional context passed through to downstream calls.
 
         Returns:
-            The subagent's result or error message.
+            The subagent's result or a JSON running-snapshot.
         """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import get_inheritable
@@ -513,17 +579,24 @@ class TaskCreateTool(AgentBaseFn):
 
 
 class SpawnAgents(AgentBaseFn):
-    """Spawn multiple subagents in parallel.
+    """Spawn several subagents in parallel. Set ``wait=False`` for true async.
 
-    Creates and manages multiple agents simultaneously for parallel task execution.
+    With ``wait=False``, returns the ids immediately and the main agent stays
+    in control — use ``AwaitAgents`` / ``CheckAgentMessages`` / ``PeekAgent``
+    to coordinate. With ``wait=True`` (the default for back-compat) blocks
+    until every spawned agent terminates.
 
-    Example:
+    Example (fire-and-forget, preferred):
         >>> SpawnAgents.static_call(
         ...     agents=[
-        ...         {"prompt": "Task 1", "name": "agent-1"},
-        ...         {"prompt": "Task 2", "name": "agent-2"}
-        ...     ]
+        ...         {"name": "lint", "prompt": "Run lint and report violations"},
+        ...         {"name": "test", "prompt": "Run the test suite"},
+        ...     ],
+        ...     wait=False,
         ... )
+
+    Example (sync — only when results are needed before the next step):
+        >>> SpawnAgents.static_call(agents=[{"prompt": "..."}], wait=True)
     """
 
     @staticmethod
@@ -533,28 +606,47 @@ class SpawnAgents(AgentBaseFn):
         timeout: float | None = None,
         **context_variables,
     ) -> str:
-        """Spawn multiple subagents in parallel.
+        """Spawn one or more subagents in parallel.
 
         Args:
-            agents: List of agent specifications with 'prompt' key,
-                optionally 'name' and 'subagent_type'.
-            wait: Wait for all agents to complete. Defaults to True.
-            timeout: Maximum seconds to wait. Defaults to 120 or env setting.
-            **context_variables: Additional context passed through to downstream calls.
+            agents: List of ``{"prompt": ..., "name"?: ..., "subagent_type"?: ...}``
+                dicts. Accepted as a Python list or a JSON-encoded string.
+            wait: Block until every agent finishes (default). Set ``False``
+                for fire-and-forget — the main agent can then coordinate
+                with ``AwaitAgents`` / ``PeekAgent`` / ``CheckAgentMessages``.
+            timeout: Maximum seconds to wait when ``wait=True``. Sub-agents
+                themselves have no internal timeout; this only bounds the
+                main agent's blocking call.
+            **context_variables: Forwarded by the dispatcher; unused.
 
         Returns:
-            JSON array of results for each agent.
+            JSON: when ``wait=False``, an array of task snapshots (ids,
+            names, statuses); when ``wait=True``, the same shape plus final
+            results.
         """
         from ..agents.definitions import get_agent_definition
         from ..runtime.config_context import get_inheritable
 
         if isinstance(agents, str):
-            try:
-                agents = json.loads(agents)
-            except Exception:
-                return f"[Error: agents must be a JSON array of objects, got: {agents[:200]}]"
+            agents = _parse_agents_payload(agents)
+            if isinstance(agents, str):
+                # ``_parse_agents_payload`` returns the original string when
+                # all parsing strategies failed, so we can include a precise
+                # error rather than the generic JSON one.
+                return (
+                    "[Error: `agents` must be a list of {prompt, name?, subagent_type?} "
+                    "dicts. Got an unparseable string. Pass it as native list/dict, "
+                    f"or JSON without extra escaping. Snippet: {agents[:200]}]"
+                )
         if not isinstance(agents, list):
             return f"[Error: agents must be a list, got {type(agents).__name__}]"
+        if not agents:
+            return "[Error: agents list is empty — nothing to spawn]"
+        for i, spec in enumerate(agents):
+            if not isinstance(spec, dict):
+                return f"[Error: agents[{i}] must be a dict, got {type(spec).__name__}]"
+            if "prompt" not in spec or not spec["prompt"]:
+                return f"[Error: agents[{i}] missing required key `prompt`]"
 
         mgr = _get_agent_manager()
         mgr.ensure_capacity(len(agents))
@@ -730,6 +822,250 @@ class TaskUpdateTool(AgentBaseFn):
             Result from SendMessageTool.
         """
         return SendMessageTool.static_call(target=task_id, message=message)
+
+
+# ---------------------------------------------------------------------------
+# Async sub-agent orchestration — the main agent uses these to coordinate
+# background sub-agents without blocking on them. The lifecycle is:
+#   1. Spawn with ``wait=False`` (AgentTool / TaskCreateTool / SpawnAgents).
+#   2. Optionally call ``AwaitAgents`` to sleep until they finish (or until
+#      the user wakes us with a steer / new prompt, or until a timeout).
+#   3. Use ``CheckAgentMessages`` to drain notifications, or rely on the
+#      streaming-loop auto-drain that splices them into the conversation
+#      between iterations.
+#   4. ``PeekAgent`` shows what a specific sub-agent is doing right now —
+#      current tool, recent output, idle time.
+#   5. ``ResetAgent`` cancels and re-spawns with the same (or a fresh)
+#      prompt; ``TaskStopTool`` cancels without re-spawn.
+# ---------------------------------------------------------------------------
+
+
+class AwaitAgents(AgentBaseFn):
+    """Sleep until tracked sub-agents finish, the user wakes us, or timeout.
+
+    The main agent calls this when it has nothing useful to do until its
+    children produce results — instead of polling in a loop, this blocks
+    on the manager's condition variable so the wake is event-driven.
+
+    Wake conditions (returned as ``wake_reason``):
+      - ``"agents_done"``  — sub-agents reached the wake threshold.
+      - ``"user_input"``  — a user steer / new prompt landed; we surrender
+        so the main agent can read it on its next turn.
+      - ``"cancelled"``    — turn-level cancellation requested.
+      - ``"timeout"``      — the requested ``timeout_seconds`` elapsed.
+
+    Example:
+        >>> AwaitAgents.static_call(timeout_seconds=30, wake_on="any")
+    """
+
+    @staticmethod
+    def static_call(
+        agent_ids: list[str] | str | None = None,
+        wake_on: str = "any",
+        timeout_seconds: float = 30.0,
+        **context_variables,
+    ) -> str:
+        """Sleep with event-driven wakeups.
+
+        Args:
+            agent_ids: Optional list of task IDs or names to watch. ``None``
+                or empty ⇒ watch every non-terminal sub-agent.
+            wake_on: ``"any"`` to wake when at least one watched agent
+                reaches terminal, ``"all"`` to wait for every watched agent,
+                ``"none"`` to ignore agent status (pure timeout / user-input
+                sleep).
+            timeout_seconds: Upper bound on the sleep, in seconds. Set to
+                ``0`` for "return immediately with current status".
+            **context_variables: Forwarded by the tool dispatcher; unused.
+
+        Returns:
+            JSON: ``{"wake_reason": "...", "elapsed_seconds": ..., "agents": [...]}``.
+        """
+        import json as _json
+        import time as _time
+
+        from ..runtime.session_context import get_active_session
+
+        mgr = _get_agent_manager()
+        ids_input = agent_ids
+        if isinstance(ids_input, str):
+            try:
+                parsed = _json.loads(ids_input)
+                ids_input = parsed if isinstance(parsed, list) else [ids_input]
+            except Exception:
+                ids_input = [s.strip() for s in ids_input.split(",") if s.strip()]
+
+        watched: list[str] = []
+        if ids_input:
+            for raw in ids_input:
+                tid = mgr._by_name.get(raw, raw)
+                if tid in mgr.tasks:
+                    watched.append(tid)
+        else:
+            watched = [tid for tid, t in mgr.tasks.items() if t.status in ("pending", "running")]
+
+        wake_mode = wake_on.strip().lower()
+        if wake_mode not in {"any", "all", "none"}:
+            wake_mode = "any"
+
+        def _terminal_count() -> int:
+            return sum(1 for tid in watched if mgr.tasks[tid].status in ("completed", "failed", "cancelled"))
+
+        def _predicate() -> bool:
+            if wake_mode == "none" or not watched:
+                return False
+            if wake_mode == "all":
+                return _terminal_count() == len(watched)
+            return _terminal_count() >= 1
+
+        session = get_active_session()
+
+        def _extra_wake() -> bool:
+            if session is None:
+                return False
+            if getattr(session, "cancel_requested", False):
+                return True
+            steers = getattr(session, "pending_steers", None)
+            if steers is not None and not steers.empty():
+                return True
+            return False
+
+        start = _time.monotonic()
+        try:
+            timeout = max(0.0, float(timeout_seconds))
+        except (TypeError, ValueError):
+            timeout = 30.0
+
+        if timeout == 0.0:
+            wake_reason = "agents_done" if _predicate() else "timeout"
+        else:
+            satisfied = mgr.wait_for(_predicate, timeout=timeout, extra_wake=_extra_wake)
+            if satisfied:
+                wake_reason = "agents_done"
+            elif session is not None and getattr(session, "cancel_requested", False):
+                wake_reason = "cancelled"
+            elif session is not None and getattr(session, "pending_steers", None) and not session.pending_steers.empty():
+                wake_reason = "user_input"
+            else:
+                wake_reason = "timeout"
+
+        elapsed = round(_time.monotonic() - start, 2)
+        snapshots = [mgr.tasks[tid].snapshot() for tid in watched if tid in mgr.tasks]
+        return _json.dumps(
+            {
+                "wake_reason": wake_reason,
+                "elapsed_seconds": elapsed,
+                "wake_on": wake_mode,
+                "agents": snapshots,
+            },
+            indent=2,
+            default=str,
+        )
+
+
+class CheckAgentMessages(AgentBaseFn):
+    """Drain the mailbox of sub-agent events accumulated since the last call.
+
+    Each call returns events newer than the recorded cursor and advances it,
+    so two consecutive calls won't return the same event twice. Use this
+    when the main agent wants to peek without sleeping — for passive auto-
+    delivery the streaming loop already splices events between iterations.
+
+    Example:
+        >>> CheckAgentMessages.static_call()
+    """
+
+    @staticmethod
+    def static_call(
+        since_seq: int = 0,
+        peek: bool = False,
+        **context_variables,
+    ) -> str:
+        """Return queued sub-agent events.
+
+        Args:
+            since_seq: Return only events with sequence > this value. Defaults
+                to ``0`` (everything currently buffered).
+            peek: When ``True``, do not consume the buffer — useful for
+                observability without disturbing the auto-drain cursor.
+            **context_variables: Unused.
+
+        Returns:
+            JSON ``{"latest_seq": ..., "events": [...]}``.
+        """
+        import json as _json
+
+        mgr = _get_agent_manager()
+        events = mgr.peek_mailbox(since_seq=since_seq) if peek else mgr.drain_mailbox(since_seq=since_seq)
+        return _json.dumps(
+            {
+                "latest_seq": mgr.latest_seq(),
+                "events": events,
+            },
+            indent=2,
+            default=str,
+        )
+
+
+class PeekAgent(AgentBaseFn):
+    """Show what a specific sub-agent is doing right now.
+
+    Returns a snapshot with the current tool name, recent output (last
+    ~2 KB), idle time, and tool-call count — the information the main
+    agent needs to decide "is this agent stuck or working?" without
+    cancelling it.
+
+    Example:
+        >>> PeekAgent.static_call(target="researcher-1")
+    """
+
+    @staticmethod
+    def static_call(
+        target: str,
+        **context_variables,
+    ) -> str:
+        """Return a rich status snapshot for the named sub-agent."""
+        import json as _json
+
+        mgr = _get_agent_manager()
+        task = mgr.get_by_name(target) or mgr.tasks.get(target)
+        if task is None:
+            return f"Error: agent '{target}' not found."
+        return _json.dumps(task.snapshot(), indent=2, default=str)
+
+
+class ResetAgent(AgentBaseFn):
+    """Cancel a sub-agent and immediately respawn it with the same spec.
+
+    Useful when an agent is stuck or has gone off-track. Passing
+    ``new_prompt`` replaces the original task description; omitting it
+    re-runs the original prompt.
+
+    Example:
+        >>> ResetAgent.static_call(target="researcher-1", new_prompt="Try again with focus on X")
+    """
+
+    @staticmethod
+    def static_call(
+        target: str,
+        new_prompt: str = "",
+        **context_variables,
+    ) -> str:
+        """Cancel + respawn ``target``; return the new task's snapshot or an error."""
+        import json as _json
+
+        mgr = _get_agent_manager()
+        new_task = mgr.reset(target, new_prompt=new_prompt)
+        if new_task is None:
+            return f"Error: cannot reset '{target}' (unknown or never spawned via spawn())."
+        return _json.dumps(
+            {
+                "reset_target": target,
+                "new_task": new_task.snapshot(),
+            },
+            indent=2,
+            default=str,
+        )
 
 
 _todo_items: list[dict[str, str]] = []

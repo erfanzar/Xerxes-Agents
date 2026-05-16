@@ -296,7 +296,12 @@ class XerxesTUI:
         while self._running:
             raw_input = await self._prompt.input_queue.get()
             if not raw_input:
-                continue
+                # Empty Enter is normally a no-op, but a pending question
+                # panel may interpret it as "accept the suggested default"
+                # (the daemon's /provider Add flow uses this for base_url
+                # and model). Let the panel handler decide.
+                if self._pending_question_panel is None:
+                    continue
 
             if raw_input == "/interrupt":
                 await self._interrupt_current_turn()
@@ -328,6 +333,12 @@ class XerxesTUI:
                     opts = panel.current_options
                     if opts and 0 <= panel._option_index < len(opts):
                         raw_input = opts[panel._option_index]
+                    elif panel.current_question.get("allow_free_form"):
+                        # Enter on a free-form question with empty buffer
+                        # means "submit empty" — the daemon side may treat
+                        # that as "accept the suggested default" (e.g. the
+                        # /provider Add credentials panel).
+                        raw_input = ""
                     else:
                         continue
                 answers = self._resolve_question_input(raw_input)
@@ -445,8 +456,18 @@ class XerxesTUI:
         self._thinking_blocks[block_id] = self._active_thinking
         self._turn_done_event.clear()
 
+    # Hard cap on the per-turn block dicts. Each turn allocates one
+    # content + one thinking block, and any number of tool blocks. The
+    # dicts had no eviction — after a long session they grew to hold
+    # every block from every turn, anchoring large reasoning traces and
+    # tool result strings in memory forever.
+    _BLOCK_RETENTION_LIMIT = 64
+
     def _on_turn_end(self) -> None:
-        """Finalize blocks, commit streamed text, dismiss panels, signal done."""
+        """Finalize blocks, commit streamed text, dismiss panels, signal done.
+
+        Also evicts old finalised blocks so the per-turn dicts stay bounded.
+        """
         if self._active_content:
             self._active_content.finalize()
         if self._active_thinking:
@@ -460,7 +481,29 @@ class XerxesTUI:
         self._approval_panel = None
         self._current_request_id = None
         self._pending_approval_request_id = None
+        self._evict_old_blocks()
         self._turn_done_event.set()
+
+    def _evict_old_blocks(self) -> None:
+        """Trim ``_content_blocks`` / ``_thinking_blocks`` / ``_tool_blocks``.
+
+        Insertion order is preserved by ``dict`` since Python 3.7, so dropping
+        the front gives us a FIFO. The active block (if any) is exempted —
+        evicting the in-flight block would cause the next streamed chunk to
+        miss its block-id lookup.
+        """
+
+        def _evict(d: dict, keep: object | None) -> None:
+            active_id = getattr(keep, "block_id", None) or getattr(keep, "tool_call_id", None)
+            while len(d) > self._BLOCK_RETENTION_LIMIT:
+                oldest = next(iter(d))
+                if oldest == active_id:
+                    return
+                d.pop(oldest, None)
+
+        _evict(self._content_blocks, self._active_content)
+        _evict(self._thinking_blocks, self._active_thinking)
+        _evict(self._tool_blocks, self._active_tool)
 
     def _on_step_begin(self, n: int) -> None:
         """Commit accumulated streaming text on each new step (``n`` is informational)."""
@@ -673,8 +716,12 @@ class XerxesTUI:
         if panel.is_complete:
             return panel._answers
 
+        # Re-render the panel in the pinned status area instead of dumping a
+        # second copy into scrollback. Without this, each advance left the
+        # previous question's render stuck above the prompt and the new one
+        # appeared again below — visually duplicating the same step.
         if self._prompt:
-            self._prompt.append_line(panel.compose())
+            self._prompt.refresh_active_question()
         return None
 
     def _wait_for_question_answers(self, panel: QuestionRequestPanel) -> dict[str, str]:

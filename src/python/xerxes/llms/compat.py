@@ -146,6 +146,25 @@ class KimiLLM(OpenAICompatLLM):
         super().__init__(config=config, provider="kimi", **kwargs)
 
 
+class KimiCodeLLM(OpenAICompatLLM):
+    """Kimi Code LLM client — Moonshot's coding-specialised endpoint.
+
+    Distinct from :class:`KimiLLM`: hits ``api.kimi.com/coding/v1`` (not
+    ``api.moonshot.cn/v1``) with the ``kimi-for-coding`` stable model id,
+    authenticated via ``KIMI_CODE_API_KEY``. The Kimi Code Console issues
+    a separate API key from the regular Moonshot account.
+    """
+
+    def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the Kimi Code LLM client.
+
+        Args:
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
+        super().__init__(config=config, provider="kimi-code", **kwargs)
+
+
 class QwenLLM(OpenAICompatLLM):
     """Qwen (Alibaba DashScope) LLM client using the OpenAI-compatible API.
 
@@ -219,6 +238,7 @@ class CustomLLM(OpenAICompatLLM):
 __all__ = [
     "CustomLLM",
     "DeepSeekLLM",
+    "KimiCodeLLM",
     "KimiLLM",
     "LMStudioLLM",
     "MiniMaxLLM",

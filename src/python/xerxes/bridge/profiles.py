@@ -230,7 +230,12 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
 
 
 def _guess_provider(base_url: str) -> str:
-    """Best-effort substring match of ``base_url`` to a known provider tag."""
+    """Best-effort substring match of ``base_url`` to a known provider tag.
+
+    Order matters — more specific paths are checked first so we don't
+    collapse ``api.kimi.com/coding/v1`` (the Kimi Code endpoint) into the
+    generic Kimi chat provider.
+    """
     url = base_url.lower()
     if "openai" in url:
         return "openai"
@@ -246,6 +251,9 @@ def _guess_provider(base_url: str) -> str:
         return "together"
     if "groq" in url:
         return "groq"
+    # Kimi Code — coding-specialised, distinct API host + model.
+    if "kimi.com/coding" in url:
+        return "kimi-code"
     if "kimi" in url or "moonshot" in url:
         return "kimi"
     if "minimax" in url or "minimaxi" in url:

@@ -33,13 +33,16 @@ order, each driving another streaming pass with the same effective config.
 
 from __future__ import annotations
 
+import collections
 import logging
 import os
 import queue
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -62,6 +65,16 @@ _SUBAGENT_CALLER_PROMPT = (
     "You must treat the parent agent as your caller. Do not directly ask the end user questions. "
     "If something is unclear, explain the ambiguity in your final summary to the parent agent."
 )
+
+
+# Per-task ring buffer of recent text chunks the subagent has emitted. Sized
+# so a ``PeekAgent`` call returns a useful slice of the agent's latest output
+# without exposing the whole transcript or forcing log retention.
+_RECENT_OUTPUT_MAXLEN = 32
+# Cap on the total characters returned by ``recent_output_text`` — keeps a
+# misbehaving subagent from blowing up the main agent's context window when
+# it peeks.
+_RECENT_OUTPUT_CHARS = 2000
 
 
 @dataclass
@@ -88,6 +101,13 @@ class SubAgentTask:
         worktree_branch: Branch name created for the worktree.
         error: Failure message when ``status == "failed"``.
         messages_sent: Count of follow-ups delivered via ``send_message``.
+        current_tool: Name of the tool the subagent is running right now,
+            or empty if it is producing text or idle.
+        last_activity_ts: ``time.monotonic()`` of the most recent event from
+            this subagent — useful to detect stuck agents.
+        tool_calls_count: Total tool invocations observed so far.
+        spawn_spec: Arguments needed to respawn the task identically;
+            populated by :meth:`SubAgentManager.spawn`.
     """
 
     id: str = ""
@@ -101,10 +121,33 @@ class SubAgentTask:
     worktree_branch: str = ""
     error: str = ""
     messages_sent: int = 0
+    current_tool: str = ""
+    last_activity_ts: float = 0.0
+    tool_calls_count: int = 0
+    spawn_spec: dict[str, Any] = field(default_factory=dict)
     _cancel_flag: bool = field(default=False, repr=False)
     _future: Future | None = field(default=None, repr=False)
     _inbox: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    _inbox_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _inbox_closed: bool = field(default=False, repr=False)
     _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
+    _recent_output: collections.deque[str] = field(
+        default_factory=lambda: collections.deque(maxlen=_RECENT_OUTPUT_MAXLEN),
+        repr=False,
+    )
+
+    def record_text(self, text: str) -> None:
+        """Push a streamed text chunk into the recent-output ring buffer."""
+        if text:
+            self._recent_output.append(text)
+            self.last_activity_ts = time.monotonic()
+
+    def recent_output_text(self) -> str:
+        """Return the most recent emitted text, capped at :data:`_RECENT_OUTPUT_CHARS`."""
+        joined = "".join(self._recent_output)
+        if len(joined) > _RECENT_OUTPUT_CHARS:
+            return "…" + joined[-_RECENT_OUTPUT_CHARS:]
+        return joined
 
     def snapshot(self) -> dict[str, Any]:
         """Return a JSON-safe dict view of the task.
@@ -112,6 +155,8 @@ class SubAgentTask:
         The prompt is truncated to 200 chars and the result to 500 chars so
         the snapshot is cheap to log and ship over the bridge. Internal
         synchronisation primitives (future, event, cancel flag) are omitted.
+        ``recent_output`` is included so callers (the main agent's
+        ``PeekAgent`` tool) can see what the subagent is producing right now.
         """
         return {
             "id": self.id,
@@ -126,6 +171,14 @@ class SubAgentTask:
             "error": self.error,
             "messages_sent": self.messages_sent,
             "inbox_size": self._inbox.qsize(),
+            "current_tool": self.current_tool,
+            "tool_calls_count": self.tool_calls_count,
+            "recent_output": self.recent_output_text(),
+            "idle_seconds": (
+                round(time.monotonic() - self.last_activity_ts, 2)
+                if self.last_activity_ts
+                else None
+            ),
         }
 
 
@@ -234,6 +287,27 @@ class SubAgentManager:
         self._agent_runner: Any = None
         self._tool_executor: Any = None
         self._tool_schemas: list[dict[str, Any]] | None = None
+        # ``os.chdir`` mutates process-wide state, so concurrent worktree
+        # subagents would clobber each other's cwd (and the parent's). The
+        # lock serialises worktree subagents only; non-worktree spawns stay
+        # fully parallel.
+        self._chdir_lock = threading.Lock()
+        # Condition notified on every task transition (status change, new
+        # event in the mailbox). ``wait_for`` callers re-check their predicate
+        # whenever it fires, so they wake exactly when something they care
+        # about happens — no polling loops.
+        self._cond = threading.Condition()
+        # Ring buffer of recent agent events (spawn / tool / done / error /
+        # text-burst summaries). Bounded so a chatty subagent can't flood
+        # the parent's context window. Drained by ``CheckAgentMessages``
+        # and by the streaming loop's ``agent_event_drain`` between turns.
+        self._mailbox: collections.deque[dict[str, Any]] = collections.deque(maxlen=512)
+        self._mailbox_seq = 0
+        # Per-task text-burst coalescing — turns a flurry of tiny text
+        # chunks into a single mailbox event so the main agent sees
+        # "wrote N tokens" instead of N separate pings.
+        self._text_burst: dict[str, list[str]] = {}
+        self._text_burst_lock = threading.Lock()
 
     def ensure_capacity(self, min_concurrent: int) -> bool:
         """Grow the pool to at least ``min_concurrent`` workers.
@@ -257,6 +331,137 @@ class SubAgentManager:
         custom runner lets tests stub out execution.
         """
         self._agent_runner = runner
+
+    # ----- event bus + wait_for -------------------------------------------
+
+    def post_event(
+        self,
+        task: SubAgentTask,
+        event_type: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Append an agent event to the mailbox and wake any waiters.
+
+        ``event_type`` should be a stable short string (e.g. ``"spawn"``,
+        ``"tool_start"``, ``"tool_end"``, ``"text_burst"``, ``"done"``,
+        ``"error"``). ``data`` carries event-specific payload — kept small
+        because the mailbox is bounded and the main agent's context window
+        is finite.
+        """
+        with self._cond:
+            self._mailbox_seq += 1
+            self._mailbox.append(
+                {
+                    "seq": self._mailbox_seq,
+                    "task_id": task.id,
+                    "agent": task.name,
+                    "type": event_type,
+                    "ts": time.time(),
+                    "data": data or {},
+                }
+            )
+            self._cond.notify_all()
+        task.last_activity_ts = time.monotonic()
+
+    def drain_mailbox(self, since_seq: int = 0) -> list[dict[str, Any]]:
+        """Return queued events with ``seq > since_seq`` and clear the buffer.
+
+        ``since_seq`` lets a poller keep track of the last seq it consumed so
+        repeated calls return only the new events. Passing ``0`` (the default)
+        drains everything.
+        """
+        with self._cond:
+            out = [evt for evt in self._mailbox if evt["seq"] > since_seq]
+            self._mailbox.clear()
+            return out
+
+    def peek_mailbox(self, since_seq: int = 0) -> list[dict[str, Any]]:
+        """Return queued events with ``seq > since_seq`` without clearing them."""
+        with self._cond:
+            return [evt for evt in self._mailbox if evt["seq"] > since_seq]
+
+    def latest_seq(self) -> int:
+        """Return the highest sequence number issued so far (or 0)."""
+        with self._cond:
+            return self._mailbox_seq
+
+    def _notify(self) -> None:
+        """Wake every waiter on :attr:`_cond` — call after any task transition."""
+        with self._cond:
+            self._cond.notify_all()
+
+    def _buffer_text(self, task: SubAgentTask, text: str) -> None:
+        """Coalesce streamed text chunks into a single ``text_burst`` event.
+
+        Token-level streaming would post dozens of events per second; that
+        would burn through the bounded mailbox and overwhelm the main agent's
+        passive event-drain. We accumulate per-task and flush either when
+        another event type fires (tool_start, done) or when the buffer grows
+        past ~512 chars.
+        """
+        if not text:
+            return
+        with self._text_burst_lock:
+            buf = self._text_burst.setdefault(task.id, [])
+            buf.append(text)
+            joined_len = sum(len(part) for part in buf)
+        if joined_len >= 512:
+            self._flush_text_burst(task)
+
+    def _flush_text_burst(self, task: SubAgentTask) -> None:
+        """Emit any buffered text as one ``text_burst`` event and clear the buffer."""
+        with self._text_burst_lock:
+            buf = self._text_burst.pop(task.id, None)
+        if not buf:
+            return
+        joined = "".join(buf)
+        preview = joined if len(joined) <= 400 else "…" + joined[-400:]
+        self.post_event(
+            task,
+            "text_burst",
+            {
+                "chars": len(joined),
+                "preview": preview,
+            },
+        )
+
+    def wait_for(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float | None = None,
+        extra_wake: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Block until ``predicate()`` is true, ``extra_wake()`` fires, or timeout.
+
+        Returns ``True`` when ``predicate`` becomes true, ``False`` otherwise
+        (timeout or ``extra_wake`` tripping). ``extra_wake`` is checked
+        alongside the predicate so callers can wake on external signals
+        without coupling them to a task transition — used by ``AwaitAgents``
+        to wake on user input or cancellation. ``timeout=None`` waits
+        indefinitely (the user spec: subagents have no timeout, so the main
+        agent can sleep arbitrarily long too).
+
+        The condition variable is notified whenever a task posts an event
+        or transitions status, so this is a true edge-triggered wait — no
+        polling.
+        """
+        end = None if timeout is None else time.monotonic() + timeout
+        with self._cond:
+            while True:
+                if predicate():
+                    return True
+                if extra_wake is not None and extra_wake():
+                    return False
+                if end is None:
+                    self._cond.wait(timeout=1.0)
+                    # 1s nudge so ``extra_wake`` callbacks (which may not be
+                    # tied to the cond) get re-polled even without a
+                    # notification.
+                    continue
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(timeout=min(remaining, 1.0))
 
     def spawn(
         self,
@@ -305,6 +510,17 @@ class SubAgentManager:
             name=short_name,
             agent_def_name=agent_def.name if agent_def else "",
         )
+        # Snapshot the exact arguments so ``ResetAgent`` can respawn the same
+        # task without the caller having to remember them.
+        task.spawn_spec = {
+            "prompt": prompt,
+            "config": dict(config),
+            "system_prompt": system_prompt,
+            "depth": depth,
+            "agent_def_name": agent_def.name if agent_def else "",
+            "isolation": isolation,
+            "name": name,
+        }
         self.tasks[task_id] = task
         if name:
             self._by_name[name] = task_id
@@ -314,6 +530,7 @@ class SubAgentManager:
             task.error = f"Max depth ({self.max_depth}) exceeded"
             task.result = task.error
             task._done_event.set()
+            self._notify()
             return task
 
         eff_config = dict(config)
@@ -334,6 +551,7 @@ class SubAgentManager:
 
         worktree_path = ""
         worktree_branch = ""
+        worktree_root = ""  # git root we created the worktree against
         base_dir = os.getcwd()
 
         if isolation == "worktree":
@@ -343,9 +561,11 @@ class SubAgentManager:
                 task.error = "isolation='worktree' requires a git repository"
                 task.result = task.error
                 task._done_event.set()
+                self._notify()
                 return task
             try:
                 worktree_path, worktree_branch = _create_worktree(git_root)
+                worktree_root = git_root
                 task.worktree_path = worktree_path
                 task.worktree_branch = worktree_branch
                 prompt += (
@@ -359,15 +579,58 @@ class SubAgentManager:
                 task.error = f"Failed to create worktree: {e}"
                 task.result = task.error
                 task._done_event.set()
+                self._notify()
                 return task
 
         runner = self._agent_runner
+        chdir_lock = self._chdir_lock
+        manager = self
+
+        def _run_one(message: str) -> str:
+            """Drive one streaming pass; returns the assistant text."""
+            if runner:
+                return runner(
+                    message,
+                    eff_config,
+                    eff_system,
+                    depth + 1,
+                    lambda: task._cancel_flag,
+                )
+            return _run_streaming_loop(
+                message,
+                eff_config,
+                eff_system,
+                depth + 1,
+                task,
+                tool_executor=manager._tool_executor,
+                tool_schemas=manager._tool_schemas,
+                manager=manager,
+            )
+
+        def _settle_status() -> None:
+            """Set the terminal status based on the cancel flag, never demoting cancelled."""
+            if task.status == "cancelled":
+                return
+            task.status = "cancelled" if task._cancel_flag else "completed"
+            manager._notify()
 
         def _run() -> None:
             """Execute the task body, drain the inbox, and finalise state."""
             from xerxes.runtime.config_context import emit_event
 
             task.status = "running"
+            task.last_activity_ts = time.monotonic()
+            manager._notify()
+            manager.post_event(
+                task,
+                "spawn",
+                {
+                    "agent_type": task.agent_def_name,
+                    "prompt": task.prompt[:200],
+                    "depth": task.depth,
+                    "isolation": isolation,
+                },
+            )
             emit_event(
                 "agent_spawn",
                 {
@@ -380,69 +643,73 @@ class SubAgentManager:
                 },
             )
             old_cwd = os.getcwd()
+            holds_chdir_lock = False
             try:
                 if worktree_path:
+                    chdir_lock.acquire()
+                    holds_chdir_lock = True
                     os.chdir(worktree_path)
 
-                if runner:
-                    result = runner(
-                        prompt,
-                        eff_config,
-                        eff_system,
-                        depth + 1,
-                        lambda: task._cancel_flag,
-                    )
-                    task.result = result
-                else:
-                    task.result = _run_streaming_loop(
-                        prompt,
-                        eff_config,
-                        eff_system,
-                        depth + 1,
-                        task,
-                        tool_executor=self._tool_executor,
-                        tool_schemas=self._tool_schemas,
-                    )
+                task.result = _run_one(prompt)
+                _settle_status()
 
-                if task._cancel_flag:
-                    task.status = "cancelled"
-                else:
-                    task.status = "completed"
+                # Drain the inbox in two passes. First pass handles messages
+                # that arrived during the initial run. Then we close the inbox
+                # under the lock — producers checking after this point are
+                # rejected by ``send_message``. The second pass drains anything
+                # enqueued in the race window before the close took effect.
+                def _drain_once() -> bool:
+                    drained = False
+                    while not task._cancel_flag:
+                        try:
+                            msg = task._inbox.get_nowait()
+                        except queue.Empty:
+                            return drained
+                        drained = True
+                        if task.status != "cancelled":
+                            task.status = "running"
+                        task.result = _run_one(msg)
+                        _settle_status()
+                    return drained
 
-                while not task._inbox.empty() and not task._cancel_flag:
-                    inbox_msg = task._inbox.get_nowait()
-                    task.status = "running"
-                    if runner:
-                        result = runner(
-                            inbox_msg,
-                            eff_config,
-                            eff_system,
-                            depth + 1,
-                            lambda: task._cancel_flag,
-                        )
-                        task.result = result
-                    else:
-                        task.result = _run_streaming_loop(
-                            inbox_msg,
-                            eff_config,
-                            eff_system,
-                            depth + 1,
-                            task,
-                            tool_executor=self._tool_executor,
-                            tool_schemas=self._tool_schemas,
-                        )
-
-                    if not task._cancel_flag:
-                        task.status = "completed"
+                _drain_once()
+                with task._inbox_lock:
+                    task._inbox_closed = True
+                _drain_once()
 
             except Exception as e:
-                task.status = "failed"
-                task.error = str(e)
-                task.result = f"Error: {e}"
+                if task.status != "cancelled":
+                    task.status = "failed"
+                    task.error = str(e)
+                    task.result = f"Error: {e}"
                 logger.error("Sub-agent %s failed: %s", task_id, e)
             finally:
-                if task.status in _TERMINAL_STATUSES:
-                    task._done_event.set()
+                if worktree_path and holds_chdir_lock:
+                    try:
+                        os.chdir(old_cwd)
+                    except Exception:
+                        pass
+                    chdir_lock.release()
+                # Always release waiters — never let _run() return with the
+                # event still cleared, otherwise wait() callers hang forever.
+                if task.status not in _TERMINAL_STATUSES:
+                    task.status = "failed"
+                    task.error = task.error or "subagent exited in non-terminal state"
+                # Flush any pending coalesced text burst before the done event
+                # so the main agent's mailbox isn't missing the final words.
+                manager._flush_text_burst(task)
+                task._done_event.set()
+                manager.post_event(
+                    task,
+                    "done",
+                    {
+                        "status": task.status,
+                        "error": task.error,
+                        "result_preview": (task.result or "")[:500],
+                        "tool_calls": task.tool_calls_count,
+                    },
+                )
+                manager._notify()
                 emit_event(
                     "agent_done",
                     {
@@ -453,10 +720,8 @@ class SubAgentManager:
                         "result": (task.result or "")[:500],
                     },
                 )
-                if worktree_path:
-                    os.chdir(old_cwd)
-                    if not _has_worktree_changes(worktree_path):
-                        _remove_worktree(worktree_path, worktree_branch, old_cwd)
+                if worktree_path and not _has_worktree_changes(worktree_path):
+                    _remove_worktree(worktree_path, worktree_branch, worktree_root)
 
         task._future = self._pool.submit(_run)
         return task
@@ -504,19 +769,21 @@ class SubAgentManager:
         """Enqueue ``message`` for a running or pending subagent.
 
         The inbox is drained after the current run completes; once a task
-        has reached a terminal state, follow-ups are rejected and ``False``
-        is returned. ``task_id_or_name`` may be either the raw task id or
-        the name supplied to :meth:`spawn`.
+        has reached a terminal state or its inbox has been closed (the small
+        window at the very end of ``_run``), follow-ups are rejected and
+        ``False`` is returned. ``task_id_or_name`` may be either the raw
+        task id or the name supplied to :meth:`spawn`.
         """
         task_id = self._by_name.get(task_id_or_name, task_id_or_name)
         task = self.tasks.get(task_id)
         if task is None:
             return False
-        if task.status not in ("running", "pending"):
-            return False
-        task._inbox.put(message)
-        task.messages_sent += 1
-        return True
+        with task._inbox_lock:
+            if task._inbox_closed or task.status not in ("running", "pending"):
+                return False
+            task._inbox.put(message)
+            task.messages_sent += 1
+            return True
 
     def get_result(self, task_id: str) -> str | None:
         """Return the current ``result`` string for ``task_id`` (may be partial)."""
@@ -527,11 +794,11 @@ class SubAgentManager:
         """Cooperatively cancel a pending or running task.
 
         Sets ``_cancel_flag`` (polled by the streaming loop), transitions the
-        task to ``cancelled``, and releases :meth:`wait` callers. Tasks
-        already in a terminal state are not touched and ``False`` is
-        returned.
+        task to ``cancelled``, releases :meth:`wait` and :meth:`wait_for`
+        callers, and posts a ``cancelled`` event. Tasks already in a terminal
+        state are not touched and ``False`` is returned.
         """
-        task = self.tasks.get(task_id)
+        task = self.tasks.get(task_id) or self.get_by_name(task_id)
         if task is None:
             return False
         if task.status in ("running", "pending"):
@@ -539,6 +806,8 @@ class SubAgentManager:
             task.status = "cancelled"
             task.result = task.result or "[Sub-agent was cancelled.]"
             task._done_event.set()
+            self.post_event(task, "cancelled", {"reason": "explicit_cancel"})
+            self._notify()
             return True
         return False
 
@@ -551,8 +820,48 @@ class SubAgentManager:
                 task.status = "cancelled"
                 task.result = task.result or "[Sub-agent was cancelled.]"
                 task._done_event.set()
+                self.post_event(task, "cancelled", {"reason": "cancel_all"})
                 n += 1
+        if n:
+            self._notify()
         return n
+
+    def reset(self, task_id_or_name: str, new_prompt: str = "") -> SubAgentTask | None:
+        """Cancel the named task and respawn a fresh one with the same spec.
+
+        ``new_prompt`` overrides the original prompt if supplied; otherwise
+        the original prompt from ``spawn_spec`` is reused. Returns the new
+        task, or ``None`` if the original is unknown or never recorded a
+        spawn spec (e.g. it was constructed directly in tests).
+        """
+        task_id = self._by_name.get(task_id_or_name, task_id_or_name)
+        task = self.tasks.get(task_id)
+        if task is None or not task.spawn_spec:
+            return None
+        # Best-effort cancel; ignore if already terminal.
+        self.cancel(task_id)
+        from .definitions import get_agent_definition
+
+        spec = task.spawn_spec
+        prompt = new_prompt.strip() or spec["prompt"]
+        agent_def = (
+            get_agent_definition(spec["agent_def_name"])
+            if spec.get("agent_def_name")
+            else None
+        )
+        # Strip the worktree banner from the original prompt to avoid double
+        # appending when ``spawn`` re-prepends it for the new worktree.
+        if "[Note: You are working in an isolated git worktree" in prompt:
+            prompt = prompt.split("\n\n[Note: You are working in an isolated git worktree", 1)[0].rstrip()
+        return self.spawn(
+            prompt=prompt,
+            config=dict(spec.get("config") or {}),
+            system_prompt=spec.get("system_prompt", ""),
+            depth=spec.get("depth", 0),
+            agent_def=agent_def,
+            isolation=spec.get("isolation", ""),
+            name=spec.get("name", ""),
+        )
 
     def list_tasks(self) -> list[SubAgentTask]:
         """Return every tracked :class:`SubAgentTask`."""
@@ -605,14 +914,19 @@ def _run_streaming_loop(
     task: SubAgentTask,
     tool_executor: Any = None,
     tool_schemas: list[dict[str, Any]] | None = None,
+    manager: "SubAgentManager | None" = None,
 ) -> str:
     """Drive :func:`xerxes.streaming.loop.run` for one subagent prompt.
 
     Tool schemas and executor are filtered via :func:`_filter_subagent_tools`
     so a subagent never inherits orchestration tools that would let it spawn
     another swarm. Streaming events are re-emitted as ``agent_*`` events on
-    the bridge so the TUI can render them. Returns the concatenated text
-    output, which the caller assigns to ``task.result``.
+    the bridge so the TUI can render them, populate the task's recent-output
+    ring buffer and ``current_tool`` field so ``PeekAgent`` works, and post
+    coalesced events into the manager's mailbox so the main agent can read
+    them via ``CheckAgentMessages`` or have them auto-injected between turns.
+    Returns the concatenated text output, which the caller assigns to
+    ``task.result``.
     """
     from xerxes.runtime.config_context import emit_event
     from xerxes.streaming.events import AgentState, TextChunk, ThinkingChunk, ToolEnd, ToolStart
@@ -639,6 +953,9 @@ def _run_streaming_loop(
     ):
         if isinstance(event, TextChunk):
             output_parts.append(event.text)
+            task.record_text(event.text)
+            if manager is not None:
+                manager._buffer_text(task, event.text)
             emit_event(
                 "agent_text",
                 {
@@ -658,6 +975,19 @@ def _run_streaming_loop(
                 },
             )
         elif isinstance(event, ToolStart):
+            task.current_tool = event.name
+            task.tool_calls_count += 1
+            if manager is not None:
+                manager._flush_text_burst(task)
+                manager.post_event(
+                    task,
+                    "tool_start",
+                    {
+                        "tool": event.name,
+                        "tool_call_id": event.tool_call_id,
+                        "input_preview": _preview_tool_input(event.inputs),
+                    },
+                )
             emit_event(
                 "agent_tool_start",
                 {
@@ -670,6 +1000,19 @@ def _run_streaming_loop(
                 },
             )
         elif isinstance(event, ToolEnd):
+            task.current_tool = ""
+            if manager is not None:
+                manager.post_event(
+                    task,
+                    "tool_end",
+                    {
+                        "tool": event.name,
+                        "tool_call_id": event.tool_call_id,
+                        "permitted": event.permitted,
+                        "duration_ms": event.duration_ms,
+                        "result_preview": (event.result or "")[:200],
+                    },
+                )
             emit_event(
                 "agent_tool_end",
                 {
@@ -684,7 +1027,30 @@ def _run_streaming_loop(
                 },
             )
 
+    if manager is not None:
+        manager._flush_text_burst(task)
+
     return "".join(output_parts)
+
+
+def _preview_tool_input(inputs: dict[str, Any]) -> str:
+    """Render a short, human-readable summary of a tool's input arguments.
+
+    The mailbox is bounded; we don't want a 50KB tool payload to push out
+    older events. 200 chars of `key=value` pairs is enough for the main
+    agent to know what the subagent is doing.
+    """
+    if not inputs:
+        return ""
+    pieces = []
+    for key, value in inputs.items():
+        text = str(value)
+        if len(text) > 60:
+            text = text[:57] + "…"
+        pieces.append(f"{key}={text}")
+        if sum(len(p) for p in pieces) > 200:
+            break
+    return ", ".join(pieces)[:200]
 
 
 def _filter_subagent_tools(

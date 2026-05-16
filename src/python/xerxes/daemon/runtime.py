@@ -54,6 +54,40 @@ from .config import DaemonConfig
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
+def _format_agent_event(evt: dict[str, Any]) -> str:
+    """Render one mailbox event as a single human-readable line.
+
+    Used to splice sub-agent activity into the main agent's conversation
+    between tool iterations so a passive main agent still notices when its
+    children spawn, finish, or change tools.
+    """
+    agent = evt.get("agent") or evt.get("task_id", "?")
+    etype = evt.get("type", "?")
+    data = evt.get("data") or {}
+    if etype == "spawn":
+        return f"[agent {agent}] spawned ({data.get('agent_type') or 'general'})"
+    if etype == "tool_start":
+        tool = data.get("tool", "?")
+        preview = data.get("input_preview", "")
+        return f"[agent {agent}] → {tool}({preview})" if preview else f"[agent {agent}] → {tool}()"
+    if etype == "tool_end":
+        tool = data.get("tool", "?")
+        ms = data.get("duration_ms")
+        suffix = f" in {ms:.0f}ms" if isinstance(ms, (int, float)) else ""
+        return f"[agent {agent}] ← {tool}{suffix}"
+    if etype == "text_burst":
+        chars = data.get("chars", 0)
+        return f"[agent {agent}] +{chars} chars"
+    if etype == "done":
+        status = data.get("status", "?")
+        preview = (data.get("result_preview") or "").strip().splitlines()
+        first = preview[0][:120] if preview else ""
+        return f"[agent {agent}] {status}" + (f" — {first}" if first else "")
+    if etype == "cancelled":
+        return f"[agent {agent}] cancelled ({data.get('reason', 'unspecified')})"
+    return f"[agent {agent}] {etype}"
+
+
 @dataclass
 class RuntimeManager:
     """Provider/runtime singleton shared by every session.
@@ -243,6 +277,8 @@ class DaemonSession:
         lock: Asyncio lock serialising turns on this session.
         cancel_requested: Set true to tell the streaming loop to stop early.
         active_turn_id: Current turn id while one is running.
+        pending_steers: Thread-safe queue of ``/steer`` strings drained by
+            the streaming loop between tool iterations.
     """
 
     id: str
@@ -253,6 +289,17 @@ class DaemonSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_requested: bool = False
     active_turn_id: str = ""
+    pending_steers: queue.Queue[str] = field(default_factory=queue.Queue)
+
+    def drain_steers(self) -> list[str]:
+        """Pop every queued steer string and return them in arrival order."""
+        out: list[str] = []
+        while True:
+            try:
+                out.append(self.pending_steers.get_nowait())
+            except queue.Empty:
+                break
+        return out
 
     def status(self) -> dict[str, Any]:
         """Return a JSON-safe snapshot used by ``session.status`` and the daemon listing."""
@@ -469,19 +516,39 @@ class SessionManager:
             count += 1
         return count
 
+    # Parallel trim limits applied at the same time we compact ``messages``.
+    # ``thinking_content`` and ``tool_executions`` are append-only side
+    # buffers — they accumulate one entry per turn / tool call and were
+    # never trimmed, so a long-running session would silently hold tens
+    # of MB of stale reasoning text and audit records.
+    _THINKING_KEEP = 32
+    _TOOL_EXEC_KEEP = 200
+
     def compact_if_needed(self, session: DaemonSession) -> bool:
-        """Trim ``session`` history to ``keep_messages`` and note the compaction.
+        """Trim ``session`` history to ``keep_messages`` (plus parallel buffers).
 
         Returns ``True`` when the session was actually compacted.
         """
-        if len(session.state.messages) <= self.keep_messages:
-            return False
-        removed = len(session.state.messages) - self.keep_messages
-        session.workspace.append_daily_note(
-            f"[session:{session.key}] compacted {removed} old messages; kept last {self.keep_messages}."
-        )
-        session.state.messages = session.state.messages[-self.keep_messages :]
-        return True
+        state = session.state
+        compacted = False
+
+        if len(state.messages) > self.keep_messages:
+            removed = len(state.messages) - self.keep_messages
+            session.workspace.append_daily_note(
+                f"[session:{session.key}] compacted {removed} old messages; kept last {self.keep_messages}."
+            )
+            state.messages = state.messages[-self.keep_messages :]
+            compacted = True
+
+        if len(state.thinking_content) > self._THINKING_KEEP:
+            state.thinking_content = state.thinking_content[-self._THINKING_KEEP :]
+            compacted = True
+
+        if len(state.tool_executions) > self._TOOL_EXEC_KEEP:
+            state.tool_executions = state.tool_executions[-self._TOOL_EXEC_KEEP :]
+            compacted = True
+
+        return compacted
 
 
 _ID_RE = __import__("re").compile(r"^[0-9a-fA-F]{8,32}$")
@@ -635,8 +702,15 @@ class TurnRunner:
         + agent memory + active skills, then iterates the streaming loop and
         translates each event (text/thinking/tool/permission/done/suggestion)
         into a daemon wire event via ``push``. Persists the session at
-        :class:`TurnDone`.
+        :class:`TurnDone`. Binds ``session`` to a thread-local so tools that
+        need session-scoped state (``AwaitAgents`` to read ``pending_steers``
+        and the cancel flag, ``CheckAgentMessages`` for the mailbox cursor)
+        can fetch it without plumbing.
         """
+        from ..agents.subagent_manager import SubAgentManager
+        from ..runtime.session_context import set_active_session
+        from ..tools.claude_tools import _get_agent_manager
+
         workspace_context = session.workspace.load_context()
         # Inject the agent's persistent memory (global + project) so the
         # model can read its own notes at every turn. The agent updates
@@ -659,14 +733,75 @@ class TurnRunner:
         config["mode"] = mode
         config["plan_mode"] = plan_mode
 
+        # Bind the session to this worker thread so tools can find it. The
+        # cursor tracks the last mailbox seq we auto-injected so the drain
+        # only emits *new* sub-agent events between iterations.
+        set_active_session(session)
+        mgr: SubAgentManager | None
+        try:
+            mgr = _get_agent_manager()
+            # Hand the manager the daemon's tool plumbing so subagents can
+            # actually call tools when ``_run_streaming_loop`` runs them.
+            if mgr._tool_executor is None:
+                mgr._tool_executor = self.runtime.tool_executor
+            if mgr._tool_schemas is None:
+                mgr._tool_schemas = self.runtime.tool_schemas
+        except Exception:
+            mgr = None
+
+        cursor = {"seq": mgr.latest_seq() if mgr is not None else 0}
+
+        def _drain_agent_events() -> list[str]:
+            """Drain new mailbox events as compact one-line summaries."""
+            if mgr is None:
+                return []
+            new_events = mgr.drain_mailbox(since_seq=cursor["seq"])
+            if not new_events:
+                return []
+            cursor["seq"] = new_events[-1]["seq"]
+            return [_format_agent_event(evt) for evt in new_events]
+
+        try:
+            self._run_event_loop(
+                session=session,
+                config=config,
+                mode=mode,
+                plan_mode=plan_mode,
+                push=push,
+                output_parts=output_parts,
+                user_message=text,
+                system_prompt=system_prompt,
+                drain_agent_events=_drain_agent_events,
+            )
+        finally:
+            # Always unbind the session — tools called after the turn (in
+            # tests, for example) should not pick up a stale handle.
+            set_active_session(None)
+
+    def _run_event_loop(
+        self,
+        *,
+        session: DaemonSession,
+        config: dict[str, Any],
+        mode: str,
+        plan_mode: bool,
+        push: Callable[[str, dict[str, Any]], None],
+        output_parts: list[str],
+        user_message: str,
+        system_prompt: str,
+        drain_agent_events: Callable[[], list[str]],
+    ) -> None:
+        """Drive the streaming-loop iterator and translate events into wire payloads."""
         for event in run_agent_loop(
-            user_message=text,
+            user_message=user_message,
             state=session.state,
             config=config,
             system_prompt=system_prompt,
             tool_executor=self.runtime.tool_executor,
             tool_schemas=self.runtime.tool_schemas,
             cancel_check=lambda: session.cancel_requested,
+            steer_drain=session.drain_steers,
+            agent_event_drain=drain_agent_events,
         ):
             if isinstance(event, TextChunk):
                 output_parts.append(event.text)
@@ -726,7 +861,7 @@ class TurnRunner:
                     "status_update",
                     {
                         "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
-                        "max_context": int(config.get("context_limit", config.get("max_context", 0)) or 0),
+                        "max_context": self._resolve_context_limit(),
                         "mcp_status": {},
                         "plan_mode": plan_mode,
                         "mode": mode,
@@ -955,16 +1090,40 @@ class TurnRunner:
 
     def _status_payload(self, session: DaemonSession, *, mode: str, plan_mode: bool) -> dict[str, Any]:
         """Build the ``status_update`` payload for ``session``."""
-        max_context = int(
-            self.runtime.runtime_config.get("context_limit", self.runtime.runtime_config.get("max_context", 0)) or 0
-        )
         return {
             "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
-            "max_context": max_context,
+            "max_context": self._resolve_context_limit(),
             "mcp_status": {},
             "plan_mode": plan_mode,
             "mode": mode,
         }
+
+    def _resolve_context_limit(self) -> int:
+        """Resolve the model's context window for the status bar.
+
+        Prefers an explicit ``context_limit`` / ``max_context`` from runtime
+        config (so users can pin custom values for self-hosted models), then
+        falls back to :func:`xerxes.llms.registry.get_context_limit` which
+        knows the published windows for every shipped provider. The status
+        bar used to render ``0/0`` when no override was set; this guarantees
+        a useful denominator even on fresh installs.
+        """
+        cfg = self.runtime.runtime_config
+        explicit = cfg.get("context_limit", cfg.get("max_context", 0)) or 0
+        if explicit:
+            try:
+                return int(explicit)
+            except (TypeError, ValueError):
+                pass
+        model = cfg.get("model", "") or self.runtime.model
+        if not model:
+            return 0
+        try:
+            from xerxes.llms.registry import get_context_limit
+
+            return int(get_context_limit(model))
+        except Exception:
+            return 0
 
 
 __all__ = ["DaemonSession", "RuntimeManager", "SessionManager", "TurnRunner", "WorkspaceManager"]
