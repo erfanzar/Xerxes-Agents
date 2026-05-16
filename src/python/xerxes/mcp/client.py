@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Client module for Xerxes.
+"""One MCP client connection: stdio subprocess or SSE / streamable HTTP.
 
-Exports:
-    - MCPClient"""
+:class:`MCPClient` brackets a single MCP server: it spawns or connects to
+it, runs the JSON-RPC initialize handshake, discovers the published tools /
+resources / prompts, and exposes ``call_tool`` / ``read_resource`` /
+``get_prompt`` for the agent runtime to invoke. When the upstream ``mcp``
+package is installed the SDK transports are used; otherwise stdio falls
+back to a hand-rolled JSON-RPC framing implementation.
+"""
 
 import asyncio
 import json
@@ -29,10 +34,7 @@ _MCP_SDK_AVAILABLE: bool | None = None
 
 
 def _check_mcp_sdk() -> bool:
-    """Internal helper to check mcp sdk.
-
-    Returns:
-        bool: OUT: Result of the operation."""
+    """Memoised check for the optional ``mcp`` package."""
 
     global _MCP_SDK_AVAILABLE
     if _MCP_SDK_AVAILABLE is None:
@@ -43,21 +45,19 @@ def _check_mcp_sdk() -> bool:
 
 
 class MCPClient:
-    """Mcpclient.
+    """One MCP server connection plus its discovered capabilities.
 
-    Attributes:
-        _request_id_counter (int): request id counter."""
+    Holds the transport handle (subprocess or SDK session), the discovered
+    :class:`MCPTool` / :class:`MCPResource` / :class:`MCPPrompt` lists, and
+    runs the JSON-RPC request loop. ``_request_id_counter`` is a class-level
+    monotonic counter shared by every client to avoid id collisions when
+    multiple servers are active.
+    """
 
     _request_id_counter: int = 0
 
     def __init__(self, config: MCPServerConfig):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (MCPServerConfig): IN: config. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Configure the client; nothing is started until :meth:`connect`."""
 
         self.config = config
         self.process: subprocess.Popen | None = None
@@ -73,23 +73,17 @@ class MCPClient:
         self._exit_stack: AsyncExitStack | None = None
 
     def _next_request_id(self) -> int:
-        """Internal helper to next request id.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Return the next JSON-RPC id from the class-wide counter."""
 
         MCPClient._request_id_counter += 1
         return MCPClient._request_id_counter
 
     async def connect(self) -> bool:
-        """Asynchronously Connect.
+        """Open the configured transport and run the initialize handshake.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Returns ``True`` on success. Errors and unsupported transports are
+        logged via :attr:`logger` and surface as a ``False`` return.
+        """
 
         try:
             transport = self.config.transport
@@ -115,12 +109,7 @@ class MCPClient:
             return False
 
     async def _connect_stdio(self) -> bool:
-        """Asynchronously Internal helper to connect stdio.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Spawn the configured command and run the JSON-RPC initialize handshake over stdio."""
 
         if not self.config.command:
             self.logger.error(f"No command specified for stdio MCP server {self.config.name}")
@@ -195,12 +184,7 @@ class MCPClient:
             return False
 
     async def _connect_sse(self) -> bool:
-        """Asynchronously Internal helper to connect sse.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Connect via the SDK's Server-Sent Events transport (requires the optional ``mcp`` package)."""
 
         if not _check_mcp_sdk():
             raise ImportError("SSE transport requires the MCP SDK. Install with: pip install xerxes[mcp]")
@@ -245,12 +229,7 @@ class MCPClient:
             return False
 
     async def _connect_streamable_http(self) -> bool:
-        """Asynchronously Internal helper to connect streamable http.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Connect via the SDK's streamable HTTP transport (requires the optional ``mcp`` package)."""
 
         if not _check_mcp_sdk():
             raise ImportError("Streamable HTTP transport requires the MCP SDK. Install with: pip install xerxes[mcp]")
@@ -295,10 +274,11 @@ class MCPClient:
             return False
 
     async def _discover_capabilities_sdk(self) -> None:
-        """Asynchronously Internal helper to discover capabilities sdk.
+        """Populate :attr:`tools`/:attr:`resources`/:attr:`prompts` via the SDK session.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Each list endpoint is queried independently — failures are logged and
+        the other lists still load.
+        """
 
         if not self._session:
             return
@@ -350,11 +330,7 @@ class MCPClient:
             self.logger.debug(f"Failed to list prompts: {e}")
 
     def _write_message(self, message: dict[str, Any]) -> None:
-        """Internal helper to write message.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (dict[str, Any]): IN: message. OUT: Consumed during execution."""
+        """Write one JSON-RPC message to the subprocess's stdin (raises if no process)."""
 
         if not self.process or not self.process.stdin:
             raise RuntimeError("MCP server process not available")
@@ -364,12 +340,7 @@ class MCPClient:
         self.process.stdin.flush()
 
     async def _read_message(self) -> dict[str, Any] | None:
-        """Asynchronously Internal helper to read message.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any] | None: OUT: Result of the operation."""
+        """Read one JSON-RPC message from the subprocess's stdout with a 10s timeout."""
 
         if not self.process or not self.process.stdout:
             return None
@@ -400,10 +371,7 @@ class MCPClient:
             return None
 
     async def _discover_capabilities(self) -> None:
-        """Asynchronously Internal helper to discover capabilities.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Populate :attr:`tools`/:attr:`resources`/:attr:`prompts` over raw JSON-RPC."""
 
         tools_request = {"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": self._next_request_id()}
         self._write_message(tools_request)
@@ -458,14 +426,11 @@ class MCPClient:
             self.logger.info(f"Discovered {len(self.prompts)} prompts from {self.config.name}")
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """Asynchronously Call tool.
+        """Invoke ``tool_name`` with ``arguments`` and return the server's content list.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            arguments (dict[str, Any]): IN: arguments. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        Raises ``RuntimeError`` when not connected or when the server reports
+        an error.
+        """
 
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -492,13 +457,7 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def read_resource(self, uri: str) -> Any:
-        """Asynchronously Read resource.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            uri (str): IN: uri. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Fetch a resource by URI and return the server's content list."""
 
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -520,14 +479,7 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
-        """Asynchronously Retrieve the prompt.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-            arguments (dict[str, Any] | None, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the named prompt template with ``arguments`` and return the text body."""
 
         if not self.connected:
             raise RuntimeError(f"Not connected to MCP server {self.config.name}")
@@ -563,10 +515,7 @@ class MCPClient:
             raise RuntimeError("Invalid response from MCP server")
 
     async def disconnect(self) -> None:
-        """Asynchronously Disconnect.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Close the SDK session (if any) and terminate the subprocess (if any)."""
 
         if self._exit_stack:
             try:
@@ -590,12 +539,7 @@ class MCPClient:
         self.logger.info(f"Disconnected from MCP server {self.config.name}")
 
     def __del__(self):
-        """Dunder method for del.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Last-resort: terminate a still-running subprocess on garbage collection."""
 
         if self.process and self.process.poll() is None:
             try:

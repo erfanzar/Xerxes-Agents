@@ -13,7 +13,10 @@
 # limitations under the License.
 """WeCom (企业微信) channel adapter.
 
-Connects to the WeCom API for enterprise messaging.
+Speaks WeCom's enterprise messaging API: parses inbound event payloads
+and sends text messages via ``cgi-bin/message/send``. Accepts either a
+static access token or a ``token_provider`` callable for installs that
+refresh the (short-lived) WeCom access token externally.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class WeComChannel(WebhookChannel):
-    """Channel implementation for WeCom (Enterprise WeChat)."""
+    """WeCom (Enterprise WeChat) adapter."""
 
     name = "wecom"
 
@@ -38,20 +41,18 @@ class WeComChannel(WebhookChannel):
         api_base: str = "https://qyapi.weixin.qq.com",
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the WeCom channel.
+        """Build the channel.
 
         Args:
-            access_token (str): IN: static access token. Defaults to empty.
-                OUT: fallback when ``token_provider`` is not given.
-            agent_id (str | int): IN: WeCom agent identifier.
-                OUT: included in outbound message payloads.
-            token_provider (Callable | None): IN: optional callable that
-                returns a fresh access token. OUT: takes precedence over the
-                static token.
-            api_base (str): IN: base URL for WeCom APIs.
-                OUT: stored with trailing slash removed.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            access_token: Static access token; fallback when
+                ``token_provider`` is unavailable.
+            agent_id: WeCom agent (application) identifier sent in every
+                outbound message payload.
+            token_provider: Optional zero-arg callable returning a fresh
+                token. Takes precedence over ``access_token``.
+            api_base: WeCom API base URL; trailing ``/`` stripped.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.access_token = access_token
@@ -61,11 +62,11 @@ class WeComChannel(WebhookChannel):
         self._http = http_client
 
     def _resolve_token(self) -> str:
-        """Resolve the current access token.
+        """Pick the access token for the next outbound call.
 
         Returns:
-            str: OUT: token from ``token_provider`` if available, otherwise
-            the static ``access_token``.
+            Output of ``token_provider`` when truthy, otherwise the static
+            ``access_token``.
         """
         if self.token_provider is not None:
             tok = self.token_provider()
@@ -74,14 +75,18 @@ class WeComChannel(WebhookChannel):
         return self.access_token
 
     def _parse_inbound(self, headers, body):
-        """Parse a WeCom webhook payload into ``ChannelMessage``.
+        """Translate a WeCom event payload into ``ChannelMessage``.
+
+        Tolerates both the official PascalCase (``Content``, ``FromUserName``,
+        ``MsgId``) and the snake_case shape used by some bridges. Messages
+        with no text body are skipped.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or empty when no text was present.
         """
         data = parse_json_body(body)
         if not data:
@@ -102,11 +107,11 @@ class WeComChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a text message via the WeCom API.
+        """Send one text message via ``cgi-bin/message/send``.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``channel_user_id``
-                or ``room_id`` is the recipient, and ``text`` the content.
+            message: Outbound message. ``channel_user_id`` (preferred) or
+                ``room_id`` becomes ``touser``; ``text`` is the body.
         """
         token = self._resolve_token()
         url = f"{self.api_base}/cgi-bin/message/send?access_token={token}"

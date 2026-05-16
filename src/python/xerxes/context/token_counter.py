@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Token counting utilities for various LLM providers.
+"""Provider-aware token counting with graceful fallbacks.
 
-Implements ``SmartTokenCounter``, which dispatches to provider-specific
-counters (OpenAI via tiktoken, Anthropic via client SDK, Google, etc.) and
-falls back to character-based estimation when libraries are unavailable.
+Detection happens by model-name substring (``gpt``/``o1`` -> OpenAI,
+``claude`` -> Anthropic, ``gemini``/``palm`` -> Google, etc.). Each
+provider has a counter that prefers its native API (tiktoken,
+Anthropic client) and falls back to ``cl100k_base`` and finally to a
+crude ``len(text) // 4`` estimate when no SDK is installed.
 """
 
 from typing import Any
@@ -33,7 +35,7 @@ ANTHROPIC_AVAILABLE = importlib.util.find_spec("anthropic") is not None
 
 
 class ProviderTokenCounter:
-    """Provider-specific token counting implementations."""
+    """Namespace of provider-specific token-counting class methods."""
 
     @classmethod
     def count_tokens_for_provider(
@@ -43,20 +45,10 @@ class ProviderTokenCounter:
         model: str | None = None,
         llm_client: Any | None = None,
     ) -> int:
-        """Count tokens for the given text and provider.
+        """Count tokens for ``text`` under the given provider/model.
 
-        Args:
-            text (str | list[dict[str, str]]): IN: plain text or a list of
-                message dicts to count.
-            provider (str | None): IN: explicit provider name. OUT: inferred
-                from ``model`` when omitted.
-            model (str | None): IN: model identifier used for provider
-                detection and encoding selection.
-            llm_client (Any | None): IN: optional client instance for
-                provider-native token counting.
-
-        Returns:
-            int: OUT: estimated token count.
+        Lists of messages are stringified into ``role: content`` lines.
+        When ``provider`` is omitted it is inferred from ``model``.
         """
         if isinstance(text, list):
             text = cls._messages_to_text(text)
@@ -75,14 +67,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _detect_provider(cls, model: str) -> str | None:
-        """Guess the provider from a model name string.
-
-        Args:
-            model (str): IN: model identifier.
-
-        Returns:
-            str | None: OUT: provider slug, or ``None`` if unknown.
-        """
+        """Guess a provider slug from a model identifier."""
         if not model:
             return None
 
@@ -101,14 +86,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _messages_to_text(cls, messages: list[dict[str, str]]) -> str:
-        """Convert a list of message dicts to a single text string.
-
-        Args:
-            messages (list[dict[str, str]]): IN: conversation messages.
-
-        Returns:
-            str: OUT: joined ``role: content`` lines.
-        """
+        """Flatten messages to ``role: content`` lines joined by newlines."""
         text_parts = []
         for msg in messages:
             role = msg.get("role", "")
@@ -118,15 +96,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_openai_tokens(cls, text: str, model: str | None = None) -> int:
-        """Count tokens using tiktoken for OpenAI models.
-
-        Args:
-            text (str): IN: text to count.
-            model (str | None): IN: model identifier for encoding selection.
-
-        Returns:
-            int: OUT: token count.
-        """
+        """Count OpenAI tokens via tiktoken; pick encoding from ``model``."""
         if not TIKTOKEN_AVAILABLE:
             return len(text) // 4
 
@@ -150,17 +120,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_anthropic_tokens(cls, text: str, model: str | None = None, client: Any | None = None) -> int:
-        """Count tokens for Anthropic models.
-
-        Args:
-            text (str): IN: text to count.
-            model (str | None): IN: model identifier.
-            client (Any | None): IN: optional Anthropic client with
-                ``count_tokens``.
-
-        Returns:
-            int: OUT: token count.
-        """
+        """Count Anthropic tokens via ``client.count_tokens`` or tiktoken."""
         if ANTHROPIC_AVAILABLE and client:
             try:
                 if hasattr(client, "count_tokens"):
@@ -179,16 +139,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_google_tokens(cls, text: str, model: str | None = None, client: Any | None = None) -> int:
-        """Count tokens for Google models.
-
-        Args:
-            text (str): IN: text to count.
-            model (str | None): IN: model identifier.
-            client (Any | None): IN: optional client (unused).
-
-        Returns:
-            int: OUT: token count.
-        """
+        """Estimate Gemini/PaLM tokens via tiktoken with a 10% upcharge."""
         if TIKTOKEN_AVAILABLE:
             try:
                 encoding = tiktoken.get_encoding("cl100k_base")
@@ -202,15 +153,7 @@ class ProviderTokenCounter:
 
     @classmethod
     def _count_fallback_tokens(cls, text: str, model: str | None = None) -> int:
-        """Fallback token counting when provider is unknown.
-
-        Args:
-            text (str): IN: text to count.
-            model (str | None): IN: model identifier (unused).
-
-        Returns:
-            int: OUT: token count.
-        """
+        """Last-resort tokenizer: tiktoken ``cl100k_base`` then ``len/4``."""
         if TIKTOKEN_AVAILABLE:
             try:
                 encoding = tiktoken.get_encoding("cl100k_base")
@@ -222,7 +165,11 @@ class ProviderTokenCounter:
 
 
 class SmartTokenCounter:
-    """Unified token counter that auto-detects provider and model."""
+    """Stateful wrapper around :class:`ProviderTokenCounter`.
+
+    Resolves provider once at construction time so subsequent
+    :meth:`count_tokens` calls don't repeat the model-string heuristic.
+    """
 
     def __init__(
         self,
@@ -230,15 +177,7 @@ class SmartTokenCounter:
         model: str | None = None,
         llm_client: Any | None = None,
     ):
-        """Initialize the token counter.
-
-        Args:
-            provider (str | None): IN: explicit provider name.
-            model (str | None): IN: model identifier. OUT: used to infer
-                provider when ``provider`` is omitted.
-            llm_client (Any | None): IN: optional client for provider-native
-                counting.
-        """
+        """Bind to a provider/model pair; auto-detect provider when omitted."""
         self.provider = provider
         self.model = model
         self.llm_client = llm_client
@@ -247,14 +186,7 @@ class SmartTokenCounter:
             self.provider = ProviderTokenCounter._detect_provider(self.model)
 
     def count_tokens(self, text: str | list[dict[str, str]]) -> int:
-        """Count tokens for the given text or messages.
-
-        Args:
-            text (str | list[dict[str, str]]): IN: text or message list.
-
-        Returns:
-            int: OUT: token count.
-        """
+        """Return the token count for ``text`` (string or message list)."""
         return ProviderTokenCounter.count_tokens_for_provider(
             text=text,
             provider=self.provider,
@@ -263,29 +195,12 @@ class SmartTokenCounter:
         )
 
     def count_remaining_capacity(self, text: str | list[dict[str, str]], max_tokens: int) -> int:
-        """Calculate how many tokens remain under a maximum budget.
-
-        Args:
-            text (str | list[dict[str, str]]): IN: current text or messages.
-            max_tokens (int): IN: maximum allowed tokens.
-
-        Returns:
-            int: OUT: remaining token budget (never negative).
-        """
+        """Return ``max_tokens - count_tokens(text)``, clamped at zero."""
         used_tokens = self.count_tokens(text)
         return max(0, max_tokens - used_tokens)
 
     def estimate_compression_ratio(self, original_text: str, compressed_text: str) -> float:
-        """Estimate the compression ratio between two texts.
-
-        Args:
-            original_text (str): IN: text before compaction.
-            compressed_text (str): IN: text after compaction.
-
-        Returns:
-            float: OUT: ratio in the range ``[0.0, 1.0]`` where ``1.0`` means
-            fully compressed to zero tokens.
-        """
+        """Return ``1 - compressed/original`` token ratio (``0`` if empty)."""
         original_tokens = self.count_tokens(original_text)
         compressed_tokens = self.count_tokens(compressed_text)
 

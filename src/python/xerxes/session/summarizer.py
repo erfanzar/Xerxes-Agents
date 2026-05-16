@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Summarizer module for Xerxes.
+"""Cheap heuristic summaries of recorded sessions.
 
-Exports:
-    - logger
-    - SessionSummary
-    - SessionSummarizer"""
+:class:`SessionSummarizer` produces a :class:`SessionSummary` from a
+:class:`SessionRecord` using string-only heuristics: title from the first
+prompt, a one-paragraph synopsis, distinct tool names, success/failure
+outcome. An optional LLM callback can refine the synopsis without inventing
+new facts — failures fall back to the heuristic draft.
+"""
 
 from __future__ import annotations
 
@@ -31,17 +33,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SessionSummary:
-    """Session summary.
+    """Heuristic summary of a session for listings and history UIs.
 
     Attributes:
-        session_id (str): session id.
-        title (str): title.
-        synopsis (str): synopsis.
-        key_actions (list[str]): key actions.
-        outcome (str): outcome.
-        turn_count (int): turn count.
-        agent_ids (list[str]): agent ids.
-        char_count (int): char count."""
+        session_id: Source session id.
+        title: Short title derived from the first prompt.
+        synopsis: One-paragraph summary of what happened.
+        key_actions: Distinct tool names invoked, in first-seen order.
+        outcome: ``"success"``, ``"failure"``, ``"mixed"`` or ``"unknown"``.
+        turn_count: Number of turns in the session.
+        agent_ids: Distinct agent ids that produced turns.
+        char_count: Total characters across all prompts and responses.
+    """
 
     session_id: str
     title: str = ""
@@ -53,39 +56,38 @@ class SessionSummary:
     char_count: int = 0
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready dict of the summary fields."""
 
         return asdict(self)
 
 
 class SessionSummarizer:
-    """Session summarizer."""
+    """Generates a :class:`SessionSummary` from a :class:`SessionRecord`.
+
+    Pure-Python heuristics by default; an optional ``llm_client`` callable
+    may refine the synopsis after the draft is computed.
+    """
 
     def __init__(
         self,
         llm_client: tp.Callable[[str], str] | None = None,
     ) -> None:
-        """Initialize the instance.
+        """Configure the summarizer with an optional LLM refinement hook.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            llm_client (tp.Callable[[str], str] | None, optional): IN: llm client. Defaults to None. OUT: Consumed during execution."""
+            llm_client: Callable that takes a prompt and returns the refined
+                synopsis. Errors are caught and the heuristic draft is kept.
+        """
 
         self.llm_client = llm_client
 
     def summarize(self, session: SessionRecord) -> SessionSummary:
-        """Summarize.
+        """Produce a :class:`SessionSummary` for ``session``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            SessionSummary: OUT: Result of the operation."""
+        Heuristics run first; if an ``llm_client`` was supplied it gets a
+        chance to rewrite the synopsis. LLM exceptions are swallowed so a
+        flaky model never breaks listings.
+        """
 
         title = self._derive_title(session)
         synopsis = self._derive_synopsis(session)
@@ -110,13 +112,7 @@ class SessionSummarizer:
         )
 
     def _derive_title(self, session: SessionRecord) -> str:
-        """Internal helper to derive title.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Derive a short title from the first user prompt."""
 
         if not session.turns:
             return f"Session {session.session_id[:8]}"
@@ -130,13 +126,7 @@ class SessionSummarizer:
         return prompt[:80]
 
     def _derive_synopsis(self, session: SessionRecord) -> str:
-        """Internal helper to derive synopsis.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Compose a 1-3 sentence synopsis from prompt, tool count, response."""
 
         if not session.turns:
             return "Empty session."
@@ -159,13 +149,7 @@ class SessionSummarizer:
         return " ".join(sentences)
 
     def _collect_tools(self, session: SessionRecord) -> list[str]:
-        """Internal helper to collect tools.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return distinct tool names invoked, preserving first-seen order."""
 
         seen: set[str] = set()
         out: list[str] = []
@@ -178,13 +162,7 @@ class SessionSummarizer:
         return out
 
     def _derive_outcome(self, session: SessionRecord) -> str:
-        """Internal helper to derive outcome.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Classify overall outcome from the per-turn ``status`` values."""
 
         if not session.turns:
             return "unknown"
@@ -196,13 +174,7 @@ class SessionSummarizer:
         return "mixed"
 
     def _distinct_agents(self, session: SessionRecord) -> list[str]:
-        """Internal helper to distinct agents.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return distinct agent ids that produced turns, in first-seen order."""
 
         seen: set[str] = set()
         out: list[str] = []
@@ -213,14 +185,7 @@ class SessionSummarizer:
         return out
 
     def _refine_with_llm(self, session: SessionRecord, draft: str) -> str:
-        """Internal helper to refine with llm.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-            draft (str): IN: draft. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Ask the configured LLM to rewrite ``draft`` more concisely."""
 
         prompt = (
             "Rewrite this session synopsis as 1-3 short, neutral sentences. "
@@ -239,13 +204,7 @@ class SessionSummarizer:
 
 
 def _truncate(text: str, n: int) -> str:
-    """Internal helper to truncate.
-
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-        n (int): IN: n. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Collapse whitespace and trim ``text`` to at most ``n`` chars."""
 
     text = " ".join(text.split())
     if len(text) <= n:

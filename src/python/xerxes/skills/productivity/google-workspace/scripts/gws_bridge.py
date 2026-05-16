@@ -11,14 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Gws bridge module for Xerxes.
-
-Exports:
-    - get_hermes_home
-    - get_token_path
-    - refresh_token
-    - get_valid_token
-    - main"""
+"""Thin wrapper that forwards CLI args to ``gws`` with a refreshed Google token."""
 
 import json
 import os
@@ -28,29 +21,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-def get_hermes_home() -> Path:
-    """Retrieve the hermes home.
-
-    Returns:
-        Path: OUT: Result of the operation."""
-    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+def get_xerxes_home() -> Path:
+    """Return the Xerxes home directory honouring ``$XERXES_HOME``."""
+    return Path(os.environ.get("XERXES_HOME", Path.home() / ".xerxes"))
 
 
 def get_token_path() -> Path:
-    """Retrieve the token path.
-
-    Returns:
-        Path: OUT: Result of the operation."""
-    return get_hermes_home() / "google_token.json"
+    """Return the path to ``google_token.json`` inside the Xerxes home."""
+    return get_xerxes_home() / "google_token.json"
 
 
 def refresh_token(token_data: dict) -> dict:
-    """Refresh token.
-
-    Args:
-        token_data (dict): IN: token data. OUT: Consumed during execution.
-    Returns:
-        dict: OUT: Result of the operation."""
+    """Refresh ``token_data`` against Google's token endpoint and persist it."""
 
     import urllib.error
     import urllib.parse
@@ -86,10 +68,7 @@ def refresh_token(token_data: dict) -> dict:
 
 
 def get_valid_token() -> str:
-    """Retrieve the valid token.
-
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return a non-expired Google OAuth access token, refreshing if needed."""
 
     token_path = get_token_path()
     if not token_path.exists():
@@ -109,10 +88,7 @@ def get_valid_token() -> str:
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Invoke the system ``gws`` CLI with a fresh access token in the environment."""
 
     if len(sys.argv) < 2:
         print("Usage: gws_bridge.py <gws args...>", file=sys.stderr)

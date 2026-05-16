@@ -56,8 +56,8 @@ class SearchHistoryTool:
     def __init__(
         self,
         *,
-        store: "SessionStore | None" = None,
-        index: "SessionIndex | None" = None,
+        store: SessionStore | None = None,
+        index: SessionIndex | None = None,
         default_k: int = 5,
     ) -> None:
         """Initialize the search history tool.
@@ -105,7 +105,7 @@ class SearchHistoryTool:
         """
         k = limit or self.default_k
         if self.index is not None:
-            hits: list["SearchHit"] = self.index.search(query, k=k, agent_id=agent_id, session_id=session_id)
+            hits: list[SearchHit] = self.index.search(query, k=k, agent_id=agent_id, session_id=session_id)
         else:
             assert self.store is not None
             hits = self.store.search(query, k=k, agent_id=agent_id, session_id=session_id)

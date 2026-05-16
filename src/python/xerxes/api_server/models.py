@@ -11,23 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pydantic models for API server responses.
+"""Pydantic response schemas for ``/v1/models`` and ``/health``.
 
-This module defines lightweight response schemas for the ``/models`` and
-``/health`` endpoints.
+The chat-completion request and response schemas live in
+:mod:`xerxes.types.oai_protocols`; only the small list/health
+envelopes are defined here.
 """
 
 from pydantic import BaseModel
 
 
 class ModelInfo(BaseModel):
-    """Represents a single model available on the API server.
+    """One row in the ``/v1/models`` list (OpenAI-compatible shape).
 
     Attributes:
-        id (str): Unique model identifier.
-        object (str): Object type (default ``"model"``).
-        created (int): Unix timestamp of model creation/registration.
-        owned_by (str): Owner identifier (default ``"xerxes"``).
+        id: unique model identifier (agent id or Cortex variant name).
+        object: always ``"model"``.
+        created: unix epoch second when the agent/variant was registered.
+        owned_by: namespace/owner; defaults to ``"xerxes"``.
     """
 
     id: str
@@ -37,11 +38,11 @@ class ModelInfo(BaseModel):
 
 
 class ModelsResponse(BaseModel):
-    """Response wrapper for the ``/v1/models`` endpoint.
+    """Envelope returned by ``GET /v1/models``.
 
     Attributes:
-        object (str): Object type (default ``"list"``).
-        data (list[ModelInfo]): List of available models.
+        object: always ``"list"``.
+        data: one :class:`ModelInfo` per registered agent or variant.
     """
 
     object: str = "list"
@@ -49,11 +50,11 @@ class ModelsResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Response for the ``/health`` endpoint.
+    """Body of ``GET /health``.
 
     Attributes:
-        status (str): Server health status.
-        agents (int): Number of registered agents.
+        status: liveness sentinel (typically ``"ok"``).
+        agents: number of registered agents at the moment of the check.
     """
 
     status: str

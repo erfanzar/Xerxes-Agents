@@ -53,7 +53,7 @@ class HomeAssistantClient:
         >>> client.call_service("light", "turn_on", {"entity_id": "light.living_room"})
     """
 
-    _instance: "HomeAssistantClient | None" = None
+    _instance: HomeAssistantClient | None = None
     _lock = threading.Lock()
 
     def __init__(
@@ -74,7 +74,7 @@ class HomeAssistantClient:
         self._http = http_client
 
     @classmethod
-    def instance(cls) -> "HomeAssistantClient":
+    def instance(cls) -> HomeAssistantClient:
         """Get the singleton client instance.
 
         Returns:
@@ -92,7 +92,7 @@ class HomeAssistantClient:
         base_url: str = "http://hass.test",
         token: str = "tok",
         http_client: tp.Any,
-    ) -> "HomeAssistantClient":
+    ) -> HomeAssistantClient:
         """Install a test client for unit testing.
 
         Args:

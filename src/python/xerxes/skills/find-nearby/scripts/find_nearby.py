@@ -11,17 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Find nearby module for Xerxes.
-
-Exports:
-    - OVERPASS_URLS
-    - NOMINATIM_URL
-    - USER_AGENT
-    - TIMEOUT
-    - haversine
-    - geocode
-    - find_nearby
-    - main"""
+"""CLI that finds OpenStreetMap places near a coordinate or geocoded address."""
 
 import argparse
 import json
@@ -36,91 +26,28 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-USER_AGENT = "HermesAgent/1.0 (find-nearby skill)"
+USER_AGENT = "Xerxes/1.0 (find-nearby skill)"
 TIMEOUT = 15
 
 
 def _http_get(url: str) -> Any:
-    """Internal helper to http get.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Issue a JSON GET request and return the decoded body."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    """Internal helper to http get.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Internal helper to http get.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read())
 
 
 def _http_post(url: str, data: str) -> Any:
-    """Internal helper to http post.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-        data (str): IN: data. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Issue a JSON POST request with body ``data`` and return the decoded body."""
     req = urllib.request.Request(url, data=data.encode(), headers={"User-Agent": USER_AGENT})
-    """Internal helper to http post.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-        data (str): IN: data. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Internal helper to http post.
-
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-        data (str): IN: data. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read())
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Haversine.
-
-    Args:
-        lat1 (float): IN: lat1. OUT: Consumed during execution.
-        lon1 (float): IN: lon1. OUT: Consumed during execution.
-        lat2 (float): IN: lat2. OUT: Consumed during execution.
-        lon2 (float): IN: lon2. OUT: Consumed during execution.
-    Returns:
-        float: OUT: Result of the operation."""
+    """Return the great-circle distance in meters between two lat/lon points."""
 
     R = 6_371_000
-    """Haversine.
-
-    Args:
-        lat1 (float): IN: lat1. OUT: Consumed during execution.
-        lon1 (float): IN: lon1. OUT: Consumed during execution.
-        lat2 (float): IN: lat2. OUT: Consumed during execution.
-        lon2 (float): IN: lon2. OUT: Consumed during execution.
-    Returns:
-        float: OUT: Result of the operation."""
-    """Haversine.
-
-    Args:
-        lat1 (float): IN: lat1. OUT: Consumed during execution.
-        lon1 (float): IN: lon1. OUT: Consumed during execution.
-        lat2 (float): IN: lat2. OUT: Consumed during execution.
-        lon2 (float): IN: lon2. OUT: Consumed during execution.
-    Returns:
-        float: OUT: Result of the operation."""
     rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -129,26 +56,9 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def geocode(query: str) -> tuple[float, float]:
-    """Geocode.
-
-    Args:
-        query (str): IN: query. OUT: Consumed during execution.
-    Returns:
-        tuple[float, float]: OUT: Result of the operation."""
+    """Resolve ``query`` to a ``(lat, lon)`` pair via the Nominatim API."""
 
     params = urllib.parse.urlencode({"q": query, "format": "json", "limit": 1})
-    """Geocode.
-
-    Args:
-        query (str): IN: query. OUT: Consumed during execution.
-    Returns:
-        tuple[float, float]: OUT: Result of the operation."""
-    """Geocode.
-
-    Args:
-        query (str): IN: query. OUT: Consumed during execution.
-    Returns:
-        tuple[float, float]: OUT: Result of the operation."""
     results = _http_get(f"{NOMINATIM_URL}?{params}")
     if not results:
         print(f"Error: Could not geocode '{query}'. Try a more specific address.", file=sys.stderr)
@@ -157,38 +67,9 @@ def geocode(query: str) -> tuple[float, float]:
 
 
 def find_nearby(lat: float, lon: float, types: list[str], radius: int = 1500, limit: int = 15) -> list[dict]:
-    """Find nearby.
-
-    Args:
-        lat (float): IN: lat. OUT: Consumed during execution.
-        lon (float): IN: lon. OUT: Consumed during execution.
-        types (list[str]): IN: types. OUT: Consumed during execution.
-        radius (int, optional): IN: radius. Defaults to 1500. OUT: Consumed during execution.
-        limit (int, optional): IN: limit. Defaults to 15. OUT: Consumed during execution.
-    Returns:
-        list[dict]: OUT: Result of the operation."""
+    """Return up to ``limit`` OSM amenities of any ``types`` within ``radius`` meters."""
 
     type_filters = "".join(f'nwr["amenity"="{t}"](around:{radius},{lat},{lon});' for t in types)
-    """Find nearby.
-
-    Args:
-        lat (float): IN: lat. OUT: Consumed during execution.
-        lon (float): IN: lon. OUT: Consumed during execution.
-        types (list[str]): IN: types. OUT: Consumed during execution.
-        radius (int, optional): IN: radius. Defaults to 1500. OUT: Consumed during execution.
-        limit (int, optional): IN: limit. Defaults to 15. OUT: Consumed during execution.
-    Returns:
-        list[dict]: OUT: Result of the operation."""
-    """Find nearby.
-
-    Args:
-        lat (float): IN: lat. OUT: Consumed during execution.
-        lon (float): IN: lon. OUT: Consumed during execution.
-        types (list[str]): IN: types. OUT: Consumed during execution.
-        radius (int, optional): IN: radius. Defaults to 1500. OUT: Consumed during execution.
-        limit (int, optional): IN: limit. Defaults to 15. OUT: Consumed during execution.
-    Returns:
-        list[dict]: OUT: Result of the operation."""
     query = f"[out:json][timeout:{TIMEOUT}];({type_filters});out center tags;"
 
     data = None
@@ -247,19 +128,8 @@ def find_nearby(lat: float, lon: float, types: list[str], radius: int = 1500, li
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Parse CLI args and print nearby places either as JSON or formatted text."""
     parser = argparse.ArgumentParser(description="Find nearby places via OpenStreetMap")
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
     parser.add_argument("--lat", type=float, help="Latitude")
     parser.add_argument("--lon", type=float, help="Longitude")
     parser.add_argument("--near", type=str, help="Address, city, or zip code (geocoded automatically)")

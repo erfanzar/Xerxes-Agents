@@ -11,13 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Permissions module for Xerxes.
+"""Permission gating for the streaming loop.
 
-Exports:
-    - PermissionMode
-    - is_safe_bash
-    - check_permission
-    - format_permission_description"""
+Every tool call passes through :func:`check_permission` before execution. The
+gate consults a hand-curated allowlist (:data:`SAFE_TOOLS`), pattern-matches
+shell commands against safe/dangerous regex sets, and applies extra rules
+for :func:`ExecutePythonCode` and any destructive file-writing tools.
+
+The mode (:class:`PermissionMode`) decides whether the gate is a hard answer
+(``ACCEPT_ALL`` / ``MANUAL``) or merely a fast-path approval for known-safe
+calls (``AUTO``), with anything else escalated to the user.
+"""
 
 from __future__ import annotations
 
@@ -27,9 +31,12 @@ from typing import Any
 
 
 class PermissionMode(Enum):
-    """Permission mode.
+    """Permission-gate behaviour selector.
 
-    Inherits from: Enum
+    Attributes:
+        AUTO: Auto-approve known-safe tools; prompt for everything else.
+        ACCEPT_ALL: Approve every tool call (use only in sandboxed runs).
+        MANUAL: Deny every tool call until the user explicitly approves.
     """
 
     AUTO = "auto"
@@ -61,6 +68,7 @@ SAFE_TOOLS: frozenset[str] = frozenset(
         "TaskOutputTool",
         "ToolSearchTool",
         "AskUserQuestionTool",
+        "SetInteractionModeTool",
         "JSONProcessor",
         "CSVProcessor",
         "TextProcessor",
@@ -93,12 +101,20 @@ _DANGEROUS_BASH_PATTERNS: list[re.Pattern[str]] = [
 
 
 def is_safe_bash(command: str) -> bool:
-    """Check whether safe bash.
+    """Return whether a shell command is on the conservative auto-approve list.
+
+    The check rejects dangerous patterns first (``rm -rf``, ``sudo``,
+    ``curl ... | sh``, partition tools, ``git push --force``) and then accepts
+    only commands whose first token matches a read-only allowlist (``ls``,
+    ``git status``, search tools, version probes, etc.). A ``cd ... &&``
+    prefix is unwrapped and the trailing command re-evaluated recursively.
 
     Args:
-        command (str): IN: command. OUT: Consumed during execution.
+        command: Raw shell command string from the tool call.
+
     Returns:
-        bool: OUT: Result of the operation."""
+        ``True`` only if every check passes; ``False`` is the safe default.
+    """
 
     command = command.strip()
 
@@ -121,13 +137,22 @@ def check_permission(
     tool_call: dict[str, Any],
     mode: PermissionMode = PermissionMode.AUTO,
 ) -> bool:
-    """Check permission.
+    """Decide whether a tool call may proceed without user prompting.
+
+    In ``AUTO`` mode the gate auto-approves any tool in :data:`SAFE_TOOLS`,
+    delegates bash/shell calls to :func:`is_safe_bash`, blocks Python code
+    that touches the filesystem or shells out, and refuses all file-writing
+    tools so they always escalate. ``ACCEPT_ALL`` and ``MANUAL`` short-circuit
+    to ``True`` / ``False`` respectively.
 
     Args:
-        tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
-        mode (PermissionMode, optional): IN: mode. Defaults to PermissionMode.AUTO. OUT: Consumed during execution.
+        tool_call: ``{"name", "input"}`` dict as yielded by the loop.
+        mode: Active permission mode.
+
     Returns:
-        bool: OUT: Result of the operation."""
+        ``True`` to skip prompting and execute immediately, ``False`` to
+        emit a :class:`PermissionRequest`.
+    """
 
     if mode == PermissionMode.ACCEPT_ALL:
         return True
@@ -162,12 +187,12 @@ def check_permission(
 
 
 def format_permission_description(tool_call: dict[str, Any]) -> str:
-    """Format permission description.
+    """Render a one-line description of a tool call for the approval UI.
 
-    Args:
-        tool_call (dict[str, Any]): IN: tool call. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Shell tools display the command, write/edit tools display the target
+    file path, ExecutePythonCode shows a code preview, and generic tools fall
+    back to ``Name(first-arg)``.
+    """
 
     name = tool_call.get("name", "")
     inp = tool_call.get("input", {})

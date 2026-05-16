@@ -13,7 +13,9 @@
 # limitations under the License.
 """Mattermost channel adapter.
 
-Connects to a Mattermost server for sending and receiving messages.
+Parses Mattermost outgoing-webhook payloads and posts replies through
+the v4 REST API. Authentication uses a bot access token; outgoing-webhook
+token validation, if any, is left to the operator.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class MattermostChannel(WebhookChannel):
-    """Channel implementation for Mattermost."""
+    """Mattermost v4 REST adapter."""
 
     name = "mattermost"
 
@@ -36,15 +38,13 @@ class MattermostChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Mattermost channel.
+        """Build the channel.
 
         Args:
-            base_url (str): IN: Mattermost server base URL.
-                OUT: stored with trailing slash removed.
-            bot_token (str): IN: bot access token.
-                OUT: stored for API authorization.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            base_url: Mattermost server base URL; trailing ``/`` stripped.
+            bot_token: Bot access token used for ``Authorization``.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.base_url = base_url.rstrip("/")
@@ -52,14 +52,14 @@ class MattermostChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Mattermost webhook payload into ``ChannelMessage``.
+        """Translate a Mattermost outgoing-webhook payload into ``ChannelMessage``.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One inbound message, or empty when the payload is empty.
         """
         data = parse_json_body(body)
         if not data:
@@ -77,12 +77,12 @@ class MattermostChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a message to a Mattermost channel.
+        """Send one post via ``POST /api/v4/posts``.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` is the
-                target channel ID, ``text`` the content, and ``reply_to``
-                (if set) the root post ID for threading.
+            message: Outbound message. ``room_id`` is the channel id,
+                ``text`` the body, and ``reply_to`` (when set) becomes the
+                ``root_id`` to thread the reply under an existing post.
         """
         url = f"{self.base_url}/api/v4/posts"
         body = {"channel_id": message.room_id, "message": message.text}

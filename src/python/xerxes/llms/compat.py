@@ -11,17 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Compat module for Xerxes.
+"""OpenAI-compatible provider adapters and a generic custom adapter.
 
-Exports:
-    - OpenAICompatLLM
-    - DeepSeekLLM
-    - MiniMaxLLM
-    - KimiLLM
-    - QwenLLM
-    - ZhipuLLM
-    - LMStudioLLM
-    - CustomLLM"""
+Every provider here subclasses :class:`OpenAILLM` with a different
+default base URL and API key environment variable: DeepSeek, MiniMax,
+Kimi (Moonshot), Qwen (DashScope), Zhipu (GLM), LMStudio, plus a
+``CustomLLM`` for arbitrary OpenAI-compatible endpoints.
+"""
 
 from __future__ import annotations
 

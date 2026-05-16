@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Context fencing module for Xerxes.
+"""Helpers for wrapping recalled memory in an unspoofable XML-style fence.
 
-Exports:
-    - sanitize_context
-    - build_memory_context_block"""
+When the runtime injects recalled context back into a prompt, we want
+the model to treat it as background data rather than as a fresh user
+turn — otherwise prompt injections that previously slipped into memory
+would re-activate. ``sanitize_context`` strips any pre-existing
+``<memory-context>`` tags out of the recalled text and
+``build_memory_context_block`` wraps the sanitised text in a fresh
+fence with a clarifying system note."""
 
 from __future__ import annotations
 
@@ -25,23 +29,22 @@ _FENCE_TAG_RE = re.compile(r"</?\s*memory-context\s*>", re.IGNORECASE)
 
 
 def sanitize_context(text: str) -> str:
-    """Sanitize context.
+    """Remove any ``<memory-context>`` open/close tags from ``text``.
 
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Strips both the opening and closing variants (case-insensitive,
+    whitespace-tolerant) so an attacker cannot smuggle a forged fence
+    inside recalled memory."""
 
     return _FENCE_TAG_RE.sub("", text)
 
 
 def build_memory_context_block(raw_context: str) -> str:
-    """Build memory context block.
+    """Wrap ``raw_context`` in a sanitised ``<memory-context>`` fence.
 
-    Args:
-        raw_context (str): IN: raw context. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    The returned block carries an explicit system-note instruction
+    telling the model the enclosed text is recalled background, not
+    fresh user input. Returns an empty string when ``raw_context`` is
+    blank."""
 
     if not raw_context or not raw_context.strip():
         return ""

@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Public surface of the Xerxes-Agents package.
+
+Re-exports the core API used by external code and integrators: the
+``Xerxes`` facade, agent orchestration (``Cortex`` and friends), LLM
+provider classes and helpers, MCP integration, memory store types,
+streaming primitives, runtime configuration, and the message/agent
+type system. The ``__all__`` tuple is the authoritative list of names
+considered part of the stable public API.
+"""
 
 from .core import PromptTemplate
 from .core.streamer_buffer import StreamerBuffer

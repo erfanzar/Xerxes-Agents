@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multimodal helpers for image handling in Xerxes.
+"""Image handling for multimodal models.
 
-Provides ``SerializableImage`` — a Pydantic-compatible annotated type that
-can deserialize from base64 strings or bytes and serialize back to base64.
-Also includes helper functions for downloading images from URLs.
+Exposes :data:`SerializableImage` — a Pydantic-compatible ``Annotated``
+alias that accepts a PIL image, raw bytes, or a base64 string on input and
+serialises back to base64 on output. Two helpers cover fetching and decoding
+images from URLs/bytes/strings.
 """
 
 import base64
@@ -28,16 +29,10 @@ from pydantic import BeforeValidator, PlainSerializer, SerializationInfo
 
 
 def download_image(url: str) -> Image.Image:
-    """Download an image from a URL and open it as a PIL Image.
-
-    Args:
-        url (str): IN: image URL.
-
-    Returns:
-        Image.Image: OUT: loaded PIL image.
+    """Fetch ``url`` with a ``Xerxes`` User-Agent and decode it as a PIL image.
 
     Raises:
-        RuntimeError: If the download or image conversion fails.
+        RuntimeError: When the HTTP fetch or image decoding fails.
     """
     headers = {"User-Agent": "Xerxes"}
     try:
@@ -53,16 +48,10 @@ def download_image(url: str) -> Image.Image:
 
 
 def maybe_load_image_from_str_or_bytes(x: Image.Image | str | bytes) -> Image.Image:
-    """Coerce a string, bytes, or existing PIL Image into a PIL Image.
-
-    Args:
-        x (Image.Image | str | bytes): IN: input value.
-
-    Returns:
-        Image.Image: OUT: loaded PIL image.
+    """Coerce a PIL image, raw bytes, or base64 string into a PIL image.
 
     Raises:
-        RuntimeError: If the input cannot be decoded as an image.
+        RuntimeError: When ``x`` can't be decoded.
     """
     if isinstance(x, Image.Image):
         return x
@@ -84,17 +73,7 @@ def maybe_load_image_from_str_or_bytes(x: Image.Image | str | bytes) -> Image.Im
 
 
 def serialize_image_to_byte_str(im: Image.Image, info: SerializationInfo) -> str:
-    """Serialize a PIL Image to a base64-encoded string.
-
-    Args:
-        im (Image.Image): IN: image to serialize.
-        info (SerializationInfo): IN: Pydantic serialization info. OUT: used
-            to read ``max_image_b64_len`` and ``add_format_prefix`` from
-            context.
-
-    Returns:
-        str: OUT: base64-encoded image, optionally truncated or prefixed.
-    """
+    """Encode ``im`` as base64; honour ``max_image_b64_len`` and ``add_format_prefix`` from context."""
     if hasattr(info, "context"):
         context = info.context or {}
     else:

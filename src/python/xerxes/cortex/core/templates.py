@@ -232,21 +232,11 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         self.env = Environment(trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=False)
 
     def render(self, template: str, **kwargs) -> str:
-        """Render a template string with the provided keyword arguments.
+        """Render a Jinja2 template with ``kwargs``, falling back to ``str.format``.
 
-        Falls back to ``str.format()`` if Jinja2 rendering fails.
-
-        Args:
-            template (str): The Jinja2 or plain template string.
-                IN: A template that may contain Jinja2 expressions.
-                OUT: Parsed and rendered with the supplied *kwargs*.
-            **kwargs: Template variables.
-                IN: Named values to substitute into the template.
-                OUT: Passed to the template renderer for substitution.
-
-        Returns:
-            str: The fully rendered template string.
-                OUT: Ready to be sent to an LLM or agent.
+        If Jinja2 raises, the error is printed and the template is rendered
+        again via Python's standard ``str.format`` so callers still get a
+        usable string.
         """
 
         if not self.use_jinja:
@@ -269,32 +259,15 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         rules: list | None = None,
         tools: list | None = None,
     ) -> str:
-        """Render the agent system prompt template.
+        """Render the agent system prompt for one :class:`CortexAgent`.
 
         Args:
-            role (str): The agent's role name.
-                IN: Describes the persona the agent should adopt.
-                OUT: Substituted into the agent template.
-            goal (str): The agent's primary objective.
-                IN: Defines what the agent should accomplish.
-                OUT: Substituted into the agent template.
-            backstory (str): Background context for the agent.
-                IN: Provides narrative context shaping the agent's behavior.
-                OUT: Substituted into the agent template.
-            instructions (str | None): Additional instructions.
-                IN: Optional extra guidance for the agent.
-                OUT: Rendered conditionally in the template.
-            rules (list | None): A list of rule strings.
-                IN: Optional behavioral constraints.
-                OUT: Rendered as a bulleted list in the template.
-            tools (list | None): A list of tool objects.
-                IN: Optional available tools; each should have ``name`` and
-                ``description`` attributes.
-                OUT: Rendered as a tool list in the template.
-
-        Returns:
-            str: The rendered agent prompt.
-                OUT: A complete system prompt for the agent.
+            role: Persona name.
+            goal: Primary objective expressed in one sentence.
+            backstory: Narrative context shaping behaviour.
+            instructions: Additional inline instructions.
+            rules: Bulleted behavioural constraints.
+            tools: Tool objects exposing ``name`` and ``description``.
         """
 
         return self.render(
@@ -314,25 +287,13 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         context: str | None = None,
         constraints: list | None = None,
     ) -> str:
-        """Render the task execution prompt template.
+        """Render the per-task user prompt for one :class:`CortexTask`.
 
         Args:
-            description (str): The task description.
-                IN: Explains what the agent needs to do.
-                OUT: Substituted into the task template.
-            expected_output (str): Description of the desired output.
-                IN: Sets expectations for the result format and content.
-                OUT: Substituted into the task template.
-            context (str | None): Previous task outputs or background.
-                IN: Optional context from earlier steps in a workflow.
-                OUT: Rendered conditionally in the template.
-            constraints (list | None): A list of constraint strings.
-                IN: Optional limitations or requirements for the task.
-                OUT: Rendered as a bulleted list in the template.
-
-        Returns:
-            str: The rendered task prompt.
-                OUT: A prompt ready for agent execution.
+            description: Task statement shown to the agent.
+            expected_output: Description of the desired result.
+            context: Concatenated outputs of upstream tasks, if any.
+            constraints: Bulleted limitations the agent must respect.
         """
 
         return self.render(
@@ -344,20 +305,11 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         )
 
     def render_manager_delegation(self, agents: list, tasks: list) -> str:
-        """Render the manager delegation prompt.
+        """Render the prompt the HIERARCHICAL manager uses to delegate tasks.
 
-        Args:
-            agents (list): List of ``CortexAgent`` instances.
-                IN: Available agents with ``role`` and ``goal`` attributes.
-                OUT: Rendered into the delegation template.
-            tasks (list): List of ``CortexTask`` instances.
-                IN: Tasks to delegate; each should have ``description`` and
-                ``expected_output`` attributes.
-                OUT: Rendered into the delegation template.
-
-        Returns:
-            str: The rendered manager delegation prompt.
-                OUT: A prompt instructing the manager to create an execution plan.
+        The manager is asked to return a JSON execution plan that assigns
+        each task to one agent and identifies dependencies, risks, and
+        optimisations.
         """
 
         return self.render(
@@ -372,22 +324,10 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         task_description: str,
         output: str,
     ) -> str:
-        """Render the manager review prompt.
+        """Render the prompt the HIERARCHICAL manager uses to review output.
 
-        Args:
-            agent_role (str): The role of the agent whose output is being reviewed.
-                IN: Identifies which agent produced the output.
-                OUT: Substituted into the review template.
-            task_description (str): The original task description.
-                IN: Provides context for the review.
-                OUT: Substituted into the review template.
-            output (str): The agent's output to evaluate.
-                IN: The content that the manager should assess.
-                OUT: Substituted into the review template.
-
-        Returns:
-            str: The rendered manager review prompt.
-                OUT: A prompt requesting structured review feedback.
+        The manager grades the output on completeness, quality, accuracy and
+        alignment and returns structured feedback as JSON.
         """
 
         return self.render(
@@ -402,19 +342,11 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         task_description: str,
         agent_outputs: dict[str, str],
     ) -> str:
-        """Render the consensus synthesis prompt.
+        """Render the prompt used by CONSENSUS to synthesise agent outputs.
 
         Args:
-            task_description (str): The task all agents addressed.
-                IN: Describes the shared objective.
-                OUT: Substituted into the consensus template.
-            agent_outputs (dict): Mapping from agent role to output string.
-                IN: Outputs produced by each participating agent.
-                OUT: Rendered as individual agent contributions in the template.
-
-        Returns:
-            str: The rendered consensus prompt.
-                OUT: A prompt asking an agent to synthesize multiple viewpoints.
+            task_description: Shared task every agent worked on.
+            agent_outputs: Map from agent role to that agent's answer.
         """
 
         return self.render(
@@ -429,22 +361,10 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         agents: list,
         context: str = "",
     ) -> str:
-        """Render the strategic planner prompt.
+        """Render the planner prompt for the PLANNED topology.
 
-        Args:
-            objective (str): The high-level objective to plan for.
-                IN: Describes the goal the plan should achieve.
-                OUT: Substituted into the planner template.
-            agents (list): List of available ``CortexAgent`` instances.
-                IN: Agents that can be assigned to plan steps.
-                OUT: Rendered into the planner template with roles and tools.
-            context (str): Additional planning context.
-                IN: Optional background information to guide plan creation.
-                OUT: Rendered in the planner template.
-
-        Returns:
-            str: The rendered planner prompt.
-                OUT: A prompt requesting an XML execution plan.
+        The planner must respond with an XML ``<plan>`` document containing
+        ordered ``<step>`` elements, each assigned to an agent role.
         """
 
         return self.render(
@@ -461,25 +381,13 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         arguments: dict | None = None,
         context: str = "",
     ) -> str:
-        """Render the step execution prompt.
+        """Render the per-step execution prompt for a planner-generated step.
 
         Args:
-            action (str): The action name for this step.
-                IN: Describes what operation to perform.
-                OUT: Substituted into the step execution template.
-            description (str): A detailed description of the step.
-                IN: Explains the purpose and requirements of the step.
-                OUT: Substituted into the step execution template.
-            arguments (dict | None): Key-value arguments for the step.
-                IN: Optional structured inputs for the action.
-                OUT: Rendered as a list in the template.
-            context (str): Output from previous steps.
-                IN: Optional upstream results to inform execution.
-                OUT: Rendered conditionally in the template.
-
-        Returns:
-            str: The rendered step execution prompt.
-                OUT: A prompt tailored to a single plan step.
+            action: Action name (e.g. ``research``, ``write``, ``analyse``).
+            description: Long-form description of what the step accomplishes.
+            arguments: Optional structured inputs threaded into the prompt.
+            context: Concatenated output from prior steps.
         """
 
         return self.render(
@@ -491,17 +399,10 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         )
 
     def create_custom_template(self, template_string: str) -> Template | None:
-        """Compile a custom Jinja2 template string.
+        """Compile a user-supplied Jinja2 template string.
 
-        Args:
-            template_string (str): A raw Jinja2 template.
-                IN: User-defined template content.
-                OUT: Parsed into a Jinja2 ``Template`` object.
-
-        Returns:
-            Template | None: A compiled template if Jinja2 is enabled;
-                otherwise ``None``.
-                OUT: Ready for rendering with arbitrary variables.
+        Returns ``None`` when Jinja2 support has been disabled on this
+        :class:`PromptTemplate` instance.
         """
 
         if not self.use_jinja:
@@ -509,16 +410,10 @@ Execute this step thoroughly and provide a clear result that can be used by subs
         return self.env.from_string(template_string)
 
     def get_template_variables(self, template_string: str) -> set:
-        """Extract all undeclared variables from a template string.
+        """Return the set of undeclared Jinja2 variables in a template.
 
-        Args:
-            template_string (str): A Jinja2 template to analyze.
-                IN: Template text that may contain variable references.
-                OUT: Parsed by Jinja2 to find variable names.
-
-        Returns:
-            set: The set of undeclared variable names.
-                OUT: Empty set if Jinja2 is disabled or no variables are found.
+        Returns the empty set if Jinja2 support has been disabled on this
+        :class:`PromptTemplate` instance.
         """
 
         if not self.use_jinja:

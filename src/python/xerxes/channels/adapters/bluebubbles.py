@@ -13,7 +13,9 @@
 # limitations under the License.
 """BlueBubbles channel adapter.
 
-Connects to a self-hosted BlueBubbles server for iMessage bridging.
+Talks to a self-hosted BlueBubbles server (macOS-side iMessage relay).
+Parses inbound webhook payloads and sends iMessage replies through the
+``/api/v1/message/text`` endpoint using the configured server password.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class BlueBubblesChannel(WebhookChannel):
-    """Channel implementation for BlueBubbles iMessage bridge."""
+    """BlueBubbles iMessage-bridge adapter."""
 
     name = "bluebubbles"
 
@@ -36,15 +38,14 @@ class BlueBubblesChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the BlueBubbles channel.
+        """Build the channel.
 
         Args:
-            server_url (str): IN: base URL of the BlueBubbles server.
-                OUT: stored with trailing slash removed.
-            password (str): IN: server API password.
-                OUT: stored for authenticating outbound requests.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            server_url: BlueBubbles server base URL; trailing ``/`` stripped.
+            password: Server API password (sent as a URL query parameter
+                on outbound calls — treat as a shared secret).
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.server_url = server_url.rstrip("/")
@@ -52,14 +53,19 @@ class BlueBubblesChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a BlueBubbles webhook payload into ``ChannelMessage``.
+        """Translate a BlueBubbles webhook into ``ChannelMessage``.
+
+        Tolerates payloads with or without a top-level ``data`` wrapper,
+        and either a ``chats`` list or a single ``chat`` dict. Drops
+        messages with empty text (e.g. attachment-only iMessages we cannot
+        yet handle).
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or empty when there is no body text.
         """
         data = parse_json_body(body)
         if not data:
@@ -82,11 +88,14 @@ class BlueBubblesChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a text message via the BlueBubbles API.
+        """Send one text iMessage through the BlueBubbles ``message/text`` endpoint.
+
+        Uses ``method=private-api`` so the BlueBubbles server routes through
+        the macOS private-message API rather than AppleScript fallbacks.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` is used
-                as the target chat GUID and ``text`` as the message body.
+            message: Outbound message. ``room_id`` is the iMessage chat GUID
+                and ``text`` the body.
         """
         url = f"{self.server_url}/api/v1/message/text?password={self.password}"
         body = {"chatGuid": message.room_id, "message": message.text, "method": "private-api"}

@@ -31,14 +31,14 @@ class CompactionAgent:
     """
 
     def __init__(self, llm_client: Any, target_length: str = "concise"):
-        """Initialize the compaction agent.
+        """Build the agent.
 
         Args:
-            llm_client (Any): IN: LLM client with a ``generate_completion`` method.
-                OUT: Stored and used for summarization calls.
-            target_length (str): IN: Desired summary length key (``"brief"``,
-                ``"concise"``, or ``"detailed"``). OUT: Selects the instruction
-                prompt used during summarization.
+            llm_client: LLM client exposing ``generate_completion``. Falls
+                back to :meth:`_fallback_truncate` when the client lacks it
+                or raises.
+            target_length: One of ``"brief"``, ``"concise"``, ``"detailed"``;
+                selects the instruction prompt sent to the LLM.
         """
         self.llm_client = llm_client
         self.target_length = target_length
@@ -56,17 +56,12 @@ class CompactionAgent:
         }
 
     def summarize_context(self, context: str, preserve_topics: list[str] | None = None) -> str:
-        """Summarize a raw context string.
+        """Summarise ``context`` via the configured LLM, with a truncate fallback.
 
-        Args:
-            context (str): IN: The full context text to summarize. OUT: Passed to
-                the LLM prompt or fallback truncation.
-            preserve_topics (list[str] | None): IN: Optional topics that must be
-                preserved in the summary. OUT: Added to the prompt if provided.
-
-        Returns:
-            str: OUT: The summarized text, or the original context if it is too
-                short or summarization fails.
+        Contexts under 200 characters are returned unchanged. If the LLM
+        client lacks ``generate_completion`` or any call raises, the helper
+        falls back to head+tail truncation. ``preserve_topics`` is woven
+        into the prompt so the LLM is told what must not be dropped.
         """
         if not context or len(context) < 200:
             return context
@@ -133,17 +128,12 @@ COMPACTED SUMMARY:"""
         messages: list[dict[str, str]],
         preserve_recent: int = 3,
     ) -> list[dict[str, str]]:
-        """Summarize older messages in a conversation, preserving recent ones.
+        """Replace older messages with a single summary, keeping system + recent.
 
-        Args:
-            messages (list[dict[str, str]]): IN: Full message list. OUT: Split
-                into older and recent subsets for selective summarization.
-            preserve_recent (int): IN: Number of most recent non-system messages
-                to keep verbatim. OUT: Determines the split point.
-
-        Returns:
-            list[dict[str, str]]: OUT: Messages with older content replaced by
-                a summary message.
+        System messages always pass through verbatim. The most recent
+        ``preserve_recent`` non-system messages are kept; everything older
+        is concatenated, summarised via :meth:`summarize_context`, and
+        inserted as one synthetic ``user`` message.
         """
         if len(messages) <= preserve_recent + 1:
             return messages
@@ -177,15 +167,7 @@ COMPACTED SUMMARY:"""
         return compacted
 
     def _fallback_truncate(self, context: str, max_chars: int) -> str:
-        """Truncate context as a last-resort fallback.
-
-        Args:
-            context (str): IN: The text to truncate. OUT: Sliced into head and tail.
-            max_chars (int): IN: Maximum character budget. OUT: Determines split size.
-
-        Returns:
-            str: OUT: Truncated text with a ``[TRUNCATED ...]`` marker.
-        """
+        """Keep ``max_chars/2`` from the head and tail with a ``[TRUNCATED]`` marker."""
         if len(context) <= max_chars:
             return context
 
@@ -194,15 +176,5 @@ COMPACTED SUMMARY:"""
 
 
 def create_compaction_agent(llm_client: Any, target_length: str = "concise") -> CompactionAgent:
-    """Factory function for creating a :class:`CompactionAgent`.
-
-    Args:
-        llm_client (Any): IN: LLM client for summarization. OUT: Passed to the
-            agent constructor.
-        target_length (str): IN: Desired summary length key. OUT: Passed to the
-            agent constructor.
-
-    Returns:
-        CompactionAgent: OUT: A configured compaction agent instance.
-    """
+    """Construct a :class:`CompactionAgent` (thin convenience factory)."""
     return CompactionAgent(llm_client=llm_client, target_length=target_length)

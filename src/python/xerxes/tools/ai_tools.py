@@ -267,6 +267,7 @@ class TextSimilarity(AgentBaseFn):
             result["common_words"] = list(intersection)[:20]
 
         elif method == "levenshtein":
+
             def levenshtein_distance(s1: str, s2: str) -> int:
                 """Calculate the minimum number of single-character edits.
 

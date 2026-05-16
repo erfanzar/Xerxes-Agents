@@ -11,15 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Models module for Xerxes.
+"""On-disk session record schema and versioning.
 
-Exports:
-    - SessionId
-    - WorkspaceId
-    - ToolCallRecord
-    - TurnRecord
-    - AgentTransitionRecord
-    - SessionRecord"""
+Dataclasses here describe the wire format the session store reads and writes.
+Every shape change must bump :data:`CURRENT_SCHEMA_VERSION` and register a
+migration in :mod:`xerxes.session.migrations` — old records are upgraded on
+load, never downgraded.
+
+The :class:`SessionRecord` is the top of the tree: it owns an ordered list of
+:class:`TurnRecord` (user prompt + agent response + tool calls) and
+:class:`AgentTransitionRecord` (handoffs between agents during a session).
+"""
 
 from __future__ import annotations
 
@@ -30,21 +32,26 @@ SessionId = tp.NewType("SessionId", str)
 
 WorkspaceId = tp.NewType("WorkspaceId", str)
 
+# Bump when the on-disk shape of SessionRecord changes. Each bump must add a
+# migration in xerxes.session.migrations. Forward-only — no downgrades.
+CURRENT_SCHEMA_VERSION = 1
+
 
 @dataclass
 class ToolCallRecord:
-    """Tool call record.
+    """One tool invocation captured inside a turn.
 
     Attributes:
-        call_id (str): call id.
-        tool_name (str): tool name.
-        arguments (dict[str, tp.Any]): arguments.
-        result (tp.Any): result.
-        status (str): status.
-        error (str | None): error.
-        duration_ms (float | None): duration ms.
-        sandbox_context (str | None): sandbox context.
-        metadata (dict[str, tp.Any]): metadata."""
+        call_id: Provider-supplied call id (matches the ``ToolStart`` event).
+        tool_name: Registered tool name (e.g. ``"Bash"``, ``"Read"``).
+        arguments: JSON-serialisable input the tool was called with.
+        result: Tool result; may be any JSON value or ``None``.
+        status: ``"success"``, ``"error"``, ``"denied"`` etc.
+        error: Error message when ``status`` is not success.
+        duration_ms: Wall-clock duration spent executing the tool.
+        sandbox_context: Sandbox label that gated the call, if any.
+        metadata: Free-form ancillary data (audit ids, permission decisions).
+    """
 
     call_id: str
     tool_name: str
@@ -57,12 +64,7 @@ class ToolCallRecord:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready shallow copy."""
 
         return {
             "call_id": self.call_id,
@@ -78,13 +80,7 @@ class ToolCallRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> ToolCallRecord:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            ToolCallRecord: OUT: Result of the operation."""
+        """Reconstruct a record from a JSON-decoded dict."""
 
         return cls(
             call_id=data["call_id"],
@@ -101,20 +97,22 @@ class ToolCallRecord:
 
 @dataclass
 class TurnRecord:
-    """Turn record.
+    """One user-prompt → agent-response cycle.
 
     Attributes:
-        turn_id (str): turn id.
-        agent_id (str | None): agent id.
-        prompt (str): prompt.
-        response_content (str | None): response content.
-        tool_calls (list[ToolCallRecord]): tool calls.
-        started_at (str): started at.
-        ended_at (str | None): ended at.
-        status (str): status.
-        error (str | None): error.
-        audit_event_ids (list[str]): audit event ids.
-        metadata (dict[str, tp.Any]): metadata."""
+        turn_id: Unique id for this turn within a session.
+        agent_id: Agent that ran the turn (``None`` for system turns).
+        prompt: Raw text the user (or parent agent) sent.
+        response_content: Final assistant text; ``None`` if the turn ended
+            before a textual response was produced.
+        tool_calls: Tool invocations made while answering, in order.
+        started_at: ISO-8601 timestamp when the turn began.
+        ended_at: ISO-8601 timestamp when the turn finished, if it did.
+        status: ``"success"``, ``"error"``, ``"cancelled"``, etc.
+        error: Error message when ``status`` is not success.
+        audit_event_ids: Linked audit log event ids for correlation.
+        metadata: Free-form per-turn metadata (model name, token counts).
+    """
 
     turn_id: str
     agent_id: str | None = None
@@ -129,12 +127,7 @@ class TurnRecord:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready shallow copy of the turn."""
 
         return {
             "turn_id": self.turn_id,
@@ -152,13 +145,7 @@ class TurnRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> TurnRecord:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            TurnRecord: OUT: Result of the operation."""
+        """Reconstruct a turn from a JSON-decoded dict."""
 
         return cls(
             turn_id=data["turn_id"],
@@ -177,14 +164,15 @@ class TurnRecord:
 
 @dataclass
 class AgentTransitionRecord:
-    """Agent transition record.
+    """Marker recorded when one agent hands control to another mid-session.
 
     Attributes:
-        from_agent (str | None): from agent.
-        to_agent (str): to agent.
-        reason (str | None): reason.
-        turn_id (str): turn id.
-        timestamp (str): timestamp."""
+        from_agent: Agent id we are leaving (``None`` for the initial entry).
+        to_agent: Agent id taking over.
+        reason: Optional human-readable reason for the switch.
+        turn_id: Turn during which the transition occurred.
+        timestamp: ISO-8601 timestamp of the transition.
+    """
 
     from_agent: str | None
     to_agent: str
@@ -193,12 +181,7 @@ class AgentTransitionRecord:
     timestamp: str = ""
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready shallow copy."""
 
         return {
             "from_agent": self.from_agent,
@@ -210,13 +193,7 @@ class AgentTransitionRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> AgentTransitionRecord:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            AgentTransitionRecord: OUT: Result of the operation."""
+        """Reconstruct from a JSON-decoded dict."""
 
         return cls(
             from_agent=data.get("from_agent"),
@@ -229,17 +206,25 @@ class AgentTransitionRecord:
 
 @dataclass
 class SessionRecord:
-    """Session record.
+    """Root persistence object — one entry per conversation.
+
+    The session is the unit of replay, search, and branching. Forks set
+    :attr:`parent_session_id` so lineage can be walked, and
+    :attr:`schema_version` lets the loader run forward-only migrations on
+    older payloads without manual intervention.
 
     Attributes:
-        session_id (str): session id.
-        workspace_id (str | None): workspace id.
-        created_at (str): created at.
-        updated_at (str): updated at.
-        agent_id (str | None): agent id.
-        turns (list[TurnRecord]): turns.
-        agent_transitions (list[AgentTransitionRecord]): agent transitions.
-        metadata (dict[str, tp.Any]): metadata."""
+        session_id: Unique id (typically a UUID hex).
+        workspace_id: Workspace this conversation lives in, or ``None``.
+        created_at: ISO-8601 timestamp set at creation.
+        updated_at: ISO-8601 timestamp refreshed on every mutation.
+        agent_id: Initial agent that owns the session.
+        turns: All recorded turns in order.
+        agent_transitions: Agent handoff markers across the session.
+        metadata: Free-form metadata (title, ``ended`` flag, etc.).
+        parent_session_id: If this session was branched, points at its source.
+        schema_version: On-disk schema version of this record.
+    """
 
     session_id: str
     workspace_id: str | None = None
@@ -249,16 +234,14 @@ class SessionRecord:
     turns: list[TurnRecord] = field(default_factory=list)
     agent_transitions: list[AgentTransitionRecord] = field(default_factory=list)
     metadata: dict[str, tp.Any] = field(default_factory=dict)
+    parent_session_id: str | None = None
+    schema_version: int = CURRENT_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready snapshot including nested records."""
 
         return {
+            "schema_version": self.schema_version,
             "session_id": self.session_id,
             "workspace_id": self.workspace_id,
             "created_at": self.created_at,
@@ -267,17 +250,12 @@ class SessionRecord:
             "turns": [t.to_dict() for t in self.turns],
             "agent_transitions": [at.to_dict() for at in self.agent_transitions],
             "metadata": dict(self.metadata),
+            "parent_session_id": self.parent_session_id,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> SessionRecord:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            SessionRecord: OUT: Result of the operation."""
+        """Reconstruct a session from a (possibly migrated) JSON dict."""
 
         return cls(
             session_id=data["session_id"],
@@ -288,4 +266,6 @@ class SessionRecord:
             turns=[TurnRecord.from_dict(t) for t in data.get("turns", [])],
             agent_transitions=[AgentTransitionRecord.from_dict(at) for at in data.get("agent_transitions", [])],
             metadata=data.get("metadata", {}),
+            parent_session_id=data.get("parent_session_id"),
+            schema_version=data.get("schema_version", CURRENT_SCHEMA_VERSION),
         )

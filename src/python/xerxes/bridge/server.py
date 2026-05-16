@@ -11,14 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Xerxes bridge server for JSON-RPC over stdio.
+"""Stdio JSON-RPC bridge hosting the agent runtime in-process.
 
-This module provides :class:`BridgeServer`, which reads JSON-RPC messages from
-standard input, dispatches them to handlers (init, query, slash commands, etc.),
-and emits events back over standard output. It supports both a legacy flat-event
-protocol and a Kimi-Code-compatible wire protocol.
+:class:`BridgeServer` reads newline-delimited JSON-RPC messages from
+``stdin``, dispatches them to handlers (``init``, ``query``, ``slash``,
+``cancel``, provider/profile CRUD, ...), and emits events back on ``stdout``
+under one of two protocols:
 
-Main entry point: :func:`main`
+* **Legacy** ``{event, data}`` flat objects — what older Xerxes clients expect.
+* **Wire** mode — Kimi-Code-compatible JSON-RPC 2.0 NDJSON with
+  ``method=event`` / ``method=request`` frames so the same TUI can talk to
+  Kimi and Xerxes interchangeably.
+
+The bridge owns the same streaming loop the daemon uses, plus per-session
+JSON persistence under ``$XERXES_HOME/sessions``, the skill authoring
+pipeline, and inline auto-compaction when the conversation exceeds 75% of
+the model context window. :func:`main` is the console-script entry point.
 """
 
 from __future__ import annotations
@@ -63,22 +71,50 @@ from . import profiles
 logger = logging.getLogger(__name__)
 
 
-class BridgeServer:
-    """JSON-RPC bridge server handling agent lifecycle over stdio.
+def _normalize_interaction_mode(mode: Any, *, plan_mode: bool = False) -> str:
+    """Coerce assorted mode labels (``coder``, ``research``, ...) to ``code``/``researcher``/``plan``."""
+    if plan_mode:
+        return "plan"
+    value = str(mode or "code").strip().lower()
+    aliases = {
+        "": "code",
+        "coding": "code",
+        "coder": "code",
+        "research": "researcher",
+        "researcher": "researcher",
+        "plan": "plan",
+        "planner": "plan",
+    }
+    return aliases.get(value, "code")
 
-    Manages session state, tool execution, skill registry, context compaction,
-    and wire-protocol event emission.
+
+def _agent_name_for_mode(mode: str) -> str:
+    """Map an interaction mode to its YAML agent definition (``planner``/``researcher``/``coder``)."""
+    if mode == "plan":
+        return "planner"
+    if mode == "researcher":
+        return "researcher"
+    return "coder"
+
+
+class BridgeServer:
+    """Stdio JSON-RPC server hosting one in-process agent session.
+
+    Owns the conversation state (:class:`AgentState`), the tool executor and
+    schema list, the cost tracker, the active skill registry, the sub-agent
+    event aggregator, and the per-session resume / replay machinery. Frame
+    emission is dual-mode: the legacy ``{event, data}`` shape and the Kimi
+    wire-protocol JSON-RPC frames are toggled by ``wire_mode``.
     """
 
     SESSIONS_DIR = xerxes_subdir("sessions")
 
     def __init__(self, wire_mode: bool = False) -> None:
-        """Initialize the bridge server.
+        """Build state, registries, and IO locks.
 
         Args:
-            wire_mode (bool): IN: Whether to use the Kimi-Code-compatible wire
-                protocol instead of the legacy flat-event protocol. OUT: Controls
-                event formatting and emission behavior.
+            wire_mode: When true, emit Kimi-compatible JSON-RPC 2.0 NDJSON
+                instead of the legacy flat ``{event, data}`` shape.
         """
         self.config: dict[str, Any] = {}
         self.state = AgentState()
@@ -137,12 +173,11 @@ class BridgeServer:
         self._pending_tool_inputs: dict[str, Any] | None = None
 
     def _emit(self, event: str, data: dict[str, Any] | None = None) -> None:
-        """Emit a legacy flat-event message to stdout.
+        """Emit a legacy ``{event, data}`` line on stdout.
 
-        Args:
-            event (str): IN: Event type name. OUT: Used as the ``"event"`` key.
-            data (dict[str, Any] | None): IN: Event payload. OUT: Serialized to
-                JSON and written.
+        In wire mode, ``slash_result`` events are reflected as
+        ``category="slash"`` notifications instead; other event names are
+        dropped (wire mode already emits them through ``_emit_wire_*``).
         """
         if self._wire_mode:
             if event == "slash_result":
@@ -162,11 +197,7 @@ class BridgeServer:
             self._stdout.flush()
 
     def _emit_error(self, message: str) -> None:
-        """Emit an error event.
-
-        Args:
-            message (str): IN: Error message text. OUT: Formatted and emitted.
-        """
+        """Emit ``message`` as an error event (or wire ``severity=error`` notification)."""
         if self._wire_mode:
             self._emit_wire_notification(
                 notification_id=str(uuid.uuid4()),
@@ -180,7 +211,7 @@ class BridgeServer:
         self._emit("error", {"message": message})
 
     def _emit_state(self) -> None:
-        """Emit the current conversation state (legacy protocol)."""
+        """Emit a legacy ``state`` event summarising tokens, cost, and message count."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
         total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
@@ -205,11 +236,11 @@ class BridgeServer:
         )
 
     def _emit_text(self, text: str) -> None:
-        """Emit a text chunk, suppressing function call tags (legacy protocol).
+        """Emit a legacy ``text_chunk`` event, eliding any ``<function=...>...</function>`` payloads.
 
-        Args:
-            text (str): IN: Raw text output. OUT: Filtered for ``<function=...>``
-                tags before emission.
+        Tool calls some providers stream as inline ``<function>`` blocks would
+        otherwise leak into the rendered transcript; this stateful filter
+        buffers across chunks until the closing tag arrives.
         """
         if self._suppressing_tag:
             self._suppress_buf.append(text)
@@ -247,21 +278,27 @@ class BridgeServer:
         self._emit("text_chunk", {"text": text})
 
     def _on_agent_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Handle an internal agent event by emitting it.
+        """Handle a runtime callback event (mode change, sub-agent activity, ...).
 
-        Args:
-            event_type (str): IN: Event type. OUT: Passed to emission.
-            data (dict[str, Any]): IN: Event payload. OUT: Passed to emission.
+        Re-emits the event on both protocols and, for ``agent_*`` events in
+        wire mode, calls :meth:`_emit_subagent_summary` so the TUI sees the
+        chatty stream folded into compact preview notifications.
         """
+        if event_type == "interaction_mode_changed":
+            mode = _normalize_interaction_mode(data.get("mode"), plan_mode=bool(data.get("plan_mode", False)))
+            self.config["mode"] = mode
+            self.config["plan_mode"] = mode == "plan"
+            set_global_config(self.config)
+            if self._wire_mode:
+                self._emit_wire_status()
+            self._emit(event_type, {**data, "mode": mode, "plan_mode": mode == "plan"})
+            return
         self._emit(event_type, data)
         if self._wire_mode and event_type.startswith("agent_"):
             self._emit_subagent_summary(event_type, data)
 
     def _replay_history_to_wire(self) -> None:
-        """Replay session message history as wire notifications.
-
-        Emits each user and assistant message as a history replay notification.
-        """
+        """Emit prior turns as ``category="history"`` wire notifications, ending with a ``resumed`` marker."""
         count = 0
         for msg in self.state.messages:
             role = (msg.get("role") or "").lower()
@@ -311,18 +348,13 @@ class BridgeServer:
         )
 
     def _emit_subagent_summary(self, event_type: str, data: dict[str, Any]) -> None:
-        """Emit wire events summarizing a sub-agent event.
+        """Fold ``agent_*`` events into compact wire summaries.
 
-        Text and thinking chunks are aggregated per-task and flushed on natural
-        boundaries (paragraph breaks, threshold size, tool calls, completion) so
-        the TUI sees coherent prose rather than per-token noise. Sub-agent tool
-        calls are additionally wrapped in ``SubagentEvent`` so they nest under
-        the parent ``AgentTool`` block in the TUI.
-
-        Args:
-            event_type (str): IN: Sub-agent event type (e.g., ``"agent_spawn"``). OUT:
-                Determines the notification body format.
-            data (dict[str, Any]): IN: Event payload. OUT: Used to build the summary.
+        Text and thinking chunks accumulate in per-task rolling buffers and
+        flush on paragraph breaks, threshold size, tool boundaries, or
+        completion so the TUI sees coherent prose instead of per-token noise.
+        Sub-agent tool calls are additionally wrapped in ``subagent_event`` so
+        they nest under the parent ``AgentTool`` block.
         """
         agent_name = data.get("agent_name") or data.get("agent_type") or "subagent"
         agent_type = data.get("agent_type") or ""
@@ -387,19 +419,12 @@ class BridgeServer:
     SUBAGENT_PREVIEW_CHARS = 100
 
     def _stream_subagent_chunk(self, task_id: str, prefix: str, text: str, *, kind: str) -> None:
-        """Update the live preview line for a sub-agent with a new text/thinking chunk.
+        """Update the rolling preview tail shown for ``task_id``.
 
-        Accumulates the per-task text in a rolling buffer (capped at
-        ``SUBAGENT_PREVIEW_CHARS`` so it never grows unbounded) and emits a
-        single ``subagent_stream`` notification carrying the latest tail. The
-        TUI replaces the previous preview line for the same task — nothing is
-        appended to the conversation history.
-
-        Args:
-            task_id (str): IN: Task identifier the chunk belongs to.
-            prefix (str): IN: Display prefix (``agent#shortid``).
-            text (str): IN: Raw chunk text. Empty chunks are ignored.
-            kind (str): IN: ``"text"`` or ``"thinking"``.
+        Per-task buffers are capped at twice :attr:`SUBAGENT_PREVIEW_CHARS`;
+        emits a single ``subagent_stream`` notification with the latest tail.
+        ``kind`` is ``"text"`` or ``"thinking"`` and selects which buffer to
+        update.
         """
         if not text or not task_id:
             return
@@ -419,15 +444,7 @@ class BridgeServer:
         self._emit_subagent_stream(task_id, f"{prefix}{label_suffix}", tail)
 
     def _emit_subagent_stream(self, task_id: str, label: str, body: str) -> None:
-        """Emit a transient ``subagent_stream`` notification for the live preview.
-
-        An empty ``body`` signals the TUI to clear the preview for ``task_id``.
-
-        Args:
-            task_id (str): IN: Sub-agent task identifier.
-            label (str): IN: Display label shown in the preview line.
-            body (str): IN: Latest preview content. Empty string clears the line.
-        """
+        """Emit one transient preview notification for ``task_id`` (empty ``body`` clears it)."""
         self._emit_wire_notification(
             notification_id=str(uuid.uuid4()),
             category="subagent_stream",
@@ -446,24 +463,12 @@ class BridgeServer:
         *,
         kind: str,
     ) -> bool:
-        """Emit a ``subagent_event`` wrapping a sub-agent's inner tool call/result.
+        """Wrap a sub-agent's inner tool call/result in a nested ``subagent_event``.
 
-        The TUI uses ``parent_tool_call_id`` to nest the inner call inside the
-        parent ``AgentTool`` block. Returns ``True`` if the event was emitted
-        with a known parent (so the caller can suppress the chronological
-        fallback notification), or ``False`` if the parent or inner tool-call
-        id is missing — in which case the caller should fall back to a flat
-        notification so the user still sees activity.
-
-        Args:
-            task_id (str): IN: Sub-agent task identifier.
-            agent_type (str): IN: Agent definition name (e.g., ``"coder"``).
-            data (dict[str, Any]): IN: Original ``agent_tool_*`` payload.
-            kind (str): IN: ``"start"`` or ``"end"``.
-
-        Returns:
-            bool: OUT: ``True`` if the inline nested event was emitted with a
-                resolvable parent block; ``False`` otherwise.
+        The TUI uses ``parent_tool_call_id`` to render the inner call inside
+        the parent ``AgentTool`` block. ``kind`` is ``"start"`` or ``"end"``.
+        Returns ``True`` when the nested event was emitted with both ids; the
+        caller can then suppress the flat fallback notification.
         """
         with self._subagent_buffer_lock:
             parent_id = self._subagent_parent_tool.get(task_id) or self._current_tool_call_id
@@ -521,13 +526,7 @@ class BridgeServer:
         return True
 
     def _emit_wire_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Emit a wire-protocol event (JSON-RPC method call).
-
-        Args:
-            event_type (str): IN: Internal event type. OUT: Mapped to a Kimi event
-                name via :func:`to_kimi_event_name`.
-            payload (dict[str, Any]): IN: Event payload. OUT: Wrapped in JSON-RPC.
-        """
+        """Write one ``method=event`` JSON-RPC frame, mapping ``event_type`` through :func:`to_kimi_event_name`."""
         if not self._wire_mode:
             return
         msg = {
@@ -549,14 +548,7 @@ class BridgeServer:
         request_type: str,
         payload: dict[str, Any],
     ) -> None:
-        """Emit a wire-protocol request (JSON-RPC with id).
-
-        Args:
-            request_id (str): IN: Unique request identifier. OUT: Included in the
-                JSON-RPC message.
-            request_type (str): IN: Request type. OUT: Mapped to a Kimi event name.
-            payload (dict[str, Any]): IN: Request payload. OUT: Wrapped in JSON-RPC.
-        """
+        """Write one ``method=request`` frame the TUI is expected to respond to."""
         if not self._wire_mode:
             return
         msg = {
@@ -574,30 +566,17 @@ class BridgeServer:
                 pass
 
     def _emit_wire_turn_begin(self, user_input: str) -> None:
-        """Emit a wire turn-begin event.
-
-        Args:
-            user_input (str): IN: The user's input text. OUT: Wrapped in a wire event.
-        """
+        """Mark the start of a new turn carrying ``user_input`` as a text part."""
         self._emit_wire_event("turn_begin", {"user_input": [{"type": "text", "text": user_input}]})
         self._step_count = 0
 
     def _emit_wire_step_begin(self, n: int) -> None:
-        """Emit a wire step-begin event.
-
-        Args:
-            n (int): IN: Step number. OUT: Included in the event payload and stored.
-        """
+        """Mark the start of step ``n`` and remember it for subsequent events."""
         self._emit_wire_event("step_begin", {"n": n})
         self._step_count = n
 
     def _emit_wire_text(self, text: str) -> None:
-        """Emit a text chunk via the wire protocol, suppressing function tags.
-
-        Args:
-            text (str): IN: Raw text output. OUT: Filtered and emitted as wire
-                text parts.
-        """
+        """Emit one ``text_part`` event, eliding inline ``<function>`` payloads."""
         if self._suppressing_tag:
             self._suppress_buf.append(text)
             joined = "".join(self._suppress_buf)
@@ -634,25 +613,15 @@ class BridgeServer:
         self._emit_wire_event("text_part", {"text": text})
 
     def _emit_wire_think(self, think: str) -> None:
-        """Emit a thinking chunk via the wire protocol.
-
-        Args:
-            think (str): IN: Thinking text. OUT: Emitted as a ``think_part`` event.
-        """
+        """Emit one ``think_part`` event carrying a thinking-stream chunk."""
         self._emit_wire_event("think_part", {"think": think})
 
     def _emit_wire_tool_start(self, tool_call_id: str, name: str, arguments: dict[str, Any]) -> None:
-        """Emit a tool start event via the wire protocol.
+        """Emit a ``tool_call`` start event, synthesising an id if the provider omits one.
 
-        Args:
-            tool_call_id (str): IN: Unique tool call identifier. OUT: Stored and
-                included in the event. If empty/None (some providers omit IDs),
-                a synthetic ``call_<uuid12>`` id is generated so downstream
-                consumers (TUI tool blocks, sub-agent nesting) always have a
-                stable key to correlate on.
-            name (str): IN: Tool name. OUT: Included in the event.
-            arguments (dict[str, Any]): IN: Tool arguments. OUT: JSON-serialized
-                and included.
+        Some upstreams (e.g. raw OpenAI streams) don't supply a tool call id;
+        in that case a stable ``call_<uuid12>`` is generated so the TUI's tool
+        blocks and the sub-agent nester can correlate later events.
         """
         if not tool_call_id:
             tool_call_id = f"call_{uuid.uuid4().hex[:12]}"
@@ -663,12 +632,7 @@ class BridgeServer:
         )
 
     def _emit_wire_tool_args_part(self, arguments_part: str) -> None:
-        """Emit a partial tool arguments update via the wire protocol.
-
-        Args:
-            arguments_part (str): IN: Partial arguments string. OUT: Emitted as a
-                ``tool_call_part`` event.
-        """
+        """Emit a streaming ``tool_call_part`` delta with an argument fragment."""
         self._emit_wire_event("tool_call_part", {"arguments_part": arguments_part})
 
     def _emit_wire_tool_result(
@@ -678,16 +642,7 @@ class BridgeServer:
         permitted: bool = True,
         duration_ms: float = 0.0,
     ) -> None:
-        """Emit a tool result event via the wire protocol.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Included in the event.
-            return_value (str): IN: Tool return value. OUT: Included in the event.
-            permitted (bool): IN: Whether the tool was permitted. OUT: Currently
-                not included in the wire payload.
-            duration_ms (float): IN: Tool execution duration. OUT: Included in
-                the wire payload for TUI rendering.
-        """
+        """Emit a ``tool_result`` event finishing the call with ``return_value`` and a duration."""
         if not tool_call_id:
             tool_call_id = self._current_tool_call_id
         self._emit_wire_event(
@@ -706,16 +661,7 @@ class BridgeServer:
         name: str,
         description: str,
     ) -> str:
-        """Emit a permission approval request via the wire protocol.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Included in the request.
-            name (str): IN: Action name. OUT: Included in the request.
-            description (str): IN: Action description. OUT: Included in the request.
-
-        Returns:
-            str: OUT: The generated request ID.
-        """
+        """Emit an ``approval_request`` and return the generated request id the TUI must echo."""
         request_id = str(uuid.uuid4())
         self._emit_wire_request(
             request_id,
@@ -733,15 +679,7 @@ class BridgeServer:
         self,
         questions: list[dict[str, Any]],
     ) -> str:
-        """Emit a question request via the wire protocol.
-
-        Args:
-            questions (list[dict[str, Any]]): IN: List of question dicts. OUT:
-                Included in the request payload.
-
-        Returns:
-            str: OUT: The generated request ID.
-        """
+        """Emit a ``question_request`` and return its id; ``questions`` is the wire shape."""
         request_id = str(uuid.uuid4())
         self._emit_wire_request(
             request_id,
@@ -751,7 +689,7 @@ class BridgeServer:
         return request_id
 
     def _emit_wire_init_done(self) -> None:
-        """Emit the initialization complete event via the wire protocol."""
+        """Emit ``init_done`` summarising model, session id, cwd, branch, and discovered skills."""
         model = self.config.get("model", "")
         agent_defs = self.config.get("_agent_definitions") or []
         agent_name = "default" if "default" in agent_defs else (agent_defs[0] if agent_defs else "agent")
@@ -770,11 +708,7 @@ class BridgeServer:
 
     @staticmethod
     def _git_branch() -> str:
-        """Return the current git branch name.
-
-        Returns:
-            str: OUT: Branch name, or empty string if not in a git repository.
-        """
+        """Return the current branch name, or empty string when not in a git repo."""
         try:
             import subprocess
 
@@ -788,7 +722,7 @@ class BridgeServer:
             return ""
 
     def _emit_wire_status(self) -> None:
-        """Emit a status update event via the wire protocol."""
+        """Emit a ``status_update`` summarising token usage and the active mode."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
         total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
@@ -799,7 +733,51 @@ class BridgeServer:
                 "max_context": context_limit,
                 "mcp_status": {},
                 "plan_mode": self.config.get("plan_mode", False),
+                "mode": self.config.get("mode", "code"),
             },
+        )
+
+    def _agent_definition_for_mode(self, mode: str) -> Any:
+        """Look up the YAML agent definition for ``mode`` or return ``None``."""
+        try:
+            from ..agents.definitions import get_agent_definition
+
+            return get_agent_definition(_agent_name_for_mode(mode))
+        except Exception:
+            return None
+
+    def _system_prompt_for_mode(self, mode: str) -> str:
+        """Return the mode-specific system prompt with the mode-switching hint appended."""
+        agent_def = self._agent_definition_for_mode(mode)
+        if agent_def is not None and getattr(agent_def, "system_prompt", ""):
+            prompt = str(agent_def.system_prompt).rstrip()
+        else:
+            prompt = self.system_prompt.rstrip()
+        return prompt + "\n\n" + self._mode_switch_hint(mode) + "\n"
+
+    @staticmethod
+    def _mode_switch_hint(mode: str) -> str:
+        """Return the ``[Mode control]`` paragraph appended to system prompts.
+
+        The hint tells the model which ``SetInteractionModeTool`` call moves
+        forward from the current mode (plan/research/code).
+        """
+        if mode == "plan":
+            return (
+                "[Mode control]\n"
+                "If the plan is complete and implementation should begin in a later turn, "
+                'call SetInteractionModeTool(mode="code").'
+            )
+        if mode == "researcher":
+            return (
+                "[Mode control]\n"
+                "If implementation is needed after your findings, "
+                'call SetInteractionModeTool(mode="code").'
+            )
+        return (
+            "[Mode control]\n"
+            "If this task should first be researched or planned, call "
+            'SetInteractionModeTool(mode="researcher") or SetInteractionModeTool(mode="plan").'
         )
 
     def _emit_wire_notification(
@@ -812,18 +790,10 @@ class BridgeServer:
         body: str,
         payload: dict[str, Any] | None = None,
     ) -> None:
-        """Emit a generic notification via the wire protocol.
+        """Emit one ``notification`` event with the canonical TUI-render fields.
 
-        Args:
-            notification_id (str): IN: Unique notification identifier. OUT: Included.
-            category (str): IN: Notification category. OUT: Included.
-            type_ (str): IN: Notification type. OUT: Included.
-            severity (str): IN: Severity level. OUT: Included.
-            title (str): IN: Notification title. OUT: Included.
-            body (str): IN: Notification body text. OUT: Included.
-            payload (dict[str, Any] | None): IN: Optional structured side-channel data
-                consumers can read (e.g. ``task_id`` for transient sub-agent stream
-                updates). Defaults to an empty dict on the wire.
+        ``payload`` carries structured side-channel data (e.g. ``task_id``
+        for sub-agent stream updates); it defaults to ``{}`` on the wire.
         """
         self._emit_wire_event(
             "notification",
@@ -839,19 +809,19 @@ class BridgeServer:
         )
 
     def _emit_wire_compaction_begin(self) -> None:
-        """Emit a context compaction begin event via the wire protocol."""
+        """Signal the TUI to render its compaction-in-progress indicator."""
         self._emit_wire_event("compaction_begin", {})
 
     def _emit_wire_compaction_end(self) -> None:
-        """Emit a context compaction end event via the wire protocol."""
+        """Signal the TUI to clear the compaction indicator."""
         self._emit_wire_event("compaction_end", {})
 
     def _emit_wire_turn_end(self) -> None:
-        """Emit a turn end event via the wire protocol."""
+        """Mark the end of the current turn on the wire."""
         self._emit_wire_event("turn_end", {})
 
     def _save_session(self) -> None:
-        """Persist the current session state to disk."""
+        """Persist the current session state to ``$XERXES_HOME/sessions/<id>.json``."""
         data = {
             "session_id": self._session_id,
             "model": self.config.get("model", ""),
@@ -869,13 +839,11 @@ class BridgeServer:
         path.write_text(json.dumps(data, indent=2, default=str, ensure_ascii=False))
 
     def _load_session(self, session_id: str) -> bool:
-        """Restore session state from a saved file.
+        """Restore in-memory state from the saved record; return ``False`` if it can't be parsed.
 
-        Args:
-            session_id (str): IN: Session identifier. OUT: Used to locate the file.
-
-        Returns:
-            bool: OUT: ``True`` if the session was successfully loaded.
+        Interrupted tool calls in the saved history are sanitised via
+        :meth:`_sanitize_resumed_messages`; the resulting stubs will be
+        replayed by :meth:`_replay_pending_tool_calls` once the executor is up.
         """
         path = self.SESSIONS_DIR / f"{session_id}.json"
         if not path.exists():
@@ -903,23 +871,17 @@ class BridgeServer:
         cls,
         messages: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Repair an interrupted message history so providers accept it.
+        """Repair an interrupted history so providers accept the resumed transcript.
 
-        Walks the message list and ensures every ``tool_calls`` entry on an
-        assistant message has a matching ``role="tool"`` reply before the next
-        non-tool message. Missing replies are filled with a stub carrying the
-        ``_RESUME_STUB_CONTENT`` marker so :meth:`_replay_pending_tool_calls`
-        can locate and replace them with real results once the executor is
-        ready. Orphan tool replies (no matching prior ``tool_call_id``) are
-        dropped.
+        Ensures every ``tool_calls`` entry on an assistant message has a
+        matching ``role="tool"`` reply before the next non-tool message.
+        Missing replies are filled with stubs carrying
+        :attr:`_RESUME_STUB_CONTENT`; :meth:`_replay_pending_tool_calls`
+        later swaps them for real results. Orphan tool replies (no matching
+        prior call) are dropped.
 
-        Args:
-            messages (list[dict[str, Any]]): IN: Raw persisted messages from disk.
-
-        Returns:
-            tuple[list[dict[str, Any]], list[dict[str, Any]]]: OUT:
-                ``(sanitized_messages, pending_replays)``. Each pending replay
-                is ``{"tool_call_id": str, "name": str, "arguments": str}``.
+        Returns ``(sanitized_messages, pending_replays)`` where each pending
+        replay is ``{"tool_call_id", "name", "arguments"}``.
         """
         if not messages:
             return [], []
@@ -929,6 +891,7 @@ class BridgeServer:
         replays: list[dict[str, Any]] = []
 
         def _flush_outstanding() -> None:
+            """Drain ``outstanding`` into repaired stubs + pending replays."""
             for tid, meta in list(outstanding.items()):
                 repaired.append(
                     {
@@ -983,16 +946,14 @@ class BridgeServer:
         return repaired, replays
 
     def _replay_pending_tool_calls(self) -> None:
-        """Re-execute tool calls that had no captured result on resume.
+        """Re-run tool calls whose results were lost during the previous session.
 
-        Walks ``self._pending_resume_replays``, invokes the live tool executor
-        for each, and replaces the matching stub message (identified by
-        ``_RESUME_STUB_CONTENT``) with the real result. Skipped entirely when
-        ``XERXES_NO_RESUME_REPLAY=1`` — the stubs stay in place so the history
-        is still structurally valid, just opaque.
-
-        Replay errors are caught per-call and written into the message as
-        ``[replay error: ...]`` so one failing tool can't poison the resume.
+        Walks :attr:`_pending_resume_replays`, invokes the live tool executor
+        for each, and replaces the matching :attr:`_RESUME_STUB_CONTENT`
+        message with the real result. Honours ``XERXES_NO_RESUME_REPLAY=1``
+        (stubs stay in place — history is still structurally valid, just
+        opaque). Per-call errors land as ``[replay error: ...]`` in the
+        message so one failing tool can't poison the whole resume.
         """
         if os.environ.get("XERXES_NO_RESUME_REPLAY") == "1":
             self._pending_resume_replays = []
@@ -1058,12 +1019,7 @@ class BridgeServer:
                 )
 
     def _list_sessions(self) -> list[dict[str, Any]]:
-        """List all saved sessions with metadata previews.
-
-        Returns:
-            list[dict[str, Any]]: OUT: Session summaries sorted by modification time
-                (most recent first).
-        """
+        """Return saved sessions sorted by mtime (most recent first), each with a preview line."""
         sessions = []
         for path in sorted(self.SESSIONS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
@@ -1090,29 +1046,22 @@ class BridgeServer:
         return sessions
 
     def handle_init(self, params: dict[str, Any]) -> None:
-        """Handle an ``init`` JSON-RPC request.
+        """Bootstrap the runtime and emit ``ready``/``init_done``.
 
-        Boots the runtime, loads the active profile, discovers skills, registers
-        tools, and connects MCP servers.
-
-        Args:
-            params (dict[str, Any]): IN: Initialization parameters. OUT: Used to
-                configure the server. Expected keys include:
-                - ``"permission_mode"`` (str): Permission strategy (default ``"auto"``).
-                - ``"verbose"`` (bool): Verbose logging flag.
-                - ``"thinking"`` (bool): Thinking display flag.
-                - ``"debug"`` (bool): Debug mode flag.
-                - ``"model"`` (str): Model name.
-                - ``"base_url"`` (str): API base URL.
-                - ``"api_key"`` (str): API key.
-                - ``"resume_session_id"`` (str): Session to resume.
-                - ``"mcp_servers"`` (list[dict]): MCP server configurations.
+        ``params`` may carry ``permission_mode``, ``verbose``, ``thinking``,
+        ``debug``, ``mode``, ``model``, ``base_url``, ``api_key``,
+        ``resume_session_id``, and ``mcp_servers``. The active provider
+        profile fills any gaps, the bootstrap is run, tools and skills are
+        loaded, agent definitions are resolved, and MCP servers (if any) are
+        connected in background threads.
         """
         self.config = {
             "permission_mode": params.get("permission_mode", "auto"),
             "verbose": params.get("verbose", False),
             "thinking": params.get("thinking", True),
             "debug": params.get("debug", False),
+            "mode": _normalize_interaction_mode(params.get("mode")),
+            "plan_mode": False,
         }
 
         model = params.get("model", "")
@@ -1211,7 +1160,7 @@ class BridgeServer:
                     _manager: MCPManager = manager,
                     _cfg: MCPServerConfig = cfg,
                 ) -> None:
-                    """Internal helper to connect."""
+                    """Spin up a dedicated event loop and connect the MCP server."""
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     try:
@@ -1264,13 +1213,14 @@ class BridgeServer:
         )
 
     def handle_query(self, params: dict[str, Any], override_tool_schemas: list[dict[str, Any]] | None = None) -> None:
-        """Handle a user query by running the agent streaming loop.
+        """Run one streaming-loop turn against the model.
 
-        Args:
-            params (dict[str, Any]): IN: Query parameters. Expected keys:
-                - ``"text"`` (str | list): User input text.
-            override_tool_schemas (list[dict[str, Any]] | None): IN: Optional tool
-                schema override. OUT: Defaults to ``self.tool_schemas`` if ``None``.
+        ``params["text"]`` carries the user input (string or list of content
+        parts). ``params["mode"]``/``params["plan_mode"]`` switch the
+        interaction mode for this turn. If a skill scaffold is pending from
+        ``/skill-create``, this turn generates the SKILL.md instead of
+        running the agent. ``override_tool_schemas`` narrows the toolset
+        exposed to the model (used when a skill suppresses ``SkillTool``).
         """
         if not self._initialized:
             self._emit_error("Not initialized. Send 'init' first.")
@@ -1293,6 +1243,13 @@ class BridgeServer:
         if "plan_mode" in params:
             self.config["plan_mode"] = bool(params.get("plan_mode"))
             set_global_config(self.config)
+        interaction_mode = _normalize_interaction_mode(
+            params.get("mode", self.config.get("mode")),
+            plan_mode=bool(self.config.get("plan_mode", False)),
+        )
+        self.config["mode"] = interaction_mode
+        self.config["plan_mode"] = interaction_mode == "plan"
+        set_global_config(self.config)
 
         if self._pending_skill_name:
             skill_name = self._pending_skill_name
@@ -1321,12 +1278,16 @@ class BridgeServer:
             self._emit_wire_turn_begin(text)
 
         schemas = override_tool_schemas if override_tool_schemas is not None else self.tool_schemas
+        system_prompt = self._system_prompt_for_mode(interaction_mode)
+        mode_agent_def = self._agent_definition_for_mode(interaction_mode)
+        if mode_agent_def is not None:
+            schemas = self._filter_tool_schemas_for_agent(schemas, mode_agent_def)
 
         for event in run_agent_loop(
             user_message=text,
             state=self.state,
             config=self.config,
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt,
             tool_executor=self.tool_executor,
             tool_schemas=schemas,
             cancel_check=lambda: self._cancel,
@@ -1452,7 +1413,7 @@ class BridgeServer:
 
     @staticmethod
     def _filter_tool_schemas_for_agent(tool_schemas: list[dict[str, Any]], agent_def: Any) -> list[dict[str, Any]]:
-        """Filter model-visible tool schemas according to an agent definition."""
+        """Return ``tool_schemas`` restricted to ``agent_def``'s ``tools``/``allowed_tools``/``exclude_tools``."""
         names = {schema.get("name", "") for schema in tool_schemas}
         allowed = set(getattr(agent_def, "tools", None) or names)
         explicit_allowed = getattr(agent_def, "allowed_tools", None)
@@ -1462,9 +1423,10 @@ class BridgeServer:
         return [schema for schema in tool_schemas if schema.get("name", "") in allowed]
 
     def _maybe_compact_context(self) -> None:
-        """Auto-compact conversation context in legacy mode when near the token limit.
+        """Auto-compact older messages via an LLM summary when usage exceeds 75% of the limit.
 
-        Summarizes older messages via an LLM call to free context space.
+        Legacy-protocol variant: emits a ``slash_result`` with the outcome.
+        Falls back silently when the summariser call fails.
         """
         model = self.config.get("model", "")
         if not model:
@@ -1575,10 +1537,7 @@ class BridgeServer:
         )
 
     def _maybe_compact_context_wire(self) -> None:
-        """Auto-compact conversation context in wire mode when near the token limit.
-
-        Similar to :meth:`_maybe_compact_context` but emits wire-protocol events.
-        """
+        """Wire-protocol twin of :meth:`_maybe_compact_context` (emits ``compaction_*`` events)."""
         model = self.config.get("model", "")
         if not model:
             return
@@ -1688,11 +1647,7 @@ class BridgeServer:
         )
 
     def _wait_for_permission(self) -> bool:
-        """Block until a permission response is received.
-
-        Returns:
-            bool: OUT: ``True`` if the request was approved or approved for the session.
-        """
+        """Block the query thread until the TUI answers; ``True`` means approved (incl. for-session)."""
         while True:
             if self._cancel:
                 return False
@@ -1707,14 +1662,7 @@ class BridgeServer:
                 continue
 
     def _ask_question(self, question: str) -> str:
-        """Ask the user a free-form question and wait for a response.
-
-        Args:
-            question (str): IN: Question text. OUT: Emitted as a question request.
-
-        Returns:
-            str: OUT: User's answer, or ``"[cancelled]"``.
-        """
+        """Synchronously prompt the user for an answer; returns ``"[cancelled]"`` on cancel."""
         if self._wire_mode:
             self._emit_wire_question_request(
                 [
@@ -1731,14 +1679,7 @@ class BridgeServer:
         return self._wait_for_question_response()
 
     def _ask_free_form(self, question: str) -> str:
-        """Ask a free-form question via the wire protocol.
-
-        Args:
-            question (str): IN: Question text. OUT: Emitted as a wire question request.
-
-        Returns:
-            str: OUT: User's answer, or ``"[cancelled]"``.
-        """
+        """Wire-protocol free-form prompt; returns the user's answer or ``"[cancelled]"``."""
         self._emit_wire_question_request(
             [
                 {
@@ -1752,11 +1693,7 @@ class BridgeServer:
         return self._wait_for_question_response()
 
     def _provider_create_interactive(self) -> str:
-        """Interactively create a new provider profile via question prompts.
-
-        Returns:
-            str: OUT: Result message indicating success or cancellation.
-        """
+        """Walk the user through the wire-mode ``/provider`` profile wizard."""
         name = self._ask_free_form("Profile name (e.g. 'kimi', 'openai-prod')").strip()
         if not name or name == "[cancelled]":
             return "Cancelled."
@@ -1779,11 +1716,7 @@ class BridgeServer:
         return f"Created and switched to profile '{name}'  (model: {model})"
 
     def _wait_for_question_response(self) -> str:
-        """Block until a question response is received.
-
-        Returns:
-            str: OUT: User's answer, or ``"[cancelled]"``.
-        """
+        """Block the query thread until the TUI returns an answer."""
         while True:
             if self._cancel:
                 return "[cancelled]"
@@ -1798,16 +1731,11 @@ class BridgeServer:
                 continue
 
     def handle_question_response(self, params: dict[str, Any]) -> None:
-        """Handle an incoming question response.
-
-        Args:
-            params (dict[str, Any]): IN: Response parameters. OUT: Enqueued for
-                the waiting question handler.
-        """
+        """Enqueue a ``question_response`` so the blocked query thread can wake."""
         self._question_queue.put({"params": params})
 
     def handle_cancel(self) -> None:
-        """Cancel the current query."""
+        """Request cancellation of the in-flight query and cancel running sub-agents."""
         self._cancel = True
         try:
             from ..tools.claude_tools import _get_agent_manager
@@ -1817,7 +1745,7 @@ class BridgeServer:
             logger.warning("Failed to cancel sub-agents: %s", exc)
 
     def handle_cancel_all(self) -> None:
-        """Cancel the current query and all running sub-agents."""
+        """Cancel the active query plus every running sub-agent, surfacing the count."""
         self._cancel = True
         try:
             from ..tools.claude_tools import _get_agent_manager
@@ -1830,17 +1758,12 @@ class BridgeServer:
             logger.warning("Failed to cancel sub-agents: %s", exc)
 
     def handle_provider_list(self) -> None:
-        """Emit the list of stored provider profiles."""
+        """Emit ``provider_list`` carrying every stored profile."""
         plist = profiles.list_profiles()
         self._emit("provider_list", {"profiles": plist})
 
     def handle_fetch_models(self, params: dict[str, Any]) -> None:
-        """Fetch available models from a provider and emit the result.
-
-        Args:
-            params (dict[str, Any]): IN: Parameters with keys ``"base_url"`` and
-                ``"api_key"``. OUT: Passed to :func:`profiles.fetch_models`.
-        """
+        """Emit ``models_list`` for ``params["base_url"]`` using :func:`profiles.fetch_models`."""
         base_url = params.get("base_url", "")
         api_key = params.get("api_key", "")
         if not base_url:
@@ -1854,7 +1777,7 @@ class BridgeServer:
         self._emit("models_list", {"models": models, "base_url": base_url})
 
     def _switch_model(self, model: str, *, persist_active_profile: bool = True) -> None:
-        """Switch the runtime model and optionally persist it on the active profile."""
+        """Update the runtime model, optionally persist it on the active profile, refresh init."""
         self.config["model"] = model
         if persist_active_profile:
             profiles.update_active_model(model)
@@ -1865,7 +1788,10 @@ class BridgeServer:
             self._emit_wire_status()
 
     def _auto_switch_stale_model(self, available: list[str]) -> str:
-        """Use the sole fetched provider model when the configured model is stale."""
+        """If the provider returns exactly one model and ours isn't in the list, switch to it.
+
+        Returns the newly-active model id, or empty string when no switch occurred.
+        """
         current = self.config.get("model", "")
         if len(available) != 1:
             return ""
@@ -1878,13 +1804,7 @@ class BridgeServer:
         return model
 
     def handle_provider_save(self, params: dict[str, Any]) -> None:
-        """Save a provider profile and activate it.
-
-        Args:
-            params (dict[str, Any]): IN: Profile parameters with keys ``"name"``,
-                ``"base_url"``, ``"api_key"``, ``"model"``, and optional ``"provider"``.
-                OUT: Passed to :func:`profiles.save_profile`.
-        """
+        """Persist a profile from ``params`` and activate it; emits ``provider_saved`` on success."""
         name = params.get("name", "")
         base_url = params.get("base_url", "")
         api_key = params.get("api_key", "")
@@ -1922,12 +1842,7 @@ class BridgeServer:
         )
 
     def handle_provider_select(self, params: dict[str, Any]) -> None:
-        """Select an existing provider profile as active.
-
-        Args:
-            params (dict[str, Any]): IN: Parameters with key ``"name"``. OUT:
-                Used to look up and activate the profile.
-        """
+        """Activate the profile named ``params["name"]`` and re-publish runtime config."""
         name = params.get("name", "")
         if not name:
             self._emit_error("Profile name is required")
@@ -1953,12 +1868,7 @@ class BridgeServer:
             )
 
     def handle_provider_delete(self, params: dict[str, Any]) -> None:
-        """Delete a provider profile.
-
-        Args:
-            params (dict[str, Any]): IN: Parameters with key ``"name"``. OUT:
-                Passed to :func:`profiles.delete_profile`.
-        """
+        """Delete the named provider profile via :func:`profiles.delete_profile`."""
         name = params.get("name", "")
         if profiles.delete_profile(name):
             self._emit("slash_result", {"output": f"Profile '{name}' deleted."})
@@ -1966,12 +1876,7 @@ class BridgeServer:
             self._emit_error(f"Profile '{name}' not found")
 
     def handle_slash(self, params: dict[str, Any]) -> None:
-        """Handle a slash command.
-
-        Args:
-            params (dict[str, Any]): IN: Parameters with key ``"command"``. OUT:
-                Parsed and dispatched to the appropriate handler.
-        """
+        """Dispatch ``params["command"]`` to the matching slash handler."""
         command = params.get("command", "").strip()
         if not command.startswith("/"):
             self._emit_error(f"Not a slash command: {command}")
@@ -1997,12 +1902,7 @@ class BridgeServer:
             self._emit("slash_result", {"output": output})
 
     def _run_wire_slash(self, cmd: str, args: str) -> None:
-        """Execute a wire-mode slash command.
-
-        Args:
-            cmd (str): IN: Command name. OUT: Determines execution path.
-            args (str): IN: Command arguments. OUT: Passed to handlers.
-        """
+        """Execute one of the wire-mode-only slash commands (``btw``/``plan``/``steer``)."""
         if cmd == "btw":
             self._emit_wire_event("btw_begin", {})
             self._emit_wire_event("steer_input", {"content": args})
@@ -2024,15 +1924,7 @@ class BridgeServer:
             self.state.messages.append({"role": "user", "content": args})
 
     def _handle_sampling(self, args: str) -> str:
-        """Handle the ``/sampling`` slash command.
-
-        Args:
-            args (str): IN: Command arguments. OUT: Parsed to view, set, reset,
-                or save sampling parameters.
-
-        Returns:
-            str: OUT: Command output text.
-        """
+        """Run ``/sampling``: view / set ``<param> <value>`` / ``reset`` / ``save`` to the active profile."""
         valid = profiles.SAMPLING_PARAMS
 
         if not args.strip():
@@ -2091,11 +1983,7 @@ class BridgeServer:
         return f"{param} = {val}"
 
     def _handle_compact(self) -> str:
-        """Handle the ``/compact`` slash command.
-
-        Returns:
-            str: OUT: Result message describing compaction outcome.
-        """
+        """Run ``/compact``: summarise older messages now via an LLM call."""
         messages = self.state.messages
         if len(messages) < 4:
             return "Nothing to compact (fewer than 4 messages)."
@@ -2193,14 +2081,7 @@ class BridgeServer:
         )
 
     def _handle_plan(self, args: str) -> str:
-        """Handle the ``/plan`` slash command.
-
-        Args:
-            args (str): IN: Plan objective. OUT: Passed to the PlanTool.
-
-        Returns:
-            str: OUT: Plan result text.
-        """
+        """Run ``/plan`` by invoking :class:`PlanTool` with ``args`` as the objective."""
         objective = args.strip()
         if not objective:
             return "Usage: /plan <objective>\n\nExample: /plan refactor the auth module into separate files"
@@ -2210,11 +2091,7 @@ class BridgeServer:
         return PlanTool.static_call(objective=objective, execute=True)
 
     def _handle_agents_list(self) -> str:
-        """Handle the ``/agents`` slash command.
-
-        Returns:
-            str: OUT: Formatted list of agent definitions and running tasks.
-        """
+        """Render the ``/agents`` output: registered definitions, load errors, and running sub-agents."""
         from ..agents.definitions import list_agent_definition_load_errors, list_agent_definitions
         from ..tools.claude_tools import _get_agent_manager
 
@@ -2242,11 +2119,7 @@ class BridgeServer:
         return "\n".join(lines)
 
     def _handle_skills_list(self) -> str:
-        """Handle the ``/skills`` slash command.
-
-        Returns:
-            str: OUT: Formatted list of available skills.
-        """
+        """Re-scan the skill directories and render the ``/skills`` output."""
         import xerxes as _xerxes_pkg
 
         _bundled = Path(_xerxes_pkg.__file__).parent / "skills"
@@ -2265,11 +2138,11 @@ class BridgeServer:
         return "\n".join(lines)
 
     def _handle_skill_invoke(self, args: str) -> None:
-        """Handle the ``/skill`` slash command.
+        """Activate and run a skill from ``/skill <name>[:<args>]``.
 
-        Args:
-            args (str): IN: Skill name with optional ``:arguments``. OUT: Parsed
-                and used to activate and run the skill.
+        Validates the skill exists, matches the current platform, then injects
+        the skill's prompt section into the conversation and dispatches a
+        query against a filtered toolset that excludes ``SkillTool``.
         """
         name = args.strip()
         if not name:
@@ -2325,14 +2198,7 @@ class BridgeServer:
         self.handle_query({"text": trigger}, override_tool_schemas=filtered_schemas)
 
     def _handle_skill_create(self, args: str) -> str:
-        """Handle the ``/skill-create`` slash command.
-
-        Args:
-            args (str): IN: Skill name. OUT: Used to set the pending skill name.
-
-        Returns:
-            str: OUT: Instructions for describing the new skill.
-        """
+        """Stage ``/skill-create <name>``: the next user message becomes the description."""
         name = args.strip()
         if not name:
             return (
@@ -2353,15 +2219,7 @@ class BridgeServer:
         return f"Creating skill '{name}'. Describe what this skill should do:"
 
     def _generate_skill(self, name: str, description: str) -> str:
-        """Generate a skill SKILL.md via LLM or fallback template.
-
-        Args:
-            name (str): IN: Skill name. OUT: Used for file naming.
-            description (str): IN: Skill description. OUT: Passed to the LLM prompt.
-
-        Returns:
-            str: OUT: Result message with the skill path.
-        """
+        """Ask the active model to author ``SKILL.md`` for ``name``; fall back to the static template."""
         model = self.config.get("model", "")
         if not model:
             return self._create_skill_template(name, description)
@@ -2443,16 +2301,7 @@ class BridgeServer:
         return f"Skill '{name}' generated and saved to {skill_dir}/SKILL.md\nUse /skill {name} to invoke it."
 
     def _create_skill_template(self, name: str, description: str, error: str = "") -> str:
-        """Create a fallback skill template when LLM generation fails.
-
-        Args:
-            name (str): IN: Skill name. OUT: Used for file naming and title.
-            description (str): IN: Skill description. OUT: Included in the template.
-            error (str): IN: Optional error message. OUT: Included in the result text.
-
-        Returns:
-            str: OUT: Result message with the skill path.
-        """
+        """Write a minimal ``SKILL.md`` scaffold when LLM generation is unavailable or fails."""
         title = name.replace("-", " ").replace("_", " ").title()
         skill_dir = self._skills_dir / name
         skill_dir.mkdir(parents=True, exist_ok=True)
@@ -2474,15 +2323,10 @@ class BridgeServer:
         return f"Skill '{name}' created at {skill_dir}/SKILL.md{err_note}\nUse /skill {name} to invoke it."
 
     def _run_slash(self, cmd: str, args: str) -> str:
-        """Dispatch a slash command to its handler.
+        """Dispatch a leading-slash command to the matching built-in handler.
 
-        Args:
-            cmd (str): IN: Command name (without leading ``/``). OUT: Used for
-                dispatch.
-            args (str): IN: Command arguments. OUT: Passed to the handler.
-
-        Returns:
-            str: OUT: Handler output, or an unknown command message.
+        Returns the rendered output text, or an unknown-command message when
+        ``cmd`` is neither a built-in nor a registered skill.
         """
         if cmd in ("help", "h"):
             return (
@@ -2697,14 +2541,7 @@ class BridgeServer:
         return f"Unknown command: /{cmd} (type /help)"
 
     def _parse_json_messages(self, line: str) -> list[dict[str, Any]]:
-        """Parse one or more JSON objects from an input line.
-
-        Args:
-            line (str): IN: Raw input line. OUT: Parsed as JSON.
-
-        Returns:
-            list[dict[str, Any]]: OUT: Parsed message dicts, or an empty list on failure.
-        """
+        """Parse one or more JSON objects from one stdin line (fall back to whitespace-split)."""
         try:
             return [json.loads(line)]
         except json.JSONDecodeError:
@@ -2721,7 +2558,7 @@ class BridgeServer:
         return messages
 
     def run(self) -> None:
-        """Main input loop reading JSON-RPC messages from stdin."""
+        """Read JSON-RPC requests from stdin until shutdown, dispatching each method."""
         for raw_line in sys.stdin:
             line = raw_line.strip()
             if not line or not self._running:
@@ -2744,10 +2581,7 @@ class BridgeServer:
                         else:
 
                             def _run_query(_params: dict[str, Any]) -> None:
-                                """Internal helper to run query.
-
-                                Args:
-                                    _params (dict[str, Any]): IN: params. OUT: Consumed during execution."""
+                                """Worker-thread body: run :meth:`handle_query` and surface any error."""
                                 try:
                                     if "user_input" in _params and "text" not in _params:
                                         _params = {**_params, "text": _params.get("user_input", "")}
@@ -2772,6 +2606,16 @@ class BridgeServer:
                     elif method == "set_plan_mode":
                         enabled = bool(params.get("enabled", params.get("plan_mode", False)))
                         self.config["plan_mode"] = enabled
+                        self.config["mode"] = _normalize_interaction_mode(
+                            params.get("mode", self.config.get("mode")), plan_mode=enabled
+                        )
+                        set_global_config(self.config)
+                        if self._wire_mode:
+                            self._emit_wire_status()
+                    elif method == "set_mode":
+                        mode = _normalize_interaction_mode(params.get("mode"), plan_mode=False)
+                        self.config["mode"] = mode
+                        self.config["plan_mode"] = mode == "plan"
                         set_global_config(self.config)
                         if self._wire_mode:
                             self._emit_wire_status()
@@ -2795,10 +2639,7 @@ class BridgeServer:
                         else:
 
                             def _run_slash(_params: dict[str, Any]) -> None:
-                                """Internal helper to run slash.
-
-                                Args:
-                                    _params (dict[str, Any]): IN: params. OUT: Consumed during execution."""
+                                """Worker-thread body: run :meth:`handle_slash` and surface any error."""
                                 try:
                                     self.handle_slash(_params)
                                 except Exception as exc:
@@ -2828,10 +2669,7 @@ class BridgeServer:
 
 
 def main() -> None:
-    """Entry point for the bridge server.
-
-    Parses command-line arguments and starts the :class:`BridgeServer`.
-    """
+    """Console-script entry point: parse flags, build :class:`BridgeServer`, run it on stdin/stdout."""
     import signal
 
     signal.signal(signal.SIGINT, signal.SIG_IGN)

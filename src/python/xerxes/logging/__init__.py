@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Console-oriented logging helpers for Xerxes.
+
+Re-exports the colorized :class:`XerxesLogger` singleton, ``stream_callback``
+for live execution streams, and the family of ``log_*`` shortcuts (step,
+thinking, success, error, retry, delegation, agent_start, task_start,
+task_complete, warning) used throughout the agent runtime."""
 
 from .console import (
     ColorFormatter,

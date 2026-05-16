@@ -13,8 +13,10 @@
 # limitations under the License.
 """Home Assistant channel adapter.
 
-Sends outbound messages as persistent notifications and parses inbound
-conversation webhook payloads.
+Inbound: parses Home Assistant's conversation webhook (used by voice
+assistants and the conversation integration). Outbound: pushes replies
+as ``persistent_notification.create`` service calls so the user sees
+them in the HA UI. Authentication uses a long-lived access token.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class HomeAssistantChannel(WebhookChannel):
-    """Channel implementation for Home Assistant."""
+    """Home Assistant adapter."""
 
     name = "home_assistant"
 
@@ -37,15 +39,14 @@ class HomeAssistantChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Home Assistant channel.
+        """Build the channel.
 
         Args:
-            ha_url (str): IN: Home Assistant instance URL.
-                OUT: stored with trailing slash removed.
-            access_token (str): IN: long-lived access token.
-                OUT: stored for API authorization.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            ha_url: Base URL of the Home Assistant instance; trailing ``/``
+                stripped.
+            access_token: Long-lived access token used for ``Authorization``.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.ha_url = ha_url.rstrip("/")
@@ -53,14 +54,19 @@ class HomeAssistantChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Home Assistant webhook payload into ``ChannelMessage``.
+        """Translate a Home Assistant conversation webhook into ``ChannelMessage``.
+
+        Accepts three text shapes: top-level ``text``, nested
+        ``input.text`` (voice pipelines), and bare ``message``. Empty
+        payloads or events with no text are silently dropped. The
+        conversation language is preserved on ``metadata['language']``.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or empty when there is no text.
         """
         data = parse_json_body(body)
         if not data:
@@ -81,11 +87,16 @@ class HomeAssistantChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Create a persistent notification in Home Assistant.
+        """Create a Home Assistant persistent notification with the reply.
+
+        Persistent notifications surface in the HA UI rather than pushing
+        anywhere — this is the broadest delivery channel HA exposes
+        without configuring a specific notify integration.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``text`` becomes
-                the notification body and ``message_id`` the notification ID.
+            message: Outbound message. ``text`` is the notification body;
+                ``message_id`` is reused as the notification id so updates
+                replace the same card.
         """
         url = f"{self.ha_url}/api/services/persistent_notification/create"
         body = {

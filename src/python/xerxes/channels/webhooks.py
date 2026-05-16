@@ -13,8 +13,11 @@
 # limitations under the License.
 """Webhook dispatcher for routing HTTP callbacks to channel handlers.
 
-Provides a lightweight registry that maps channel names to async webhook
-handlers and returns standardized ``WebhookResponse`` objects.
+The bridge server exposes one HTTP endpoint per channel and forwards each
+request into ``WebhookDispatcher.dispatch``; the dispatcher looks up the
+matching ``WebhookHandler`` and returns a ``WebhookResponse`` the HTTP
+layer can turn into a response. Handler exceptions are caught and surfaced
+as HTTP 500 so a buggy adapter cannot crash the bridge.
 """
 
 from __future__ import annotations
@@ -32,9 +35,9 @@ class WebhookResponse:
     """HTTP response returned by a webhook handler.
 
     Attributes:
-        status: HTTP status code.
-        body: Response body string.
-        headers: Optional response headers.
+        status: HTTP status code; defaults to 200.
+        body: Response body. The HTTP layer is responsible for encoding.
+        headers: Extra response headers, or ``None`` for none.
     """
 
     status: int = 200
@@ -43,49 +46,51 @@ class WebhookResponse:
 
 
 class WebhookDispatcher:
-    """Routes incoming webhook requests to the appropriate handler."""
+    """Maps channel names to async webhook handlers.
+
+    A thin wrapper around a ``dict[name, handler]`` plus error containment:
+    unknown names return 404, and handler exceptions are caught, logged at
+    WARNING, and surfaced as 500 so a single bad adapter cannot tear down
+    the HTTP server.
+    """
 
     def __init__(self) -> None:
-        """Initialize an empty dispatcher."""
+        """Build a dispatcher with no handlers registered."""
         self._handlers: dict[str, WebhookHandler] = {}
 
     def register(self, name: str, handler: WebhookHandler) -> None:
-        """Register a webhook handler for a channel.
+        """Register or replace the handler for ``name``.
 
         Args:
-            name (str): IN: channel identifier.
-            handler (WebhookHandler): IN: async callable that processes
-                webhook payloads for this channel.
+            name: Channel identifier (typically matches ``Channel.name``).
+            handler: Async callable that processes one webhook payload.
         """
         self._handlers[name] = handler
 
     def unregister(self, name: str) -> None:
-        """Remove a registered webhook handler.
+        """Remove the handler for ``name``; no-op if missing.
 
         Args:
-            name (str): IN: channel identifier to remove.
+            name: Channel identifier passed to ``register``.
         """
         self._handlers.pop(name, None)
 
     def names(self) -> list[str]:
-        """Return all registered handler names.
-
-        Returns:
-            list[str]: OUT: list of channel identifiers.
-        """
+        """Return all registered channel identifiers in insertion order."""
         return list(self._handlers.keys())
 
     async def dispatch(self, name: str, headers: dict[str, str], body: bytes) -> WebhookResponse:
-        """Dispatch a webhook request to the registered handler.
+        """Look up and invoke the handler for ``name``.
 
         Args:
-            name (str): IN: channel identifier.
-            headers (dict[str, str]): IN: HTTP request headers.
-            body (bytes): IN: raw request body.
+            name: Channel identifier.
+            headers: HTTP request headers.
+            body: Raw request body.
 
         Returns:
-            WebhookResponse: OUT: 404 if no handler is found, 500 on handler
-            exception, otherwise the handler's response.
+            404 ``WebhookResponse`` when no handler is registered, 500 when
+            the handler raises (logged at WARNING), otherwise whatever the
+            handler returned.
         """
         handler = self._handlers.get(name)
         if handler is None:

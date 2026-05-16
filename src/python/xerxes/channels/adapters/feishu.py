@@ -13,7 +13,10 @@
 # limitations under the License.
 """Feishu (Lark) channel adapter.
 
-Connects to the Feishu Open Platform for messaging.
+Parses Open Platform event-subscription payloads and sends text messages
+via the ``im/v1/messages`` endpoint. Supports either a static
+``tenant_access_token`` or a ``token_provider`` callback for installs
+that need to refresh the token periodically.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class FeishuChannel(WebhookChannel):
-    """Channel implementation for Feishu (Lark)."""
+    """Feishu (Lark) Open Platform adapter."""
 
     name = "feishu"
 
@@ -38,18 +41,17 @@ class FeishuChannel(WebhookChannel):
         api_base: str = "https://open.feishu.cn",
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Feishu channel.
+        """Build the channel.
 
         Args:
-            tenant_access_token (str): IN: static tenant access token.
-                OUT: fallback token when ``token_provider`` is not given.
-            token_provider (Callable | None): IN: optional callable that
-                returns a fresh access token. OUT: takes precedence over the
-                static token.
-            api_base (str): IN: base URL for Feishu open APIs.
-                OUT: stored with trailing slash removed.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            tenant_access_token: Static tenant access token; used when
+                ``token_provider`` is not supplied or returns falsy.
+            token_provider: Optional zero-arg callable returning a fresh
+                token. Called on every outbound send so the operator can
+                centralise refresh.
+            api_base: Open Platform base URL; trailing ``/`` stripped.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.tenant_access_token = tenant_access_token
@@ -58,11 +60,11 @@ class FeishuChannel(WebhookChannel):
         self._http = http_client
 
     def _resolve_token(self) -> str:
-        """Resolve the current access token.
+        """Pick the access token for the next outbound call.
 
         Returns:
-            str: OUT: token from ``token_provider`` if available, otherwise
-            the static ``tenant_access_token``.
+            Output of ``token_provider`` when it returns a truthy value,
+            otherwise the static ``tenant_access_token``.
         """
         if self.token_provider is not None:
             tok = self.token_provider()
@@ -71,15 +73,19 @@ class FeishuChannel(WebhookChannel):
         return self.tenant_access_token
 
     def _parse_inbound(self, headers, body):
-        """Parse a Feishu webhook payload into ``ChannelMessage``.
+        """Translate a Feishu event payload into ``ChannelMessage`` instances.
+
+        Drops URL-verification challenges. Feishu wraps message content as
+        a JSON string under ``event.message.content``; we decode it and
+        fall back to the raw value if decoding fails. Messages with no
+        text are skipped.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages. Empty for
-            URL-verification events.
+            Parsed messages, empty when nothing meaningful was present.
         """
         data = parse_json_body(body)
         if not data:
@@ -109,11 +115,14 @@ class FeishuChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a text message via the Feishu API.
+        """Send one text message via ``im/v1/messages?receive_id_type=chat_id``.
+
+        Feishu requires ``content`` to be a JSON-encoded string rather than
+        a nested object, so we encode ``text`` explicitly.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` is used
-                as the target chat ID and ``text`` as the message body.
+            message: Outbound message. ``room_id`` is the chat id and
+                ``text`` the body.
         """
         url = f"{self.api_base}/open-apis/im/v1/messages?receive_id_type=chat_id"
         body = {

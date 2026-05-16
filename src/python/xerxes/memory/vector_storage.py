@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Vector storage module for Xerxes.
+"""Single-file SQLite store that pairs each row with a dense embedding.
 
-Exports:
-    - logger
-    - SQLiteVectorStorage"""
+``SQLiteVectorStorage`` is a self-contained alternative to
+``RAGStorage`` for use cases where the vectors live in the same
+database as the data and a brute-force cosine scan is fast enough
+(thousands of rows). Embeddings are stored as JSON text for portability."""
 
 from __future__ import annotations
 
@@ -33,22 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 class SQLiteVectorStorage(MemoryStorage):
-    """Sqlite vector storage.
-
-    Inherits from: MemoryStorage
-    """
+    """SQLite backend with built-in embeddings and cosine-similarity search."""
 
     def __init__(
         self,
         db_path: str = ".xerxes_memory/vectors.db",
         embedder: Embedder | None = None,
     ) -> None:
-        """Initialize the instance.
+        """Ensure the parent directory exists and initialise the ``vectors`` table.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            db_path (str, optional): IN: db path. Defaults to '.xerxes_memory/vectors.db'. OUT: Consumed during execution.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution."""
+            db_path: SQLite file path; ``~`` is expanded.
+            embedder: Embedder used to vectorise saved text/dicts;
+                defaults to the process-wide ``get_default_embedder``."""
 
         self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,10 +54,7 @@ class SQLiteVectorStorage(MemoryStorage):
         self._init_db()
 
     def _init_db(self) -> None:
-        """Internal helper to init db.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Create the ``vectors`` table and its ``created_at`` index if absent."""
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -76,14 +71,11 @@ class SQLiteVectorStorage(MemoryStorage):
             conn.commit()
 
     def save(self, key: str, data: tp.Any) -> bool:
-        """Save.
+        """Persist ``data`` plus an embedding of its textual form.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (tp.Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Strings are embedded directly; dicts are JSON-serialised first.
+        For other types a zero vector is stored so the row still exists
+        but does not match similarity queries."""
 
         try:
             payload = pickle.dumps(data)
@@ -115,13 +107,7 @@ class SQLiteVectorStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> tp.Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            tp.Any | None: OUT: Result of the operation."""
+        """Unpickle the row at ``key`` or return ``None`` if missing/corrupt."""
 
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute("SELECT data FROM vectors WHERE key = ?", (key,)).fetchone()
@@ -134,13 +120,7 @@ class SQLiteVectorStorage(MemoryStorage):
             return None
 
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Remove the row at ``key`` and return True iff one was removed."""
 
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute("DELETE FROM vectors WHERE key = ?", (key,))
@@ -148,26 +128,14 @@ class SQLiteVectorStorage(MemoryStorage):
             return cur.rowcount > 0
 
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when a row exists for ``key``."""
 
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute("SELECT 1 FROM vectors WHERE key = ? LIMIT 1", (key,)).fetchone()
         return row is not None
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return keys (newest first), optionally filtered by ``LIKE %pattern%``."""
 
         with sqlite3.connect(self.db_path) as conn:
             if pattern:
@@ -180,12 +148,7 @@ class SQLiteVectorStorage(MemoryStorage):
             return [r[0] for r in cur.fetchall()]
 
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Truncate the table and return the number of rows that were removed."""
 
         with sqlite3.connect(self.db_path) as conn:
             n = conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
@@ -194,12 +157,7 @@ class SQLiteVectorStorage(MemoryStorage):
             return int(n)
 
     def supports_semantic_search(self) -> bool:
-        """Supports semantic search.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """``SQLiteVectorStorage`` always supports semantic search."""
 
         return True
 
@@ -209,15 +167,11 @@ class SQLiteVectorStorage(MemoryStorage):
         limit: int = 10,
         threshold: float = 0.0,
     ) -> list[tuple[str, float, tp.Any]]:
-        """Semantic search.
+        """Brute-force cosine scan over every stored embedding.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            threshold (float, optional): IN: threshold. Defaults to 0.0. OUT: Consumed during execution.
-        Returns:
-            list[tuple[str, float, tp.Any]]: OUT: Result of the operation."""
+        Returns ``(key, similarity, data)`` triples sorted by descending
+        similarity, dropping anything below ``threshold`` and capping
+        the result at ``limit``."""
 
         if not query:
             return []

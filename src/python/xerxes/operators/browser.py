@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Browser module for Xerxes.
+"""Playwright-backed browser manager used by the operator ``web.*`` tools.
 
-Exports:
-    - BrowserPageState
-    - BrowserManager"""
+Owns a single chromium browser process and context, and tracks every page
+opened during the session by a stable ``ref_id``. The manager is lazy: the
+browser is not launched until the first ``open`` call, so sessions that
+never touch the web pay no startup cost.
+"""
 
 from __future__ import annotations
 
@@ -29,13 +31,17 @@ from pathlib import Path
 
 @dataclass
 class BrowserPageState:
-    """Browser page state.
+    """Bookkeeping for one tracked Playwright page.
 
     Attributes:
-        ref_id (str): ref id.
-        url (str): url.
-        title (str): title.
-        link_map (dict[int, str]): link map."""
+        ref_id: Stable identifier used by ``web.click`` /``web.find`` /
+            ``web.screenshot`` to address the page across tool calls.
+        url: Last-known URL of the page (updated on every ``open``).
+        title: Page ``<title>`` captured during the most recent navigation.
+        link_map: Dictionary mapping numeric link ids to absolute URLs so
+            the model can click discovered links by id without writing a
+            CSS selector.
+    """
 
     ref_id: str
     url: str
@@ -44,15 +50,23 @@ class BrowserPageState:
 
 
 class BrowserManager:
-    """Browser manager."""
+    """Lazy Playwright wrapper that backs the operator ``web.*`` tools.
+
+    A single instance owns the chromium browser, the default context, and
+    every :class:`BrowserPageState` registered during the session. The
+    browser is only launched on the first ``open`` call; all later calls
+    reuse the running context.
+    """
 
     def __init__(self, *, headless: bool = True, screenshot_dir: str | None = None) -> None:
-        """Initialize the instance.
+        """Configure browser launch options without starting Playwright yet.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            headless (bool, optional): IN: headless. Defaults to True. OUT: Consumed during execution.
-            screenshot_dir (str | None, optional): IN: screenshot dir. Defaults to None. OUT: Consumed during execution."""
+            headless: Launch chromium without a visible window.
+            screenshot_dir: Directory used by ``screenshot`` when the caller
+                doesn't supply an explicit path; a tempdir is used if this
+                is ``None``.
+        """
 
         self._headless = headless
         self._screenshot_dir = screenshot_dir
@@ -63,15 +77,13 @@ class BrowserManager:
         self._page_state: dict[str, BrowserPageState] = {}
 
     async def open(self, *, url: str | None = None, ref_id: str | None = None, wait_ms: int = 500) -> dict[str, tp.Any]:
-        """Asynchronously Open.
+        """Navigate to ``url`` (or revisit ``ref_id``) and return page state.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            url (str | None, optional): IN: url. Defaults to None. OUT: Consumed during execution.
-            ref_id (str | None, optional): IN: ref id. Defaults to None. OUT: Consumed during execution.
-            wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        When ``ref_id`` is omitted a brand-new tab is opened and assigned a
+        fresh id. When ``url`` is omitted the existing page is re-inspected
+        without navigating. The returned payload includes the rendered
+        title, a 2 KB content preview and the click-able link map.
+        """
 
         page, state = await self._resolve_page(url=url, ref_id=ref_id)
         if url is not None:
@@ -98,17 +110,19 @@ class BrowserManager:
         text: str | None = None,
         wait_ms: int = 500,
     ) -> dict[str, tp.Any]:
-        """Asynchronously Click.
+        """Interact with a tracked page and return its updated state.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref_id (str): IN: ref id. OUT: Consumed during execution.
-            link_id (int | None, optional): IN: link id. Defaults to None. OUT: Consumed during execution.
-            selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
-            text (str | None, optional): IN: text. Defaults to None. OUT: Consumed during execution.
-            wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Exactly one of ``link_id``, ``selector`` or ``text`` must be set:
+
+        * ``link_id`` — navigate to ``link_map[link_id]`` discovered by the
+          last :meth:`open`.
+        * ``selector`` — click the first element matching the CSS selector.
+        * ``text`` — click the first element containing the literal text.
+
+        Raises:
+            ValueError: When no targeting argument is given, or when
+                ``link_id`` has no mapping for the page.
+        """
 
         page = self._require_page(ref_id)
         state = self._page_state[ref_id]
@@ -127,14 +141,11 @@ class BrowserManager:
         return await self.open(ref_id=ref_id)
 
     async def find(self, ref_id: str, pattern: str) -> dict[str, tp.Any]:
-        """Asynchronously Find.
+        """Search the page's visible body text for a case-insensitive regex.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref_id (str): IN: ref id. OUT: Consumed during execution.
-            pattern (str): IN: pattern. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Returns at most 20 matches plus the total match count so the model
+        can decide whether to refine the pattern.
+        """
 
         page = self._require_page(ref_id)
         body_text = await page.locator("body").inner_text()
@@ -148,15 +159,15 @@ class BrowserManager:
         }
 
     async def screenshot(self, ref_id: str, *, path: str | None = None, full_page: bool = True) -> dict[str, tp.Any]:
-        """Asynchronously Screenshot.
+        """Capture a screenshot of the tracked page and persist it to disk.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref_id (str): IN: ref id. OUT: Consumed during execution.
-            path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
-            full_page (bool, optional): IN: full page. Defaults to True. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            ref_id: Identifier returned by a previous :meth:`open`.
+            path: Output filename; auto-generated under the screenshot
+                directory when ``None``.
+            full_page: Capture the entire scrollable canvas (default) or
+                just the current viewport.
+        """
 
         page = self._require_page(ref_id)
         screenshot_path = path or self._default_screenshot_path(ref_id)
@@ -164,12 +175,7 @@ class BrowserManager:
         return {"ref_id": ref_id, "path": screenshot_path, "full_page": full_page}
 
     def list_pages(self) -> list[dict[str, str]]:
-        """List pages.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[dict[str, str]]: OUT: Result of the operation."""
+        """Return a wire-safe summary of every tracked page."""
 
         return [
             {"ref_id": ref_id, "url": state.url, "title": state.title}
@@ -177,14 +183,7 @@ class BrowserManager:
         ]
 
     async def _resolve_page(self, *, url: str | None, ref_id: str | None) -> tuple[tp.Any, BrowserPageState]:
-        """Asynchronously Internal helper to resolve page.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            url (str | None): IN: url. OUT: Consumed during execution.
-            ref_id (str | None): IN: ref id. OUT: Consumed during execution.
-        Returns:
-            tuple[tp.Any, BrowserPageState]: OUT: Result of the operation."""
+        """Return ``(page, state)`` for an existing ref or open a new tab."""
 
         await self._ensure_browser()
         if ref_id is not None:
@@ -199,23 +198,14 @@ class BrowserManager:
         return page, state
 
     def _require_page(self, ref_id: str) -> tp.Any:
-        """Internal helper to require page.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref_id (str): IN: ref id. OUT: Consumed during execution.
-        Returns:
-            tp.Any: OUT: Result of the operation."""
+        """Return the Playwright page for ``ref_id`` or raise ``ValueError``."""
 
         if ref_id not in self._pages:
             raise ValueError(f"Browser page not found: {ref_id}")
         return self._pages[ref_id]
 
     async def _ensure_browser(self) -> None:
-        """Asynchronously Internal helper to ensure browser.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Lazily launch Playwright and the chromium browser/context."""
 
         if self._browser is not None:
             return
@@ -229,25 +219,13 @@ class BrowserManager:
         self._context = await self._browser.new_context()
 
     async def _extract_link_map(self, page: tp.Any) -> dict[int, str]:
-        """Asynchronously Internal helper to extract link map.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            page (tp.Any): IN: page. OUT: Consumed during execution.
-        Returns:
-            dict[int, str]: OUT: Result of the operation."""
+        """Enumerate ``<a href>`` URLs on the page into an id-indexed map."""
 
         links = await page.locator("a[href]").evaluate_all("(els) => els.map((el) => el.href).filter(Boolean)")
         return {index: href for index, href in enumerate(links)}
 
     def _default_screenshot_path(self, ref_id: str) -> str:
-        """Internal helper to default screenshot path.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ref_id (str): IN: ref id. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return an auto-generated screenshot filename for ``ref_id``."""
 
         if self._screenshot_dir:
             directory = Path(self._screenshot_dir)

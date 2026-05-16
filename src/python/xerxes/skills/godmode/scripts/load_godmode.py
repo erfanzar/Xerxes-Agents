@@ -11,14 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Load godmode module for Xerxes."""
+"""Exec the godmode helper scripts into the caller's namespace.
+
+Imported as a one-liner from interactive sessions to make every public helper
+(``score_response``, ``race_models``, ``escalate_encoding``, ...) immediately
+available without a real package install.
+"""
 
 import os
 import sys
 from pathlib import Path
 
 _gm_scripts_dir = (
-    Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "skills" / "red-teaming" / "godmode" / "scripts"
+    Path(os.getenv("XERXES_HOME", Path.home() / ".xerxes")) / "skills" / "red-teaming" / "godmode" / "scripts"
 )
 
 _gm_old_argv = sys.argv
@@ -26,25 +31,8 @@ sys.argv = ["_godmode_loader"]
 
 
 def _gm_load(path):
-    """Internal helper to gm load.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Exec the script at ``path`` against a copy of the loader globals and return the namespace."""
     ns = dict(globals())
-    """Internal helper to gm load.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Internal helper to gm load.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
     ns["__name__"] = "_godmode_module"
     ns["__file__"] = str(path)
     exec(compile(open(path).read(), str(path), "exec"), ns)

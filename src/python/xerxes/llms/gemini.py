@@ -11,10 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Gemini module for Xerxes.
+"""Google Gemini provider adapter (via ``google.generativeai``).
 
-Exports:
-    - GeminiLLM"""
+:class:`GeminiLLM` uses the official SDK directly. Streaming emits
+the normalised chunk dicts described in :class:`BaseLLM`; Gemini
+function-call responses are translated into the same
+``{id, name, arguments}`` shape used by other providers.
+"""
 
 from __future__ import annotations
 

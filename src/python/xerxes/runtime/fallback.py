@@ -11,15 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fallback module for Xerxes.
+"""Capability fallback chains and tool health probes.
 
-Exports:
-    - logger
-    - FallbackChain
-    - FallbackRegistry
-    - HealthSnapshot
-    - ProbeFn
-    - ToolHealthProber"""
+:class:`FallbackChain` records a preferred provider/tool plus ordered
+alternatives for one capability; :class:`FallbackRegistry` is the
+thread-safe map keyed by capability name. :class:`ToolHealthProber` runs
+caller-supplied probe functions on a per-tool interval and surfaces the
+latest :class:`HealthSnapshot` for routing decisions.
+"""
 
 from __future__ import annotations
 
@@ -34,24 +33,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class FallbackChain:
-    """Fallback chain.
+    """Ordered chain of providers/tools for one capability.
 
     Attributes:
-        capability (str): capability.
-        preferred (str): preferred.
-        alternatives (list[str]): alternatives."""
+        capability: Capability name (e.g. ``"llm.summary"``).
+        preferred: Primary choice; tried first by :meth:`order`.
+        alternatives: Ordered backup options tried after ``preferred``.
+    """
 
     capability: str
     preferred: str
     alternatives: list[str] = field(default_factory=list)
 
     def order(self) -> list[str]:
-        """Order.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return the deduplicated try-order starting with ``preferred``."""
 
         seen: set[str] = set()
         out: list[str] = []
@@ -63,26 +58,15 @@ class FallbackChain:
 
 
 class FallbackRegistry:
-    """Fallback registry."""
+    """Thread-safe map of capability name → :class:`FallbackChain`."""
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Create an empty registry guarded by a reentrant lock."""
         self._chains: dict[str, FallbackChain] = {}
         self._lock = threading.RLock()
 
     def set(self, capability: str, preferred: str, *, alternatives: tp.Iterable[str] = ()) -> None:
-        """Set.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (str): IN: capability. OUT: Consumed during execution.
-            preferred (str): IN: preferred. OUT: Consumed during execution.
-            alternatives (tp.Iterable[str], optional): IN: alternatives. Defaults to (). OUT: Consumed during execution."""
-
+        """Register (or replace) the fallback chain for ``capability``."""
         with self._lock:
             self._chains[capability] = FallbackChain(
                 capability=capability,
@@ -91,40 +75,18 @@ class FallbackRegistry:
             )
 
     def get(self, capability: str) -> FallbackChain | None:
-        """Get.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (str): IN: capability. OUT: Consumed during execution.
-        Returns:
-            FallbackChain | None: OUT: Result of the operation."""
-
+        """Return the registered chain for ``capability`` or ``None``."""
         with self._lock:
             return self._chains.get(capability)
 
     def order_for(self, capability: str) -> list[str]:
-        """Order for.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (str): IN: capability. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
-
+        """Return the ordered fallback list, or an empty list if unregistered."""
         with self._lock:
             chain = self._chains.get(capability)
             return chain.order() if chain else []
 
     def next_after(self, capability: str, current: str) -> str | None:
-        """Next after.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (str): IN: capability. OUT: Consumed during execution.
-            current (str): IN: current. OUT: Consumed during execution.
-        Returns:
-            str | None: OUT: Result of the operation."""
-
+        """Return the next backup after ``current`` in ``capability``'s chain, or ``None``."""
         order = self.order_for(capability)
         try:
             idx = order.index(current)
@@ -133,39 +95,27 @@ class FallbackRegistry:
         return order[idx + 1] if idx + 1 < len(order) else None
 
     def remove(self, capability: str) -> bool:
-        """Remove.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capability (str): IN: capability. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
-
+        """Drop ``capability``; return ``True`` when something was removed."""
         with self._lock:
             return self._chains.pop(capability, None) is not None
 
     def all(self) -> dict[str, FallbackChain]:
-        """All.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, FallbackChain]: OUT: Result of the operation."""
-
+        """Return a shallow copy of every registered chain."""
         with self._lock:
             return dict(self._chains)
 
 
 @dataclass
 class HealthSnapshot:
-    """Health snapshot.
+    """Last observation of a probed tool's health.
 
     Attributes:
-        name (str): name.
-        status (str): status.
-        latency_ms (float): latency ms.
-        last_checked (float): last checked.
-        message (str): message."""
+        name: Tool name the snapshot belongs to.
+        status: ``"ok"``, ``"down"``, or ``"unknown"``.
+        latency_ms: Last probe latency in milliseconds.
+        last_checked: Wall-clock seconds at which the probe ran.
+        message: Optional short human-readable diagnostic message.
+    """
 
     name: str
     status: str = "unknown"
@@ -175,30 +125,21 @@ class HealthSnapshot:
 
 
 ProbeFn = tp.Callable[[], "HealthSnapshot | bool | None"]
+"""Probe signature: returns a :class:`HealthSnapshot`, ``bool``, or ``None``."""
 
 
 class ToolHealthProber:
-    """Tool health prober."""
+    """Run periodic probe functions and remember each tool's latest health."""
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Create an empty prober."""
         self._probes: dict[str, tuple[ProbeFn, float]] = {}
         self._snapshots: dict[str, HealthSnapshot] = {}
         self._next_due: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def register(self, name: str, probe: ProbeFn, *, interval_seconds: float = 60.0) -> None:
-        """Register.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-            probe (ProbeFn): IN: probe. OUT: Consumed during execution.
-            interval_seconds (float, optional): IN: interval seconds. Defaults to 60.0. OUT: Consumed during execution."""
+        """Register ``probe`` for tool ``name`` to run every ``interval_seconds``."""
 
         with self._lock:
             self._probes[name] = (probe, float(interval_seconds))
@@ -206,11 +147,7 @@ class ToolHealthProber:
             self._snapshots.setdefault(name, HealthSnapshot(name=name))
 
     def unregister(self, name: str) -> None:
-        """Unregister.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution."""
+        """Drop the probe and accumulated snapshot for ``name``."""
 
         with self._lock:
             self._probes.pop(name, None)
@@ -218,14 +155,13 @@ class ToolHealthProber:
             self._snapshots.pop(name, None)
 
     def run_one(self, name: str, *, now: float | None = None) -> HealthSnapshot:
-        """Run one.
+        """Invoke ``name``'s probe immediately, ignoring its scheduled interval.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            HealthSnapshot: OUT: Result of the operation."""
+        Records the resulting snapshot, schedules the next due time, and
+        returns the snapshot. ``True``/``None``/``False`` probe return values
+        are mapped to ``"ok"``/``"down"`` statuses; raised exceptions become
+        ``"down"`` snapshots with the exception text.
+        """
 
         now = time.time() if now is None else now
         with self._lock:
@@ -266,13 +202,7 @@ class ToolHealthProber:
         return snapshot
 
     def run_due(self, *, now: float | None = None) -> list[HealthSnapshot]:
-        """Run due.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            now (float | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[HealthSnapshot]: OUT: Result of the operation."""
+        """Run every probe whose next-due time has elapsed and return new snapshots."""
 
         now = time.time() if now is None else now
         with self._lock:
@@ -280,37 +210,17 @@ class ToolHealthProber:
         return [self.run_one(name, now=now) for name in due_names]
 
     def snapshot(self, name: str) -> HealthSnapshot | None:
-        """Snapshot.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-        Returns:
-            HealthSnapshot | None: OUT: Result of the operation."""
-
+        """Return the latest :class:`HealthSnapshot` for ``name``, or ``None``."""
         with self._lock:
             return self._snapshots.get(name)
 
     def snapshots(self) -> dict[str, HealthSnapshot]:
-        """Snapshots.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, HealthSnapshot]: OUT: Result of the operation."""
-
+        """Return a shallow copy of every tool snapshot held."""
         with self._lock:
             return dict(self._snapshots)
 
     def healthy(self, name: str) -> bool:
-        """Healthy.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
-
+        """Return ``True`` when ``name``'s most recent snapshot has status ``"ok"``."""
         snap = self.snapshot(name)
         return bool(snap and snap.status == "ok")
 

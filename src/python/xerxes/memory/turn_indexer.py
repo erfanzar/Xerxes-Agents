@@ -11,12 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Turn indexer module for Xerxes.
+"""Streaming-loop adapters that bridge assistant turns into memory.
 
-Exports:
-    - logger
-    - make_turn_indexer_hook
-    - make_memory_provider"""
+Provides two factories used by the runtime:
+
+* ``make_turn_indexer_hook`` — returns a hook the streaming loop fires
+  at the end of every assistant turn to capture the response in memory.
+* ``make_memory_provider`` — returns a callable the loop uses to pull
+  back context strings for the next turn.
+
+Both are written to tolerate the various ``Memory.save``/``search``
+signatures across tiers."""
 
 from __future__ import annotations
 
@@ -29,12 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 def _coerce_text(response: tp.Any) -> str:
-    """Internal helper to coerce text.
+    """Normalise an assistant response (string, dict, object) into a plain text string.
 
-    Args:
-        response (tp.Any): IN: response. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Handles the most common shapes: raw strings, ``{"content": ...}``
+    blocks where content is itself a string or list of text/dict
+    fragments, and objects exposing ``content`` or ``text`` attributes.
+    Falls back to ``str(response)``."""
 
     if response is None:
         return ""
@@ -68,21 +73,23 @@ def make_turn_indexer_hook(
     importance: float = 0.5,
     memory_type: str = "turn",
 ) -> tp.Callable[..., None]:
-    """Make turn indexer hook.
+    """Build a ``post_turn`` hook that indexes each assistant turn into ``memory``.
+
+    The returned hook is keyword-only and tolerant of unrecognised
+    kwargs: it pulls ``agent_id`` and ``response`` from the call,
+    coerces the response to text, and saves it when long enough. If
+    the configured tier's ``save`` signature is narrower than expected
+    a fallback path retries with just ``content``/``metadata``.
 
     Args:
-        memory (Memory): IN: memory. OUT: Consumed during execution.
-        min_chars (int, optional): IN: min chars. Defaults to 32. OUT: Consumed during execution.
-        importance (float, optional): IN: importance. Defaults to 0.5. OUT: Consumed during execution.
-        memory_type (str, optional): IN: memory type. Defaults to 'turn'. OUT: Consumed during execution.
-    Returns:
-        tp.Callable[..., None]: OUT: Result of the operation."""
+        memory: The memory tier to index into.
+        min_chars: Minimum response length (in characters) to record;
+            shorter turns are silently skipped.
+        importance: Importance score attached to the saved item.
+        memory_type: Tier label written to ``MemoryItem.memory_type``."""
 
     def _hook(**kwargs: tp.Any) -> None:
-        """Internal helper to hook.
-
-        Args:
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
+        """Indexer hook fired after each assistant turn."""
 
         agent_id = kwargs.get("agent_id")
         response = kwargs.get("response")
@@ -114,22 +121,20 @@ def make_memory_provider(
     *,
     use_semantic: bool = True,
 ) -> tp.Callable[[str | None, int], list[str]]:
-    """Make memory provider.
+    """Build a ``(agent_id, k) -> list[str]`` callable the loop uses to fetch context.
+
+    The provider runs ``memory.search`` against either the agent id
+    (when present) or the literal string ``"context"``, taking at most
+    ``k`` items and returning their ``content`` strings. Tiers that
+    don't accept ``use_semantic`` are retried without it.
 
     Args:
-        memory (Memory): IN: memory. OUT: Consumed during execution.
-        use_semantic (bool, optional): IN: use semantic. Defaults to True. OUT: Consumed during execution.
-    Returns:
-        tp.Callable[[str | None, int], list[str]]: OUT: Result of the operation."""
+        memory: The memory tier to query.
+        use_semantic: Pass through to the tier's ``search`` when
+            supported; silently dropped otherwise."""
 
     def _provider(agent_id: str | None, k: int) -> list[str]:
-        """Internal helper to provider.
-
-        Args:
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-            k (int): IN: k. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Memory provider invoked once per turn to fetch context strings."""
 
         query = agent_id or "context"
         try:

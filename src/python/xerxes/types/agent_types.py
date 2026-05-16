@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Agent types module for Xerxes.
+"""Pydantic dataclasses describing an Agent's configuration and outputs.
 
-Exports:
-    - AgentBaseFn
-    - AgentFunction
-    - Agent
-    - Response
-    - Result"""
+Defines the :class:`Agent` record (identity, instructions, tools, sampling,
+compaction, switch triggers, MCP attachments), the :class:`AgentBaseFn`
+metaclass for declaring tools as classes, plus :class:`Response` and
+:class:`Result` envelopes for agent outputs.
+"""
 
 from __future__ import annotations
 

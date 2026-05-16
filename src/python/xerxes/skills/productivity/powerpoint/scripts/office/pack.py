@@ -11,10 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pack module for Xerxes.
-
-Exports:
-    - pack"""
+"""Re-pack an unpacked Office document directory into a ``.docx``/``.pptx``/``.xlsx``."""
 
 import argparse
 import shutil
@@ -34,16 +31,18 @@ def pack(
     validate: bool = True,
     infer_author_func=None,
 ) -> tuple[None, str]:
-    """Pack.
+    """Zip ``input_directory`` into ``output_file`` after optional validation.
 
     Args:
-        input_directory (str): IN: input directory. OUT: Consumed during execution.
-        output_file (str): IN: output file. OUT: Consumed during execution.
-        original_file (str | None, optional): IN: original file. Defaults to None. OUT: Consumed during execution.
-        validate (bool, optional): IN: validate. Defaults to True. OUT: Consumed during execution.
-        infer_author_func (Any, optional): IN: infer author func. Defaults to None. OUT: Consumed during execution.
+        input_directory: Path to an unpacked Office document tree.
+        output_file: Output path ending in ``.docx``, ``.pptx``, or ``.xlsx``.
+        original_file: Original file used as a baseline for validation.
+        validate: When True, run schema and redlining validators.
+        infer_author_func: Callable used to infer the redlining author.
+
     Returns:
-        tuple[None, str]: OUT: Result of the operation."""
+        ``(None, message)`` where ``message`` is a human-readable status string.
+    """
     input_dir = Path(input_directory)
     output_path = Path(output_file)
     suffix = output_path.suffix.lower()
@@ -86,15 +85,7 @@ def _run_validation(
     suffix: str,
     infer_author_func=None,
 ) -> tuple[bool, str | None]:
-    """Internal helper to run validation.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        original_file (Path): IN: original file. OUT: Consumed during execution.
-        suffix (str): IN: suffix. OUT: Consumed during execution.
-        infer_author_func (Any, optional): IN: infer author func. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        tuple[bool, str | None]: OUT: Result of the operation."""
+    """Run schema and redlining validators, returning ``(success, message)``."""
     output_lines = []
     validators = []
 
@@ -129,10 +120,7 @@ def _run_validation(
 
 
 def _condense_xml(xml_file: Path) -> None:
-    """Internal helper to condense xml.
-
-    Args:
-        xml_file (Path): IN: xml file. OUT: Consumed during execution."""
+    """Strip whitespace text nodes and comments from ``xml_file`` in-place."""
     try:
         with open(xml_file, encoding="utf-8") as f:
             dom = defusedxml.minidom.parse(f)

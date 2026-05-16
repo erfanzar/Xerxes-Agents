@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Security primitives for Xerxes-Agents.
+
+Re-exports the public surface of the package: tool policy
+(allow/deny lists), sandbox configuration and routing, and the
+sandbox backend protocol. Lower-level helpers (path security,
+URL safety, redaction, prompt scanning, approvals) live in their
+own modules and are imported on demand."""
 
 from .policy import PolicyAction, PolicyEngine, ToolPolicy, ToolPolicyViolation
 from .sandbox import (

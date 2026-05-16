@@ -13,7 +13,11 @@
 # limitations under the License.
 """WhatsApp channel adapter.
 
-Connects to the WhatsApp Business API (via Meta Graph API) for messaging.
+Targets the WhatsApp Business Cloud API on Meta's Graph endpoint. Parses
+inbound webhook payloads (entry → changes → value → messages) and sends
+``text`` messages through ``POST /<phone_number_id>/messages``. Meta's
+``hub.verify_token`` handshake is the operator's responsibility — the
+adapter only handles the JSON event format.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class WhatsAppChannel(WebhookChannel):
-    """Channel implementation for WhatsApp Business API."""
+    """WhatsApp Business Cloud API (Meta Graph) adapter."""
 
     name = "whatsapp"
 
@@ -37,17 +41,15 @@ class WhatsAppChannel(WebhookChannel):
         http_client: tp.Any = None,
         api_version: str = "v18.0",
     ) -> None:
-        """Initialize the WhatsApp channel.
+        """Build the channel.
 
         Args:
-            access_token (str): IN: Meta Graph API access token.
-                OUT: stored for API authorization.
-            phone_number_id (str): IN: WhatsApp Business phone number ID.
-                OUT: used in the API request path.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
-            api_version (str): IN: Meta Graph API version. Defaults to "v18.0".
-                OUT: used in the API URL.
+            access_token: Meta Graph API access token.
+            phone_number_id: WhatsApp Business phone-number id; the leading
+                path segment of every outbound API call.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
+            api_version: Meta Graph API version. Defaults to ``"v18.0"``.
         """
         super().__init__()
         self.access_token = access_token
@@ -56,14 +58,19 @@ class WhatsAppChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a WhatsApp webhook payload into ``ChannelMessage``.
+        """Walk the WhatsApp webhook envelope and emit one message per entry.
+
+        The Cloud API can batch many messages into one webhook: each
+        ``entry`` may have multiple ``changes``, and each change's ``value``
+        may have multiple ``messages``. We unpack the full tree.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            Every parsed user message in delivery order; empty if the
+            envelope contained none.
         """
         data = parse_json_body(body)
         out = []
@@ -85,11 +92,12 @@ class WhatsAppChannel(WebhookChannel):
         return out
 
     async def _send_outbound(self, message):
-        """Send a text message via the WhatsApp Business API.
+        """Send a ``text`` message via ``POST /<phone_number_id>/messages``.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` or
-                ``channel_user_id`` is the recipient, and ``text`` the body.
+            message: Outbound message. ``room_id`` or ``channel_user_id``
+                becomes the recipient phone number (E.164 without ``+``);
+                ``text`` carries the body.
         """
         url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
         body = {

@@ -11,20 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Polymarket module for Xerxes.
-
-Exports:
-    - GAMMA
-    - CLOB
-    - DATA
-    - cmd_search
-    - cmd_trending
-    - cmd_market
-    - cmd_event
-    - cmd_price
-    - cmd_book
-    - cmd_history
-    - ... and 2 more."""
+"""CLI front-end for the Polymarket Gamma, CLOB, and Data APIs."""
 
 import json
 import sys
@@ -39,14 +26,9 @@ DATA = "https://data-api.polymarket.com"
 
 
 def _get(url: str) -> dict | list:
-    """Internal helper to get.
+    """Issue a JSON GET to ``url`` and return the decoded body or exit on failure."""
 
-    Args:
-        url (str): IN: url. OUT: Consumed during execution.
-    Returns:
-        dict | list: OUT: Result of the operation."""
-
-    req = urllib.request.Request(url, headers={"User-Agent": "hermes-agent/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "xerxes/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
@@ -59,12 +41,7 @@ def _get(url: str) -> dict | list:
 
 
 def _parse_json_field(val):
-    """Internal helper to parse json field.
-
-    Args:
-        val (Any): IN: val. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Decode ``val`` from a JSON string when needed, otherwise return it as-is."""
 
     if isinstance(val, str):
         try:
@@ -75,12 +52,7 @@ def _parse_json_field(val):
 
 
 def _fmt_pct(price_str: str) -> str:
-    """Internal helper to fmt pct.
-
-    Args:
-        price_str (str): IN: price str. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Format a ``0..1`` price string as a percentage with one decimal."""
 
     try:
         return f"{float(price_str) * 100:.1f}%"
@@ -89,12 +61,7 @@ def _fmt_pct(price_str: str) -> str:
 
 
 def _fmt_volume(vol) -> str:
-    """Internal helper to fmt volume.
-
-    Args:
-        vol (Any): IN: vol. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Format ``vol`` as a compact USD string with K/M suffixes."""
 
     try:
         v = float(vol)
@@ -108,13 +75,7 @@ def _fmt_volume(vol) -> str:
 
 
 def _print_market(m: dict, indent: str = ""):
-    """Internal helper to print market.
-
-    Args:
-        m (dict): IN: m. OUT: Consumed during execution.
-        indent (str, optional): IN: indent. Defaults to ''. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print a single market summary with prices and volume, indented by ``indent``."""
 
     question = m.get("question", "?")
     prices = _parse_json_field(m.get("outcomePrices", "[]"))
@@ -139,12 +100,7 @@ def _print_market(m: dict, indent: str = ""):
 
 
 def cmd_search(query: str):
-    """Cmd search.
-
-    Args:
-        query (str): IN: query. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Run a Polymarket public search for ``query`` and print matching events."""
 
     q = urllib.parse.quote(query)
     data = _get(f"{GAMMA}/public-search?q={q}")
@@ -163,12 +119,7 @@ def cmd_search(query: str):
 
 
 def cmd_trending(limit: int = 10):
-    """Cmd trending.
-
-    Args:
-        limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the top ``limit`` trending events ranked by volume."""
 
     events = _get(f"{GAMMA}/events?limit={limit}&active=true&closed=false&order=volume&ascending=false")
     print(f"Top {len(events)} trending events:\n")
@@ -185,12 +136,7 @@ def cmd_trending(limit: int = 10):
 
 
 def cmd_market(slug: str):
-    """Cmd market.
-
-    Args:
-        slug (str): IN: slug. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print details for the market identified by ``slug``."""
 
     markets = _get(f"{GAMMA}/markets?slug={urllib.parse.quote(slug)}")
     if not markets:
@@ -213,12 +159,7 @@ def cmd_market(slug: str):
 
 
 def cmd_event(slug: str):
-    """Cmd event.
-
-    Args:
-        slug (str): IN: slug. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print details and child markets for the event identified by ``slug``."""
 
     events = _get(f"{GAMMA}/events?slug={urllib.parse.quote(slug)}")
     if not events:
@@ -235,12 +176,7 @@ def cmd_event(slug: str):
 
 
 def cmd_price(token_id: str):
-    """Cmd price.
-
-    Args:
-        token_id (str): IN: token id. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print buy, midpoint, and spread prices for ``token_id``."""
 
     buy = _get(f"{CLOB}/price?token_id={token_id}&side=buy")
     mid = _get(f"{CLOB}/midpoint?token_id={token_id}")
@@ -252,12 +188,7 @@ def cmd_price(token_id: str):
 
 
 def cmd_book(token_id: str):
-    """Cmd book.
-
-    Args:
-        token_id (str): IN: token id. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the top bids and asks for the orderbook of ``token_id``."""
 
     book = _get(f"{CLOB}/book?token_id={token_id}")
     bids = book.get("bids", [])
@@ -277,14 +208,7 @@ def cmd_book(token_id: str):
 
 
 def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
-    """Cmd history.
-
-    Args:
-        condition_id (str): IN: condition id. OUT: Consumed during execution.
-        interval (str, optional): IN: interval. Defaults to 'all'. OUT: Consumed during execution.
-        fidelity (int, optional): IN: fidelity. Defaults to 50. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Render a sparkline-style price history for ``condition_id``."""
 
     data = _get(f"{CLOB}/prices-history?market={condition_id}&interval={interval}&fidelity={fidelity}")
     history = data.get("history", [])
@@ -302,13 +226,7 @@ def cmd_history(condition_id: str, interval: str = "all", fidelity: int = 50):
 
 
 def cmd_trades(limit: int = 10, market: str | None = None):
-    """Cmd trades.
-
-    Args:
-        limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        market (str | None, optional): IN: market. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the most recent trades, optionally filtered to a single ``market``."""
 
     url = f"{DATA}/trades?limit={limit}"
     if market:
@@ -329,10 +247,7 @@ def cmd_trades(limit: int = 10, market: str | None = None):
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Parse the Polymarket CLI sub-command and dispatch to its handler."""
     args = sys.argv[1:]
     if not args or args[0] in ("-h", "--help", "help"):
         print(__doc__)

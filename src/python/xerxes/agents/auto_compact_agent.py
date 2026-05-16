@@ -25,10 +25,12 @@ from ..context.token_counter import SmartTokenCounter
 
 
 class AutoCompactAgent:
-    """Monitors conversation context size and triggers compaction automatically.
+    """Token-budget watchdog that drives :class:`CompactionAgent` automatically.
 
-    Uses token-count thresholds to decide when to summarize older messages
-    while preserving recent context and system prompts.
+    Computes absolute trigger and target token counts from the provided
+    ``max_context_tokens`` and threshold fractions, then delegates to a
+    :class:`CompactionAgent` to do the summarisation. Tracks how many times
+    compaction has fired and how many tokens were saved overall.
     """
 
     def __init__(
@@ -77,11 +79,7 @@ class AutoCompactAgent:
         self._tokens_saved = 0
 
     def get_statistics(self) -> dict[str, Any]:
-        """Return compaction statistics.
-
-        Returns:
-            Metrics including compaction count, tokens saved, thresholds, and strategy.
-        """
+        """Return cumulative compaction stats and current thresholds."""
         return {
             "compaction_count": self._compaction_count,
             "tokens_saved": self._tokens_saved,
@@ -92,11 +90,7 @@ class AutoCompactAgent:
         }
 
     def check_usage(self) -> dict[str, Any]:
-        """Return current usage thresholds.
-
-        Returns:
-            Threshold and target configuration values.
-        """
+        """Return the threshold/target configuration as a dict."""
         return {
             "max_context_tokens": self.max_context_tokens,
             "threshold_tokens": self.threshold_tokens,
@@ -105,23 +99,15 @@ class AutoCompactAgent:
         }
 
     def record_compaction(self, tokens_before: int, tokens_after: int) -> None:
-        """Record the results of a compaction operation.
-
-        Args:
-            tokens_before: Token count before compaction.
-            tokens_after: Token count after compaction.
-        """
+        """Increment counters with the savings from one compaction pass."""
         self._compaction_count += 1
         self._tokens_saved += tokens_before - tokens_after
 
     def compact(self, messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, Any]]:
-        """Compact a message list by summarizing older messages.
+        """Run a :class:`CompactionAgent` over ``messages``.
 
-        Args:
-            messages: Full conversation history to be summarized.
-
-        Returns:
-            A tuple of the compacted message list and an empty metadata dict.
+        Returns ``(compacted_messages, metadata)``; the metadata slot is
+        reserved for future telemetry and is currently always empty.
         """
         from ..agents.compaction_agent import CompactionAgent
 

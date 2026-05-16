@@ -11,18 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Clean module for Xerxes.
-
-Exports:
-    - get_slides_in_sldidlst
-    - remove_orphaned_slides
-    - remove_trash_directory
-    - get_slide_referenced_files
-    - remove_orphaned_rels_files
-    - get_referenced_files
-    - remove_orphaned_files
-    - update_content_types
-    - clean_unused_files"""
+"""Garbage-collect orphan files inside an unpacked PPTX directory tree."""
 
 import re
 import sys
@@ -32,25 +21,8 @@ import defusedxml.minidom
 
 
 def get_slides_in_sldidlst(unpacked_dir: Path) -> set[str]:
-    """Retrieve the slides in sldidlst.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set[str]: OUT: Result of the operation."""
+    """Return slide filenames referenced from ``presentation.xml``'s ``sldIdLst``."""
     pres_path = unpacked_dir / "ppt" / "presentation.xml"
-    """Retrieve the slides in sldidlst.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set[str]: OUT: Result of the operation."""
-    """Retrieve the slides in sldidlst.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set[str]: OUT: Result of the operation."""
     pres_rels_path = unpacked_dir / "ppt" / "_rels" / "presentation.xml.rels"
 
     if not pres_path.exists() or not pres_rels_path.exists():
@@ -72,25 +44,11 @@ def get_slides_in_sldidlst(unpacked_dir: Path) -> set[str]:
 
 
 def remove_orphaned_slides(unpacked_dir: Path) -> list[str]:
-    """Remove orphaned slides.
+    """Delete slide and rel files not referenced by ``presentation.xml``.
 
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    Returns the list of relative file paths that were removed.
+    """
     slides_dir = unpacked_dir / "ppt" / "slides"
-    """Remove orphaned slides.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
-    """Remove orphaned slides.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
     slides_rels_dir = slides_dir / "_rels"
     pres_rels_path = unpacked_dir / "ppt" / "_rels" / "presentation.xml.rels"
 
@@ -132,25 +90,8 @@ def remove_orphaned_slides(unpacked_dir: Path) -> list[str]:
 
 
 def remove_trash_directory(unpacked_dir: Path) -> list[str]:
-    """Remove trash directory.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Delete the ``[trash]`` directory and return the relative paths removed."""
     trash_dir = unpacked_dir / "[trash]"
-    """Remove trash directory.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
-    """Remove trash directory.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
     removed = []
 
     if trash_dir.exists() and trash_dir.is_dir():
@@ -165,25 +106,8 @@ def remove_trash_directory(unpacked_dir: Path) -> list[str]:
 
 
 def get_slide_referenced_files(unpacked_dir: Path) -> set:
-    """Retrieve the slide referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
+    """Return every relative path referenced by ``ppt/slides/_rels/*.rels``."""
     referenced = set()
-    """Retrieve the slide referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
-    """Retrieve the slide referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
     slides_rels_dir = unpacked_dir / "ppt" / "slides" / "_rels"
 
     if not slides_rels_dir.exists():
@@ -205,25 +129,8 @@ def get_slide_referenced_files(unpacked_dir: Path) -> set:
 
 
 def remove_orphaned_rels_files(unpacked_dir: Path) -> list[str]:
-    """Remove orphaned rels files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Delete ``.rels`` files for chart/diagram/drawing resources no longer referenced."""
     resource_dirs = ["charts", "diagrams", "drawings"]
-    """Remove orphaned rels files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
-    """Remove orphaned rels files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
     removed = []
     slide_referenced = get_slide_referenced_files(unpacked_dir)
 
@@ -248,25 +155,8 @@ def remove_orphaned_rels_files(unpacked_dir: Path) -> list[str]:
 
 
 def get_referenced_files(unpacked_dir: Path) -> set:
-    """Retrieve the referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
+    """Return every relative path referenced by any ``.rels`` file in the package."""
     referenced = set()
-    """Retrieve the referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
-    """Retrieve the referenced files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        set: OUT: Result of the operation."""
 
     for rels_file in unpacked_dir.rglob("*.rels"):
         dom = defusedxml.minidom.parse(str(rels_file))
@@ -284,28 +174,8 @@ def get_referenced_files(unpacked_dir: Path) -> set:
 
 
 def remove_orphaned_files(unpacked_dir: Path, referenced: set) -> list[str]:
-    """Remove orphaned files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        referenced (set): IN: referenced. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Remove resource files under ``ppt/`` that are absent from ``referenced``."""
     resource_dirs = ["media", "embeddings", "charts", "diagrams", "tags", "drawings", "ink"]
-    """Remove orphaned files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        referenced (set): IN: referenced. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
-    """Remove orphaned files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        referenced (set): IN: referenced. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
     removed = []
 
     for dir_name in resource_dirs:
@@ -355,22 +225,8 @@ def remove_orphaned_files(unpacked_dir: Path, referenced: set) -> list[str]:
 
 
 def update_content_types(unpacked_dir: Path, removed_files: list[str]) -> None:
-    """Update content types.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        removed_files (list[str]): IN: removed files. OUT: Consumed during execution."""
+    """Drop ``<Override>`` entries from ``[Content_Types].xml`` for ``removed_files``."""
     ct_path = unpacked_dir / "[Content_Types].xml"
-    """Update content types.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        removed_files (list[str]): IN: removed files. OUT: Consumed during execution."""
-    """Update content types.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        removed_files (list[str]): IN: removed files. OUT: Consumed during execution."""
     if not ct_path.exists():
         return
 
@@ -390,25 +246,8 @@ def update_content_types(unpacked_dir: Path, removed_files: list[str]) -> None:
 
 
 def clean_unused_files(unpacked_dir: Path) -> list[str]:
-    """Clean unused files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Run every cleanup pass in turn and return all removed file paths."""
     all_removed = []
-    """Clean unused files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
-    """Clean unused files.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
 
     slides_removed = remove_orphaned_slides(unpacked_dir)
     all_removed.extend(slides_removed)

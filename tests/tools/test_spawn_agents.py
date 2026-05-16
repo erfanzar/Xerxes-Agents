@@ -4,6 +4,7 @@ import json
 import threading
 import time
 
+from xerxes.agents.definitions import get_agent_definition
 from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask, _filter_subagent_tools
 from xerxes.tools import claude_tools
 from xerxes.tools.claude_tools import AgentTool, SpawnAgents
@@ -194,3 +195,35 @@ def test_subagent_system_prompt_does_not_include_active_skills_by_default(monkey
     monkeypatch.setattr(claude_tools, "_skill_registry", {"deepscan": _Skill()}, raising=False)
 
     assert claude_tools._build_subagent_system_prompt("base") == "base"
+
+
+def test_agent_definition_spawn_adds_subagent_caller_prompt():
+    captured: dict[str, object] = {}
+
+    def runner(prompt, config, system_prompt, depth, cancel_check):
+        captured["prompt"] = prompt
+        captured["config"] = dict(config)
+        captured["system_prompt"] = system_prompt
+        captured["depth"] = depth
+        return "done"
+
+    agent_def = get_agent_definition("researcher")
+    mgr = SubAgentManager(max_concurrent=1)
+    mgr.set_runner(runner)
+    try:
+        task = mgr.spawn(
+            prompt="inspect mode handling",
+            config={},
+            system_prompt="base system",
+            agent_def=agent_def,
+            name="researcher-check",
+        )
+
+        assert mgr.wait(task.id, timeout=2) is task
+        assert task.status == "completed"
+        assert "You are now running as a subagent" in str(captured["system_prompt"])
+        assert "You are a research assistant focused on understanding codebases." in str(captured["system_prompt"])
+        assert str(captured["system_prompt"]).rstrip().endswith("base system")
+        assert captured["config"].get("_tools_allowed") == agent_def.allowed_tools
+    finally:
+        mgr.shutdown()

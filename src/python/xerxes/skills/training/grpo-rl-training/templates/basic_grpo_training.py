@@ -11,20 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Basic grpo training module for Xerxes.
-
-Exports:
-    - MODEL_NAME
-    - OUTPUT_DIR
-    - MAX_PROMPT_LENGTH
-    - MAX_COMPLETION_LENGTH
-    - SYSTEM_PROMPT
-    - get_dataset
-    - extract_xml_tag
-    - extract_answer
-    - correctness_reward_func
-    - format_reward_func
-    - ... and 4 more."""
+"""Reference GRPO training template: GSM8K + reasoning/answer reward functions."""
 
 import re
 
@@ -51,22 +38,12 @@ Respond in the following format:
 
 
 def get_dataset(split="train"):
-    """Retrieve the dataset.
-
-    Args:
-        split (Any, optional): IN: split. Defaults to 'train'. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Load the requested GSM8K ``split`` and map each example to the GRPO prompt format."""
 
     data = load_dataset("openai/gsm8k", "main")[split]
 
     def process_example(x):
-        """Process example.
-
-        Args:
-            x (Any): IN: x. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Convert a GSM8K row into ``{"prompt": [...], "answer": "<final>"}``."""
 
         answer = x["answer"].split("####")[1].strip() if "####" in x["answer"] else None
 
@@ -79,13 +56,7 @@ def get_dataset(split="train"):
 
 
 def extract_xml_tag(text: str, tag: str) -> str:
-    """Extract xml tag.
-
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-        tag (str): IN: tag. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return the body of the first ``<tag>...</tag>`` block in ``text``."""
 
     pattern = f"<{tag}>(.*?)</{tag}>"
     match = re.search(pattern, text, re.DOTALL)
@@ -93,26 +64,13 @@ def extract_xml_tag(text: str, tag: str) -> str:
 
 
 def extract_answer(text: str) -> str:
-    """Extract answer.
-
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return the contents of the ``<answer>`` block in ``text``."""
 
     return extract_xml_tag(text, "answer")
 
 
 def correctness_reward_func(prompts, completions, answer, **kwargs):
-    """Correctness reward func.
-
-    Args:
-        prompts (Any): IN: prompts. OUT: Consumed during execution.
-        completions (Any): IN: completions. OUT: Consumed during execution.
-        answer (Any): IN: answer. OUT: Consumed during execution.
-        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return 2.0 per completion whose extracted answer equals the ground truth, else 0.0."""
 
     responses = [comp[0]["content"] for comp in completions]
     extracted = [extract_answer(r) for r in responses]
@@ -120,13 +78,7 @@ def correctness_reward_func(prompts, completions, answer, **kwargs):
 
 
 def format_reward_func(completions, **kwargs):
-    """Format reward func.
-
-    Args:
-        completions (Any): IN: completions. OUT: Consumed during execution.
-        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return 0.5 when a completion contains both ``<reasoning>`` and ``<answer>``, else 0.0."""
 
     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
     responses = [comp[0]["content"] for comp in completions]
@@ -134,13 +86,7 @@ def format_reward_func(completions, **kwargs):
 
 
 def incremental_format_reward_func(completions, **kwargs):
-    """Incremental format reward func.
-
-    Args:
-        completions (Any): IN: completions. OUT: Consumed during execution.
-        **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Reward per opening/closing tag present and penalise trailing junk after ``</answer>``."""
 
     responses = [comp[0]["content"] for comp in completions]
     rewards = []
@@ -166,10 +112,7 @@ def incremental_format_reward_func(completions, **kwargs):
 
 
 def setup_model_and_tokenizer():
-    """Setup model and tokenizer.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Load ``MODEL_NAME`` in bf16 with flash-attention and return ``(model, tokenizer)``."""
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2", device_map="auto"
@@ -182,10 +125,7 @@ def setup_model_and_tokenizer():
 
 
 def get_peft_config():
-    """Retrieve the peft config.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return the LoRA configuration used to fine-tune the base model."""
 
     return LoraConfig(
         r=16,
@@ -197,10 +137,7 @@ def get_peft_config():
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Run the GRPO training loop end-to-end and save the final model."""
 
     print("Loading dataset...")
     dataset = get_dataset()

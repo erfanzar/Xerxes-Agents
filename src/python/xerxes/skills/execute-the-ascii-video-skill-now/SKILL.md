@@ -4,7 +4,6 @@ description: "Execute the 'ascii-video' skill now."
 version: 0.1.0
 tags: [ListDir, GlobTool, GrepTool, ReadFile, ExecuteShell]
 required_tools: [ListDir, GlobTool, GrepTool, ReadFile, ExecuteShell]
-author: hermes-skill-authoring
 ---
 # When to use
 

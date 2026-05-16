@@ -22,15 +22,18 @@ from ...core.utils import function_to_json
 
 @dataclass
 class CortexTool:
-    """Wraps a callable as a tool with a JSON schema for LLM function calling.
+    """Wrap a callable as an LLM-callable tool with a JSON Schema.
 
     Attributes:
-        name (str): The tool name exposed to the LLM.
-        description (str): A description of what the tool does.
-        function (Callable): The actual Python function to invoke.
-        parameters (dict): JSON Schema for the function parameters.
-        auto_generate_schema (bool): Whether to auto-generate the schema from
-            the function signature when *parameters* is empty.
+        name: Tool name surfaced to the model.
+        description: Free-form description shown in the tool catalogue.
+        function: Python callable invoked when the model selects the tool.
+        parameters: Explicit JSON Schema for the parameters; ignored when
+            ``auto_generate_schema`` is ``True`` and the field is left
+            empty (a schema is then derived from the signature).
+        auto_generate_schema: When ``True``, derive a schema from the
+            function signature via :func:`function_to_json` whenever
+            ``parameters`` is empty.
     """
 
     name: str
@@ -40,12 +43,11 @@ class CortexTool:
     auto_generate_schema: bool = True
 
     def to_function_json(self) -> dict:
-        """Serialize the tool to a function-calling JSON schema.
+        """Return an OpenAI-style ``function`` JSON descriptor for the tool.
 
-        Returns:
-            dict: A JSON object compatible with OpenAI-style function calling.
-                OUT: Contains ``type``, ``function.name``, ``function.description``,
-                and ``function.parameters``.
+        Uses the auto-generated schema when ``auto_generate_schema`` is set
+        and ``parameters`` is empty, otherwise falls back to the explicit
+        ``parameters`` (or an empty object schema).
         """
 
         if self.auto_generate_schema and not self.parameters:
@@ -78,22 +80,10 @@ class CortexTool:
         name: str | None = None,
         description: str | None = None,
     ) -> "CortexTool":
-        """Create a ``CortexTool`` instance from a plain callable.
+        """Build a :class:`CortexTool` from a plain Python callable.
 
-        Args:
-            function (Callable): The function to wrap.
-                IN: Any callable object that will be exposed as a tool.
-                OUT: Stored as the tool's executable function.
-            name (str | None): Optional override for the tool name.
-                IN: If ``None``, ``function.__name__`` is used.
-                OUT: Becomes the ``name`` attribute of the created tool.
-            description (str | None): Optional override for the tool description.
-                IN: If ``None``, ``function.__doc__`` or an empty string is used.
-                OUT: Becomes the ``description`` attribute of the created tool.
-
-        Returns:
-            CortexTool: A fully configured tool instance.
-                OUT: Ready for registration with an agent or LLM.
+        ``name`` defaults to ``function.__name__`` and ``description``
+        defaults to ``function.__doc__``.
         """
 
         return cls(

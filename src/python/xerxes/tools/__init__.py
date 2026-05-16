@@ -11,12 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes.
+"""Public surface of the Xerxes tools subsystem.
 
-Exports:
-    - get_available_tools
-    - get_tool_info
-    - list_tools_by_category"""
+This package aggregates every tool implementation shipped with Xerxes — coding,
+browser, system, AI, math, memory, agent orchestration, RL, media, Home
+Assistant integration, and more — re-exporting them so callers (agents, the
+streaming loop, the TUI tool registry) can import a single namespace instead
+of reaching into individual modules. The module also publishes
+:data:`TOOL_CATEGORIES` and :data:`TOOL_REQUIREMENTS` plus the helper
+functions :func:`get_available_tools`, :func:`get_tool_info`, and
+:func:`list_tools_by_category` used by introspection and documentation
+tooling.
+"""
 
 from .coding_tools import (
     analyze_code_structure,
@@ -60,6 +66,15 @@ try:
 except ImportError:
     _SYSTEM_TOOLS_AVAILABLE = False
 
+from .agent_memory_tool import (
+    agent_memory_append,
+    agent_memory_journal,
+    agent_memory_list,
+    agent_memory_read,
+    agent_memory_search,
+    agent_memory_status,
+    agent_memory_write,
+)
 from .agent_meta_tools import (
     configure_mixture_of_agents,
     mixture_of_agents,
@@ -104,6 +119,7 @@ from .claude_tools import (
     RemoteTriggerTool,
     ScheduleCronTool,
     SendMessageTool,
+    SetInteractionModeTool,
     SkillTool,
     SpawnAgents,
     TaskCreateTool,
@@ -200,6 +216,7 @@ __all__ = [
     "RemoteTriggerTool",
     "ScheduleCronTool",
     "SendMessageTool",
+    "SetInteractionModeTool",
     "SkillTool",
     "SpawnAgents",
     "StatisticalAnalyzer",
@@ -218,6 +235,13 @@ __all__ = [
     "ToolSearchTool",
     "UnitConverter",
     "WriteFile",
+    "agent_memory_append",
+    "agent_memory_journal",
+    "agent_memory_list",
+    "agent_memory_read",
+    "agent_memory_search",
+    "agent_memory_status",
+    "agent_memory_write",
     "analyze_code_structure",
     "apply_diff",
     "browser_back",
@@ -322,7 +346,23 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "ai": ["TextEmbedder", "TextSimilarity", "TextClassifier", "TextSummarizer", "EntityExtractor"],
     "math": ["Calculator", "StatisticalAnalyzer", "MathematicalFunctions", "NumberTheory", "UnitConverter"],
     "system": ["SystemInfo", "EnvironmentManager", "ProcessManager"],
-    "memory": ["save_memory", "search_memory", "consolidate_agent_memories", "delete_memory", "get_memory_statistics"],
+    "memory": [
+        "save_memory",
+        "search_memory",
+        "consolidate_agent_memories",
+        "delete_memory",
+        "get_memory_statistics",
+        # Agent's persistent two-tier memory (global + project-scoped). The
+        # agent reads/writes its own notes here; contents are injected into
+        # the system prompt at session start.
+        "agent_memory_read",
+        "agent_memory_write",
+        "agent_memory_append",
+        "agent_memory_list",
+        "agent_memory_search",
+        "agent_memory_journal",
+        "agent_memory_status",
+    ],
     "agent": [
         "AgentTool",
         "HandoffTool",
@@ -339,6 +379,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "workflow": [
         "TodoWriteTool",
         "AskUserQuestionTool",
+        "SetInteractionModeTool",
         "EnterPlanModeTool",
         "ExitPlanModeTool",
         "EnterWorktreeTool",
@@ -407,10 +448,15 @@ TOOL_REQUIREMENTS: dict[str, str] = {
 
 
 def get_available_tools() -> dict[str, list[str]]:
-    """Retrieve the available tools.
+    """Return the set of tools that successfully imported, grouped by category.
+
+    Tools whose optional dependencies failed to load (for example ``web_tools``
+    or ``system_tools``) are silently dropped from the returned mapping rather
+    than raising; the keys mirror :data:`TOOL_CATEGORIES`.
 
     Returns:
-        dict[str, list[str]]: OUT: Result of the operation."""
+        Mapping of category name to a list of importable tool symbol names.
+    """
 
     available: dict[str, list[str]] = {}
 
@@ -424,12 +470,21 @@ def get_available_tools() -> dict[str, list[str]]:
 
 
 def get_tool_info(tool_name: str) -> dict[str, str | bool | None]:
-    """Retrieve the tool info.
+    """Describe a single tool by name.
+
+    Looks the symbol up in the package globals, locates its category in
+    :data:`TOOL_CATEGORIES`, attaches the install requirement (defaulting to
+    ``"core"``) and, when present, extracts the first line of the tool's
+    ``static_call`` docstring as a one-line description.
 
     Args:
-        tool_name (str): IN: tool name. OUT: Consumed during execution.
+        tool_name: Public symbol name as listed in :data:`__all__`.
+
     Returns:
-        dict[str, str | bool | None]: OUT: Result of the operation."""
+        Dictionary with keys ``name``, ``category``, ``available``,
+        ``requirements``, and optionally ``description``. When the tool is
+        unknown or could not be imported, a single ``error`` key is returned.
+    """
 
     if tool_name not in __all__:
         return {"error": f"Tool {tool_name} not found"}
@@ -460,12 +515,17 @@ def get_tool_info(tool_name: str) -> dict[str, str | bool | None]:
 
 
 def list_tools_by_category(category: str | None = None) -> list[str] | dict[str, list[str]]:
-    """List tools by category.
+    """Enumerate importable tools, optionally filtered to a single category.
 
     Args:
-        category (str | None, optional): IN: category. Defaults to None. OUT: Consumed during execution.
+        category: Category key from :data:`TOOL_CATEGORIES`. When ``None``,
+            every category is returned.
+
     Returns:
-        list[str] | dict[str, list[str]]: OUT: Result of the operation."""
+        When ``category`` is given, a list of tool names belonging to that
+        category (empty if the category is unknown). When ``category`` is
+        ``None``, a mapping of every category to its importable tools.
+    """
 
     if category:
         if category not in TOOL_CATEGORIES:

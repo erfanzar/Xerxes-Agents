@@ -1,20 +1,13 @@
 # Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Unix domain socket channel for local daemon communication.
+"""Newline-delimited JSON-RPC over a Unix domain socket.
 
-``SocketChannel`` exposes a line-delimited JSON-RPC-like interface over a
-Unix domain socket so local clients can submit tasks without a network hop.
+This is the local-only sibling of :mod:`xerxes.daemon.gateway`: TUIs and other
+co-tenanted clients connect to ``$XERXES_HOME/daemon/xerxes.sock`` and speak
+plain JSON-RPC 2.0, one message per line. Outbound ``event`` notifications
+are broadcast to every live writer; inbound requests are dispatched via the
+caller-supplied :data:`RPCHandler`.
 """
 
 from __future__ import annotations
@@ -25,157 +18,114 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-SubmitFn = Callable[[str, str], Awaitable[str]]
+EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
+RPCHandler = Callable[[str, dict[str, Any], EmitFn], Awaitable[dict[str, Any]]]
 
 
 class SocketChannel:
-    """Unix socket server that accepts JSON-line requests.
-
-    Args:
-        socket_path (str): IN: Filesystem path for the Unix socket. OUT:
-            Expanded, cleaned up, and bound by ``asyncio.start_unix_server``.
-    """
+    """JSON-RPC 2.0 server over a Unix domain socket using newline framing."""
 
     def __init__(self, socket_path: str) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            socket_path (str): IN: socket path. OUT: Consumed during execution."""
+        """Configure the path; the listener is opened by :meth:`start`."""
         self._path = Path(socket_path).expanduser()
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            socket_path (str): IN: socket path. OUT: Consumed during execution."""
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            socket_path (str): IN: socket path. OUT: Consumed during execution."""
         self._server: asyncio.AbstractServer | None = None
-        self._submit_fn: SubmitFn | None = None
-        self._list_fn: Callable[[], list[dict[str, Any]]] | None = None
-        self._status_fn: Callable[[], dict[str, Any]] | None = None
+        self._handler: RPCHandler | None = None
+        self._clients: dict[asyncio.StreamWriter, asyncio.Lock] = {}
+        self._broadcast_tasks: set[asyncio.Task[None]] = set()
 
-    async def start(
-        self,
-        submit_fn: SubmitFn,
-        list_fn: Callable[[], list[dict[str, Any]]],
-        status_fn: Callable[[], dict[str, Any]],
-    ) -> None:
-        """Bind callbacks and start the Unix socket server.
-
-        Args:
-            submit_fn (SubmitFn): IN: Async callback for task submission.
-                OUT: Invoked for ``submit`` method requests.
-            list_fn (Callable): IN: Callback returning task list. OUT: Invoked
-                for ``list`` method requests.
-            status_fn (Callable): IN: Callback returning daemon status. OUT:
-                Invoked for ``status`` method requests.
-
-        Returns:
-            None: OUT: Server is listening when the coroutine completes.
-        """
-        self._submit_fn = submit_fn
-        self._list_fn = list_fn
-        self._status_fn = status_fn
-
+    async def start(self, handler: RPCHandler) -> None:
+        """Bind the socket, remove any stale file, and accept connections."""
+        self._handler = handler
         if self._path.exists():
             self._path.unlink()
         self._path.parent.mkdir(parents=True, exist_ok=True)
-
-        self._server = await asyncio.start_unix_server(
-            self._handle_client,
-            path=str(self._path),
-        )
+        self._server = await asyncio.start_unix_server(self._handle_client, path=str(self._path))
 
     async def stop(self) -> None:
-        """Stop the server and remove the socket file.
-
-        Returns:
-            None: OUT: Socket is closed and filesystem entry is removed.
-        """
+        """Close every client, cancel in-flight broadcasts, and remove the socket file."""
+        for writer in list(self._clients):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        self._clients.clear()
+        for task in list(self._broadcast_tasks):
+            task.cancel()
+        self._broadcast_tasks.clear()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
-        if self._path.exists():
-            self._path.unlink(missing_ok=True)
+            self._server = None
+        self._path.unlink(missing_ok=True)
 
-    async def _handle_client(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Process JSON-line requests from a single client.
+    def broadcast(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Push an ``event`` notification line to every connected client."""
+        data = {"jsonrpc": "2.0", "method": "event", "params": {"type": event_type, "payload": payload}}
+        for writer, lock in list(self._clients.items()):
+            task = asyncio.create_task(self._send(writer, lock, data))
+            self._broadcast_tasks.add(task)
+            task.add_done_callback(self._broadcast_tasks.discard)
 
-        Args:
-            reader (asyncio.StreamReader): IN: Async reader for the socket.
-                OUT: Consumed line-by-line.
-            writer (asyncio.StreamWriter): IN: Async writer for the socket.
-                OUT: Used to send JSON response lines.
+    async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Pump one connected client's request loop until disconnect."""
+        write_lock = asyncio.Lock()
+        self._clients[writer] = write_lock
 
-        Returns:
-            None: OUT: Connection is closed after the first ``submit`` or on
-            error.
-        """
+        async def send(data: dict[str, Any]) -> None:
+            await self._send(writer, write_lock, data)
+
+        async def emit(event_type: str, payload: dict[str, Any]) -> None:
+            await send({"jsonrpc": "2.0", "method": "event", "params": {"type": event_type, "payload": payload}})
+
         try:
             while True:
-                data = await reader.readline()
-                if not data:
+                raw = await reader.readline()
+                if not raw:
                     break
-                line = data.decode().strip()
-                if not line:
-                    continue
-
                 try:
-                    msg = json.loads(line)
+                    msg = json.loads(raw.decode("utf-8"))
                 except json.JSONDecodeError:
-                    resp = {"ok": False, "error": "Invalid JSON"}
-                    writer.write((json.dumps(resp) + "\n").encode())
-                    await writer.drain()
+                    await send({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Invalid JSON"}})
                     continue
 
-                method = msg.get("method", "")
-                resp = await self._dispatch(method, msg.get("params", {}))
-                writer.write((json.dumps(resp, default=str) + "\n").encode())
-                await writer.drain()
-
-                if method == "submit":
-                    break
-        except (ConnectionResetError, BrokenPipeError):
+                req_id = msg.get("id")
+                method = str(msg.get("method") or msg.get("type") or "")
+                params = msg.get("params", {})
+                if not isinstance(params, dict):
+                    params = {}
+                if not self._handler:
+                    result = {"ok": False, "error": "Daemon not ready"}
+                else:
+                    try:
+                        result = await self._handler(method, params, emit)
+                    except Exception as exc:
+                        await send(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "error": {"code": -32000, "message": str(exc)},
+                            }
+                        )
+                        continue
+                await send({"jsonrpc": "2.0", "id": req_id, "result": result})
+        except (ConnectionResetError, BrokenPipeError, OSError):
             pass
         finally:
+            self._clients.pop(writer, None)
             writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
-    async def _dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Route a parsed request to the appropriate handler.
+    async def _send(self, writer: asyncio.StreamWriter, lock: asyncio.Lock, data: dict[str, Any]) -> None:
+        """Serialise ``data`` and write it as a single newline-terminated line."""
+        try:
+            async with lock:
+                writer.write((json.dumps(data, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+                await writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            self._clients.pop(writer, None)
 
-        Args:
-            method (str): IN: Request method name. OUT: Used for routing.
-            params (dict[str, Any]): IN: Method parameters. OUT: Passed to the
-                handler (e.g. ``prompt`` for ``submit``).
 
-        Returns:
-            dict[str, Any]: OUT: Response dict with ``ok`` and result fields.
-        """
-        if method == "submit":
-            prompt = params.get("prompt", "").strip()
-            if not prompt:
-                return {"ok": False, "error": "Empty prompt"}
-            if self._submit_fn:
-                result = await self._submit_fn(prompt, "socket")
-                return {"ok": True, "result": result}
-            return {"ok": False, "error": "Daemon not ready"}
-
-        if method == "list":
-            if self._list_fn:
-                return {"ok": True, "tasks": self._list_fn()}
-            return {"ok": True, "tasks": []}
-
-        if method == "status":
-            if self._status_fn:
-                return {"ok": True, **self._status_fn()}
-            return {"ok": True, "status": "running"}
-
-        return {"ok": False, "error": f"Unknown method: {method}"}
+__all__ = ["EmitFn", "RPCHandler", "SocketChannel"]

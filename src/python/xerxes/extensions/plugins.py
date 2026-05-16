@@ -48,15 +48,13 @@ class PluginMeta:
     """Metadata describing a plugin package.
 
     Attributes:
-        name (str): IN: Unique plugin identifier. OUT: Used as registry key.
-        version (str): IN: Semver string. OUT: Used for dependency checks.
-        plugin_type (PluginType): IN: Category. OUT: Logged on registration.
-        description (str): IN: Human-readable summary. OUT: Optional metadata.
-        author (str): IN: Author name. OUT: Optional metadata.
-        dependencies (list[str]): IN: Dependency strings. OUT: Parsed during
-            validation.
-        version_constraints (dict[str, str]): IN: Name-to-constraint map.
-            OUT: Parsed during validation.
+        name: Unique plugin identifier, used as the registry key.
+        version: Semver string consulted during dependency resolution.
+        plugin_type: Category of capability this plugin exports.
+        description: Human-readable summary.
+        author: Author name.
+        dependencies: Dependency strings parsed during validation.
+        version_constraints: Mapping from dependency name to constraint expression.
     """
 
     name: str
@@ -70,18 +68,14 @@ class PluginMeta:
 
 @dataclass
 class RegisteredPlugin:
-    """Runtime record of a loaded plugin and its exports.
+    """Runtime record of a loaded plugin and its exported capabilities.
 
     Attributes:
-        meta (PluginMeta): IN: Plugin metadata. OUT: Stored for introspection.
-        tools (dict[str, tp.Callable]): IN: Exported tool functions. OUT:
-            Looked up by ``get_tool``.
-        hooks (dict[str, tp.Callable]): IN: Exported hook functions. OUT:
-            Aggregated by ``get_hooks``.
-        provider (tp.Any): IN: Exported provider instance. OUT: Looked up by
-            ``get_provider``.
-        channels (dict[str, tp.Any]): IN: Exported channel objects. OUT:
-            Looked up by ``get_channel``.
+        meta: Plugin metadata.
+        tools: Exported tool functions keyed by tool name.
+        hooks: Exported hook callbacks keyed by hook point.
+        provider: Optional exported provider instance.
+        channels: Exported channel objects keyed by channel name.
     """
 
     meta: PluginMeta
@@ -92,19 +86,14 @@ class RegisteredPlugin:
 
 
 class PluginConflictError(Exception):
-    """Raised when registering a plugin or resource that already exists.
-
-    Args:
-        name (str): IN: Conflicting resource name. OUT: Stored.
-        existing (str): IN: Name of the existing owner. OUT: Stored.
-    """
+    """Raised when registering a plugin or resource whose name already exists."""
 
     def __init__(self, name: str, existing: str) -> None:
-        """Initialize with conflict details.
+        """Store the conflicting and existing owner names on the exception.
 
         Args:
-            name (str): IN: New resource name. OUT: Stored.
-            existing (str): IN: Existing resource owner. OUT: Stored.
+            name: Resource that could not be registered.
+            existing: Plugin that already owns the name.
         """
 
         self.name = name
@@ -116,7 +105,7 @@ class PluginRegistry:
     """Central registry for plugin metadata and exported capabilities."""
 
     def __init__(self) -> None:
-        """Initialize empty internal indexes."""
+        """Initialize empty plugin, tool, hook, provider, and channel indexes."""
 
         self._plugins: dict[str, RegisteredPlugin] = {}
         self._tools: dict[str, tuple[tp.Callable, str]] = {}
@@ -126,27 +115,21 @@ class PluginRegistry:
 
     @property
     def plugin_names(self) -> list[str]:
-        """List names of all registered plugins.
-
-        Returns:
-            list[str]: OUT: Snapshot of ``self._plugins`` keys.
-        """
+        """Return a snapshot of the registered plugin names."""
 
         return list(self._plugins.keys())
 
     def register_plugin(self, meta: PluginMeta) -> RegisteredPlugin:
-        """Create a new plugin entry in the registry.
+        """Create and store a new plugin entry.
 
         Args:
-            meta (PluginMeta): IN: Metadata for the plugin. OUT: Stored and
-                used as the registry key.
+            meta: Metadata describing the plugin.
 
         Returns:
-            RegisteredPlugin: OUT: Newly created entry.
+            The newly created ``RegisteredPlugin`` record.
 
         Raises:
-            PluginConflictError: OUT: If a plugin with the same name already
-                exists.
+            PluginConflictError: A plugin with the same name is already registered.
         """
 
         if meta.name in self._plugins:
@@ -163,19 +146,20 @@ class PluginRegistry:
         meta: PluginMeta | None = None,
         plugin_name: str | None = None,
     ) -> None:
-        """Register a tool function.
+        """Register a tool function under ``tool_name``.
+
+        When ``meta`` is supplied and the owning plugin has not been registered yet,
+        it is registered first so the tool can be linked back to its owner.
 
         Args:
-            tool_name (str): IN: Unique tool identifier. OUT: Used as lookup
-                key.
-            func (tp.Callable): IN: Tool implementation. OUT: Stored.
-            meta (PluginMeta | None): IN: Plugin metadata (auto-registers the
-                plugin if needed). OUT: Used to derive ``plugin_name``.
-            plugin_name (str | None): IN: Explicit plugin owner. OUT:
-                Defaults to ``meta.name`` or ``"__standalone__"``.
+            tool_name: Unique tool identifier.
+            func: Tool implementation.
+            meta: Optional plugin metadata; auto-registers the plugin if needed.
+            plugin_name: Explicit plugin owner; defaults to ``meta.name`` or
+                ``"__standalone__"``.
 
         Raises:
-            PluginConflictError: OUT: If ``tool_name`` is already registered.
+            PluginConflictError: ``tool_name`` is already registered.
         """
 
         pname = plugin_name or (meta.name if meta else "__standalone__")
@@ -199,15 +183,14 @@ class PluginRegistry:
         meta: PluginMeta | None = None,
         plugin_name: str | None = None,
     ) -> None:
-        """Register a hook callback.
+        """Register a hook callback under ``hook_name``.
 
         Args:
-            hook_name (str): IN: Hook point name. OUT: Used as key.
-            func (tp.Callable): IN: Callback implementation. OUT: Stored.
-            meta (PluginMeta | None): IN: Plugin metadata. OUT: Auto-registers
-                plugin if absent.
-            plugin_name (str | None): IN: Explicit plugin owner. OUT:
-                Defaults to ``meta.name`` or ``"__standalone__"``.
+            hook_name: Hook point name.
+            func: Callback implementation invoked when the hook fires.
+            meta: Optional plugin metadata; auto-registers the plugin if absent.
+            plugin_name: Explicit plugin owner; defaults to ``meta.name`` or
+                ``"__standalone__"``.
         """
 
         pname = plugin_name or (meta.name if meta else "__standalone__")
@@ -229,19 +212,17 @@ class PluginRegistry:
         meta: PluginMeta | None = None,
         plugin_name: str | None = None,
     ) -> None:
-        """Register a provider object.
+        """Register a provider instance under ``provider_name``.
 
         Args:
-            provider_name (str): IN: Unique provider identifier. OUT: Lookup
-                key.
-            provider (tp.Any): IN: Provider instance. OUT: Stored.
-            meta (PluginMeta | None): IN: Plugin metadata. OUT: Auto-registers
-                plugin if absent.
-            plugin_name (str | None): IN: Explicit plugin owner. OUT:
-                Defaults to ``meta.name`` or ``"__standalone__"``.
+            provider_name: Unique provider identifier.
+            provider: Provider instance to expose.
+            meta: Optional plugin metadata; auto-registers the plugin if absent.
+            plugin_name: Explicit plugin owner; defaults to ``meta.name`` or
+                ``"__standalone__"``.
 
         Raises:
-            PluginConflictError: OUT: If ``provider_name`` already exists.
+            PluginConflictError: ``provider_name`` is already registered.
         """
 
         pname = plugin_name or (meta.name if meta else "__standalone__")
@@ -262,18 +243,17 @@ class PluginRegistry:
         meta: PluginMeta | None = None,
         plugin_name: str | None = None,
     ) -> None:
-        """Register a channel object.
+        """Register a channel instance under ``channel_name``.
 
         Args:
-            channel_name (str): IN: Unique channel identifier. OUT: Lookup key.
-            channel (tp.Any): IN: Channel instance. OUT: Stored.
-            meta (PluginMeta | None): IN: Plugin metadata. OUT: Auto-registers
-                plugin if absent.
-            plugin_name (str | None): IN: Explicit plugin owner. OUT:
-                Defaults to ``meta.name`` or ``"__standalone__"``.
+            channel_name: Unique channel identifier.
+            channel: Channel instance to expose.
+            meta: Optional plugin metadata; auto-registers the plugin if absent.
+            plugin_name: Explicit plugin owner; defaults to ``meta.name`` or
+                ``"__standalone__"``.
 
         Raises:
-            PluginConflictError: OUT: If ``channel_name`` already exists.
+            PluginConflictError: ``channel_name`` is already registered.
         """
 
         pname = plugin_name or (meta.name if meta else "__standalone__")
@@ -290,100 +270,45 @@ class PluginRegistry:
         logger.debug("Registered channel '%s' from plugin '%s'", channel_name, pname)
 
     def get_channel(self, channel_name: str) -> tp.Any | None:
-        """Retrieve a registered channel by name.
-
-        Args:
-            channel_name (str): IN: Channel identifier. OUT: Looked up in the
-                registry.
-
-        Returns:
-            tp.Any | None: OUT: Channel instance or ``None``.
-        """
+        """Return the channel registered under ``channel_name``, or ``None``."""
 
         entry = self._channels.get(channel_name)
         return entry[0] if entry else None
 
     def get_all_channels(self) -> dict[str, tp.Any]:
-        """Return all registered channels.
-
-        Returns:
-            dict[str, tp.Any]: OUT: Mapping from channel name to instance.
-        """
+        """Return a mapping from channel name to channel instance."""
 
         return {name: chan for name, (chan, _) in self._channels.items()}
 
     def get_tool(self, tool_name: str) -> tp.Callable | None:
-        """Retrieve a registered tool by name.
-
-        Args:
-            tool_name (str): IN: Tool identifier. OUT: Looked up in the
-                registry.
-
-        Returns:
-            tp.Callable | None: OUT: Tool function or ``None``.
-        """
+        """Return the tool callable registered under ``tool_name``, or ``None``."""
 
         entry = self._tools.get(tool_name)
         return entry[0] if entry else None
 
     def get_all_tools(self) -> dict[str, tp.Callable]:
-        """Return all registered tools.
-
-        Returns:
-            dict[str, tp.Callable]: OUT: Mapping from tool name to function.
-        """
+        """Return a mapping from tool name to callable."""
 
         return {name: func for name, (func, _) in self._tools.items()}
 
     def get_hooks(self, hook_name: str) -> list[tp.Callable]:
-        """Return callbacks for a hook point.
-
-        Args:
-            hook_name (str): IN: Hook point identifier. OUT: Looked up in the
-                registry.
-
-        Returns:
-            list[tp.Callable]: OUT: List of registered callbacks.
-        """
+        """Return every callback registered for ``hook_name``."""
 
         return [func for func, _ in self._hooks.get(hook_name, [])]
 
     def get_provider(self, provider_name: str) -> tp.Any | None:
-        """Retrieve a registered provider by name.
-
-        Args:
-            provider_name (str): IN: Provider identifier. OUT: Looked up in
-                the registry.
-
-        Returns:
-            tp.Any | None: OUT: Provider instance or ``None``.
-        """
+        """Return the provider registered under ``provider_name``, or ``None``."""
 
         entry = self._providers.get(provider_name)
         return entry[0] if entry else None
 
     def get_plugin(self, name: str) -> RegisteredPlugin | None:
-        """Retrieve a plugin record by name.
-
-        Args:
-            name (str): IN: Plugin identifier. OUT: Looked up in the registry.
-
-        Returns:
-            RegisteredPlugin | None: OUT: Plugin record or ``None``.
-        """
+        """Return the plugin record for ``name``, or ``None`` if unregistered."""
 
         return self._plugins.get(name)
 
     def unregister_plugin(self, name: str) -> None:
-        """Remove a plugin and all its exported resources.
-
-        Args:
-            name (str): IN: Plugin identifier. OUT: Used to purge entries from
-                all internal indexes.
-
-        Returns:
-            None: OUT: Plugin and its resources are removed.
-        """
+        """Remove ``name`` and purge every tool, hook, provider, and channel it owns."""
 
         plugin = self._plugins.pop(name, None)
         if not plugin:
@@ -402,8 +327,7 @@ class PluginRegistry:
         """Validate every plugin's declared dependencies.
 
         Returns:
-            list[str]: OUT: Human-readable error strings for missing or
-            conflicting dependencies.
+            Human-readable error strings for missing or conflicting dependencies.
         """
 
         from xerxes.extensions.dependency import DependencyResolver, parse_dependency
@@ -428,11 +352,7 @@ class PluginRegistry:
         return errors
 
     def get_load_order(self) -> list[str]:
-        """Return plugins in dependency-respecting load order.
-
-        Returns:
-            list[str]: OUT: Topologically sorted plugin names.
-        """
+        """Return plugin names topologically sorted by dependency."""
 
         from xerxes.extensions.dependency import DependencyResolver, parse_dependency
 
@@ -451,17 +371,7 @@ class PluginRegistry:
         return resolver.topological_sort(graph)
 
     def _check_version_conflict(self, name: str, version: str) -> list[str]:
-        """Check whether adding ``name`` at ``version`` would conflict.
-
-        Args:
-            name (str): IN: Plugin / package name. OUT: Checked against
-                constraints in existing plugins.
-            version (str): IN: Proposed version. OUT: Compared with
-                ``VersionConstraint``.
-
-        Returns:
-            list[str]: OUT: Human-readable conflict messages.
-        """
+        """Return version-conflict messages for installing ``name`` at ``version``."""
 
         from xerxes.extensions.dependency import VersionConstraint
 
@@ -487,17 +397,16 @@ class PluginRegistry:
         return conflicts
 
     def discover(self, directory: str | Path) -> list[str]:
-        """Load ``*.py`` plugins from a directory.
+        """Load every ``*.py`` plugin in ``directory``.
 
         Each file is executed as a module; if it exposes a ``register``
-        function it is called with ``self``.
+        function it is invoked with ``self``.
 
         Args:
-            directory (str | Path): IN: Directory to scan. OUT: Enumerated for
-                ``*.py`` files.
+            directory: Directory to scan for plugin modules.
 
         Returns:
-            list[str]: OUT: Names of newly registered plugins.
+            Names of plugins newly registered as a side effect of the scan.
         """
 
         dir_path = Path(directory)

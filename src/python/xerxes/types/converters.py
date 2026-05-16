@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Converters module for Xerxes.
+"""Conversions between OpenAI wire dicts and typed Xerxes message/tool objects.
 
-Exports:
-    - convert_openai_messages
-    - convert_openai_tools
-    - check_openai_fields_names
-    - is_openai_field_name"""
+Includes :func:`convert_openai_messages` (dispatches by role to the right
+``ChatMessage`` subclass), :func:`convert_openai_tools`, and helpers that
+validate that an incoming kwargs dict only contains recognised OpenAI
+chat-completion parameter names.
+"""
 
 from typing import Any
 

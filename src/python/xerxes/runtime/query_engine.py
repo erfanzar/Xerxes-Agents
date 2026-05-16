@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Query engine module for Xerxes.
+"""High-level driver that turns user prompts into completed agent turns.
 
-Exports:
-    - logger
-    - QueryEngineConfig
-    - TurnResult
-    - QueryEngine"""
+:class:`QueryEngine` owns the per-session transcript, history log, and cost
+tracker, and drives :func:`xerxes.streaming.loop.run` to actually talk to the
+LLM. It enforces per-session limits (max turns, token budget, automatic
+compaction) and exposes both a blocking :meth:`QueryEngine.submit` and a
+streaming :meth:`QueryEngine.submit_stream` interface for the TUI and bridge.
+"""
 
 from __future__ import annotations
 
@@ -37,19 +38,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QueryEngineConfig:
-    """Query engine config.
+    """Tunable parameters of a :class:`QueryEngine` instance.
 
     Attributes:
-        max_turns (int): max turns.
-        max_budget_tokens (int): max budget tokens.
-        compact_after_turns (int): compact after turns.
-        compact_keep_last (int): compact keep last.
-        model (str): model.
-        system_prompt (str): system prompt.
-        permission_mode (str): permission mode.
-        max_tokens (int): max tokens.
-        thinking (bool): thinking.
-        thinking_budget (int): thinking budget."""
+        max_turns: Hard cap on user → assistant turns before the engine refuses
+            new prompts with ``stop_reason="max_turns"``.
+        max_budget_tokens: Combined input+output token ceiling enforced across
+            the whole session.
+        compact_after_turns: Trigger transcript compaction once the stored
+            turn count reaches this value.
+        compact_keep_last: Number of most-recent transcript entries preserved
+            when compaction runs.
+        model: LLM identifier passed to the streaming loop.
+        system_prompt: System prompt injected ahead of every turn.
+        permission_mode: Permission policy forwarded to the streaming loop
+            (``"auto"``, ``"plan"``, ``"manual"``, etc.).
+        max_tokens: Maximum tokens the LLM may emit per response.
+        thinking: Whether to request reasoning content from the provider.
+        thinking_budget: Reasoning-token budget when ``thinking`` is enabled.
+    """
 
     max_turns: int = 50
     max_budget_tokens: int = 500_000
@@ -65,15 +72,16 @@ class QueryEngineConfig:
 
 @dataclass
 class TurnResult:
-    """Turn result.
+    """Outcome of a single :meth:`QueryEngine.submit` call.
 
     Attributes:
-        prompt (str): prompt.
-        output (str): output.
-        tool_calls (tuple[str, ...]): tool calls.
-        in_tokens (int): in tokens.
-        out_tokens (int): out tokens.
-        stop_reason (str): stop reason."""
+        prompt: The user message that initiated this turn.
+        output: Assistant-visible text, concatenated from every ``TextChunk``.
+        tool_calls: Names of tools invoked during the turn, in order.
+        in_tokens: Input tokens consumed.
+        out_tokens: Output tokens produced.
+        stop_reason: ``"complete"``, ``"max_turns"``, or ``"budget_exhausted"``.
+    """
 
     prompt: str
     output: str
@@ -84,7 +92,7 @@ class TurnResult:
 
 
 class QueryEngine:
-    """Query engine."""
+    """Per-session driver that turns prompts into completed agent turns."""
 
     def __init__(
         self,
@@ -92,13 +100,15 @@ class QueryEngine:
         registry: ExecutionRegistry | None = None,
         session_id: str | None = None,
     ) -> None:
-        """Initialize the instance.
+        """Construct a new engine.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (QueryEngineConfig): IN: config. OUT: Consumed during execution.
-            registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
-            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution."""
+            config: Behavioural knobs (limits, model, prompt, etc.).
+            registry: Optional pre-populated execution registry; when omitted
+                an empty one is created.
+            session_id: Stable session identifier; a random hex id is
+                generated when ``None``.
+        """
         self.config = config
         self.session_id = session_id or uuid4().hex
         self.registry = registry or ExecutionRegistry()
@@ -117,16 +127,11 @@ class QueryEngine:
         registry: ExecutionRegistry | None = None,
         **config_kwargs: Any,
     ) -> QueryEngine:
-        """Create.
+        """Build a :class:`QueryEngine` with a freshly constructed config.
 
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            model (str, optional): IN: model. Defaults to 'gpt-4o'. OUT: Consumed during execution.
-            system_prompt (str, optional): IN: system prompt. Defaults to ''. OUT: Consumed during execution.
-            registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
-            **config_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            QueryEngine: OUT: Result of the operation."""
+        Convenience wrapper around ``QueryEngine(QueryEngineConfig(...))`` that
+        forwards extra ``config_kwargs`` straight into the dataclass.
+        """
 
         config = QueryEngineConfig(model=model, system_prompt=system_prompt, **config_kwargs)
         return cls(config=config, registry=registry)
@@ -137,15 +142,24 @@ class QueryEngine:
         tool_executor: Any = None,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> TurnResult:
-        """Submit.
+        """Run one full turn synchronously and return its aggregated result.
+
+        Blocks until the streaming loop emits ``TurnDone`` (or the configured
+        limits are hit). Updates the session transcript, history log, and
+        cost tracker as a side-effect. Triggers transcript compaction when the
+        stored turn count crosses ``compact_after_turns``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            tool_executor (Any, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-            tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
+            prompt: User message to send for this turn.
+            tool_executor: Callable forwarded to the streaming loop to actually
+                dispatch tool calls; ``None`` disables tool execution.
+            tool_schemas: Optional list of tool schemas exposed to the LLM.
+
         Returns:
-            TurnResult: OUT: Result of the operation."""
+            A :class:`TurnResult` summarising the turn; ``stop_reason`` is
+            ``"max_turns"`` or ``"budget_exhausted"`` when limits aborted the
+            call before the LLM was contacted.
+        """
 
         if self._turn_count >= self.config.max_turns:
             return TurnResult(
@@ -234,15 +248,13 @@ class QueryEngine:
         tool_executor: Any = None,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> Generator[Any, None, TurnResult]:
-        """Submit stream.
+        """Run a turn while yielding every underlying streaming-loop event.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            tool_executor (Any, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-            tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Generator[Any, None, TurnResult]: OUT: Result of the operation."""
+        Like :meth:`submit` but exposes the raw event stream so callers (TUI,
+        bridge) can render text chunks, tool starts, etc. live. Returns the
+        completed :class:`TurnResult` via ``StopIteration.value`` once the
+        generator is exhausted.
+        """
 
         from xerxes.streaming.events import AgentState, TextChunk, ToolStart, TurnDone
         from xerxes.streaming.loop import run
@@ -308,31 +320,16 @@ class QueryEngine:
 
     @property
     def turn_count(self) -> int:
-        """Return Turn count.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Number of turns submitted so far this session."""
         return self._turn_count
 
     @property
     def total_cost(self) -> float:
-        """Return Total cost.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            float: OUT: Result of the operation."""
+        """Cumulative USD cost recorded by the :class:`CostTracker`."""
         return self.cost_tracker.total_cost_usd
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the full session (transcript, history, costs) as Markdown."""
 
         lines = [
             "# Query Engine Session",
@@ -352,12 +349,7 @@ class QueryEngine:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Serialise the engine's persistent state for save/load round-trips."""
 
         return {
             "session_id": self.session_id,
@@ -372,14 +364,11 @@ class QueryEngine:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], **kwargs: Any) -> QueryEngine:
-        """From dict.
+        """Rehydrate a :class:`QueryEngine` from :meth:`to_dict` output.
 
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, Any]): IN: data. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            QueryEngine: OUT: Result of the operation."""
+        Extra ``kwargs`` are forwarded to :class:`QueryEngineConfig` so callers
+        can override model/system-prompt at restore time.
+        """
 
         config = QueryEngineConfig(model=data.get("model", "gpt-4o"), **kwargs)
         engine = cls(config=config, session_id=data.get("session_id"))

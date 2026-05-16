@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Content block renderers for the Xerxes TUI.
+"""Per-turn content blocks rendered into the Xerxes TUI status area.
 
-This module defines various block types used to accumulate and format
-streaming content, thinking traces, tool calls, notifications, and
-interactive panels such as approval and question requests.
-"""
+Each block subclass accumulates one logical fragment of a turn —
+streaming text, reasoning trace, tool call, nested subagent tool calls,
+notifications — and exposes a ``compose`` method that returns ANSI
+markup ready for :class:`~xerxes.tui.prompt.StatusRenderer` to display.
+
+The :class:`ApprovalRequestPanel` and :class:`QuestionRequestPanel`
+modal blocks are also defined here; they live inside the same render
+slot as the streaming blocks while interactive input is pending."""
 
 from __future__ import annotations
 
@@ -37,16 +41,10 @@ try:
 except Exception:
 
     class _DummyParser:
-        """Dummy parser."""
+        """No-op stand-in used when ``markdown_it`` isn't installed."""
 
         def parse(self, text: str) -> list[Any]:
-            """Parse.
-
-            Args:
-                self: IN: The instance. OUT: Used for attribute access.
-                text (str): IN: text. OUT: Consumed during execution.
-            Returns:
-                list[Any]: OUT: Result of the operation."""
+            """Return an empty token list regardless of input."""
             return []
 
     _MD_PARSER = _DummyParser()
@@ -70,18 +68,11 @@ _CODE_FENCE_PATTERN = re.compile(r"```(\w*)")
 
 
 def _is_block_boundary(text: str) -> bool:
-    """Check whether the end of ``text`` looks like a block boundary.
+    """Return ``True`` when ``text`` ends at a Markdown block boundary.
 
-    A block boundary is detected by a double newline or a line that matches
-    common Markdown block-start patterns.
-
-    Args:
-        text (str): IN: Accumulated text to inspect. OUT: Checked for boundary
-            markers at its end.
-
-    Returns:
-        bool: OUT: ``True`` if the text ends at a block boundary.
-    """
+    Recognized as a boundary: trailing ``\\n\\n`` or a final line that
+    matches a heading / fence / quote / list / horizontal-rule marker.
+    Used to decide when streaming content can be split into paragraphs."""
     if not text:
         return False
 
@@ -92,18 +83,12 @@ def _is_block_boundary(text: str) -> bool:
 
 
 def _extract_key_argument(arguments: str | dict[str, Any]) -> str:
-    """Extract a short representative argument string from tool arguments.
+    """Pick a short, identifying argument value to show beside a tool name.
 
-    Tries to parse JSON if needed, then looks for common keys such as
-    ``"path"``, ``"file"``, ``"query"``, etc.
-
-    Args:
-        arguments (str | dict[str, Any]): IN: Raw tool arguments, either a JSON
-            string or a dictionary. OUT: Parsed and inspected for a key value.
-
-    Returns:
-        str: OUT: Truncated representative argument value, or empty string.
-    """
+    Prefers semantically-meaningful keys (``path``, ``file``, ``query``,
+    ``url``, ``name``, ``code``, ``command``, ``target``) before falling
+    back to the first non-empty value. Output is always truncated to
+    keep the live tool line single-row."""
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -124,25 +109,28 @@ def _extract_key_argument(arguments: str | dict[str, Any]) -> str:
     return ""
 
 
-class _ToolCallLexer:
-    """Incremental JSON lexer for streaming tool-call arguments.
+def _markup_safe(text: Any) -> str:
+    """Return text that cannot be interpreted as prompt markup tags."""
+    return str(text).replace("[", "(").replace("]", ")")
 
-    Buffers incoming chunks and attempts to parse a complete JSON object.
-    """
+
+class _ToolCallLexer:
+    """Incremental JSON lexer for streaming tool-call argument deltas.
+
+    Each ``append`` retries a full ``json.loads`` of the accumulated
+    buffer; once the buffer parses, :attr:`is_complete` flips and
+    subsequent appends are ignored. This lets the TUI show a key
+    argument the moment the JSON closes without paying the cost of a
+    streaming JSON parser."""
 
     def __init__(self) -> None:
-        """Initialize the lexer with an empty buffer."""
+        """Start with an empty buffer in the incomplete state."""
         self._buffer = ""
         self._complete = False
         self._arguments: dict[str, Any] | None = None
 
     def append(self, chunk: str) -> None:
-        """Append a text chunk and attempt to parse complete JSON.
-
-        Args:
-            chunk (str): IN: Next fragment of JSON text. OUT: Added to the
-                internal buffer and parsed.
-        """
+        """Append ``chunk`` and attempt a full re-parse; no-op once complete."""
         if self._complete:
             return
         self._buffer += chunk
@@ -154,39 +142,26 @@ class _ToolCallLexer:
 
     @property
     def arguments(self) -> dict[str, Any] | None:
-        """Return the parsed arguments dictionary if complete.
-
-        Returns:
-            dict[str, Any] | None: OUT: Parsed arguments or ``None``.
-        """
+        """Parsed argument dict once :attr:`is_complete` is true; otherwise ``None``."""
         return self._arguments
 
     @property
     def is_complete(self) -> bool:
-        """Return whether the JSON has been fully parsed.
-
-        Returns:
-            bool: OUT: ``True`` if parsing succeeded.
-        """
+        """``True`` once the buffered JSON has parsed successfully."""
         return self._complete
 
 
 class _ContentBlock:
-    """Accumulates streaming text content and splits it at block boundaries.
+    """Accumulates assistant text and emits paragraphs at block boundaries.
 
     Attributes:
-        MAX_LIVE_LINES (int): Maximum number of live lines to keep.
+        MAX_LIVE_LINES: Soft cap retained for future trimming logic.
     """
 
     MAX_LIVE_LINES = 40
 
     def __init__(self, block_id: str) -> None:
-        """Initialize a content block.
-
-        Args:
-            block_id (str): IN: Unique identifier for this block. OUT: Stored
-                as an instance attribute.
-        """
+        """Allocate an empty block tagged with ``block_id`` and start its timer."""
         self.block_id = block_id
         self._raw = ""
         self._committed = False
@@ -195,15 +170,10 @@ class _ContentBlock:
         self._subagent_text_len = 0
 
     def append(self, text: str) -> list[str]:
-        """Append text and return any committed paragraph segments.
+        """Append ``text``; return any fully-formed paragraphs that just closed.
 
-        Args:
-            text (str): IN: Incoming text chunk. OUT: Appended to the block
-                buffer and split at block boundaries.
-
-        Returns:
-            list[str]: OUT: List of committed paragraph strings, if any.
-        """
+        Paragraphs split on ``\\n\\n``; the trailing fragment stays in
+        the buffer for the next call."""
         self._raw += text
         self._token_count += len(text.split())
 
@@ -220,45 +190,25 @@ class _ContentBlock:
 
     @property
     def raw_text(self) -> str:
-        """Return the current raw buffer text.
-
-        Returns:
-            str: OUT: Uncommitted raw text.
-        """
+        """Uncommitted text currently sitting in the buffer."""
         return self._raw
 
     @property
     def committed_text(self) -> str:
-        """Return the current committed text.
-
-        Returns:
-            str: OUT: Same as :attr:`raw_text` for this implementation.
-        """
+        """Alias for :attr:`raw_text` retained for legacy callers."""
         return self._raw
 
     def finalize(self) -> None:
-        """Mark the block as finalized."""
+        """Mark the block as no longer accepting more text."""
         self._committed = True
 
     @property
     def is_finalized(self) -> bool:
-        """Return whether the block has been finalized.
-
-        Returns:
-            bool: OUT: ``True`` if finalized.
-        """
+        """``True`` once :meth:`finalize` has been called."""
         return self._committed
 
     def compose(self, *, running: bool = False) -> AnyFormattedText:
-        """Render the block into formatted text for display.
-
-        Args:
-            running (bool): IN: Whether the block is actively streaming. OUT:
-                Controls spinner display in the rendered output.
-
-        Returns:
-            AnyFormattedText: OUT: ANSI-formatted text representation.
-        """
+        """Render the block: spinner glyph, body text, elapsed time, token count."""
         from prompt_toolkit.formatted_text import ANSI
 
         if not self._raw.strip():
@@ -272,10 +222,10 @@ class _ContentBlock:
 
 @dataclass
 class _ThinkingBlock:
-    """Accumulates streaming thinking traces with an animated spinner.
+    """Accumulates reasoning-trace fragments with an animated spinner.
 
     Attributes:
-        block_id (str): Unique block identifier.
+        block_id: Identifier matching the parent content block.
     """
 
     block_id: str
@@ -286,15 +236,7 @@ class _ThinkingBlock:
     _committed: bool = field(default=False, repr=False)
 
     def append(self, text: str) -> list[str]:
-        """Append thinking text and return committed paragraph segments.
-
-        Args:
-            text (str): IN: Incoming thinking chunk. OUT: Appended to the buffer
-                and split at block boundaries.
-
-        Returns:
-            list[str]: OUT: List of committed paragraph strings, if any.
-        """
+        """Append ``text``; return any paragraphs that closed since the last call."""
         self._raw += text
 
         if "\n\n" not in text and not _is_block_boundary(self._raw):
@@ -305,28 +247,16 @@ class _ThinkingBlock:
         return [committed]
 
     def finalize(self) -> None:
-        """Mark the thinking block as finalized."""
+        """Mark the thinking block as no longer accepting more text."""
         self._committed = True
 
     @property
     def raw_text(self) -> str:
-        """Return the current raw thinking text.
-
-        Returns:
-            str: OUT: Uncommitted raw text.
-        """
+        """Uncommitted text currently sitting in the buffer."""
         return self._raw
 
     def compose(self, *, running: bool = False) -> AnyFormattedText:
-        """Render the thinking block into formatted text.
-
-        Args:
-            running (bool): IN: Whether the thinking stream is active. OUT:
-                Advances the spinner animation frame.
-
-        Returns:
-            AnyFormattedText: OUT: ANSI-formatted thinking display.
-        """
+        """Render the thinking block; advances the spinner frame on every call."""
         from prompt_toolkit.formatted_text import ANSI
 
         self._frame = (self._frame + 1) % len(self._frames)
@@ -340,15 +270,15 @@ class _ThinkingBlock:
 
 @dataclass
 class _SubToolCall:
-    """Represents a single sub-tool call within a parent tool call.
+    """One nested tool call inside a parent (e.g. subagent) tool invocation.
 
     Attributes:
-        tool_call_id (str): Unique sub-tool call ID.
-        name (str): Tool name.
-        key_arg (str): Short representative argument.
-        status (str): Current status (``"running"``, ``"done"``, or ``"error"``).
-        result (str): Tool result string.
-        duration_ms (float): Execution duration in milliseconds.
+        tool_call_id: Unique id from the daemon.
+        name: Tool name (rendered with cyan).
+        key_arg: Short representative argument (path/url/etc).
+        status: ``"running"`` / ``"done"`` / ``"error"``.
+        result: Tool return value (only shown to debugger surfaces).
+        duration_ms: Execution duration once finished.
     """
 
     tool_call_id: str
@@ -359,51 +289,39 @@ class _SubToolCall:
     duration_ms: float = 0.0
 
     def finish(self, result: str, duration_ms: float) -> None:
-        """Mark the sub-tool call as finished.
-
-        Args:
-            result (str): IN: Result value from the tool. OUT: Stored internally.
-            duration_ms (float): IN: Execution duration. OUT: Stored internally.
-        """
+        """Mark this sub-call done and record its result + duration."""
         self.result = result
         self.duration_ms = duration_ms
         self.status = "done"
 
     def compose(self) -> str:
-        """Render the sub-tool call into an ANSI-escaped string.
-
-        Returns:
-            str: OUT: Formatted sub-tool call line with icon and timing.
-        """
+        """Render one bullet line: status icon, tool name, key argument, timing."""
         from .console import _prompt_text_to_ansi
 
         icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self.status, "·")
+        name = _markup_safe(self.name)
+        key_arg = _markup_safe(self.key_arg)
         if self.status == "done":
-            markup = f"  {icon} [cyan]{self.name}[/cyan] ({self.key_arg}) — {self.duration_ms:.0f}ms"
+            markup = f"  {icon} [cyan]{name}[/cyan] ({key_arg}) — {self.duration_ms:.0f}ms"
         else:
-            markup = f"  {icon} [cyan]{self.name}[/cyan] ({self.key_arg})"
+            markup = f"  {icon} [cyan]{name}[/cyan] ({key_arg})"
         return _prompt_text_to_ansi(markup)
 
 
 class _ToolCallBlock:
-    """Accumulates and renders a single tool call and its sub-tool calls.
+    """Live + final renderer for one tool invocation and its nested sub-calls.
 
     Attributes:
-        MAX_RESULT_LINES (int): Maximum result lines to display.
+        MAX_RESULT_LINES: How many trailing result lines to keep in the
+            committed view.
+        MAX_SUBAGENT_TOOL_LINES: Tail length for the sub-call list.
     """
 
     MAX_RESULT_LINES = 5
+    MAX_SUBAGENT_TOOL_LINES = 5
 
     def __init__(self, block_id: str, tool_call_id: str, name: str, arguments: str | None) -> None:
-        """Initialize a tool call block.
-
-        Args:
-            block_id (str): IN: Unique block identifier. OUT: Stored internally.
-            tool_call_id (str): IN: Tool call ID. OUT: Stored internally.
-            name (str): IN: Tool name. OUT: Stored internally.
-            arguments (str | None): IN: Raw tool arguments JSON string. OUT:
-                Stored for incremental parsing.
-        """
+        """Start a running block; ``arguments`` is fed into the incremental lexer."""
         self.block_id = block_id
         self.tool_call_id = tool_call_id
         self.name = name
@@ -418,11 +336,7 @@ class _ToolCallBlock:
 
     @property
     def key_arg(self) -> str:
-        """Return a short representative argument for this tool call.
-
-        Returns:
-            str: OUT: Extracted key argument or truncated raw arguments.
-        """
+        """Return a short representative argument, parsing JSON when possible."""
         if self._arguments:
             try:
                 args = json.loads(self._arguments) if isinstance(self._arguments, str) else self._arguments
@@ -434,89 +348,53 @@ class _ToolCallBlock:
         return ""
 
     def append_args_part(self, chunk: str) -> None:
-        """Append a fragment of tool arguments.
-
-        Args:
-            chunk (str): IN: Partial JSON string. OUT: Fed into the incremental
-                lexer and appended to the raw arguments.
-        """
+        """Feed a JSON fragment into both the raw buffer and incremental lexer."""
         self._arguments = (self._arguments or "") + chunk
         self._args_lexer.append(chunk)
 
     def set_result(self, result: str, duration_ms: float) -> None:
-        """Set the tool result and mark the call as done.
-
-        Args:
-            result (str): IN: Tool result string. OUT: Stored internally.
-            duration_ms (float): IN: Execution duration. OUT: Stored internally.
-        """
+        """Record the tool's return value and flip ``_status`` to done."""
         self._result = result
         self._duration_ms = duration_ms
         self._status = "done"
 
     def append_sub_tool_call(self, tool_call_id: str, name: str, key_arg: str) -> _SubToolCall:
-        """Register a new sub-tool call.
-
-        Args:
-            tool_call_id (str): IN: Sub-tool call ID. OUT: Stored in the new
-                sub-tool call instance.
-            name (str): IN: Sub-tool name. OUT: Stored in the new instance.
-            key_arg (str): IN: Short representative argument. OUT: Stored in the
-                new instance.
-
-        Returns:
-            _SubToolCall: OUT: The created sub-tool call object.
-        """
+        """Register a nested sub-call and return the created :class:`_SubToolCall`."""
         sub = _SubToolCall(tool_call_id=tool_call_id, name=name, key_arg=key_arg)
         self._sub_tool_calls.append(sub)
         return sub
 
     def finish_sub_tool_call(self, tool_call_id: str, result: str, duration_ms: float) -> None:
-        """Mark a sub-tool call as finished by ID.
-
-        Args:
-            tool_call_id (str): IN: ID of the sub-tool call to finish. OUT: Used
-                to look up the matching sub-tool call.
-            result (str): IN: Result string. OUT: Passed to the sub-tool call.
-            duration_ms (float): IN: Execution duration. OUT: Passed to the sub-tool call.
-        """
+        """Mark the sub-call with id ``tool_call_id`` finished; no-op if unknown."""
         for sub in self._sub_tool_calls:
             if sub.tool_call_id == tool_call_id:
                 sub.finish(result, duration_ms)
                 break
 
     def set_subagent_metadata(self, agent_id: str, subagent_type: str) -> None:
-        """Store metadata identifying this tool call as a subagent invocation.
-
-        Args:
-            agent_id (str): IN: Subagent identifier. OUT: Stored internally.
-            subagent_type (str): IN: Subagent type. OUT: Stored internally.
-        """
+        """Tag this block as a subagent invocation for downstream renderers."""
         self._subagent_id = agent_id
         self._subagent_type = subagent_type
 
     def compose(self) -> str:
-        """Render the tool call block into an ANSI-escaped string.
-
-        Returns:
-            str: OUT: Formatted tool call display with status, timing, result,
-                and sub-tool calls.
-        """
+        """Render the full block (status header, sub-call lines, truncated result)."""
         from .console import _prompt_text_to_ansi
 
         elapsed_s = int(time.monotonic() - self._started_at)
         duration = f"{elapsed_s}s" if self._status == "running" else f"{self._duration_ms:.0f}ms"
         icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self._status, "·")
         status_word = "Using" if self._status == "running" else "Used"
+        name = _markup_safe(self.name)
+        key_arg = _markup_safe(self.key_arg)
 
-        lines = [f"{icon} [bold cyan]{status_word} {self.name}[/bold cyan] ([dim]{self.key_arg}[/dim]) — {duration}"]
+        lines = [f"{icon} [bold cyan]{status_word} {name}[/bold cyan] ([dim]{key_arg}[/dim]) — {duration}"]
 
         sub_lines: list[str] = []
-        for sub in self._sub_tool_calls:
+        for sub in self._sub_tool_calls[-self.MAX_SUBAGENT_TOOL_LINES :]:
             sub_lines.append(sub.compose())
 
         if self._status == "done" and self._result:
-            result_lines = self._result.strip().split("\n")[: self.MAX_RESULT_LINES]
+            result_lines = _markup_safe(self._result).strip().split("\n")[: self.MAX_RESULT_LINES]
             result_text = "\n".join(result_lines)
             if len(result_lines) == self.MAX_RESULT_LINES:
                 result_text += "\n  [dim](truncated)[/dim]"
@@ -534,25 +412,18 @@ class _ToolCallBlock:
 
 
 class _NotificationBlock:
-    """Renders a single notification message.
+    """Single notification (icon + title + body) committed to the prompt history.
 
     Attributes:
-        MAX_BODY_LINES (int): Maximum body lines to display.
-        PROSE_CATEGORIES (tuple[str, ...]): Categories rendered as prose.
+        MAX_BODY_LINES: Body lines kept before truncation marker.
+        PROSE_CATEGORIES: Categories rendered through full Markdown
+            instead of the compact icon+text layout.
     """
 
     MAX_BODY_LINES = 2
 
     def __init__(self, notification_id: str, category: str, severity: str, title: str, body: str) -> None:
-        """Initialize a notification block.
-
-        Args:
-            notification_id (str): IN: Unique notification ID. OUT: Stored internally.
-            category (str): IN: Notification category. OUT: Stored internally.
-            severity (str): IN: Severity level. OUT: Stored internally.
-            title (str): IN: Notification title. OUT: Stored internally.
-            body (str): IN: Notification body text. OUT: Stored internally.
-        """
+        """Capture the notification fields verbatim; rendering happens in :meth:`compose`."""
         self.notification_id = notification_id
         self.category = category
         self.severity = severity
@@ -562,12 +433,10 @@ class _NotificationBlock:
     PROSE_CATEGORIES = ("slash", "history")
 
     def compose(self) -> str:
-        """Render the notification into an ANSI-escaped string.
+        """Format the notification as one ANSI block.
 
-        Returns:
-            str: OUT: Formatted notification with icon, color, and optional
-                Markdown rendering.
-        """
+        Slash/history categories pass through Markdown for nicer output;
+        everything else uses the compact icon + title + dim-body layout."""
         from .console import _prompt_text_to_ansi, markdown_to_ansi
 
         color = severity_color(self.severity)
@@ -593,24 +462,16 @@ class _NotificationBlock:
 
 
 def _severity_ansi(sev: str) -> str:
-    """Return an ANSI 256-color index for a severity level.
-
-    Args:
-        sev (str): IN: Severity string such as ``"info"`` or ``"error"``. OUT:
-            Looked up in the severity-to-color mapping.
-
-    Returns:
-        str: OUT: ANSI color index string, defaulting to ``"245"``.
-    """
+    """Return the ANSI 256-color index for ``sev`` (defaults to grey ``"245"``)."""
     return {"info": "51", "warning": "214", "error": "196"}.get(sev, "245")
 
 
 class ApprovalRequestPanel:
-    """Interactive panel for rendering and navigating an approval request.
+    """Interactive approval modal: navigate options with arrows, submit with Enter.
 
     Attributes:
-        SELECTIONS (list[str]): Available response options.
-        LABELS (dict[str, str]): Human-readable labels for each option.
+        SELECTIONS: Concrete response values sent back to the daemon.
+        LABELS: Human-readable display strings keyed by selection.
     """
 
     SELECTIONS: ClassVar[list[str]] = ["approve", "approve_for_session", "reject"]
@@ -628,15 +489,7 @@ class ApprovalRequestPanel:
         description: str,
         diff: str | None = None,
     ) -> None:
-        """Initialize an approval request panel.
-
-        Args:
-            request_id (str): IN: Approval request ID. OUT: Stored internally.
-            tool_call_id (str): IN: Associated tool call ID. OUT: Stored internally.
-            action (str): IN: Action description. OUT: Stored internally.
-            description (str): IN: Detailed description. OUT: Stored internally.
-            diff (str | None): IN: Optional diff text. OUT: Stored internally.
-        """
+        """Capture the daemon-sent request fields; cursor starts on ``approve``."""
         self.request_id = request_id
         self.tool_call_id = tool_call_id
         self.action = action
@@ -647,32 +500,24 @@ class ApprovalRequestPanel:
 
     @property
     def selected_response(self) -> str:
-        """Return the currently selected response value.
-
-        Returns:
-            str: OUT: One of :attr:`SELECTIONS`.
-        """
+        """Currently highlighted response value (one of :attr:`SELECTIONS`)."""
         return self.SELECTIONS[self._selected]
 
     def move_cursor_up(self) -> None:
-        """Move the selection cursor up (wraps around)."""
+        """Highlight the previous response (wraps to the bottom)."""
         self._selected = (self._selected - 1) % len(self.SELECTIONS)
 
     def move_cursor_down(self) -> None:
-        """Move the selection cursor down (wraps around)."""
+        """Highlight the next response (wraps to the top)."""
         self._selected = (self._selected + 1) % len(self.SELECTIONS)
 
     def toggle_expand(self) -> None:
-        """Toggle expansion of the diff view, if a diff is present."""
+        """Toggle inline diff display when a diff was attached to the request."""
         if self.diff:
             self._expanded = not self._expanded
 
     def compose(self) -> str:
-        """Render the approval panel into an ANSI-escaped string.
-
-        Returns:
-            str: OUT: Formatted approval panel with options and optional diff.
-        """
+        """Render the panel: header, action description, response list, optional diff."""
         from .console import _prompt_text_to_ansi
 
         lines = [
@@ -698,30 +543,18 @@ class ApprovalRequestPanel:
 
 
 class QuestionRequestPanel:
-    """Interactive panel for rendering and answering question requests.
+    """Sequential question modal: walks through a list, collecting one answer each.
 
-    Tracks the current question index, selected option, and free-text mode.
-    """
+    Each question dict carries ``id``, ``question``, ``options``
+    (multiple-choice list, possibly empty), and ``allow_free_form``
+    (whether typing arbitrary text is permitted alongside the options)."""
 
     def __init__(
         self,
         request_id: str,
         questions: list[dict[str, Any]],
     ) -> None:
-        """Initialize a question request panel.
-
-        Args:
-            request_id (str): IN: Request ID. OUT: Stored internally.
-            questions (list[dict[str, Any]]): IN: List of question dictionaries.
-                Each dictionary may contain:
-
-                - ``"id"`` (str): Question identifier.
-                - ``"question"`` (str): Question text.
-                - ``"options"`` (list[str]): Available answer options.
-                - ``"allow_free_form"`` (bool): Whether free-text input is allowed.
-
-                OUT: Stored internally for sequential answering.
-        """
+        """Initialize at question 0 with the first option highlighted."""
         self.request_id = request_id
         self.questions = questions
         self._question_index = 0
@@ -732,29 +565,17 @@ class QuestionRequestPanel:
 
     @property
     def current_question(self) -> dict[str, Any]:
-        """Return the current question dictionary.
-
-        Returns:
-            dict[str, Any]: OUT: Current question being answered.
-        """
+        """Dict for the question currently being answered."""
         return self.questions[self._question_index]
 
     @property
     def current_options(self) -> list[str]:
-        """Return the options for the current question.
-
-        Returns:
-            list[str]: OUT: List of option strings.
-        """
+        """Option labels for the current question (may be empty for free-form-only)."""
         return self.current_question.get("options", [])
 
     @property
     def selected_label(self) -> str:
-        """Return the label of the currently selected answer.
-
-        Returns:
-            str: OUT: Selected option label, free text, or placeholder.
-        """
+        """Display string for the highlighted selection (option or free text)."""
         opts = self.current_options
         if self._free_text_mode:
             return self._free_text or "(type your answer)"
@@ -763,42 +584,36 @@ class QuestionRequestPanel:
         return ""
 
     def move_up(self) -> None:
-        """Move the option cursor up (wraps around)."""
+        """Highlight the previous option (no-op while in free-text mode)."""
         if self._free_text_mode:
             return
         self._option_index = (self._option_index - 1) % max(1, len(self.current_options))
 
     def move_down(self) -> None:
-        """Move the option cursor down (wraps around)."""
+        """Highlight the next option (no-op while in free-text mode)."""
         if self._free_text_mode:
             return
         self._option_index = (self._option_index + 1) % max(1, len(self.current_options))
 
     def select_other(self) -> None:
-        """Switch to free-text input mode."""
+        """Switch the cursor into free-text capture mode."""
         self._free_text_mode = True
 
     def append_free_text(self, char: str) -> None:
-        """Append a character to the free-text answer.
-
-        Args:
-            char (str): IN: Character to append. OUT: Added to the free-text buffer.
-        """
+        """Append ``char`` to the free-text answer buffer (only while in that mode)."""
         if self._free_text_mode:
             self._free_text += char
 
     def backspace_free_text(self) -> None:
-        """Remove the last character from the free-text answer."""
+        """Delete the last character of the free-text answer."""
         if self._free_text_mode and self._free_text:
             self._free_text = self._free_text[:-1]
 
     def confirm_current(self) -> str | None:
-        """Confirm the current answer and advance to the next question.
+        """Record the highlighted/typed answer and advance to the next question.
 
-        Returns:
-            str | None: OUT: The question ID if all questions are answered,
-                otherwise ``None``.
-        """
+        Returns the just-answered question id once every question is
+        answered; ``None`` while more questions remain."""
         question_id = self.current_question.get("id", f"q_{self._question_index}")
         if self._free_text_mode:
             answer = self._free_text
@@ -818,19 +633,11 @@ class QuestionRequestPanel:
 
     @property
     def is_complete(self) -> bool:
-        """Return whether all questions have been answered.
-
-        Returns:
-            bool: OUT: ``True`` if the number of answers equals the number of questions.
-        """
+        """``True`` once every question in :attr:`questions` has an entry in ``_answers``."""
         return len(self._answers) == len(self.questions)
 
     def compose(self) -> str:
-        """Render the question panel into an ANSI-escaped string.
-
-        Returns:
-            str: OUT: Formatted question panel with options and instructions.
-        """
+        """Render the question panel: header, prompt, option list, free-form hint."""
         from .console import _prompt_text_to_ansi
 
         lines = [

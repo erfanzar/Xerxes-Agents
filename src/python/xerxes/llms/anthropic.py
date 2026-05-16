@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Anthropic module for Xerxes.
+"""Anthropic Claude provider adapter built on ``httpx``.
 
-Exports:
-    - ANTHROPIC_CONTEXT_LENGTHS
-    - AnthropicLLM"""
+Talks directly to the Messages API rather than the official SDK.
+``stream_completion`` / ``astream_completion`` emit normalised chunk
+dicts (see :class:`BaseLLM`); Anthropic-specific extras include
+thinking-content deltas for extended-thinking models. :data:`ANTHROPIC_CONTEXT_LENGTHS`
+is a static fallback for context-window lookup.
+"""
 
 from __future__ import annotations
 

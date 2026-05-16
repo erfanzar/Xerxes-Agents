@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers module for Xerxes.
+"""Decorator helpers shared by every operator tool factory.
 
-Exports:
-    - operator_tool"""
+Provides :func:`operator_tool`, the lightweight annotation that tags a
+callable with the metadata the streaming runtime needs to register it as a
+tool (canonical name, description, capability category).
+"""
 
 from __future__ import annotations
 
@@ -27,22 +29,22 @@ def operator_tool(
     description: str | None = None,
     category: str = "operator",
 ) -> tp.Callable[[tp.Callable], tp.Callable]:
-    """Operator tool.
+    """Stamp tool metadata onto a function so the runtime can register it.
+
+    The decorator mutates ``__xerxes_schema__`` (creating it if absent) and
+    attaches a ``category`` attribute. Existing schema fields are preserved
+    unless ``name`` / ``description`` overrides them.
 
     Args:
-        name (str): IN: name. OUT: Consumed during execution.
-        description (str | None, optional): IN: description. Defaults to None. OUT: Consumed during execution.
-        category (str, optional): IN: category. Defaults to 'operator'. OUT: Consumed during execution.
-    Returns:
-        tp.Callable[[tp.Callable], tp.Callable]: OUT: Result of the operation."""
+        name: Canonical tool name surfaced to the model.
+        description: Long-form description shown in the tool catalogue;
+            ``None`` keeps whatever description the schema already had.
+        category: Capability bucket — defaults to ``"operator"`` so the
+            policy engine groups these tools together.
+    """
 
     def _decorate(func: tp.Callable) -> tp.Callable:
-        """Internal helper to decorate.
-
-        Args:
-            func (tp.Callable): IN: func. OUT: Consumed during execution.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Attach the schema dict and category attribute to ``func``."""
 
         schema = dict(getattr(func, "__xerxes_schema__", {}) or {})
         schema["name"] = name

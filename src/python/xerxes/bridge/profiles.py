@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Provider profile management for the Xerxes bridge.
+"""Persistent LLM provider profile store used by the bridge and daemon.
 
-This module handles saving, loading, updating, and deleting LLM provider
-profiles (base URL, API key, model, sampling parameters). It also provides
-model list fetching from provider APIs.
+Each profile bundles a base URL, API key, default model, provider name, and
+optional sampling overrides, persisted as JSON under
+``$XERXES_HOME/profiles.json``. Exactly one profile is marked ``"active"`` at
+a time and is loaded by the daemon's :class:`RuntimeManager` on every
+reload. ``fetch_models`` queries the provider's ``GET /models`` endpoint,
+falling back to the built-in MiniMax catalogue when the provider doesn't
+implement it.
 """
 
 from __future__ import annotations
@@ -32,12 +36,7 @@ PROFILES_FILE = PROFILES_DIR / "profiles.json"
 
 
 def _load_store() -> dict[str, Any]:
-    """Load the profiles JSON store from disk.
-
-    Returns:
-        dict[str, Any]: OUT: Parsed store with ``"active"`` and ``"profiles"`` keys,
-            or a default empty store if the file is missing or unreadable.
-    """
+    """Read the profiles JSON file or return an empty store on miss/parse error."""
     if PROFILES_FILE.exists():
         try:
             return json.loads(PROFILES_FILE.read_text())
@@ -47,22 +46,13 @@ def _load_store() -> dict[str, Any]:
 
 
 def _save_store(store: dict[str, Any]) -> None:
-    """Persist the profiles JSON store to disk.
-
-    Args:
-        store (dict[str, Any]): IN: Profile store to persist. OUT: Serialized
-            and written to ``PROFILES_FILE``.
-    """
+    """Write the profiles store to disk, creating parent directories as needed."""
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     PROFILES_FILE.write_text(json.dumps(store, indent=2, ensure_ascii=False))
 
 
 def list_profiles() -> list[dict[str, Any]]:
-    """List all stored profiles, marking the active one.
-
-    Returns:
-        list[dict[str, Any]]: OUT: Profile dictionaries with an ``"active"`` flag.
-    """
+    """Return every stored profile with an extra ``"active"`` boolean per record."""
     store = _load_store()
     active = store.get("active")
     result = []
@@ -77,11 +67,7 @@ def list_profiles() -> list[dict[str, Any]]:
 
 
 def get_active_profile() -> dict[str, Any] | None:
-    """Return the currently active profile, if any.
-
-    Returns:
-        dict[str, Any] | None: OUT: The active profile dictionary, or ``None``.
-    """
+    """Return the profile marked active, or ``None`` if no active profile exists."""
     store = _load_store()
     active = store.get("active")
     if active and active in store.get("profiles", {}):
@@ -110,22 +96,19 @@ def save_profile(
     sampling: dict[str, Any] | None = None,
     set_active: bool = True,
 ) -> dict[str, Any]:
-    """Save or update a provider profile.
+    """Create or replace a profile and optionally mark it active.
 
     Args:
-        name (str): IN: Profile name. OUT: Used as the dictionary key.
-        base_url (str): IN: API base URL. OUT: Stored after stripping trailing slashes.
-        api_key (str): IN: API authentication key. OUT: Stored.
-        model (str): IN: Default model name. OUT: Stored.
-        provider (str): IN: Provider identifier. OUT: Auto-detected from base_url
-            if not provided.
-        sampling (dict[str, Any] | None): IN: Sampling parameters. OUT: Defaults
-            to existing values when updating.
-        set_active (bool): IN: Whether to make this profile active. OUT: Updates
-            the ``"active"`` key in the store.
+        name: Profile key.
+        base_url: API base URL; trailing slashes are stripped.
+        api_key: Provider API key (stored verbatim).
+        model: Default model id.
+        provider: Provider tag; auto-detected from ``base_url`` when empty.
+        sampling: Sampling overrides; preserved from the prior profile if ``None``.
+        set_active: When true, mark the profile active after saving.
 
     Returns:
-        dict[str, Any]: OUT: The saved profile dictionary.
+        The saved profile dict.
     """
     store = _load_store()
     existing = store.get("profiles", {}).get(name, {})
@@ -145,15 +128,10 @@ def save_profile(
 
 
 def update_sampling(name: str, sampling: dict[str, Any]) -> dict[str, Any] | None:
-    """Update sampling parameters for an existing profile.
+    """Merge sampling overrides into an existing profile.
 
-    Args:
-        name (str): IN: Profile name. OUT: Looked up in the store.
-        sampling (dict[str, Any]): IN: Sampling parameter updates. OUT: Merged
-            with existing values; ``None`` values cause deletion.
-
-    Returns:
-        dict[str, Any] | None: OUT: Updated profile, or ``None`` if not found.
+    Only keys in :data:`SAMPLING_PARAMS` are accepted; ``None`` deletes a key.
+    Returns the updated profile, or ``None`` if no such profile exists.
     """
     store = _load_store()
     if name not in store.get("profiles", {}):
@@ -171,15 +149,7 @@ def update_sampling(name: str, sampling: dict[str, Any]) -> dict[str, Any] | Non
 
 
 def update_active_model(model: str) -> dict[str, Any] | None:
-    """Update the active profile's default model.
-
-    Args:
-        model (str): IN: Model identifier to persist. OUT: Stored on the active profile.
-
-    Returns:
-        dict[str, Any] | None: OUT: Updated active profile, or ``None`` when no
-            active profile exists.
-    """
+    """Persist ``model`` as the active profile's default; return it, or ``None``."""
     store = _load_store()
     active = store.get("active")
     if not active or active not in store.get("profiles", {}):
@@ -190,14 +160,7 @@ def update_active_model(model: str) -> dict[str, Any] | None:
 
 
 def delete_profile(name: str) -> bool:
-    """Delete a profile by name.
-
-    Args:
-        name (str): IN: Profile name to delete. OUT: Removed from the store.
-
-    Returns:
-        bool: OUT: ``True`` if the profile existed and was deleted.
-    """
+    """Remove a profile (clearing ``"active"`` if it was the active one)."""
     store = _load_store()
     if name in store.get("profiles", {}):
         del store["profiles"][name]
@@ -209,14 +172,7 @@ def delete_profile(name: str) -> bool:
 
 
 def set_active(name: str) -> bool:
-    """Set the active profile.
-
-    Args:
-        name (str): IN: Profile name. OUT: Set as active if it exists.
-
-    Returns:
-        bool: OUT: ``True`` if the profile exists and was activated.
-    """
+    """Mark ``name`` as the active profile; return ``False`` if it doesn't exist."""
     store = _load_store()
     if name in store.get("profiles", {}):
         store["active"] = name
@@ -241,19 +197,14 @@ _PROVIDERS_WITHOUT_MODELS = {"minimax", "minimaxi"}
 
 
 def fetch_models(base_url: str, api_key: str) -> list[str]:
-    """Fetch the list of available models from a provider's ``/models`` endpoint.
+    """Return the provider's available model ids, sorted.
 
-    Args:
-        base_url (str): IN: Provider base URL. OUT: Used to construct the request URL.
-        api_key (str): IN: API key for authentication. OUT: Sent in the
-            ``Authorization`` header.
-
-    Returns:
-        list[str]: OUT: Sorted list of model identifiers.
+    MiniMax-flavoured providers don't implement ``GET /models``; a 404 there
+    falls back to a hard-coded MiniMax catalogue rather than raising.
 
     Raises:
-        httpx.HTTPStatusError: On HTTP errors (with a fallback for MiniMax).
-        httpx.RequestError: On network-level request failures.
+        httpx.HTTPStatusError: For non-404 HTTP errors.
+        httpx.RequestError: On network-level failures.
     """
     url = f"{base_url.rstrip('/')}/models"
     headers = {}
@@ -279,15 +230,7 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
 
 
 def _guess_provider(base_url: str) -> str:
-    """Guess the provider name from a base URL.
-
-    Args:
-        base_url (str): IN: API base URL. OUT: Matched against known provider
-            substrings.
-
-    Returns:
-        str: OUT: Provider name, or ``"custom"`` if no match.
-    """
+    """Best-effort substring match of ``base_url`` to a known provider tag."""
     url = base_url.lower()
     if "openai" in url:
         return "openai"

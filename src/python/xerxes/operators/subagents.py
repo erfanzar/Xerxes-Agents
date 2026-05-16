@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Subagents module for Xerxes.
+"""Background subagent handles and their lifecycle controller.
 
-Exports:
-    - SpawnedAgentHandle
-    - SpawnedAgentManager"""
+Each handle wraps a cloned :class:`Agent` plus a single :class:`asyncio.Task`
+that drives ``xerxes.create_response``. The manager exposes spawn / send /
+wait / close / resume primitives so the parent agent can fan work out to
+short-lived helpers while staying in control of their lifecycle.
+"""
 
 from __future__ import annotations
 
@@ -30,32 +32,38 @@ from ..types import Agent, ResponseResult
 
 
 def _now_iso() -> str:
-    """Internal helper to now iso.
-
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return the current UTC time as an ISO-8601 string."""
 
     return datetime.now(UTC).isoformat()
 
 
 @dataclass
 class SpawnedAgentHandle:
-    """Spawned agent handle.
+    """Reference to one in-flight (or recently finished) subagent.
+
+    A handle is created by :meth:`SpawnedAgentManager.spawn` and lives until
+    the parent agent explicitly closes it. The ``task`` field holds the
+    coroutine currently running on the subagent (or ``None`` between jobs);
+    pending follow-up messages buffer in ``queue`` so the parent can pipeline
+    work without waiting between calls.
 
     Attributes:
-        handle_id (str): handle id.
-        agent (Agent): agent.
-        source_agent_id (str | None): source agent id.
-        status (str): status.
-        created_at (str): created at.
-        updated_at (str): updated at.
-        prompt_profile (str): prompt profile.
-        last_input (str | None): last input.
-        last_output (str | None): last output.
-        error (str | None): error.
-        queue (list[str]): queue.
-        task (asyncio.Task | None): task.
-        closed (bool): closed."""
+        handle_id: Public alias used by ``send_input`` / ``wait`` / ``close``.
+        agent: Cloned :class:`Agent` driven by this handle.
+        source_agent_id: Identifier of the parent agent that spawned us.
+        status: Lifecycle marker — ``idle``, ``running``, ``completed``,
+            ``cancelled``, ``interrupted``, ``error``, or ``closed``.
+        created_at: ISO-8601 spawn timestamp.
+        updated_at: ISO-8601 timestamp of the last state change.
+        prompt_profile: Prompt profile name applied to subagent turns.
+        last_input: Most recent message dispatched to the subagent.
+        last_output: Most recent textual response produced by the subagent.
+        error: Stringified exception when ``status == "error"``.
+        queue: FIFO of follow-up messages waiting for the active task.
+        task: Currently running asyncio task, or ``None``.
+        closed: ``True`` after :meth:`SpawnedAgentManager.close`; the handle
+            still exists for inspection but rejects new work until resumed.
+    """
 
     handle_id: str
     agent: Agent
@@ -72,12 +80,7 @@ class SpawnedAgentHandle:
     closed: bool = False
 
     def snapshot(self) -> dict[str, tp.Any]:
-        """Snapshot.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a wire-safe view of the handle for tool responses."""
 
         return {
             "id": self.handle_id,
@@ -98,27 +101,30 @@ class SpawnedAgentHandle:
 
 
 class SpawnedAgentManager:
-    """Spawned agent manager."""
+    """Lifecycle controller for the operator's spawned subagent handles.
+
+    The manager keeps a flat registry of :class:`SpawnedAgentHandle`
+    entries. Each subagent reuses the parent's Xerxes orchestrator but
+    runs through ``create_response`` with its own prompt profile override
+    so it cannot accidentally inherit the parent's tool budget.
+    """
 
     def __init__(self, xerxes: tp.Any, runtime_state: tp.Any) -> None:
-        """Initialize the instance.
+        """Bind the manager to a running Xerxes instance and runtime state.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            xerxes (tp.Any): IN: xerxes. OUT: Consumed during execution.
-            runtime_state (tp.Any): IN: runtime state. OUT: Consumed during execution."""
+            xerxes: The Xerxes orchestrator used to clone agents and drive
+                ``create_response``.
+            runtime_state: Streaming runtime state — used to read and write
+                per-agent overrides (prompt profile, etc.).
+        """
 
         self._xerxes = xerxes
         self._runtime_state = runtime_state
         self._handles: dict[str, SpawnedAgentHandle] = {}
 
     def list_handles(self) -> list[dict[str, tp.Any]]:
-        """List handles.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+        """Return a snapshot list of every tracked subagent handle."""
 
         return [handle.snapshot() for handle in self._handles.values()]
 
@@ -131,17 +137,23 @@ class SpawnedAgentManager:
         prompt_profile: str | None = None,
         nickname: str | None = None,
     ) -> dict[str, tp.Any]:
-        """Asynchronously Spawn.
+        """Create a new background subagent handle and optionally seed work.
+
+        The new handle clones the parent agent (or the agent named by
+        ``agent_id``), registers a prompt-profile override on the runtime
+        state, and — if an initial ``message`` (or legacy
+        ``task_description``) is supplied — dispatches that message
+        immediately via :meth:`send_input`.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
-            task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            prompt_profile (str | None, optional): IN: prompt profile. Defaults to None. OUT: Consumed during execution.
-            nickname (str | None, optional): IN: nickname. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            message: First message to send to the subagent.
+            task_description: Legacy alias for ``message``.
+            agent_id: Parent agent to clone; defaults to the currently
+                active agent.
+            prompt_profile: Prompt profile applied to the subagent's turns;
+                defaults to :attr:`PromptProfile.MINIMAL`.
+            nickname: Optional stable handle id (defaults to a random one).
+        """
 
         source_agent = (
             self._xerxes.orchestrator.agents[agent_id] if agent_id else self._xerxes.orchestrator.get_current_agent()
@@ -178,16 +190,22 @@ class SpawnedAgentManager:
         task_description: str | None = None,
         interrupt: bool = False,
     ) -> dict[str, tp.Any]:
-        """Asynchronously Send input.
+        """Hand more work to an existing subagent.
+
+        Resolves the target handle (most-recent open handle if ``handle_id``
+        is ``None``), validates that it is still open, and either:
+
+        * Starts a fresh task if nothing is currently running.
+        * Queues the message behind the active task when ``interrupt=False``.
+        * Cancels the active task and starts a new one when ``interrupt=True``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle_id (str | None, optional): IN: handle id. Defaults to None. OUT: Consumed during execution.
-            message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
-            task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
-            interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            handle_id: Target handle; defaults to the most recently
+                updated open handle.
+            message: Body of work to dispatch.
+            task_description: Legacy alias for ``message``.
+            interrupt: Cancel the current task before starting the new one.
+        """
 
         resolved_handle_id = self._resolve_handle_id(handle_id)
         resolved_message = message if message is not None else task_description
@@ -211,14 +229,11 @@ class SpawnedAgentManager:
         return handle.snapshot()
 
     async def wait(self, targets: list[str], timeout_ms: int = 30000) -> dict[str, tp.Any]:
-        """Asynchronously Wait.
+        """Wait for the given subagents to settle or the timeout to expire.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            targets (list[str]): IN: targets. OUT: Consumed during execution.
-            timeout_ms (int, optional): IN: timeout ms. Defaults to 30000. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Splits the targets into ``completed`` (task finished or never had
+        one) and ``pending`` (still running when the timeout hit).
+        """
 
         handles = [self._require_handle(target) for target in targets]
         tasks = [handle.task for handle in handles if handle.task is not None]
@@ -232,13 +247,11 @@ class SpawnedAgentManager:
         }
 
     def resume(self, handle_id: str) -> dict[str, tp.Any]:
-        """Resume.
+        """Reopen a previously closed handle so it can take new work.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle_id (str): IN: handle id. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Clears the ``closed`` flag and resets the status from ``"closed"``
+        back to ``"idle"``. Other statuses are left intact.
+        """
 
         handle = self._require_handle(handle_id)
         handle.closed = False
@@ -248,13 +261,12 @@ class SpawnedAgentManager:
         return handle.snapshot()
 
     def close(self, handle_id: str) -> dict[str, tp.Any]:
-        """Close.
+        """Cancel the active task (if any) and mark the handle closed.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle_id (str): IN: handle id. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Closed handles remain registered so subsequent ``resume`` or
+        ``wait`` calls still find them. The returned snapshot includes
+        ``previous_status`` so callers can see what we cancelled.
+        """
 
         handle = self._require_handle(handle_id)
         previous_status = handle.status
@@ -268,12 +280,12 @@ class SpawnedAgentManager:
         return out
 
     async def _run_handle(self, handle: SpawnedAgentHandle, message: str) -> None:
-        """Asynchronously Internal helper to run handle.
+        """Drive one ``create_response`` call for the given handle.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle (SpawnedAgentHandle): IN: handle. OUT: Consumed during execution.
-            message (str): IN: message. OUT: Consumed during execution."""
+        Updates the handle's lifecycle fields based on the outcome
+        (``completed`` / ``cancelled`` / ``error``) and, if more messages
+        are queued and the handle is still open, chains the next task.
+        """
 
         handle.status = "running"
         handle.last_input = message
@@ -305,26 +317,14 @@ class SpawnedAgentManager:
                 handle.task = asyncio.create_task(self._run_handle(handle, next_message))
 
     def _require_handle(self, handle_id: str) -> SpawnedAgentHandle:
-        """Internal helper to require handle.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle_id (str): IN: handle id. OUT: Consumed during execution.
-        Returns:
-            SpawnedAgentHandle: OUT: Result of the operation."""
+        """Return the named handle or raise ``ValueError`` if unknown."""
 
         if handle_id not in self._handles:
             raise ValueError(f"Spawned agent not found: {handle_id}")
         return self._handles[handle_id]
 
     def _resolve_handle_id(self, handle_id: str | None) -> str:
-        """Internal helper to resolve handle id.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            handle_id (str | None): IN: handle id. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Pick the most-recently-updated open handle when no id is given."""
 
         if handle_id:
             return handle_id

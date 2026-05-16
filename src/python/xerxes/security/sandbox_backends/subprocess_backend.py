@@ -11,11 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Subprocess backend module for Xerxes.
+"""Subprocess-based sandbox backend.
 
-Exports:
-    - logger
-    - SubprocessSandboxBackend"""
+Runs the target callable in a fresh Python interpreter spawned via
+``subprocess.run``. The child inherits no Python objects from the
+parent — payload is pickled into base64, the child unpickles and
+invokes the callable, and the result is base64-encoded JSON back.
+Provides process isolation, a wall-clock timeout, and (on POSIX)
+an ``RLIMIT_AS`` memory cap; it does NOT provide filesystem or
+network isolation. Useful as a fallback when Docker is unavailable
+but expectations should be calibrated accordingly."""
 
 from __future__ import annotations
 
@@ -56,27 +61,18 @@ sys.stdout.write(base64.b64encode(out.encode("utf-8")).decode())
 
 
 class SubprocessSandboxBackend:
-    """Subprocess sandbox backend."""
+    """Run tools in a forked Python child process with a memory and time cap."""
 
     def __init__(self, sandbox_config: SandboxConfig) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            sandbox_config (SandboxConfig): IN: sandbox config. OUT: Consumed during execution."""
+        """Store the shared :class:`SandboxConfig` used per call."""
 
         self._config = sandbox_config
 
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
-        """Execute.
+        """Pickle ``func``/``arguments`` into a child, return the result.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            func (tp.Callable): IN: func. OUT: Consumed during execution.
-            arguments (dict): IN: arguments. OUT: Consumed during execution.
-        Returns:
-            tp.Any: OUT: Result of the operation."""
+        Raises ``RuntimeError`` on timeout, non-zero exit, decoding failure,
+        or if the child reports the wrapped callable raised."""
 
         payload = pickle.dumps((func, arguments))
         encoded_payload = base64.b64encode(payload).decode()
@@ -125,22 +121,12 @@ class SubprocessSandboxBackend:
         return result_data["value"]
 
     def is_available(self) -> bool:
-        """Check whether available.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Always True; ``subprocess`` is part of the standard library."""
 
         return True
 
     def get_capabilities(self) -> dict[str, tp.Any]:
-        """Retrieve the capabilities.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Describe what this backend provides (process isolation, no fs/net)."""
 
         return {
             "backend": "subprocess",

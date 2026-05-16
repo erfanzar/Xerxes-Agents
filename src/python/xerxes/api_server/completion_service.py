@@ -11,11 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Standard completion service for the Xerxes API server.
+"""Single-agent completion service for the Xerxes API server.
 
-This module provides :class:`CompletionService`, which bridges Xerxes agent
-execution to OpenAI-compatible chat completion requests, supporting both
-synchronous and streaming responses.
+:class:`CompletionService` adapts the synchronous :meth:`Xerxes.run`
+entry point to the FastAPI request handlers. ``create_completion``
+returns a :class:`ChatCompletionResponse`; ``create_streaming_completion``
+yields SSE ``data:`` frames followed by the OpenAI ``[DONE]`` marker.
 """
 
 from __future__ import annotations
@@ -42,32 +43,24 @@ if typing.TYPE_CHECKING:
 
 
 class CompletionService:
-    """Wraps a Xerxes instance to provide OpenAI-compatible completions."""
+    """Adapter from a :class:`Xerxes` instance to OpenAI completions."""
 
     def __init__(self, xerxes: Xerxes, can_overide_samplings: bool = False):
-        """Initialize the completion service.
+        """Bind to ``xerxes`` and remember whether requests may override sampling.
 
-        Args:
-            xerxes (Xerxes): IN: The Xerxes runtime instance. OUT: Used to
-                execute agent runs.
-            can_overide_samplings (bool): IN: Whether request sampling parameters
-                may override agent defaults. OUT: Stored and checked during request
-                processing.
+        When ``can_overide_samplings`` is ``False`` (the default), the
+        agent's configured sampling parameters always win regardless of
+        what the chat completion request supplies.
         """
         self.xerxes = xerxes
         self.can_overide_samplings = can_overide_samplings
 
     def apply_request_parameters(self, agent: Agent, request: ChatCompletionRequest) -> Agent:
-        """Override agent sampling parameters from a chat completion request.
+        """Return a deep copy of ``agent`` with request overrides applied.
 
-        Args:
-            agent (Agent): IN: Base agent configuration. OUT: Deep-copied and
-                selectively mutated with request parameters.
-            request (ChatCompletionRequest): IN: Request containing optional
-                sampling overrides. OUT: Read for parameter values.
-
-        Returns:
-            Agent: OUT: Configured agent with applied overrides.
+        Overrides only take effect when ``can_overide_samplings`` is
+        ``True``. Each sampling parameter is copied only when present
+        on the request so missing values keep the agent's defaults.
         """
         configured_agent = agent.model_copy(deep=True)
         if self.can_overide_samplings:
@@ -97,17 +90,12 @@ class CompletionService:
         messages: MessagesHistory,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
-        """Create a non-streaming chat completion.
+        """Run ``agent`` once and wrap the result in OpenAI's response shape.
 
-        Args:
-            agent (Agent): IN: Configured agent to run. OUT: Passed to Xerxes.
-            messages (MessagesHistory): IN: Conversation messages. OUT: Passed to
-                Xerxes as the message history.
-            request (ChatCompletionRequest): IN: Request metadata. OUT: Used for
-                model name and to construct the response.
-
-        Returns:
-            ChatCompletionResponse: OUT: The completed assistant message with usage.
+        ``Xerxes.run`` is synchronous, so it executes in the default
+        thread pool to keep the event loop unblocked. The returned
+        usage info copies whatever counters the provider supplied,
+        defaulting missing values to ``0`` / ``0.0``.
         """
         loop = asyncio.get_event_loop()
         response = typing.cast(
@@ -150,18 +138,13 @@ class CompletionService:
         messages: MessagesHistory,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[str | bytes]:
-        """Create a streaming chat completion.
+        """Yield SSE-formatted streaming chunks for one chat completion.
 
-        Args:
-            agent (Agent): IN: Configured agent to run. OUT: Passed to Xerxes as
-                the agent identifier.
-            messages (MessagesHistory): IN: Conversation messages. OUT: Passed to
-                Xerxes.
-            request (ChatCompletionRequest): IN: Request metadata. OUT: Used for
-                model name in streamed chunks.
-
-        Yields:
-            str | bytes: OUT: SSE-formatted JSON chunks and the final ``[DONE]`` marker.
+        Each delta is emitted as a ``data: {json}`` line followed by
+        ``\\n\\n``. A final ``finish_reason="stop"`` chunk and the
+        OpenAI ``data: [DONE]`` sentinel terminate the stream. The
+        function yields nothing when :meth:`Xerxes.run` short-circuits
+        to a :class:`ResponseResult` (no streaming available).
         """
         usage_info = None
         stream_result = self.xerxes.run(

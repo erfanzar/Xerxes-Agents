@@ -13,7 +13,10 @@
 # limitations under the License.
 """DingTalk (钉钉) channel adapter.
 
-Supports inbound and outbound messaging via DingTalk webhooks.
+Inbound: parses DingTalk's outgoing-webhook JSON. Outbound: posts plain
+``text`` messages back to the configured incoming-webhook URL. Webhook
+sign / keyword authentication is the operator's responsibility — the
+adapter does not enforce it.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class DingTalkChannel(WebhookChannel):
-    """Channel implementation for DingTalk."""
+    """DingTalk webhook adapter."""
 
     name = "dingtalk"
 
@@ -35,27 +38,30 @@ class DingTalkChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the DingTalk channel.
+        """Build the channel.
 
         Args:
-            webhook_url (str): IN: DingTalk incoming webhook URL.
-                OUT: stored for outbound message delivery.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            webhook_url: DingTalk incoming-webhook URL (includes the
+                ``access_token`` query parameter).
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.webhook_url = webhook_url
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a DingTalk webhook payload into ``ChannelMessage``.
+        """Translate a DingTalk outgoing-webhook payload into ``ChannelMessage``.
+
+        Accepts both the official ``{"text": {"content": ...}}`` shape and
+        the simplified top-level ``content`` shape used by some bridges.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or empty when the payload is empty.
         """
         data = parse_json_body(body)
         if not data:
@@ -74,11 +80,10 @@ class DingTalkChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a text message via the DingTalk webhook.
+        """Post ``message.text`` to the configured DingTalk webhook.
 
-        Args:
-            message (ChannelMessage): IN: message to send. ``text`` is used
-                as the message content.
+        DingTalk incoming webhooks are conversation-scoped, so ``room_id``
+        is ignored — the URL itself determines the destination.
         """
         body = {"msgtype": "text", "text": {"content": message.text}}
         http_post(self.webhook_url, json_body=body, http_client=self._http)

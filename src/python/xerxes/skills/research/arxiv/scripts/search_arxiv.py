@@ -11,11 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Search arxiv module for Xerxes.
-
-Exports:
-    - NS
-    - search"""
+"""Query the arXiv Atom search API and print results to stdout."""
 
 import sys
 import urllib.parse
@@ -26,40 +22,17 @@ NS = {"a": "http://www.w3.org/2005/Atom"}
 
 
 def search(query=None, author=None, category=None, ids=None, max_results=5, sort="relevance"):
-    """Search.
+    """Print arXiv results matching the requested filters.
 
     Args:
-        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
-        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
-        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
-        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
-        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
-        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+        query: Free-text search query.
+        author: Restrict results to a specific author.
+        category: Restrict results to an arXiv category.
+        ids: Comma-separated list of arXiv ids; overrides other filters.
+        max_results: Maximum number of papers to print.
+        sort: One of ``relevance`` (default), ``date``, or ``updated``.
+    """
     params = {}
-    """Search.
-
-    Args:
-        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
-        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
-        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
-        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
-        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
-        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Search.
-
-    Args:
-        query (Any, optional): IN: query. Defaults to None. OUT: Consumed during execution.
-        author (Any, optional): IN: author. Defaults to None. OUT: Consumed during execution.
-        category (Any, optional): IN: category. Defaults to None. OUT: Consumed during execution.
-        ids (Any, optional): IN: ids. Defaults to None. OUT: Consumed during execution.
-        max_results (Any, optional): IN: max results. Defaults to 5. OUT: Consumed during execution.
-        sort (Any, optional): IN: sort. Defaults to 'relevance'. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     if ids:
         params["id_list"] = ids
@@ -84,7 +57,7 @@ def search(query=None, author=None, category=None, ids=None, max_results=5, sort
 
     url = "https://export.arxiv.org/api/query?" + "&".join(f"{k}={v}" for k, v in params.items())
 
-    req = urllib.request.Request(url, headers={"User-Agent": "HermesAgent/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Xerxes/1.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = resp.read()
 

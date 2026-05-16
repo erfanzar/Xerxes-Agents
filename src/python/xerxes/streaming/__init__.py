@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Streaming subsystem: agent loop, stream events, wire-protocol events.
+
+Re-exports the public surface used by the daemon, TUI, and bridge: the
+:func:`run_agent_loop` driver, neutral message conversion helpers, the
+:class:`PermissionMode` gate, internal :class:`StreamEvent` dataclasses, and
+the full wire-event vocabulary.
+"""
 
 from .events import (
     AgentState,

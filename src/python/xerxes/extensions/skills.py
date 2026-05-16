@@ -33,15 +33,7 @@ _active_skills: list[str] = []
 
 
 def activate_skill(name: str) -> None:
-    """Add a skill name to the global active set.
-
-    Args:
-        name (str): IN: Skill identifier. OUT: Appended to ``_active_skills``
-            if not already present.
-
-    Returns:
-        None: OUT: Global state is updated.
-    """
+    """Mark ``name`` as active in the module-global skill set."""
 
     global _active_skills
     if name not in _active_skills:
@@ -49,21 +41,13 @@ def activate_skill(name: str) -> None:
 
 
 def get_active_skills() -> list[str]:
-    """Return the current global active skill names.
-
-    Returns:
-        list[str]: OUT: Snapshot of ``_active_skills``.
-    """
+    """Return a snapshot of currently active skill names."""
 
     return list(_active_skills)
 
 
 def clear_active_skills() -> None:
-    """Remove all entries from the global active skill set.
-
-    Returns:
-        None: OUT: ``_active_skills`` is emptied.
-    """
+    """Reset the module-global active skill set."""
 
     global _active_skills
     _active_skills.clear()
@@ -81,25 +65,21 @@ class SkillMetadata:
     """Parsed frontmatter fields for a skill.
 
     Attributes:
-        name (str): IN: Skill identifier. OUT: Registry key.
-        description (str): IN: Human summary. OUT: Used in listings.
-        version (str): IN: Semver string. OUT: Stored.
-        tags (list[str]): IN: Categorisation labels. OUT: Used for search.
-        resources (list[str]): IN: Resource file names. OUT: Used to set
-            ``resources_dir``.
-        author (str): IN: Author name. OUT: Stored.
-        dependencies (list[str]): IN: Skill dependency names. OUT: Validated
-            by registry.
-        required_tools (list[str]): IN: Tool names needed. OUT: Validated by
-            registry.
-        platforms (list[str]): IN: Supported platform names. OUT: Matched by
-            ``skill_matches_platform``.
-        config_vars (list[str]): IN: Configurable variable names. OUT: Used
-            by ``resolve_skill_config``.
-        trust_level (str): IN: Trust tier. OUT: Stored.
-        source (str): IN: Origin label. OUT: Stored.
-        setup_command (str): IN: Shell command for one-time setup. OUT:
-            Stored.
+        name: Skill identifier and registry key.
+        description: Human-readable summary used in listings.
+        version: Semver string.
+        tags: Categorisation labels used for search.
+        resources: Resource file names that determine ``resources_dir``.
+        author: Author name.
+        dependencies: Skill names this skill depends on.
+        required_tools: Tool names this skill requires.
+        platforms: Supported platforms; consulted by ``skill_matches_platform``.
+        config_vars: Configurable variable names consumed by ``resolve_skill_config``.
+        trust_level: Trust tier (e.g. ``community``).
+        source: Origin label (e.g. ``local``).
+        setup_command: Shell command run once during setup.
+        subcommands: Sub-command names exposed by the skill (e.g. for slash
+            command completion).
     """
 
     name: str
@@ -115,6 +95,7 @@ class SkillMetadata:
     trust_level: str = "community"
     source: str = "local"
     setup_command: str = ""
+    subcommands: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -122,12 +103,10 @@ class Skill:
     """Complete skill object combining metadata, instructions, and paths.
 
     Attributes:
-        metadata (SkillMetadata): IN: Parsed frontmatter. OUT: Stored.
-        instructions (str): IN: Markdown body after frontmatter. OUT: Used
-            for prompt injection.
-        source_path (Path): IN: Path to the ``SKILL.md`` file. OUT: Stored.
-        resources_dir (Path | None): IN: Directory containing resources.
-            OUT: Set when ``metadata.resources`` is non-empty.
+        metadata: Parsed frontmatter.
+        instructions: Markdown body after the frontmatter, used for prompt injection.
+        source_path: Path to the originating ``SKILL.md`` file.
+        resources_dir: Directory containing companion resources, when present.
     """
 
     metadata: SkillMetadata
@@ -137,11 +116,7 @@ class Skill:
 
     @property
     def name(self) -> str:
-        """Convenience accessor for ``metadata.name``.
-
-        Returns:
-            str: OUT: The skill name.
-        """
+        """Return ``self.metadata.name``."""
 
         return self.metadata.name
 
@@ -149,8 +124,8 @@ class Skill:
         """Render the skill as a markdown prompt section.
 
         Returns:
-            str: OUT: ``## Skill: {name}`` header plus description and
-            instructions.
+            ``## Skill: {name}`` header followed by the description and
+            instruction body.
         """
 
         header = f"## Skill: {self.metadata.name}"
@@ -160,19 +135,17 @@ class Skill:
 
 
 def parse_skill_md(content: str, source_path: Path) -> Skill:
-    """Parse a ``SKILL.md`` string into a ``Skill`` object.
+    """Parse a ``SKILL.md`` document into a ``Skill``.
 
     Supports YAML frontmatter delimited by ``---``. Falls back to simple
-    ``key: value`` parsing if PyYAML is unavailable.
+    ``key: value`` parsing when PyYAML is unavailable.
 
     Args:
-        content (str): IN: Full markdown text. OUT: Split into frontmatter
-            and body.
-        source_path (Path): IN: Path to the file. OUT: Stored on the
-            returned ``Skill``.
+        content: Full markdown text including optional frontmatter.
+        source_path: Path to the originating file; recorded on the result.
 
     Returns:
-        Skill: OUT: Populated skill instance.
+        Populated ``Skill`` instance.
     """
 
     metadata_dict: dict = {}
@@ -201,14 +174,7 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
     name = metadata_dict.get("name", source_path.parent.name)
 
     def _normalize_list(value):
-        """Coerce a frontmatter value into a list of strings.
-
-        Args:
-            value: IN: Raw parsed value. OUT: Normalised to ``list[str]``.
-
-        Returns:
-            list[str]: OUT: Clean string list.
-        """
+        """Coerce a raw frontmatter value into a clean ``list[str]``."""
 
         if value is None:
             return []
@@ -217,6 +183,14 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
         if isinstance(value, list):
             return [str(v).strip() for v in value if str(v).strip()]
         return []
+
+    # Sub-commands: explicit ``subcommands:`` field wins; otherwise auto-detect
+    # from sibling ``references/<sub>-workflow.md`` files (the autoresearch
+    # skill's convention). This means existing community skills get correct
+    # sub-command completion without any frontmatter changes.
+    explicit_subcommands = _normalize_list(metadata_dict.get("subcommands"))
+    detected_subcommands = _detect_subcommands_from_references(source_path)
+    subcommands = explicit_subcommands or detected_subcommands
 
     metadata = SkillMetadata(
         name=name,
@@ -232,6 +206,7 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
         trust_level=str(metadata_dict.get("trust_level", "community")),
         source=str(metadata_dict.get("source", "local")),
         setup_command=metadata_dict.get("setup_command", ""),
+        subcommands=subcommands,
     )
 
     resources_dir = source_path.parent if metadata.resources else None
@@ -244,6 +219,25 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
     )
 
 
+def _detect_subcommands_from_references(source_path: Path) -> list[str]:
+    """Infer sub-commands from sibling ``references/<sub>-workflow.md`` files.
+
+    Used as a fallback when the skill author did not declare ``subcommands:``
+    in frontmatter. Mirrors the autoresearch convention: each workflow file
+    becomes a sub-command (``autoresearch:fix`` <- ``references/fix-workflow.md``).
+    """
+
+    references_dir = source_path.parent / "references"
+    if not references_dir.is_dir():
+        return []
+    subs: list[str] = []
+    for path in sorted(references_dir.glob("*-workflow.md")):
+        sub = path.stem[: -len("-workflow")]
+        if sub:
+            subs.append(sub)
+    return subs
+
+
 class SkillRegistry:
     """In-memory registry of discovered skills."""
 
@@ -254,23 +248,18 @@ class SkillRegistry:
 
     @property
     def skill_names(self) -> list[str]:
-        """Return all registered skill names.
-
-        Returns:
-            list[str]: OUT: Snapshot of ``self._skills`` keys.
-        """
+        """Return a snapshot of registered skill names."""
 
         return list(self._skills.keys())
 
     def discover(self, *directories: str | Path) -> list[str]:
-        """Scan directories recursively for ``SKILL.md`` files.
+        """Recursively scan ``directories`` for ``SKILL.md`` files.
 
-        Args:
-            *directories (str | Path): IN: Directories to scan. OUT:
-                Recursively searched.
+        Each file is content-scanned for prompt injection before being parsed.
+        Existing entries are not overwritten.
 
         Returns:
-            list[str]: OUT: Names of newly discovered skills.
+            Names of newly registered skills.
         """
 
         from xerxes.security.prompt_scanner import scan_context_content
@@ -302,50 +291,24 @@ class SkillRegistry:
         return discovered
 
     def register(self, skill: Skill) -> None:
-        """Manually add a skill to the registry.
-
-        Args:
-            skill (Skill): IN: Skill instance. OUT: Stored by ``skill.name``.
-
-        Returns:
-            None: OUT: Overwrites any existing skill with the same name.
-        """
+        """Store ``skill`` in the registry, overwriting any prior entry."""
 
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> Skill | None:
-        """Retrieve a skill by name.
-
-        Args:
-            name (str): IN: Skill identifier. OUT: Looked up in the registry.
-
-        Returns:
-            Skill | None: OUT: Skill instance or ``None``.
-        """
+        """Return the skill registered under ``name``, or ``None``."""
 
         return self._skills.get(name)
 
     def get_all(self) -> list[Skill]:
-        """Return all registered skills.
-
-        Returns:
-            list[Skill]: OUT: Snapshot of stored skills.
-        """
+        """Return a snapshot of every registered skill."""
 
         return list(self._skills.values())
 
     def search(self, query: str = "", tags: list[str] | None = None) -> list[Skill]:
-        """Filter skills by query text or tag membership.
+        """Filter skills by case-insensitive ``query`` text or ``tags`` membership.
 
-        Args:
-            query (str): IN: Substring to match against name/description.
-                OUT: Case-insensitive filter.
-            tags (list[str] | None): IN: Tags to match. OUT: Skills with any
-                matching tag are included.
-
-        Returns:
-            list[Skill]: OUT: Matching skills; if no filters given, returns
-            all skills.
+        With no filters supplied the full skill list is returned.
         """
 
         results = []
@@ -360,15 +323,14 @@ class SkillRegistry:
         return results
 
     def validate_dependencies(self, plugin_registry: tp.Any = None) -> list[str]:
-        """Check that every skill's dependencies and required tools exist.
+        """Verify that each skill's dependencies and required tools exist.
 
         Args:
-            plugin_registry (tp.Any): IN: Optional plugin registry with a
-                ``get_tool`` method. OUT: Used to validate
-                ``required_tools``.
+            plugin_registry: Optional plugin registry exposing ``get_tool``;
+                when present, ``required_tools`` are validated as well.
 
         Returns:
-            list[str]: OUT: Human-readable error strings.
+            Human-readable error strings for unmet requirements.
         """
 
         errors: list[str] = []
@@ -383,11 +345,7 @@ class SkillRegistry:
         return errors
 
     def build_skills_index(self) -> str:
-        """Build a markdown list of available skills.
-
-        Returns:
-            str: OUT: Formatted index or empty string if no skills.
-        """
+        """Return a markdown bulleted list of registered skills, or ``""``."""
 
         if not self._skills:
             return ""
@@ -401,17 +359,13 @@ class SkillRegistry:
 
 
 def skill_matches_platform(skill: Skill, current_platform: str | None = None) -> bool:
-    """Determine whether a skill supports the current OS.
+    """Return whether ``skill`` is compatible with ``current_platform``.
+
+    A skill with no declared platforms is treated as universal.
 
     Args:
-        skill (Skill): IN: Skill to test. OUT: ``metadata.platforms`` is
-            checked.
-        current_platform (str | None): IN: Override platform string (defaults
-            to ``sys.platform``). OUT: Normalised and compared.
-
-    Returns:
-        bool: OUT: ``True`` if no platforms are specified or if the current
-        platform matches.
+        skill: Skill to test.
+        current_platform: Override platform string; defaults to ``sys.platform``.
     """
 
     platforms = skill.metadata.platforms
@@ -427,11 +381,9 @@ def skill_matches_platform(skill: Skill, current_platform: str | None = None) ->
 
 
 def _load_skill_config() -> dict[str, dict[str, tp.Any]]:
-    """Load per-skill configuration from ``~/.xerxes/config.yaml``.
+    """Return the ``skills.config`` block of ``~/.xerxes/config.yaml``.
 
-    Returns:
-        dict[str, dict[str, tp.Any]]: OUT: Mapping from skill name to config
-        dict; empty if file missing or unreadable.
+    Yields an empty dict when the file is missing or unreadable.
     """
 
     from xerxes.core.paths import xerxes_subdir
@@ -460,17 +412,11 @@ def resolve_skill_config(
     skill: Skill,
     user_config: dict[str, dict[str, tp.Any]] | None = None,
 ) -> dict[str, tp.Any]:
-    """Resolve configuration values for a skill from user config.
+    """Return the user config subset that matches ``skill.metadata.config_vars``.
 
     Args:
-        skill (Skill): IN: Skill whose ``config_vars`` are requested. OUT:
-            Used to determine which keys to extract.
-        user_config (dict[str, dict[str, tp.Any]] | None): IN: Override
-            config mapping. OUT: Defaults to ``_load_skill_config()``.
-
-    Returns:
-        dict[str, tp.Any]: OUT: Subset of config containing only the skill's
-        declared variables.
+        skill: Skill whose declared config variables drive the extraction.
+        user_config: Optional override; defaults to ``_load_skill_config()``.
     """
 
     if user_config is None:
@@ -484,17 +430,9 @@ def resolve_skill_config(
 
 
 def inject_skill_config(skill: Skill, user_config: dict[str, dict[str, tp.Any]] | None = None) -> str:
-    """Format resolved skill configuration as a markdown snippet.
+    """Render resolved skill config as a markdown snippet for prompt injection.
 
-    Args:
-        skill (Skill): IN: Skill to resolve config for. OUT: Passed to
-            ``resolve_skill_config``.
-        user_config (dict[str, dict[str, tp.Any]] | None): IN: Override
-            config mapping. OUT: Passed to ``resolve_skill_config``.
-
-    Returns:
-        str: OUT: Markdown block with key/value pairs, or empty string if no
-        config variables are set.
+    Returns the empty string when the skill defines no resolved variables.
     """
 
     resolved = resolve_skill_config(skill, user_config)

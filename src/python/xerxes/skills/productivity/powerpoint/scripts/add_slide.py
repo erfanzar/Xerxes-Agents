@@ -11,13 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Add slide module for Xerxes.
-
-Exports:
-    - get_next_slide_number
-    - create_slide_from_layout
-    - duplicate_slide
-    - parse_source"""
+"""Helpers for adding slides to an unpacked PPTX directory tree."""
 
 import re
 import shutil
@@ -26,22 +20,13 @@ from pathlib import Path
 
 
 def get_next_slide_number(slides_dir: Path) -> int:
-    """Retrieve the next slide number.
-
-    Args:
-        slides_dir (Path): IN: slides dir. OUT: Consumed during execution.
-    Returns:
-        int: OUT: Result of the operation."""
+    """Return the next free integer suffix for a ``slideN.xml`` file."""
     existing = [int(m.group(1)) for f in slides_dir.glob("slide*.xml") if (m := re.match(r"slide(\d+)\.xml", f.name))]
     return max(existing) + 1 if existing else 1
 
 
 def create_slide_from_layout(unpacked_dir: Path, layout_file: str) -> None:
-    """Create slide from layout.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        layout_file (str): IN: layout file. OUT: Consumed during execution."""
+    """Add a new blank slide based on ``layout_file`` and print the required edits."""
     slides_dir = unpacked_dir / "ppt" / "slides"
     rels_dir = slides_dir / "_rels"
     layouts_dir = unpacked_dir / "ppt" / "slideLayouts"
@@ -99,11 +84,7 @@ def create_slide_from_layout(unpacked_dir: Path, layout_file: str) -> None:
 
 
 def duplicate_slide(unpacked_dir: Path, source: str) -> None:
-    """Duplicate slide.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        source (str): IN: source. OUT: Consumed during execution."""
+    """Copy an existing slide to a fresh ``slideN.xml`` and print required edits."""
     slides_dir = unpacked_dir / "ppt" / "slides"
     rels_dir = slides_dir / "_rels"
 
@@ -144,11 +125,7 @@ def duplicate_slide(unpacked_dir: Path, source: str) -> None:
 
 
 def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
-    """Internal helper to add to content types.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        dest (str): IN: dest. OUT: Consumed during execution."""
+    """Register ``dest`` as a slide in ``[Content_Types].xml``."""
     content_types_path = unpacked_dir / "[Content_Types].xml"
     content_types = content_types_path.read_text(encoding="utf-8")
 
@@ -160,13 +137,7 @@ def _add_to_content_types(unpacked_dir: Path, dest: str) -> None:
 
 
 def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
-    """Internal helper to add to presentation rels.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-        dest (str): IN: dest. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Append a slide relationship for ``dest`` to the presentation rels and return its rId."""
     pres_rels_path = unpacked_dir / "ppt" / "_rels" / "presentation.xml.rels"
     pres_rels = pres_rels_path.read_text(encoding="utf-8")
 
@@ -184,12 +155,7 @@ def _add_to_presentation_rels(unpacked_dir: Path, dest: str) -> str:
 
 
 def _get_next_slide_id(unpacked_dir: Path) -> int:
-    """Internal helper to get next slide id.
-
-    Args:
-        unpacked_dir (Path): IN: unpacked dir. OUT: Consumed during execution.
-    Returns:
-        int: OUT: Result of the operation."""
+    """Return the next free slide id, defaulting to 256 for an empty deck."""
     pres_path = unpacked_dir / "ppt" / "presentation.xml"
     pres_content = pres_path.read_text(encoding="utf-8")
     slide_ids = [int(m) for m in re.findall(r'<p:sldId[^>]*id="(\d+)"', pres_content)]
@@ -197,12 +163,7 @@ def _get_next_slide_id(unpacked_dir: Path) -> int:
 
 
 def parse_source(source: str) -> tuple[str, str | None]:
-    """Parse source.
-
-    Args:
-        source (str): IN: source. OUT: Consumed during execution.
-    Returns:
-        tuple[str, str | None]: OUT: Result of the operation."""
+    """Classify ``source`` as a ``"layout"`` filename or an existing ``"slide"``."""
     if source.startswith("slideLayout") and source.endswith(".xml"):
         return ("layout", source)
 

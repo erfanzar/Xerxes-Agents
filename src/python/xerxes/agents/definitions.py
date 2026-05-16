@@ -69,13 +69,7 @@ BUILTIN_AGENTS_DIR = Path(__file__).parent / "default"
 
 
 def _load_builtin_agents() -> dict[str, AgentDefinition]:
-    """Load built-in agent definitions from the ``default/`` directory.
-
-    Falls back to hardcoded definitions if no YAML specs are found.
-
-    Returns:
-        dict[str, AgentDefinition]: OUT: Mapping of agent name to definition.
-    """
+    """Load built-in definitions from ``default/``; fall back to hardcoded set."""
     defs: dict[str, AgentDefinition] = {}
     if BUILTIN_AGENTS_DIR.is_dir():
         for yaml_path in sorted(BUILTIN_AGENTS_DIR.glob("*.yaml")):
@@ -198,15 +192,12 @@ BUILTIN_AGENTS = _load_builtin_agents()
 
 
 def _parse_agent_md(path: Path, source: str = "user") -> AgentDefinition:
-    """Parse an agent definition from a Markdown file with optional YAML frontmatter.
+    """Parse a Markdown agent file with optional ``---`` YAML frontmatter.
 
-    Args:
-        path (Path): IN: Path to the ``.md`` file. OUT: Read as text.
-        source (str): IN: Source label (e.g., ``"user"`` or ``"project"``). OUT:
-            Stored in the returned definition.
-
-    Returns:
-        AgentDefinition: OUT: Parsed definition.
+    Frontmatter pulls ``description``, ``model``, ``tools``, ``max_depth``
+    and ``isolation``; the rest of the file becomes the system prompt. The
+    agent name is the file stem. ``source`` is stamped onto the returned
+    definition unchanged.
     """
     content = path.read_text()
     name = path.stem
@@ -249,15 +240,7 @@ def _parse_agent_md(path: Path, source: str = "user") -> AgentDefinition:
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
-    """Parse simple YAML or key-value frontmatter.
-
-    Args:
-        text (str): IN: Raw frontmatter text. OUT: Parsed line by line if PyYAML
-            is unavailable.
-
-    Returns:
-        dict[str, Any]: OUT: Parsed frontmatter dictionary.
-    """
+    """Parse YAML frontmatter, with a key:value line fallback if PyYAML is missing."""
     try:
         import yaml
 
@@ -283,16 +266,18 @@ def load_agent_definitions(
     user_dir: Path | None = None,
     project_dir: Path | None = None,
 ) -> dict[str, AgentDefinition]:
-    """Load all agent definitions from built-in, user, and project sources.
+    """Merge built-in, user, and project agent definitions into one mapping.
+
+    Precedence is built-in < user < project — later entries override earlier
+    ones by ``name``. Per-file load errors are captured in
+    ``_LAST_LOAD_ERRORS`` (see :func:`list_agent_definition_load_errors`)
+    rather than raised.
 
     Args:
-        user_dir (Path | None): IN: Directory containing user ``*.yaml``/``*.md``
-            agent files. OUT: Defaults to the xerxes user agents subdirectory.
-        project_dir (Path | None): IN: Directory for project-level agent files.
-            OUT: Defaults to ``.xerxes/agents`` under the current working directory.
-
-    Returns:
-        dict[str, AgentDefinition]: OUT: Merged mapping of all loaded definitions.
+        user_dir: Override for the user agents directory; defaults to the
+            ``agents`` subdir of the xerxes home.
+        project_dir: Override for the project agents directory; defaults to
+            ``.xerxes/agents`` under the current working directory.
     """
     global _LAST_LOAD_ERRORS
     _LAST_LOAD_ERRORS = []
@@ -346,28 +331,14 @@ def load_agent_definitions(
 
 
 def _record_load_error(path: Path, exc: Exception) -> None:
-    """Record an agent definition load error.
-
-    Args:
-        path (Path): IN: The file that failed to load. OUT: Included in the error
-            message.
-        exc (Exception): IN: The exception raised. OUT: Logged and recorded.
-    """
+    """Append a formatted entry to ``_LAST_LOAD_ERRORS`` and log a warning."""
     message = f"{path}: {type(exc).__name__}: {exc}"
     _LAST_LOAD_ERRORS.append(message)
     logger.warning("Failed to load agent definition %s: %s", path, exc)
 
 
 def _project_agent_candidates(cwd: Path) -> list[tuple[Path, str]]:
-    """Enumerate candidate project-level agent spec files.
-
-    Args:
-        cwd (Path): IN: Current working directory. OUT: Used to resolve candidate
-            file paths.
-
-    Returns:
-        list[tuple[Path, str]]: OUT: Existing candidate files with their source label.
-    """
+    """Return existing ``(path, source)`` pairs for project-level spec files."""
     candidates = [
         (cwd / ".kimi" / "agent.yaml", "project"),
         (cwd / ".kimi" / "agents.yaml", "project"),
@@ -378,18 +349,15 @@ def _project_agent_candidates(cwd: Path) -> list[tuple[Path, str]]:
 
 
 def _parse_project_agent_file(path: Path, source: str) -> list[AgentDefinition]:
-    """Parse a project-level agent file (single or multi-agent ``agents.yaml``).
+    """Parse a single ``agent.yaml`` or a multi-agent ``agents.yaml``.
 
-    Args:
-        path (Path): IN: Path to the agent YAML file. OUT: Read and parsed.
-        source (str): IN: Source label for definitions. OUT: Stored in results.
-
-    Returns:
-        list[AgentDefinition]: OUT: Parsed definitions.
+    For ``agents.yaml`` each child of the top-level ``agents:`` mapping
+    becomes its own normalised spec; for any other filename a single spec
+    is returned. ``source`` is stamped onto every returned definition.
 
     Raises:
         RuntimeError: If PyYAML is not installed.
-        ValueError: If the YAML structure is invalid.
+        ValueError: If ``agents`` is present but not a mapping.
     """
     if path.name != "agents.yaml":
         parsed = _parse_agent_yaml(path, source=source)
@@ -423,16 +391,11 @@ def _parse_project_agent_file(path: Path, source: str) -> list[AgentDefinition]:
 
 
 def _load_agent_spec_from_data(path: Path, data: dict[str, Any]):
-    """Serialize data to a temporary YAML and load it as an agent spec.
+    """Round-trip ``data`` through a tempfile so :func:`load_agent_spec` can read it.
 
-    Args:
-        path (Path): IN: Base path used to determine the temp file directory. OUT:
-            Parent directory hosts the temporary file.
-        data (dict[str, Any]): IN: Normalized agent spec data. OUT: Serialized to
-            YAML and loaded.
-
-    Returns:
-        ResolvedAgentSpec: OUT: The loaded agent specification.
+    Used by the ``agents.yaml`` parser to reuse the regular loading
+    pipeline (including ``extend`` resolution) for inline agent
+    definitions. The tempfile is removed unconditionally.
     """
     import tempfile
 
@@ -453,16 +416,7 @@ def _load_agent_spec_from_data(path: Path, data: dict[str, Any]):
 
 
 def _agent_definition_from_spec(spec: Any, source: str) -> AgentDefinition:
-    """Convert a ResolvedAgentSpec into an AgentDefinition.
-
-    Args:
-        spec (Any): IN: Resolved spec object (duck-typed). OUT: Field values
-            extracted and mapped.
-        source (str): IN: Source label. OUT: Stored in the definition.
-
-    Returns:
-        AgentDefinition: OUT: The mapped definition.
-    """
+    """Project a :class:`ResolvedAgentSpec` into the registry's :class:`AgentDefinition`."""
     return AgentDefinition(
         name=spec.name,
         description=spec.when_to_use,
@@ -478,15 +432,7 @@ def _agent_definition_from_spec(spec: Any, source: str) -> AgentDefinition:
 
 
 def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | None:
-    """Parse a single agent YAML file into an AgentDefinition.
-
-    Args:
-        path (Path): IN: Path to the YAML file. OUT: Loaded via ``load_agent_spec``.
-        source (str): IN: Source label. OUT: Passed to the mapper.
-
-    Returns:
-        AgentDefinition | None: OUT: The definition, or ``None`` if loading fails.
-    """
+    """Load ``path`` via :func:`load_agent_spec` and project to :class:`AgentDefinition`."""
     from .agentspec import load_agent_spec
 
     spec = load_agent_spec(path)
@@ -494,12 +440,10 @@ def _parse_agent_yaml(path: Path, source: str = "user") -> AgentDefinition | Non
 
 
 def list_agent_definition_load_errors() -> list[str]:
-    """Return the list of errors encountered during the last load.
+    """Return formatted error strings from the last :func:`load_agent_definitions` call.
 
-    Forces a reload if no errors have been recorded yet.
-
-    Returns:
-        list[str]: OUT: Error messages from the most recent load.
+    Triggers a reload if the cache is empty so callers asking right after
+    process startup get a non-stale answer.
     """
     if not _LAST_LOAD_ERRORS:
         load_agent_definitions()
@@ -507,23 +451,12 @@ def list_agent_definition_load_errors() -> list[str]:
 
 
 def get_agent_definition(name: str) -> AgentDefinition | None:
-    """Retrieve a single agent definition by name.
-
-    Args:
-        name (str): IN: Agent name to look up. OUT: Used as a dictionary key.
-
-    Returns:
-        AgentDefinition | None: OUT: The matching definition, or ``None``.
-    """
+    """Return the definition registered as ``name``, or ``None`` if missing."""
     return load_agent_definitions().get(name)
 
 
 def list_agent_definitions() -> list[AgentDefinition]:
-    """List all loaded agent definitions sorted by name.
-
-    Returns:
-        list[AgentDefinition]: OUT: Sorted list of definitions.
-    """
+    """Return every loaded definition sorted by name."""
     return sorted(load_agent_definitions().values(), key=lambda d: d.name)
 
 

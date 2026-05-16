@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Replay module for Xerxes.
+"""Read-only views over recorded sessions for replay and inspection.
 
-Exports:
-    - TimelineEvent
-    - ReplayView
-    - SessionReplay"""
+:class:`ReplayView` slices and reformats a :class:`SessionRecord` without
+mutating it: filter by agent, list tool calls, flatten everything to a sorted
+:class:`TimelineEvent` stream, or render Markdown. :class:`SessionReplay` is a
+thin factory kept for symmetry with the rest of the session API.
+"""
 
 from __future__ import annotations
 
@@ -28,13 +29,15 @@ from .models import AgentTransitionRecord, SessionRecord, ToolCallRecord, TurnRe
 
 @dataclass
 class TimelineEvent:
-    """Timeline event.
+    """One row in the flattened replay timeline.
 
     Attributes:
-        timestamp (str): timestamp.
-        event_type (str): event type.
-        summary (str): summary.
-        data (dict[str, tp.Any]): data."""
+        timestamp: ISO-8601 string used for chronological sorting.
+        event_type: ``"turn_start"``, ``"turn_end"``, ``"tool_call"`` or
+            ``"agent_transition"``.
+        summary: Short human-readable description for display.
+        data: Structured payload (turn/tool ids, agent names).
+    """
 
     timestamp: str
     event_type: str
@@ -43,31 +46,25 @@ class TimelineEvent:
 
 
 class ReplayView:
-    """Replay view."""
+    """Filtered, read-only projection of a :class:`SessionRecord`.
+
+    Constructing a view never mutates the source session. ``turns`` defaults
+    to a shallow copy of the session's turns; pass an explicit list (e.g.
+    from :meth:`filter_by_agent`) to slice the view further.
+    """
 
     def __init__(
         self,
         session: SessionRecord,
         turns: list[TurnRecord] | None = None,
     ) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-            turns (list[TurnRecord] | None, optional): IN: turns. Defaults to None. OUT: Consumed during execution."""
+        """Wrap ``session`` with an optional turn-list override."""
 
         self.session = session
         self.turns: list[TurnRecord] = turns if turns is not None else list(session.turns)
 
     def get_turn(self, index_or_id: int | str) -> TurnRecord | None:
-        """Retrieve the turn.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            index_or_id (int | str): IN: index or id. OUT: Consumed during execution.
-        Returns:
-            TurnRecord | None: OUT: Result of the operation."""
+        """Look a turn up by positional index or ``turn_id``."""
 
         if isinstance(index_or_id, int):
             if 0 <= index_or_id < len(self.turns):
@@ -79,12 +76,7 @@ class ReplayView:
         return None
 
     def get_tool_calls(self) -> list[ToolCallRecord]:
-        """Retrieve the tool calls.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ToolCallRecord]: OUT: Result of the operation."""
+        """Return every tool call across the view's turns in order."""
 
         result: list[ToolCallRecord] = []
         for turn in self.turns:
@@ -92,22 +84,12 @@ class ReplayView:
         return result
 
     def get_agent_transitions(self) -> list[AgentTransitionRecord]:
-        """Retrieve the agent transitions.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[AgentTransitionRecord]: OUT: Result of the operation."""
+        """Return a copy of the source session's agent-transition list."""
 
         return list(self.session.agent_transitions)
 
     def get_timeline(self) -> list[TimelineEvent]:
-        """Retrieve the timeline.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[TimelineEvent]: OUT: Result of the operation."""
+        """Flatten turns, tool calls, and transitions into a sorted timeline."""
 
         events: list[TimelineEvent] = []
 
@@ -162,24 +144,18 @@ class ReplayView:
         return events
 
     def filter_by_agent(self, agent_id: str) -> ReplayView:
-        """Filter by agent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            ReplayView: OUT: Result of the operation."""
+        """Return a new view containing only turns produced by ``agent_id``."""
 
         filtered = [t for t in self.turns if t.agent_id == agent_id]
         return ReplayView(session=self.session, turns=filtered)
 
     def to_markdown(self) -> str:
-        """To markdown.
+        """Render the view as a human-readable Markdown report.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        Includes a header with session metadata, agent transitions, and a
+        per-turn breakdown with prompt previews, response previews (truncated
+        to 200 chars), and tool-call summaries.
+        """
 
         lines: list[str] = []
         lines.append(f"# Session {self.session.session_id}")
@@ -232,15 +208,10 @@ class ReplayView:
 
 
 class SessionReplay:
-    """Session replay."""
+    """Static factory for :class:`ReplayView` objects."""
 
     @staticmethod
     def load(session: SessionRecord) -> ReplayView:
-        """Load.
-
-        Args:
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            ReplayView: OUT: Result of the operation."""
+        """Wrap ``session`` in a default :class:`ReplayView`."""
 
         return ReplayView(session=session)

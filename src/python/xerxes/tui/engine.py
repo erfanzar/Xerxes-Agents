@@ -11,24 +11,31 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bridge client for communicating with the Xerxes backend subprocess.
+"""TUI-side client for the Xerxes daemon socket.
 
-This module defines :class:`BridgeClient`, which manages the lifecycle of the
-Xerxes bridge process, sends JSON-RPC commands, and yields wire events back to
-the TUI.
-"""
+Defines :class:`BridgeClient`, which speaks JSON-RPC over the Unix domain
+socket published by the daemon. Spawns the daemon subprocess when none
+is reachable, sends JSON-RPC requests / notifications, demultiplexes
+inbound events into an :class:`asyncio.Queue` for the TUI, and tracks
+correlated request futures."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
+import socket
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
+from ..daemon.config import load_config
 from ..streaming.wire_events import (
     WireEvent,
     event_from_dict,
@@ -36,25 +43,30 @@ from ..streaming.wire_events import (
 
 
 class BridgeClient:
-    """Manages a subprocess bridge to the Xerxes backend.
+    """Asyncio-friendly JSON-RPC client for the Xerxes daemon socket.
 
-    Spawns the bridge process, sends JSON-RPC messages over stdin, and
-    asynchronously reads events from stdout via a background thread.
-    """
+    The TUI uses one instance per session. ``spawn`` connects to (and
+    if needed, launches) the daemon; events flow back via :meth:`events`
+    as :class:`WireEvent` instances. Concurrent ``await`` callers are
+    safe — outbound writes serialize through ``_write_lock`` and
+    inbound bytes are demultiplexed by a daemon thread that re-enters
+    the asyncio loop with ``call_soon_threadsafe``."""
 
     def __init__(
         self,
         python_executable: str | None = None,
     ) -> None:
-        """Initialize the bridge client without spawning the process.
+        """Stash configuration; no daemon contact happens until :meth:`spawn`.
 
         Args:
-            python_executable (str | None): IN: Path to the Python executable
-                used to run the bridge module. OUT: Stored internally; defaults
-                to ``sys.executable`` when spawning.
+            python_executable: Interpreter used to launch the daemon
+                module if none is running. Defaults to ``sys.executable``.
         """
         self._python = python_executable or sys.executable
         self._proc: subprocess.Popen[bytes, bytes] | None = None
+        self._sock: socket.socket | None = None
+        self._socket_reader: Any = None
+        self._socket_writer: Any = None
         self._write_lock = asyncio.Lock()
         self._event_queue: asyncio.Queue[WireEvent] = asyncio.Queue()
         self._read_thread: threading.Thread | None = None
@@ -68,11 +80,12 @@ class BridgeClient:
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def spawn(self) -> None:
-        """Spawn the bridge subprocess and start the background reader thread.
+        """Connect to the daemon, launching one if needed, and start reader threads.
 
-        If the process is already running, this method is a no-op.
-        """
-        if self._proc is not None:
+        Stops a stale daemon (older protocol) before launching a fresh
+        one. Raises ``RuntimeError`` if the new daemon doesn't become
+        reachable within ten seconds. Idempotent once connected."""
+        if self._sock is not None:
             return
 
         try:
@@ -80,33 +93,57 @@ class BridgeClient:
         except RuntimeError:
             self._loop = asyncio.get_event_loop()
 
-        self._proc = subprocess.Popen(
-            [self._python, "-m", "xerxes.bridge", "--wire"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
+        config = load_config()
+        socket_path = Path(config.socket_path).expanduser()
+        required_protocol = 22
+        if self._daemon_protocol(socket_path) < required_protocol:
+            self._stop_stale_daemon(Path(config.pid_file).expanduser(), socket_path)
+        if not self._connect_socket(socket_path):
+            self._proc = subprocess.Popen(
+                [self._python, "-m", "xerxes.daemon"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                start_new_session=True,
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and self._daemon_protocol(socket_path) < required_protocol:
+                if self._proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            self._connect_socket(socket_path)
+            if self._sock is None:
+                raise RuntimeError("Xerxes daemon did not become ready on the Unix socket")
+
         self._running = True
 
         self._read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._read_thread.start()
-        self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
-        self._stderr_thread.start()
+        if self._proc and self._proc.stderr:
+            self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
+            self._stderr_thread.start()
 
     def close(self) -> None:
-        """Terminate the bridge subprocess and clean up resources."""
+        """Tear down the socket and reader handles; safe to call multiple times."""
         self._running = False
-        if self._proc:
-            self._proc.terminate()
+        for handle in (self._socket_reader, self._socket_writer):
             try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-            self._proc = None
+                if handle:
+                    handle.close()
+            except Exception:
+                pass
+        if self._sock:
+            try:
+                self._sock.close()
+            except Exception:
+                pass
+        self._sock = None
+        self._socket_reader = None
+        self._socket_writer = None
 
     def stderr_tail(self) -> list[str]:
-        """Return recent stderr lines captured from the bridge subprocess."""
+        """Snapshot the last ~200 stderr lines captured from the daemon subprocess."""
         with self._stderr_lock:
             return list(self._stderr_lines)
 
@@ -118,17 +155,10 @@ class BridgeClient:
         permission_mode: str = "auto",
         resume_session_id: str = "",
     ) -> None:
-        """Send the ``initialize`` JSON-RPC command to the bridge.
+        """Send the ``initialize`` JSON-RPC and wait for the daemon ack.
 
-        Args:
-            model (str): IN: Model identifier. OUT: Sent to the bridge.
-            base_url (str): IN: Base URL for the model provider. OUT: Sent to the bridge.
-            api_key (str): IN: API key for authentication. OUT: Sent to the bridge.
-            permission_mode (str): IN: Permission mode such as ``"auto"``. OUT: Sent
-                to the bridge.
-            resume_session_id (str): IN: Session ID to resume, if any. OUT: Sent
-                to the bridge.
-        """
+        Must run before any :meth:`query`. Pass ``resume_session_id`` to
+        rehydrate an existing session instead of starting fresh."""
         self._model = model
         await self._send_jsonrpc(
             method="initialize",
@@ -142,32 +172,38 @@ class BridgeClient:
         )
         self._initialized = True
 
-    async def query(self, user_input: str, plan_mode: bool = False) -> None:
-        """Send a user prompt to the bridge via the ``prompt`` JSON-RPC method.
+    async def query(self, user_input: str, plan_mode: bool = False, mode: str = "code") -> None:
+        """Submit ``user_input`` as a new turn; raises if the daemon rejects it.
 
         Args:
-            user_input (str): IN: Raw user input text. OUT: Sent to the bridge.
-            plan_mode (bool): IN: Whether plan mode is enabled. OUT: Sent to the bridge.
+            user_input: Raw user text.
+            plan_mode: Run the turn in read-only plan mode.
+            mode: Interaction mode (``"code"``, ``"researcher"``, ``"plan"``).
 
         Raises:
-            RuntimeError: If :meth:`initialize` has not been called yet.
+            RuntimeError: If :meth:`initialize` has not run yet, or if
+                the daemon returns a non-OK response within ten seconds.
         """
         if not self._initialized:
             raise RuntimeError("Call initialize() before query()")
-        await self._send_jsonrpc(
+        result = await self._request_jsonrpc(
             method="prompt",
             params={
                 "user_input": user_input,
                 "plan_mode": plan_mode,
+                "mode": mode,
             },
+            timeout=10.0,
         )
+        if not result.raw.get("ok", False):
+            raise RuntimeError(str(result.raw.get("error", "Daemon rejected prompt")))
 
     async def cancel(self) -> None:
-        """Send the ``cancel`` JSON-RPC command to abort the current turn."""
+        """Ask the daemon to abort the currently running turn."""
         await self._send_jsonrpc(method="cancel", params={})
 
     async def cancel_all(self) -> None:
-        """Send the ``cancel_all`` JSON-RPC command to abort all turns."""
+        """Ask the daemon to abort every running turn in this session."""
         await self._send_jsonrpc(method="cancel_all", params={})
 
     async def permission_response(
@@ -176,15 +212,13 @@ class BridgeClient:
         response: str,
         feedback: str | None = None,
     ) -> None:
-        """Send a permission response for an approval request.
+        """Deliver the user's verdict for a pending permission/approval request.
 
         Args:
-            request_id (str): IN: ID of the approval request. OUT: Identifies
-                which request is being answered.
-            response (str): IN: Response value such as ``"approve"``. OUT: Sent
-                to the bridge.
-            feedback (str | None): IN: Optional user feedback text. OUT: Sent
-                to the bridge if provided.
+            request_id: Daemon-issued request id from the matching event.
+            response: One of ``"approve"``, ``"approve_for_session"``,
+                ``"approve_always"``, ``"reject"``.
+            feedback: Optional free-text reason routed back to the agent.
         """
         await self._send_jsonrpc(
             method="permission_response",
@@ -200,14 +234,7 @@ class BridgeClient:
         request_id: str,
         answers: dict[str, str],
     ) -> None:
-        """Send answers for a question request.
-
-        Args:
-            request_id (str): IN: ID of the question request. OUT: Identifies
-                which request is being answered.
-            answers (dict[str, str]): IN: Mapping from question ID to answer text.
-                OUT: Serialized and sent to the bridge.
-        """
+        """Submit ``answers`` (question-id → text) for a pending clarification."""
         await self._send_jsonrpc(
             method="question_response",
             params={
@@ -217,32 +244,30 @@ class BridgeClient:
         )
 
     async def steer(self, content: str) -> None:
-        """Send mid-turn guidance (steer) to the bridge.
-
-        Args:
-            content (str): IN: Steer text content. OUT: Sent to the bridge.
-        """
+        """Inject mid-turn guidance (``/btw`` / ``/steer``) into the active turn."""
         await self._send_jsonrpc(method="steer", params={"content": content})
 
     async def fetch_models(self, base_url: str, api_key: str = "") -> list[dict[str, Any]]:
-        """Fetch available models from the bridge.
+        """Ask the daemon to list available models for ``base_url``.
 
-        Args:
-            base_url (str): IN: Provider base URL. OUT: Sent to the bridge.
-            api_key (str): IN: Optional API key. OUT: Sent to the bridge.
-
-        Returns:
-            list[dict[str, Any]]: OUT: List of model metadata dictionaries.
-        """
-        future: asyncio.Future[WireEvent] = asyncio.get_event_loop().create_future()
+        Awaits the correlated daemon response and returns its ``models``
+        array verbatim. The pending future is always reaped, even on
+        cancellation, to prevent dict-growth leaks across the session."""
+        future: asyncio.Future[WireEvent] = asyncio.get_running_loop().create_future()
         req_id = f"fetch_models_{id(future)}"
         self._pending_requests[req_id] = future
-        await self._send_jsonrpc(
-            method="fetch_models",
-            params={"base_url": base_url, "api_key": api_key},
-            req_id=req_id,
-        )
-        result = await future
+        try:
+            await self._send_jsonrpc(
+                method="fetch_models",
+                params={"base_url": base_url, "api_key": api_key},
+                req_id=req_id,
+            )
+            result = await future
+        finally:
+            # Always reap the registration; otherwise a cancelled/timed-out
+            # caller leaves a dangling future in _pending_requests that grows
+            # the dict over the session lifetime.
+            self._pending_requests.pop(req_id, None)
 
         return result.raw.get("models", []) if hasattr(result, "raw") else []
 
@@ -254,15 +279,7 @@ class BridgeClient:
         model: str,
         provider: str = "",
     ) -> None:
-        """Save a provider profile via the bridge.
-
-        Args:
-            name (str): IN: Profile name. OUT: Sent to the bridge.
-            base_url (str): IN: Provider base URL. OUT: Sent to the bridge.
-            api_key (str): IN: API key. OUT: Sent to the bridge.
-            model (str): IN: Model identifier. OUT: Sent to the bridge.
-            provider (str): IN: Optional provider type. OUT: Sent to the bridge.
-        """
+        """Persist a provider profile on the daemon side (config + secrets store)."""
         await self._send_jsonrpc(
             method="provider_save",
             params={
@@ -275,44 +292,34 @@ class BridgeClient:
         )
 
     async def provider_list(self) -> list[dict[str, Any]]:
-        """List saved provider profiles from the bridge.
-
-        Returns:
-            list[dict[str, Any]]: OUT: List of profile dictionaries.
-        """
-        future = asyncio.get_event_loop().create_future()
+        """Return saved provider profiles from the daemon."""
+        future = asyncio.get_running_loop().create_future()
         req_id = f"provider_list_{id(future)}"
         self._pending_requests[req_id] = future
-        await self._send_jsonrpc(method="provider_list", params={}, req_id=req_id)
-        result = await future
+        try:
+            await self._send_jsonrpc(method="provider_list", params={}, req_id=req_id)
+            result = await future
+        finally:
+            self._pending_requests.pop(req_id, None)
         return result.raw.get("profiles", []) if hasattr(result, "raw") else []
 
     async def provider_select(self, name: str) -> None:
-        """Select a saved provider profile.
-
-        Args:
-            name (str): IN: Profile name to activate. OUT: Sent to the bridge.
-        """
+        """Mark provider profile ``name`` as the active one."""
         await self._send_jsonrpc(method="provider_select", params={"name": name})
 
     async def provider_delete(self, name: str) -> None:
-        """Delete a saved provider profile.
-
-        Args:
-            name (str): IN: Profile name to delete. OUT: Sent to the bridge.
-        """
+        """Delete the saved provider profile named ``name``."""
         await self._send_jsonrpc(method="provider_delete", params={"name": name})
 
     async def shutdown(self) -> None:
-        """Send the ``shutdown`` JSON-RPC command to gracefully stop the bridge."""
-        await self._send_jsonrpc(method="shutdown", params={})
+        """Cancel every running turn before the TUI disconnects."""
+        await self._send_jsonrpc(method="cancel_all", params={})
 
     async def events(self) -> AsyncIterator[WireEvent]:
-        """Yield wire events from the bridge as an async iterator.
+        """Yield :class:`WireEvent` instances as the daemon pushes them.
 
-        Yields:
-            WireEvent: OUT: Incoming events from the bridge event queue.
-        """
+        Polls the internal queue with a 0.5 s timeout so the loop exits
+        promptly when :meth:`close` flips ``_running`` to false."""
         while self._running:
             try:
                 event = await asyncio.wait_for(self._event_queue.get(), timeout=0.5)
@@ -326,21 +333,13 @@ class BridgeClient:
         params: dict[str, Any],
         req_id: str | None = None,
     ) -> None:
-        """Serialize and send a JSON-RPC message to the bridge stdin.
+        """Encode and write one JSON-RPC frame to the daemon socket.
 
-        Args:
-            method (str): IN: JSON-RPC method name. OUT: Written to the message.
-            params (dict[str, Any]): IN: Method parameters. OUT: Serialized into
-                the JSON-RPC payload.
-            req_id (str | None): IN: Optional request ID for correlating responses.
-                OUT: Included in the message if provided.
-
-        Raises:
-            RuntimeError: If the bridge subprocess is not running or its stdin
-                pipe is broken.
-        """
-        if self._proc is None or self._proc.stdin is None:
-            raise RuntimeError("Bridge subprocess not running. Call spawn() first.")
+        Pass ``req_id`` for request/response style calls; omit it for
+        notifications. Raises ``RuntimeError`` when the socket is missing
+        or the peer has closed it."""
+        if self._socket_writer is None:
+            raise RuntimeError("Xerxes daemon socket not connected. Call spawn() first.")
 
         message: dict[str, Any] = {
             "jsonrpc": "2.0",
@@ -353,82 +352,58 @@ class BridgeClient:
         line = json.dumps(message, ensure_ascii=False, default=str)
         async with self._write_lock:
             try:
-                self._proc.stdin.write((line + "\n").encode("utf-8"))
-                self._proc.stdin.flush()
+                self._socket_writer.write((line + "\n").encode("utf-8"))
+                self._socket_writer.flush()
             except BrokenPipeError as exc:
-                raise RuntimeError("Bridge stdin pipe broken (process exited?)") from exc
+                raise RuntimeError("Xerxes daemon socket closed") from exc
+
+    async def _request_jsonrpc(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> WireEvent:
+        """Send a JSON-RPC request and await the correlated response.
+
+        Raises ``RuntimeError`` if the daemon doesn't reply within
+        ``timeout`` seconds; either way the pending future is reaped."""
+        future = asyncio.get_running_loop().create_future()
+        req_id = f"{method}_{id(future)}"
+        self._pending_requests[req_id] = future
+        try:
+            await self._send_jsonrpc(method=method, params=params, req_id=req_id)
+            return await asyncio.wait_for(future, timeout=timeout)
+        except TimeoutError as exc:
+            raise RuntimeError(f"Daemon did not acknowledge {method}") from exc
+        finally:
+            # Reap on every exit (success, timeout, cancellation). Previously
+            # only TimeoutError was cleaned up; a cancellation between the
+            # send and the wait left a dangling future entry.
+            self._pending_requests.pop(req_id, None)
 
     def _read_loop(self) -> None:
-        """Background thread loop that reads JSON-RPC messages from bridge stdout.
+        """Daemon thread: pull newline-delimited JSON from the socket forever.
 
-        Parses lines into events or responses and dispatches them to the
-        asyncio event queue or pending request futures.
-        """
-        assert self._proc is not None and self._proc.stdout is not None
-        reader = self._proc.stdout
-
-        buf = ""
+        Each parsed line is handed to :meth:`_handle_inbound_line` which
+        either pushes a :class:`WireEvent` onto the asyncio queue or
+        completes a pending request future."""
+        assert self._socket_reader is not None
+        reader = self._socket_reader
         while self._running:
             try:
-                chunk = reader.read(4096)
-                if not chunk:
-                    break
-                buf += chunk.decode("utf-8", errors="replace")
+                raw = reader.readline()
             except Exception:
                 break
-
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                method = msg.get("method", "")
-                msg_id = msg.get("id")
-
-                if method == "event":
-                    payload = msg.get("params", {})
-                    event_type = payload.get("type", "")
-                    event_data = payload.get("payload", {}) or {}
-                    event_data["type"] = event_type
-                    try:
-                        wire_event = event_from_dict(event_data)
-                        if self._loop is None:
-                            continue
-                        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, wire_event)
-                    except Exception:
-                        pass
-
-                elif method == "request":
-                    payload = msg.get("params", {})
-                    event_type = payload.get("type", "")
-                    event_data = payload.get("payload", {}) or {}
-                    event_data["type"] = event_type
-                    try:
-                        wire_event = event_from_dict(event_data)
-                        if self._loop is None:
-                            continue
-                        self._loop.call_soon_threadsafe(self._event_queue.put_nowait, wire_event)
-                    except Exception:
-                        pass
-
-                elif msg_id and str(msg_id) in self._pending_requests:
-                    future = self._pending_requests.pop(str(msg_id))
-                    result = msg.get("result", {})
-
-                    from ..streaming.wire_events import GenericWireEvent
-
-                    wire_event = GenericWireEvent(raw=result)
-                    if self._loop is None:
-                        continue
-                    self._loop.call_soon_threadsafe(lambda f, ev: f.set_result(ev), future, wire_event)
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            self._handle_inbound_line(line)
 
     def _read_stderr_loop(self) -> None:
-        """Drain bridge stderr so subprocess logging cannot block the backend."""
+        """Daemon thread: drain daemon stderr into the rolling ring buffer."""
         assert self._proc is not None and self._proc.stderr is not None
         reader = self._proc.stderr
 
@@ -445,15 +420,126 @@ class BridgeClient:
             with self._stderr_lock:
                 self._stderr_lines.append(text)
 
-    def __enter__(self) -> BridgeClient:
-        """Enter the runtime context, spawning the bridge process.
+    def _connect_socket(self, socket_path: Path) -> bool:
+        """Attempt one AF_UNIX connect and stash readable/writable handles.
 
-        Returns:
-            BridgeClient: OUT: Self for use in a ``with`` statement.
-        """
+        Returns ``True`` on success; ``False`` (with sock closed) when
+        the daemon isn't listening yet."""
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(socket_path))
+        except OSError:
+            try:
+                if sock:
+                    sock.close()
+            except Exception:
+                pass
+            return False
+        self._sock = sock
+        self._socket_reader = sock.makefile("rb", buffering=0)
+        self._socket_writer = sock.makefile("wb", buffering=0)
+        return True
+
+    def _daemon_protocol(self, socket_path: Path) -> int:
+        """Probe the daemon health endpoint and return its protocol version.
+
+        Returns ``0`` when no daemon is listening or the response is
+        malformed — the caller treats that as ``stale`` and respawns."""
+        sock: socket.socket | None = None
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1.5)
+            sock.connect(str(socket_path))
+            msg = {"jsonrpc": "2.0", "id": "health", "method": "runtime.status", "params": {}}
+            sock.sendall((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
+            buffer = b""
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    data = json.loads(raw.decode("utf-8", errors="replace"))
+                    if data.get("id") == "health":
+                        result = data.get("result", {}) or {}
+                        return int(result.get("daemon_protocol", 0) or 0)
+        except Exception:
+            return 0
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return 0
+
+    @staticmethod
+    def _stop_stale_daemon(pid_file: Path, socket_path: Path) -> None:
+        """SIGTERM the recorded pid, wait briefly, then unlink the socket file."""
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            pid = 0
+        if pid > 0:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                pass
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                except OSError:
+                    break
+                time.sleep(0.05)
+        socket_path.unlink(missing_ok=True)
+
+    def _handle_inbound_line(self, line: str) -> None:
+        """Demultiplex one inbound JSON-RPC frame into an event or request future."""
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            return
+
+        method = msg.get("method", "")
+        msg_id = msg.get("id")
+
+        if method in {"event", "request"}:
+            payload = msg.get("params", {})
+            event_type = payload.get("type", "")
+            event_data = payload.get("payload", {}) or {}
+            event_data["type"] = event_type
+            try:
+                wire_event = event_from_dict(event_data)
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(self._event_queue.put_nowait, wire_event)
+            except Exception:
+                pass
+            return
+
+        if msg_id and str(msg_id) in self._pending_requests:
+            future = self._pending_requests.pop(str(msg_id))
+            result = msg.get("result", {})
+            from ..streaming.wire_events import GenericWireEvent
+
+            wire_event = GenericWireEvent(raw=result)
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(lambda f, ev: f.set_result(ev), future, wire_event)
+
+    def __enter__(self) -> BridgeClient:
+        """Spawn the daemon on context entry and return ``self``."""
         self.spawn()
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Exit the runtime context, closing the bridge process."""
+        """Close the socket on context exit."""
         self.close()

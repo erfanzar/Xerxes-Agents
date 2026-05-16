@@ -1,27 +1,22 @@
 # Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Daemon configuration loading and data structures.
+"""Configuration loader for the Xerxes daemon.
 
-Defines ``DaemonConfig`` and the ``load_config`` helper that merges JSON file
-settings with environment variable overrides.
+The daemon reads ``$XERXES_HOME/daemon/config.json`` (a nested document with
+``runtime``, ``control``, ``workspace``, and ``channels`` blocks), then layers
+``XERXES_DAEMON_*`` environment overrides on top. ``DaemonConfig`` exposes the
+nested shape but keeps legacy flat attribute names (``ws_host``, ``socket_path``,
+etc.) as properties so callers and tests untouched by the migration keep
+working.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 from xerxes.core.paths import xerxes_subdir
 
@@ -29,82 +24,239 @@ DAEMON_DIR = xerxes_subdir("daemon")
 CONFIG_FILE = DAEMON_DIR / "config.json"
 
 
+def _env_value(value: Any) -> Any:
+    """Resolve an ``env:VAR`` indirection to the env var's current value."""
+    if isinstance(value, str) and value.startswith("env:"):
+        return os.environ.get(value[4:], "")
+    return value
+
+
+def _resolve_env_refs(settings: dict[str, Any]) -> dict[str, Any]:
+    """Resolve ``*_env`` keys and ``env:VAR`` references into concrete values.
+
+    A key ending in ``_env`` is replaced by the named environment variable's
+    value, stored under the trimmed key. Other values run through
+    :func:`_env_value` so plain ``env:VAR`` strings expand too.
+    """
+    resolved: dict[str, Any] = {}
+    for key, value in settings.items():
+        if key.endswith("_env") and isinstance(value, str):
+            resolved[key[:-4]] = os.environ.get(value, "")
+        else:
+            resolved[key] = _env_value(value)
+    return resolved
+
+
 @dataclass
 class DaemonConfig:
-    """Runtime configuration for the Xerxes background daemon.
+    """Nested daemon configuration with legacy flat-attribute access.
+
+    The on-disk JSON is grouped into ``runtime`` (model/provider settings),
+    ``control`` (sockets, ports, log directory, auth), ``workspace`` (agent
+    workspaces root and defaults), and ``channels`` (messaging adapter
+    settings). Properties expose the most-used keys at the top level so older
+    service helpers and tests don't need to know about the nested shape.
 
     Attributes:
-        ws_host (str): Host address for the WebSocket gateway. IN: IP or hostname.
-            OUT: Passed to ``asyncio.start_server``.
-        ws_port (int): Port number for the WebSocket gateway. IN: 1-65535.
-            OUT: Bound by the gateway server.
-        socket_path (str): Filesystem path for the Unix domain socket.
-            IN: Absolute or relative path string. OUT: Used by ``SocketChannel``.
-        pid_file (str): Path where the daemon writes its PID. IN: Path string.
-            OUT: Created by ``DaemonServer._write_pid``.
-        log_dir (str): Directory for JSONL log files. IN: Path string.
-            OUT: Created and used by ``DaemonLogger``.
-        max_concurrent_tasks (int): Thread-pool size for task execution.
-            IN: Positive integer. OUT: Passed to ``ThreadPoolExecutor``.
-        project_dir (str): Working directory for the daemon process.
-            IN: Absolute path. OUT: Defaults to ``os.getcwd()``.
-        model (str): LLM model identifier. IN: Model name string.
-            OUT: Used during runtime bootstrap.
-        base_url (str): Base URL for the LLM API. IN: URL string.
-            OUT: Used during runtime bootstrap.
-        api_key (str): API key for the LLM provider. IN: Secret string.
-            OUT: Used during runtime bootstrap.
-        auth_token (str): Bearer token for WebSocket authentication.
-            IN: Secret string or empty. OUT: Enforced by ``WebSocketGateway``.
+        runtime: LLM provider settings — ``model``, ``base_url``, ``api_key``,
+            ``permission_mode``, sampling params.
+        control: Listening surfaces — websocket host/port, Unix socket path,
+            PID file, log directory, optional bearer token.
+        workspace: Markdown workspace settings — ``root`` directory and
+            ``default_agent_id``.
+        channels: Messaging-channel adapters keyed by name. Each entry holds
+            ``type``, ``enabled``, and provider-specific ``settings``.
+        project_dir: Working directory the daemon ``cd``s into on launch.
+        max_concurrent_turns: Worker count for the turn thread pool.
     """
 
-    ws_host: str = "127.0.0.1"
-    ws_port: int = 11996
-    socket_path: str = str(DAEMON_DIR / "xerxes.sock")
-    pid_file: str = str(DAEMON_DIR / "daemon.pid")
-    log_dir: str = str(DAEMON_DIR / "logs")
-    max_concurrent_tasks: int = 5
+    runtime: dict[str, Any] = field(default_factory=dict)
+    control: dict[str, Any] = field(default_factory=dict)
+    workspace: dict[str, Any] = field(default_factory=dict)
+    channels: dict[str, dict[str, Any]] = field(default_factory=dict)
     project_dir: str = ""
+    max_concurrent_turns: int = 8
 
-    model: str = ""
-    base_url: str = ""
-    api_key: str = ""
+    @property
+    def ws_host(self) -> str:
+        return str(self.control.get("websocket_host", self.control.get("host", "127.0.0.1")))
 
-    auth_token: str = ""
+    @ws_host.setter
+    def ws_host(self, value: str) -> None:
+        self.control["websocket_host"] = value
+
+    @property
+    def ws_port(self) -> int:
+        return int(self.control.get("websocket_port", self.control.get("port", 11996)))
+
+    @ws_port.setter
+    def ws_port(self, value: int) -> None:
+        self.control["websocket_port"] = int(value)
+
+    @property
+    def socket_path(self) -> str:
+        return str(self.control.get("unix_socket", self.control.get("socket_path", DAEMON_DIR / "xerxes.sock")))
+
+    @socket_path.setter
+    def socket_path(self, value: str) -> None:
+        self.control["unix_socket"] = value
+
+    @property
+    def pid_file(self) -> str:
+        return str(self.control.get("pid_file", DAEMON_DIR / "daemon.pid"))
+
+    @pid_file.setter
+    def pid_file(self, value: str) -> None:
+        self.control["pid_file"] = value
+
+    @property
+    def log_dir(self) -> str:
+        return str(self.control.get("log_dir", DAEMON_DIR / "logs"))
+
+    @log_dir.setter
+    def log_dir(self, value: str) -> None:
+        self.control["log_dir"] = value
+
+    @property
+    def auth_token(self) -> str:
+        return str(self.control.get("auth_token", ""))
+
+    @auth_token.setter
+    def auth_token(self, value: str) -> None:
+        self.control["auth_token"] = value
+
+    @property
+    def model(self) -> str:
+        return str(self.runtime.get("model", ""))
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self.runtime["model"] = value
+
+    @property
+    def base_url(self) -> str:
+        return str(self.runtime.get("base_url", ""))
+
+    @base_url.setter
+    def base_url(self, value: str) -> None:
+        self.runtime["base_url"] = value
+
+    @property
+    def api_key(self) -> str:
+        return str(self.runtime.get("api_key", ""))
+
+    @api_key.setter
+    def api_key(self, value: str) -> None:
+        self.runtime["api_key"] = value
+
+    @property
+    def max_concurrent_tasks(self) -> int:
+        return self.max_concurrent_turns
+
+    @max_concurrent_tasks.setter
+    def max_concurrent_tasks(self, value: int) -> None:
+        self.max_concurrent_turns = int(value)
+
+    def resolved_runtime(self) -> dict[str, Any]:
+        """Return a copy of ``runtime`` with env-ref keys expanded."""
+        return _resolve_env_refs(dict(self.runtime))
+
+    def resolved_channels(self) -> dict[str, dict[str, Any]]:
+        """Return a copy of ``channels`` with each adapter's ``settings`` expanded."""
+        resolved: dict[str, dict[str, Any]] = {}
+        for name, raw in self.channels.items():
+            item = dict(raw or {})
+            settings = dict(item.get("settings", {}))
+            item["settings"] = _resolve_env_refs(settings)
+            resolved[name] = item
+        return resolved
+
+
+def _merge_legacy_keys(cfg: DaemonConfig, data: dict[str, Any]) -> None:
+    """Merge a parsed config dict onto ``cfg`` honouring both layouts.
+
+    The new layout's top-level groups (``runtime``, ``control``, ``workspace``,
+    ``channels``) are merged dict-wise; older flat keys (``ws_host``,
+    ``model``, etc.) are routed through the legacy property setters so they
+    land in the right group.
+    """
+    for key in ("runtime", "control", "workspace", "channels"):
+        if isinstance(data.get(key), dict):
+            getattr(cfg, key).update(data[key])
+
+    legacy = {
+        "ws_host": "ws_host",
+        "ws_port": "ws_port",
+        "socket_path": "socket_path",
+        "pid_file": "pid_file",
+        "log_dir": "log_dir",
+        "auth_token": "auth_token",
+        "model": "model",
+        "base_url": "base_url",
+        "api_key": "api_key",
+        "max_concurrent_tasks": "max_concurrent_tasks",
+        "max_concurrent_turns": "max_concurrent_tasks",
+        "project_dir": "project_dir",
+    }
+    for source, target in legacy.items():
+        if source in data:
+            setattr(cfg, target, data[source])
 
 
 def load_config(project_dir: str = "") -> DaemonConfig:
-    """Load daemon configuration from file and environment.
+    """Build a :class:`DaemonConfig` from defaults, ``config.json``, and env vars.
 
-    Reads ``config.json`` inside the daemon data directory, then overrides
-    select fields with environment variables.
-
-    Args:
-        project_dir (str): IN: Preferred working directory. OUT: Assigned to
-            ``DaemonConfig.project_dir`` or defaults to ``os.getcwd()``.
-
-    Returns:
-        DaemonConfig: OUT: Fully populated configuration instance.
+    Defaults seed the control/workspace blocks, then ``$XERXES_HOME/daemon/config.json``
+    (if present) is merged on top via :func:`_merge_legacy_keys`. Finally
+    ``XERXES_DAEMON_*`` and ``XERXES_*`` environment variables override
+    matching fields. ``XERXES_DAEMON_ENABLE_TELEGRAM`` injects a minimal
+    Telegram channel entry pulling the bot token from ``TELEGRAM_BOT_TOKEN``.
     """
 
     cfg = DaemonConfig(project_dir=project_dir or os.getcwd())
+    cfg.ws_host = "127.0.0.1"
+    cfg.ws_port = 11996
+    cfg.socket_path = str(DAEMON_DIR / "xerxes.sock")
+    cfg.pid_file = str(DAEMON_DIR / "daemon.pid")
+    cfg.log_dir = str(DAEMON_DIR / "logs")
+    cfg.workspace.setdefault("root", str(xerxes_subdir("agents")))
+    cfg.workspace.setdefault("default_agent_id", "default")
 
     if CONFIG_FILE.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text())
-            for k, v in data.items():
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
+            _merge_legacy_keys(cfg, json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
             pass
 
-    if v := os.environ.get("XERXES_DAEMON_HOST"):
-        cfg.ws_host = v
-    if v := os.environ.get("XERXES_DAEMON_PORT"):
-        cfg.ws_port = int(v)
-    if v := os.environ.get("XERXES_MAX_TASKS"):
-        cfg.max_concurrent_tasks = int(v)
-    if v := os.environ.get("XERXES_DAEMON_TOKEN"):
-        cfg.auth_token = v
+    if value := os.environ.get("XERXES_DAEMON_HOST"):
+        cfg.ws_host = value
+    if value := os.environ.get("XERXES_DAEMON_PORT"):
+        cfg.ws_port = int(value)
+    if value := os.environ.get("XERXES_DAEMON_SOCKET"):
+        cfg.socket_path = value
+    if value := os.environ.get("XERXES_DAEMON_TOKEN"):
+        cfg.auth_token = value
+    if value := os.environ.get("XERXES_MAX_TASKS"):
+        cfg.max_concurrent_tasks = int(value)
+    if value := os.environ.get("XERXES_MAX_TURNS"):
+        cfg.max_concurrent_turns = int(value)
+
+    for env, key in (
+        ("XERXES_MODEL", "model"),
+        ("XERXES_BASE_URL", "base_url"),
+        ("XERXES_API_KEY", "api_key"),
+        ("XERXES_PERMISSION_MODE", "permission_mode"),
+    ):
+        if value := os.environ.get(env):
+            cfg.runtime[key] = value
+
+    if os.environ.get("XERXES_DAEMON_ENABLE_TELEGRAM"):
+        settings = cfg.channels.setdefault("telegram", {"type": "telegram", "enabled": True, "settings": {}})
+        settings["enabled"] = True
+        settings.setdefault("type", "telegram")
+        settings.setdefault("settings", {}).setdefault("token_env", "TELEGRAM_BOT_TOKEN")
 
     return cfg
+
+
+__all__ = ["CONFIG_FILE", "DAEMON_DIR", "DaemonConfig", "load_config"]

@@ -11,20 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Console module for Xerxes.
+"""Colorized console logger for the Xerxes runtime.
 
-Exports:
-    - COLORS
-    - LEVEL_COLORS
-    - ColorFormatter
-    - XerxesLogger
-    - get_logger
-    - set_verbosity
-    - log_step
-    - log_thinking
-    - log_success
-    - log_error
-    - ... and 8 more."""
+Defines the ANSI ``COLORS`` palette, a level-coloring :class:`ColorFormatter`,
+the process-wide :class:`XerxesLogger` singleton, and a family of
+``log_step`` / ``log_success`` / ``log_error`` etc. shortcuts that render
+emoji + ANSI when stdout is a TTY and degrade gracefully otherwise.
+
+Also exposes :func:`stream_callback`, the legacy streaming pretty-printer
+used by the non-TUI demo loop to render :mod:`xerxes.types` events
+(``StreamChunk``, ``FunctionCallsExtracted``, ``Completion``, ...)."""
 
 import datetime
 import json
@@ -84,19 +80,13 @@ LEVEL_COLORS = {
 
 
 class ColorFormatter(logging.Formatter):
-    """Color formatter.
+    """``logging.Formatter`` that colorizes the level name and prepends a timestamp tag.
 
-    Inherits from: logging.Formatter
-    """
+    Each line of a multi-line message is decorated with ``(HH:MM:SS name)``
+    so streamed output stays attributable in mixed-source logs."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Format.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            record (logging.LogRecord): IN: record. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return ``record`` formatted with ANSI color escapes per level."""
 
         orig_levelname = record.levelname
         color = LEVEL_COLORS.get(record.levelname, COLORS["RESET"])
@@ -113,18 +103,17 @@ class ColorFormatter(logging.Formatter):
 
 
 class XerxesLogger:
-    """Xerxes logger."""
+    """Thread-safe singleton wrapper around the ``Xerxes`` :mod:`logging` logger.
+
+    Holds a single console handler with a :class:`ColorFormatter`. The
+    effective level is sourced from ``$XERXES_LOG_LEVEL`` (default ``INFO``)
+    and can be adjusted at runtime via :meth:`set_level`."""
 
     _instance = None
     _lock = threading.Lock()
 
     def __new__(cls):
-        """Dunder method for new.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Return the singleton instance, constructing it on first access."""
 
         if cls._instance is None:
             with cls._lock:
@@ -133,24 +122,14 @@ class XerxesLogger:
         return cls._instance
 
     def __init__(self):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Set up the underlying logger on first construction only."""
 
         if not hasattr(self, "_initialized"):
             self._initialized = True
             self._setup_logger()
 
     def _setup_logger(self):
-        """Internal helper to setup logger.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Attach the ANSI-colored stdout handler at the env-configured level."""
 
         self.logger = logging.getLogger("Xerxes")
         self.logger.setLevel(logging.DEBUG)
@@ -164,89 +143,43 @@ class XerxesLogger:
         self.logger.addHandler(console_handler)
 
     def _get_log_level(self) -> int:
-        """Internal helper to get log level.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Resolve the effective log level from ``$XERXES_LOG_LEVEL``."""
 
         level_str = os.environ.get("XERXES_LOG_LEVEL", "INFO").upper()
         return getattr(logging, level_str, logging.INFO)
 
     def debug(self, message: str, *args, **kwargs):
-        """Debug.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str): IN: message. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Forward ``message`` and ``args``/``kwargs`` to the underlying logger at DEBUG."""
 
         self.logger.debug(message, *args, **kwargs)
 
     def info(self, message: str, *args, **kwargs):
-        """Info.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str): IN: message. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Forward ``message`` and ``args``/``kwargs`` to the underlying logger at INFO."""
 
         self.logger.info(message, *args, **kwargs)
 
     def warning(self, message: str, *args, **kwargs):
-        """Warning.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str): IN: message. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Forward ``message`` and ``args``/``kwargs`` to the underlying logger at WARNING."""
 
         self.logger.warning(message, *args, **kwargs)
 
     def error(self, message: str, *args, **kwargs):
-        """Error.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str): IN: message. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Forward ``message`` and ``args``/``kwargs`` to the underlying logger at ERROR."""
 
         self.logger.error(message, *args, **kwargs)
 
     def critical(self, message: str, *args, **kwargs):
-        """Critical.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            message (str): IN: message. OUT: Consumed during execution.
-            *args: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Forward ``message`` and ``args``/``kwargs`` to the underlying logger at CRITICAL."""
 
         self.logger.critical(message, *args, **kwargs)
 
     def set_level(self, level: str):
-        """Set the level.
+        """Update the logger and every attached handler to ``level``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            level (str): IN: level. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+            level: Case-insensitive level name (``"DEBUG"``, ``"INFO"``, ...).
+                Unknown values fall back to ``INFO``.
+        """
 
         numeric_level = getattr(logging, level.upper(), logging.INFO)
         self.logger.setLevel(numeric_level)
@@ -255,35 +188,27 @@ class XerxesLogger:
 
 
 def get_logger() -> XerxesLogger:
-    """Retrieve the logger.
-
-    Returns:
-        XerxesLogger: OUT: Result of the operation."""
+    """Return the process-wide :class:`XerxesLogger` singleton."""
 
     return XerxesLogger()
 
 
 def set_verbosity(level: str):
-    """Set the verbosity.
-
-    Args:
-        level (str): IN: level. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Shortcut to update the singleton logger's level (see :meth:`XerxesLogger.set_level`)."""
 
     logger = get_logger()
     logger.set_level(level)
 
 
 def log_step(step_name: str, description: str = "", color: str = "CYAN"):
-    """Log step.
+    """Log a labelled pipeline step at INFO.
 
     Args:
-        step_name (str): IN: step name. OUT: Consumed during execution.
-        description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
-        color (str, optional): IN: color. Defaults to 'CYAN'. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+        step_name: Short tag bracketed in the output (e.g. ``"plan"``).
+        description: Optional follow-up sentence appended after the tag.
+        color: ANSI color key from :data:`COLORS`; falls back to cyan
+            when the name is unknown.
+    """
 
     logger = get_logger()
     color_code = COLORS.get(color.upper(), COLORS["CYAN"])
@@ -302,12 +227,7 @@ def log_step(step_name: str, description: str = "", color: str = "CYAN"):
 
 
 def log_thinking(agent_name: str):
-    """Log thinking.
-
-    Args:
-        agent_name (str): IN: agent name. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log that ``agent_name`` is generating, with brain emoji on TTYs."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -319,12 +239,7 @@ def log_thinking(agent_name: str):
 
 
 def log_success(message: str):
-    """Log success.
-
-    Args:
-        message (str): IN: message. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log a success ``message`` at INFO with a rocket prefix."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -334,12 +249,7 @@ def log_success(message: str):
 
 
 def log_error(message: str):
-    """Log error.
-
-    Args:
-        message (str): IN: message. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log an error ``message`` at ERROR with a cross-mark prefix."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -349,12 +259,7 @@ def log_error(message: str):
 
 
 def log_warning(message: str):
-    """Log warning.
-
-    Args:
-        message (str): IN: message. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log a warning ``message`` at WARNING with a triangle prefix."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -364,14 +269,13 @@ def log_warning(message: str):
 
 
 def log_retry(attempt: int, max_attempts: int, error: str):
-    """Log retry.
+    """Log a retry attempt at WARNING with the offending error message.
 
     Args:
-        attempt (int): IN: attempt. OUT: Consumed during execution.
-        max_attempts (int): IN: max attempts. OUT: Consumed during execution.
-        error (str): IN: error. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+        attempt: 1-based attempt counter.
+        max_attempts: Hard cap so the user can see ``attempt/max_attempts``.
+        error: Stringified exception associated with the failure.
+    """
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -382,13 +286,7 @@ def log_retry(attempt: int, max_attempts: int, error: str):
 
 
 def log_delegation(from_agent: str, to_agent: str):
-    """Log delegation.
-
-    Args:
-        from_agent (str): IN: from agent. OUT: Consumed during execution.
-        to_agent (str): IN: to agent. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log an agent-to-agent handoff at INFO with an arrow glyph."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -403,12 +301,7 @@ def log_delegation(from_agent: str, to_agent: str):
 
 
 def log_agent_start(agent: str | None = None):
-    """Log agent start.
-
-    Args:
-        agent (str | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log that ``agent`` has been started (omit the name for an anonymous start)."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -419,13 +312,7 @@ def log_agent_start(agent: str | None = None):
 
 
 def log_task_start(task_name: str, agent: str | None = None):
-    """Log task start.
-
-    Args:
-        task_name (str): IN: task name. OUT: Consumed during execution.
-        agent (str | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log a task-start marker, optionally tagging it with the owning agent."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -440,13 +327,7 @@ def log_task_start(task_name: str, agent: str | None = None):
 
 
 def log_task_complete(task_name: str, duration: float | None = None):
-    """Log task complete.
-
-    Args:
-        task_name (str): IN: task name. OUT: Consumed during execution.
-        duration (float | None, optional): IN: duration. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Log a task-complete marker; ``duration`` (seconds) renders as ``(x.xxs)``."""
 
     logger = get_logger()
     if sys.stdout.isatty():
@@ -464,12 +345,14 @@ logger = get_logger()
 
 
 def stream_callback(chunk):
-    """Stream callback.
+    """Pretty-print one streaming event from the cortex/agent loop.
 
-    Args:
-        chunk (Any): IN: chunk. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    Dispatches on the ``chunk`` subclass (``StreamChunk``, ``FunctionDetection``,
+    ``FunctionCallsExtracted``, ``FunctionExecutionStart``/``Complete``,
+    ``AgentSwitch``, ``ReinvokeSignal``, ``Completion``) to render the
+    appropriate banner / spinner / result block to stdout. Keeps per-call
+    state on the function object so repeated invocations stitch the
+    output together coherently."""
 
     COL = COLORS
     ACCENT = COL["BLUE_PURPLE"]
@@ -494,20 +377,12 @@ def stream_callback(chunk):
     ANSI_RE = re.compile(r"\x1b```math[0-9;]*m")
 
     def strip_ansi(s: str) -> str:
-        """Strip ansi.
-
-        Args:
-            s (str): IN: s. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Drop ANSI escape sequences so ``s`` can be measured for layout."""
 
         return ANSI_RE.sub("", s)
 
     def term_width() -> int:
-        """Term width.
-
-        Returns:
-            int: OUT: Result of the operation."""
+        """Return current terminal column count clamped to a sensible range."""
 
         try:
             return max(60, shutil.get_terminal_size(fallback=(100, 24)).columns)
@@ -515,92 +390,55 @@ def stream_callback(chunk):
             return 100
 
     def paint(text: object, *styles: str) -> str:
-        """Paint.
-
-        Args:
-            text (object): IN: text. OUT: Consumed during execution.
-            *styles: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Wrap ``text`` in concatenated ANSI ``styles`` plus a final reset."""
 
         return "".join(styles) + str(text) + RESET
 
     def tag(agent_id: str) -> str:
-        """Tag.
-
-        Args:
-            agent_id (str): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render ``[agent_id]`` as a bold accent-colored bracket prefix."""
 
         return f"{BOLD}{ACCENT}[{agent_id}]{RESET}"
 
     def bullet() -> str:
-        """Bullet.
-
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return the accent-styled ``•`` glyph used in list items."""
 
         return paint("•", ACCENT, BOLD)
 
     def ensure_newline() -> None:
-        """Ensure newline."""
+        """Emit a newline if the previous ``write`` left the line open."""
 
         if state["open_line"]:
             print("", flush=True)
             state["open_line"] = False
 
     def write(s: str) -> None:
-        """Write.
-
-        Args:
-            s (str): IN: s. OUT: Consumed during execution."""
+        """Print ``s`` without a newline and remember the line is still open."""
 
         print(s, end="", flush=True)
         state["open_line"] = True
 
     def writeln(s: str) -> None:
-        """Writeln.
-
-        Args:
-            s (str): IN: s. OUT: Consumed during execution."""
+        """Print ``s`` followed by a newline, closing any in-progress line first."""
 
         ensure_newline()
         print(s, flush=True)
         state["open_line"] = False
 
     def indent_newlines(s: str, indent: str) -> str:
-        """Indent newlines.
-
-        Args:
-            s (str): IN: s. OUT: Consumed during execution.
-            indent (str): IN: indent. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Re-indent every newline in ``s`` with ``indent`` for hanging blocks."""
 
         if not s or "\n" not in s:
             return s
         return s.replace("\n", "\n" + indent)
 
     def preview(text: object, max_len: int = 100) -> str:
-        """Preview.
-
-        Args:
-            text (object): IN: text. OUT: Consumed during execution.
-            max_len (int, optional): IN: max len. Defaults to 100. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return ``text`` capped at ``max_len`` chars with an ellipsis if cut."""
 
         s = str(text)
         return (s[:max_len] + "…") if len(s) > max_len else s
 
     def pretty_result(value: object) -> str:
-        """Pretty result.
-
-        Args:
-            value (object): IN: value. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return a 2-space JSON dump of ``value`` with pprint as fallback."""
 
         try:
             if isinstance(value, dict | list):
@@ -610,10 +448,7 @@ def stream_callback(chunk):
             return pformat(value, width=max(60, term_width() - 8), compact=False)
 
     def hr(title: str | None = None) -> None:
-        """Hr.
-
-        Args:
-            title (str | None, optional): IN: title. Defaults to None. OUT: Consumed during execution."""
+        """Print a horizontal rule, optionally centered around ``title``."""
 
         width = term_width()
         if not title:

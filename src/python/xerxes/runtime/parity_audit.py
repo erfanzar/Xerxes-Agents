@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Parity audit module for Xerxes.
+"""Audit which Xerxes subsystems are importable against a reference surface.
 
-Exports:
-    - ModuleStatus
-    - ParityAuditResult
-    - run_parity_audit"""
+Walks the :data:`REFERENCE_SURFACE` list of expected modules, tries to import
+each, counts the Python files under each, and also flags top-level
+directories that exist on disk but aren't in the reference. The result is a
+:class:`ParityAuditResult` consumed by ``/doctor`` and the
+:func:`xerxes.runtime.doctor` health-check tooling.
+"""
 
 from __future__ import annotations
 
@@ -27,15 +29,16 @@ from pathlib import Path
 
 @dataclass
 class ModuleStatus:
-    """Module status.
+    """Outcome record for one audited module.
 
     Attributes:
-        name (str): name.
-        category (str): category.
-        expected (bool): expected.
-        present (bool): present.
-        file_count (int): file count.
-        notes (str): notes."""
+        name: Dotted module name under ``xerxes.`` (e.g. ``"runtime.session"``).
+        category: Grouping label used for the Markdown report.
+        expected: Whether this module is part of the reference surface.
+        present: Whether ``import xerxes.<name>`` succeeded.
+        file_count: Number of ``*.py`` files found under the module.
+        notes: Human-readable annotation from the reference list.
+    """
 
     name: str
     category: str = ""
@@ -47,127 +50,43 @@ class ModuleStatus:
 
 @dataclass
 class ParityAuditResult:
-    """Parity audit result.
+    """Aggregate result of a :func:`run_parity_audit` call.
 
     Attributes:
-        modules (list[ModuleStatus]): modules.
-        total_files (int): total files."""
+        modules: Per-module :class:`ModuleStatus` records.
+        total_files: Total ``*.py`` files found under the package root.
+    """
 
     modules: list[ModuleStatus] = field(default_factory=list)
     total_files: int = 0
 
     @property
     def missing(self) -> list[ModuleStatus]:
-        """Return Missing.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
+        """Reference modules that failed to import."""
         return [m for m in self.modules if m.expected and not m.present]
-        """Return Missing.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
-        """Return Missing.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def extra(self) -> list[ModuleStatus]:
-        """Return Extra.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
+        """Modules present on disk that aren't in :data:`REFERENCE_SURFACE`."""
         return [m for m in self.modules if not m.expected and m.present]
-        """Return Extra.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
-        """Return Extra.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def present(self) -> list[ModuleStatus]:
-        """Return Present.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
+        """Reference modules that imported successfully."""
         return [m for m in self.modules if m.expected and m.present]
-        """Return Present.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
-        """Return Present.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[ModuleStatus]: OUT: Result of the operation."""
 
     @property
     def coverage_pct(self) -> float:
-        """Return Coverage pct.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            float: OUT: Result of the operation."""
+        """Percentage of reference modules that imported successfully (``100.0`` when none expected)."""
         expected = [m for m in self.modules if m.expected]
-        """Return Coverage pct.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            float: OUT: Result of the operation."""
-        """Return Coverage pct.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            float: OUT: Result of the operation."""
         if not expected:
             return 100.0
         return len(self.present) / len(expected) * 100
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the audit result as a Markdown report grouped by status."""
 
         lines = [
-            """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
-            """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
             "# Parity Audit",
             "",
             f"Coverage: {self.coverage_pct:.1f}%",
@@ -236,29 +155,20 @@ def run_parity_audit(
     package_root: Path | None = None,
     reference: list[dict[str, str]] | None = None,
 ) -> ParityAuditResult:
-    """Run parity audit.
+    """Audit the importability of every module in ``reference``.
 
     Args:
-        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
-        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
+        package_root: Filesystem path of the package to walk; defaults to the
+            ``xerxes`` package containing this module.
+        reference: Override list of expected modules; defaults to
+            :data:`REFERENCE_SURFACE`.
+
     Returns:
-        ParityAuditResult: OUT: Result of the operation."""
+        Populated :class:`ParityAuditResult` covering missing, present, and
+        extra modules along with file-count totals.
+    """
 
     root = package_root or Path(__file__).resolve().parent.parent
-    """Run parity audit.
-
-    Args:
-        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
-        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        ParityAuditResult: OUT: Result of the operation."""
-    """Run parity audit.
-
-    Args:
-        package_root (Path | None, optional): IN: package root. Defaults to None. OUT: Consumed during execution.
-        reference (list[dict[str, str]] | None, optional): IN: reference. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        ParityAuditResult: OUT: Result of the operation."""
     ref = reference or REFERENCE_SURFACE
     result = ParityAuditResult()
 

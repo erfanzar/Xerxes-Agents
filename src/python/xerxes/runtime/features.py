@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Features module for Xerxes.
+"""Runtime feature wiring for plugins, skills, sandboxing, audit, and policy.
 
-Exports:
-    - logger
-    - AgentRuntimeOverrides
-    - RuntimeFeaturesConfig
-    - RuntimeFeaturesState"""
+This module owns the heavyweight :class:`RuntimeFeaturesState` that the
+streaming loop reaches into during a turn. It assembles plugins, skills, the
+hook runner, sandbox routers, audit emitter, session manager, operator
+state, and skill-authoring pipeline, then exposes per-agent overrides
+through :class:`AgentRuntimeOverrides`. Construction is intentionally
+heavy-handed (one-time on session start) so per-turn lookups stay cheap.
+"""
 
 from __future__ import annotations
 
@@ -47,15 +49,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentRuntimeOverrides:
-    """Agent runtime overrides.
+    """Per-agent overrides applied on top of :class:`RuntimeFeaturesConfig`.
 
     Attributes:
-        policy (ToolPolicy | None): policy.
-        loop_detection (LoopDetectionConfig | None): loop detection.
-        sandbox (SandboxConfig | None): sandbox.
-        enabled_skills (list[str] | None): enabled skills.
-        guardrails (list[str] | None): guardrails.
-        prompt_profile (PromptProfile | str | None): prompt profile."""
+        policy: Custom :class:`ToolPolicy` for this agent; ``None`` inherits.
+        loop_detection: Custom :class:`LoopDetectionConfig`, or ``None``.
+        sandbox: Custom :class:`SandboxConfig`, or ``None``.
+        enabled_skills: Explicit list of enabled skill names; ``None``
+            inherits the runtime-wide list.
+        guardrails: Explicit list of guardrail identifiers; ``None``
+            inherits the runtime-wide list.
+        prompt_profile: Override prompt profile (instance, config, or name).
+    """
 
     policy: ToolPolicy | None = None
     loop_detection: LoopDetectionConfig | None = None
@@ -67,24 +72,29 @@ class AgentRuntimeOverrides:
 
 @dataclass
 class RuntimeFeaturesConfig:
-    """Runtime features config.
+    """Declarative configuration of the runtime feature surface.
 
     Attributes:
-        enabled (bool): enabled.
-        workspace_root (str | None): workspace root.
-        plugin_dirs (list[str]): plugin dirs.
-        skill_dirs (list[str]): skill dirs.
-        discover_conventional_extensions (bool): discover conventional extensions.
-        guardrails (list[str]): guardrails.
-        policy (ToolPolicy | None): policy.
-        loop_detection (LoopDetectionConfig | None): loop detection.
-        sandbox (SandboxConfig | None): sandbox.
-        enabled_skills (list[str]): enabled skills.
-        default_prompt_profile (PromptProfile | str | None): default prompt profile.
-        audit_collector (AuditCollector | None): audit collector.
-        session_store (SessionStore | None): session store.
-        operator (OperatorRuntimeConfig | None): operator.
-        agent_overrides (dict[str, AgentRuntimeOverrides]): agent overrides."""
+        enabled: Master switch consulted by the streaming loop.
+        workspace_root: Project root used for conventional extension discovery.
+        plugin_dirs: Explicit plugin directories to discover.
+        skill_dirs: Explicit skill directories to discover.
+        discover_conventional_extensions: When ``True`` also probe
+            ``<workspace_root>/plugins`` and ``<workspace_root>/skills``.
+        guardrails: Default list of guardrail identifiers (per-agent
+            overridable).
+        policy: Default :class:`ToolPolicy`; merged with operator power-tool
+            policy when applicable.
+        loop_detection: Default loop-detection config (per-agent overridable).
+        sandbox: Default :class:`SandboxConfig` (per-agent overridable).
+        enabled_skills: Default list of enabled skill names.
+        default_prompt_profile: Default :class:`PromptProfile` or its name.
+        audit_collector: Optional :class:`AuditCollector` for audit events.
+        session_store: Optional :class:`SessionStore` for session persistence.
+        operator: Optional :class:`OperatorRuntimeConfig` enabling PTY/browser
+            operators.
+        agent_overrides: Per-agent :class:`AgentRuntimeOverrides`.
+    """
 
     enabled: bool = False
     workspace_root: str | None = None
@@ -105,17 +115,20 @@ class RuntimeFeaturesConfig:
 
 @dataclass
 class RuntimeFeaturesState:
-    """Runtime features state.
+    """Fully constructed feature-state object consumed by the streaming loop.
 
     Attributes:
-        config (RuntimeFeaturesConfig): config.
-        plugin_registry (PluginRegistry): plugin registry.
-        skill_registry (SkillRegistry): skill registry.
-        hook_runner (HookRunner): hook runner.
-        sandbox_backend (SandboxBackend | None): sandbox backend.
-        operator_state (OperatorState | None): operator state.
-        authoring_pipeline (SkillAuthoringPipeline | None): authoring pipeline.
-        authoring_telemetry (SkillTelemetry | None): authoring telemetry."""
+        config: The originating :class:`RuntimeFeaturesConfig`.
+        plugin_registry: Registry of discovered plugins.
+        skill_registry: Registry of discovered skills.
+        hook_runner: Hook dispatcher used at lifecycle events.
+        sandbox_backend: Instantiated sandbox backend, or ``None``.
+        operator_state: Live :class:`OperatorState` when operators are
+            enabled.
+        authoring_pipeline: Skill-authoring pipeline, when configured.
+        authoring_telemetry: Telemetry sink paired with the authoring
+            pipeline.
+    """
 
     config: RuntimeFeaturesConfig
     plugin_registry: PluginRegistry = field(default_factory=PluginRegistry)
@@ -127,10 +140,11 @@ class RuntimeFeaturesState:
     authoring_telemetry: SkillTelemetry | None = None
 
     def __post_init__(self) -> None:
-        """Dunder method for post init.
+        """Materialise policies, prompt builder, sandbox, audit, sessions, and operators.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Side-effects: discovers plugins/skills, registers their hooks, and
+        kicks off skill-authoring telemetry when ``skill_dirs`` is set.
+        """
 
         global_policy = self.config.policy or ToolPolicy()
         if self.config.operator is not None and self.config.operator.enabled:
@@ -202,10 +216,12 @@ class RuntimeFeaturesState:
             self.hook_runner.register("on_turn_end", self._on_turn_end_hook)
 
     def discover_extensions(self) -> None:
-        """Discover extensions.
+        """Walk configured plus conventional plugin/skill directories.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Discovered modules are registered into ``plugin_registry`` and
+        ``skill_registry``; dependency validation runs against the union and
+        raises :class:`ValueError` on any unresolved declaration.
+        """
 
         plugin_dirs = self._resolve_dirs(self.config.plugin_dirs, "plugins")
         skill_dirs = self._resolve_dirs(self.config.skill_dirs, "skills")
@@ -224,14 +240,12 @@ class RuntimeFeaturesState:
             raise ValueError("Runtime extension dependency validation failed:\n" + "\n".join(errors))
 
     def _resolve_dirs(self, configured_dirs: list[str], conventional_name: str) -> list[Path]:
-        """Internal helper to resolve dirs.
+        """Expand ``configured_dirs`` and optionally append a conventional dir.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            configured_dirs (list[str]): IN: configured dirs. OUT: Consumed during execution.
-            conventional_name (str): IN: conventional name. OUT: Consumed during execution.
-        Returns:
-            list[Path]: OUT: Result of the operation."""
+        Returns absolute :class:`Path` objects in stable order with duplicates
+        removed. When ``discover_conventional_extensions`` is set, appends
+        ``<workspace_root>/<conventional_name>`` if it exists.
+        """
 
         ordered: list[Path] = []
         seen: set[Path] = set()
@@ -252,31 +266,20 @@ class RuntimeFeaturesState:
         return ordered
 
     def _register_plugin_hooks(self) -> None:
-        """Internal helper to register plugin hooks.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Register every plugin-declared hook against the hook runner."""
 
         for hook_name in HOOK_POINTS:
             for callback in self.plugin_registry.get_hooks(hook_name):
                 self.hook_runner.register(hook_name, callback)
 
     def _register_builtin_hooks(self) -> None:
-        """Internal helper to register builtin hooks.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Wire built-in hooks (currently: audit loop-warning emission)."""
 
         if self.audit_emitter is not None:
             self.hook_runner.register("on_loop_warning", self._on_loop_warning_hook)
 
     def _on_turn_start_hook(self, agent_id=None, messages=None) -> None:
-        """Internal helper to on turn start hook.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (Any, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            messages (Any, optional): IN: messages. Defaults to None. OUT: Consumed during execution."""
+        """Hand the turn's opening user prompt to the skill-authoring pipeline."""
 
         if self.authoring_pipeline is not None:
             prompt = ""
@@ -285,27 +288,14 @@ class RuntimeFeaturesState:
             self.authoring_pipeline.begin_turn(agent_id=agent_id, user_prompt=prompt)
 
     def _before_tool_call_hook(self, tool_name=None, arguments=None, agent_id=None) -> dict | None:
-        """Internal helper to before tool call hook.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (Any, optional): IN: tool name. Defaults to None. OUT: Consumed during execution.
-            arguments (Any, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
-            agent_id (Any, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            dict | None: OUT: Result of the operation."""
+        """Forward each tool invocation to the authoring pipeline for telemetry."""
 
         if self.authoring_pipeline is not None:
             self.authoring_pipeline.record_call(tool_name, dict(arguments or {}))
         return None
 
     def _on_turn_end_hook(self, agent_id=None, response=None) -> None:
-        """Internal helper to on turn end hook.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (Any, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            response (Any, optional): IN: response. Defaults to None. OUT: Consumed during execution."""
+        """Notify the authoring pipeline that a turn finished and pass the response."""
 
         if self.authoring_pipeline is not None:
             self.authoring_pipeline.on_turn_end(final_response=str(response or ""))
@@ -319,16 +309,7 @@ class RuntimeFeaturesState:
         agent_id: str | None = None,
         turn_id: str | None = None,
     ) -> None:
-        """Internal helper to on loop warning hook.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str, optional): IN: tool name. Defaults to ''. OUT: Consumed during execution.
-            pattern (str, optional): IN: pattern. Defaults to ''. OUT: Consumed during execution.
-            severity (str, optional): IN: severity. Defaults to ''. OUT: Consumed during execution.
-            count (int, optional): IN: count. Defaults to 0. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            turn_id (str | None, optional): IN: turn id. Defaults to None. OUT: Consumed during execution."""
+        """Emit a tool-loop-warning audit event when loop detection trips."""
 
         if self.audit_emitter is not None:
             self.audit_emitter.emit_tool_loop_warning(
@@ -341,11 +322,12 @@ class RuntimeFeaturesState:
             )
 
     def merge_plugin_tools(self, agent: Agent) -> None:
-        """Merge plugin tools.
+        """Append every discovered plugin tool onto ``agent.functions``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent (Agent): IN: agent. OUT: Consumed during execution."""
+        Raises:
+            ValueError: A plugin tool name collides with one already declared
+                on the agent.
+        """
 
         if agent.functions is None:
             agent.functions = []
@@ -360,11 +342,12 @@ class RuntimeFeaturesState:
             existing_names.add(tool_name)
 
     def merge_operator_tools(self, agent: Agent) -> None:
-        """Merge operator tools.
+        """Append allowed operator tools to ``agent.functions``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent (Agent): IN: agent. OUT: Consumed during execution."""
+        No-op when operators are disabled or :attr:`operator_state` is unset.
+        Tools already on the agent are skipped silently to make repeated
+        merges idempotent.
+        """
 
         if self.operator_state is None:
             return
@@ -382,55 +365,31 @@ class RuntimeFeaturesState:
             existing_names.add(tool_name)
 
     def get_agent_overrides(self, agent_id: str | None) -> AgentRuntimeOverrides:
-        """Retrieve the agent overrides.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            AgentRuntimeOverrides: OUT: Result of the operation."""
-
+        """Return the override set for ``agent_id`` (empty default when unset)."""
         if not agent_id:
             return AgentRuntimeOverrides()
         return self.config.agent_overrides.get(agent_id, AgentRuntimeOverrides())
 
     def get_guardrails(self, agent_id: str | None) -> list[str]:
-        """Retrieve the guardrails.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
-
+        """Return effective guardrails for ``agent_id``, preferring overrides."""
         overrides = self.get_agent_overrides(agent_id)
         if overrides.guardrails is not None:
             return overrides.guardrails
         return self.config.guardrails
 
     def get_enabled_skill_names(self, agent_id: str | None) -> list[str]:
-        """Retrieve the enabled skill names.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
-
+        """Return the enabled skill name list for ``agent_id``."""
         overrides = self.get_agent_overrides(agent_id)
         if overrides.enabled_skills is not None:
             return overrides.enabled_skills
         return self.config.enabled_skills
 
     def get_enabled_skills(self, agent_id: str | None) -> list[Skill]:
-        """Retrieve the enabled skills.
+        """Resolve :meth:`get_enabled_skill_names` to live :class:`Skill` objects.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            list[Skill]: OUT: Result of the operation."""
-
+        Skill names that fail to resolve in the registry are skipped with a
+        WARNING log rather than raising.
+        """
         skills: list[Skill] = []
         for skill_name in self.get_enabled_skill_names(agent_id):
             skill = self.skill_registry.get(skill_name)
@@ -441,55 +400,32 @@ class RuntimeFeaturesState:
         return skills
 
     def get_loop_detection_config(self, agent_id: str | None) -> LoopDetectionConfig | None:
-        """Retrieve the loop detection config.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            LoopDetectionConfig | None: OUT: Result of the operation."""
-
+        """Return the loop-detection config for ``agent_id`` or its inherited default."""
         overrides = self.get_agent_overrides(agent_id)
         if overrides.loop_detection is not None:
             return overrides.loop_detection
         return self.config.loop_detection
 
     def create_loop_detector(self, agent_id: str | None) -> LoopDetector | None:
-        """Create loop detector.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            LoopDetector | None: OUT: Result of the operation."""
-
+        """Instantiate a fresh :class:`LoopDetector` for ``agent_id``, or ``None``."""
         config = self.get_loop_detection_config(agent_id)
         if config is None:
             return None
         return LoopDetector(config)
 
     def get_sandbox_config(self, agent_id: str | None) -> SandboxConfig | None:
-        """Retrieve the sandbox config.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            SandboxConfig | None: OUT: Result of the operation."""
-
+        """Return the sandbox config for ``agent_id`` or its inherited default."""
         overrides = self.get_agent_overrides(agent_id)
         if overrides.sandbox is not None:
             return overrides.sandbox
         return self.config.sandbox
 
     def get_sandbox_router(self, agent_id: str | None) -> SandboxRouter | None:
-        """Retrieve the sandbox router.
+        """Return a (cached) :class:`SandboxRouter` for ``agent_id``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            SandboxRouter | None: OUT: Result of the operation."""
+        Routers are memoised by agent id; the cache is invalidated when the
+        underlying config or backend changes between calls.
+        """
 
         config = self.get_sandbox_config(agent_id)
         if config is None:
@@ -505,14 +441,7 @@ class RuntimeFeaturesState:
         return router
 
     def get_prompt_profile(self, agent_id: str | None) -> PromptProfile | PromptProfileConfig | str | None:
-        """Retrieve the prompt profile.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            PromptProfile | PromptProfileConfig | str | None: OUT: Result of the operation."""
-
+        """Return the prompt profile for ``agent_id`` or the configured default."""
         overrides = self.get_agent_overrides(agent_id)
         if overrides.prompt_profile is not None:
             return overrides.prompt_profile
@@ -524,15 +453,12 @@ class RuntimeFeaturesState:
         tool_names: list[str] | None = None,
         profile: PromptProfile | PromptProfileConfig | str | None = None,
     ) -> str:
-        """Build prompt prefix.
+        """Render the runtime-aware system-prompt prefix for ``agent_id``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            profile (PromptProfile | PromptProfileConfig | str | None, optional): IN: profile. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        Combines guardrails, enabled skills, sandbox metadata, and the agent's
+        prompt profile through :class:`PromptContextBuilder`. ``profile``
+        overrides the per-agent profile when supplied.
+        """
 
         resolved_profile = profile or self.get_prompt_profile(agent_id)
         return self.prompt_context_builder.assemble_system_prompt_prefix(

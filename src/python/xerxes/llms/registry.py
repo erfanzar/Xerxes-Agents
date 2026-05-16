@@ -11,17 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Registry module for Xerxes.
+"""Static registry of LLM providers, models, pricing, and context limits.
 
-Exports:
-    - ProviderConfig
-    - detect_provider
-    - bare_model
-    - get_provider_config
-    - get_api_key
-    - calc_cost
-    - list_all_models
-    - get_context_limit"""
+Public surface:
+
+* :data:`PROVIDERS` — provider name -> :class:`ProviderConfig` (API
+  key env var, base URL, default context limit, known models).
+* :data:`COSTS` — model name -> (input USD per 1M tokens, output USD).
+* :func:`detect_provider` — guess a provider from a model identifier.
+* :func:`get_context_limit` — context window for a model.
+* :func:`calc_cost` — USD cost of a token bill.
+* :func:`get_api_key` — resolve a provider's key from env or config.
+"""
 
 from __future__ import annotations
 
@@ -31,16 +32,17 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """Provider config.
+    """Static metadata describing one LLM provider.
 
     Attributes:
-        name (str): name.
-        type (str): type.
-        api_key_env (str | None): api key env.
-        base_url (str | None): base url.
-        context_limit (int): context limit.
-        models (list[str]): models.
-        default_api_key (str | None): default api key."""
+        name: provider slug (matches :data:`PROVIDERS` keys).
+        type: wire protocol family (e.g. ``"openai"``, ``"anthropic"``).
+        api_key_env: environment variable holding the API key.
+        base_url: HTTPS endpoint root for the provider.
+        context_limit: default context window in tokens.
+        models: known model identifiers for this provider.
+        default_api_key: literal key used when no env var is set.
+    """
 
     name: str
     type: str
@@ -292,12 +294,12 @@ _PREFIX_MAP: list[tuple[str, str]] = sorted(
 
 
 def detect_provider(model: str) -> str:
-    """Detect provider.
+    """Return the provider slug for ``model``.
 
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    A ``provider/model`` prefix (e.g. ``"anthropic/claude-3-5-sonnet"``)
+    is honoured directly; otherwise the longest matching prefix in
+    ``_PREFIX_MAP`` wins. Defaults to ``"openai"`` for unknown names.
+    """
 
     if "/" in model:
         return model.split("/", 1)[0].lower()
@@ -309,35 +311,22 @@ def detect_provider(model: str) -> str:
 
 
 def bare_model(model: str) -> str:
-    """Bare model.
-
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Strip any ``provider/`` prefix from ``model``."""
 
     return model.split("/", 1)[1] if "/" in model else model
 
 
 def get_provider_config(provider_name: str) -> ProviderConfig:
-    """Retrieve the provider config.
-
-    Args:
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-    Returns:
-        ProviderConfig: OUT: Result of the operation."""
+    """Return :class:`ProviderConfig` for ``provider_name``; raises ``KeyError``."""
 
     return PROVIDERS[provider_name]
 
 
 def get_api_key(provider_name: str, extra_config: dict | None = None) -> str:
-    """Retrieve the api key.
+    """Resolve an API key for ``provider_name`` (config -> env -> default).
 
-    Args:
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-        extra_config (dict | None, optional): IN: extra config. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Returns the empty string when no key can be found.
+    """
 
     prov = PROVIDERS.get(provider_name)
     if prov is None:
@@ -357,14 +346,11 @@ def get_api_key(provider_name: str, extra_config: dict | None = None) -> str:
 
 
 def calc_cost(model: str, in_tok: int, out_tok: int) -> float:
-    """Calc cost.
+    """Return the USD cost of an LLM call using :data:`COSTS`.
 
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        in_tok (int): IN: in tok. OUT: Consumed during execution.
-        out_tok (int): IN: out tok. OUT: Consumed during execution.
-    Returns:
-        float: OUT: Result of the operation."""
+    Rates in :data:`COSTS` are USD per 1M tokens; unknown models cost
+    ``0.0``.
+    """
 
     name = bare_model(model)
     ic, oc = COSTS.get(name, (0.0, 0.0))
@@ -372,10 +358,7 @@ def calc_cost(model: str, in_tok: int, out_tok: int) -> float:
 
 
 def list_all_models() -> dict[str, list[str]]:
-    """List all models.
-
-    Returns:
-        dict[str, list[str]]: OUT: Result of the operation."""
+    """Return the registered provider -> models map (providers with models only)."""
 
     return {name: list(prov.models) for name, prov in PROVIDERS.items() if prov.models}
 
@@ -389,12 +372,7 @@ _MODEL_CONTEXT_LIMITS: dict[str, int] = {
 
 
 def get_context_limit(model: str) -> int:
-    """Retrieve the context limit.
-
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-    Returns:
-        int: OUT: Result of the operation."""
+    """Return the context window for ``model`` (model-specific or provider default)."""
 
     if model in _MODEL_CONTEXT_LIMITS:
         return _MODEL_CONTEXT_LIMITS[model]

@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Xerxes API server components.
+"""OpenAI-compatible HTTP API in front of Xerxes agents and Cortex.
 
-This module exports the main server class and the Cortex-backed completion
-service used to provide an OpenAI-compatible HTTP API.
+The server is the third surface Xerxes exposes (alongside the daemon
+and bridge). It hosts FastAPI routers that translate OpenAI chat
+completion requests into either single-agent runs (:class:`Xerxes`)
+or multi-agent Cortex executions, including SSE streaming. Endpoints:
 
-Main exports:
-    - CortexCompletionService: Completion backend using the Cortex framework.
-    - XerxesAPIServer: FastAPI-based HTTP server.
+* ``POST /v1/chat/completions`` — sync or streamed completions.
+* ``GET  /v1/models`` — list registered agents and Cortex variants.
+* ``GET  /health`` — server liveness plus registered agent count.
 """
 
 from .cortex_completion_service import CortexCompletionService

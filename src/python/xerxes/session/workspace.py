@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Workspace module for Xerxes.
+"""Workspace identity records and an in-process registry.
 
-Exports:
-    - WorkspaceIdentity
-    - WorkspaceManager"""
+A workspace is the long-lived container sessions are filed under (project
+root, telegram chat, etc.). :class:`WorkspaceIdentity` is the serialisable
+record; :class:`WorkspaceManager` is a thread-safe in-memory registry used
+by the daemon to dedupe workspace creation during a process lifetime.
+"""
 
 from __future__ import annotations
 
@@ -28,14 +30,15 @@ from datetime import UTC, datetime
 
 @dataclass
 class WorkspaceIdentity:
-    """Workspace identity.
+    """Stable identity record describing one workspace.
 
     Attributes:
-        workspace_id (str): workspace id.
-        name (str): name.
-        root_path (str | None): root path.
-        created_at (str): created at.
-        metadata (dict[str, tp.Any]): metadata."""
+        workspace_id: Unique opaque id (typically a UUID hex).
+        name: Human-readable label.
+        root_path: Filesystem root, when the workspace is a project on disk.
+        created_at: ISO-8601 creation timestamp.
+        metadata: Arbitrary JSON-serialisable metadata.
+    """
 
     workspace_id: str
     name: str
@@ -44,12 +47,7 @@ class WorkspaceIdentity:
     metadata: dict[str, tp.Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Return a JSON-ready shallow copy."""
 
         return {
             "workspace_id": self.workspace_id,
@@ -61,13 +59,7 @@ class WorkspaceIdentity:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> WorkspaceIdentity:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            WorkspaceIdentity: OUT: Result of the operation."""
+        """Reconstruct an identity from a JSON-decoded dict."""
 
         return cls(
             workspace_id=data["workspace_id"],
@@ -79,13 +71,16 @@ class WorkspaceIdentity:
 
 
 class WorkspaceManager:
-    """Workspace manager."""
+    """Thread-safe in-memory registry of :class:`WorkspaceIdentity` records.
+
+    The registry is process-local — restarting the daemon empties it. The
+    file-backed :class:`FileSessionStore` derives its directory layout from
+    ``workspace_id``, so persistent identity ultimately lives on disk via
+    the sessions themselves.
+    """
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Create an empty registry."""
 
         self._workspaces: dict[str, WorkspaceIdentity] = {}
         self._lock = threading.Lock()
@@ -98,16 +93,14 @@ class WorkspaceManager:
         workspace_id: str | None = None,
         metadata: dict[str, tp.Any] | None = None,
     ) -> WorkspaceIdentity:
-        """Create workspace.
+        """Register a new workspace and return its identity.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-            root_path (str | None, optional): IN: root path. Defaults to None. OUT: Consumed during execution.
-            workspace_id (str | None, optional): IN: workspace id. Defaults to None. OUT: Consumed during execution.
-            metadata (dict[str, tp.Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            WorkspaceIdentity: OUT: Result of the operation."""
+            name: Human-readable label.
+            root_path: Filesystem root associated with the workspace.
+            workspace_id: Override the generated UUID hex (mostly for tests).
+            metadata: Arbitrary extra fields stored on the identity.
+        """
 
         ws = WorkspaceIdentity(
             workspace_id=workspace_id or uuid.uuid4().hex,
@@ -121,24 +114,13 @@ class WorkspaceManager:
         return ws
 
     def get_workspace(self, workspace_id: str) -> WorkspaceIdentity | None:
-        """Retrieve the workspace.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            workspace_id (str): IN: workspace id. OUT: Consumed during execution.
-        Returns:
-            WorkspaceIdentity | None: OUT: Result of the operation."""
+        """Return the registered identity or ``None`` if it does not exist."""
 
         with self._lock:
             return self._workspaces.get(workspace_id)
 
     def list_workspaces(self) -> list[WorkspaceIdentity]:
-        """List workspaces.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[WorkspaceIdentity]: OUT: Result of the operation."""
+        """Return a snapshot of every registered workspace."""
 
         with self._lock:
             return list(self._workspaces.values())

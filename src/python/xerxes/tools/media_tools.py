@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Media generation and processing tools for image generation, vision analysis, and text-to-speech.
+"""OpenAI-compatible media tools for image generation, vision, and TTS.
 
-This module provides tools for generating images, analyzing images with vision models,
-and converting text to speech. These tools enable agents to work with visual and audio media.
-
-Example:
-    >>> from xerxes.tools.media_tools import image_generate, vision_analyze, text_to_speech
-    >>> image_generate.static_call(prompt="A sunset over mountains")
-    >>> vision_analyze.static_call(image_url="https://example.com/image.jpg")
+Defines the agent-facing :class:`image_generate`, :class:`vision_analyze`,
+and :class:`text_to_speech` tools plus the shared :class:`MediaConfig`
+state. All three tools talk to an OpenAI-compatible REST endpoint configured
+via :func:`configure_media` (base URL, API key, model defaults) so the same
+code path drives the real OpenAI API, Azure OpenAI deployments, or a local
+gateway. The HTTP client is pluggable via :func:`set_media_client` to let
+tests intercept calls without monkey-patching ``httpx``.
 """
 
 from __future__ import annotations

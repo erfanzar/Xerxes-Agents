@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Docker backend module for Xerxes.
+"""Docker-based sandbox backend.
 
-Exports:
-    - logger
-    - DockerSandboxBackend"""
+Runs the target callable inside a ``docker run --rm -i`` invocation
+against a configured image. The pickled ``(func, args)`` payload is
+piped over stdin, the JSON result comes back on stdout. Provides
+strong isolation (rootless filesystem, memory cap, optional ``--network
+none``) for any tool the model can call. Falls back gracefully when
+the Docker daemon isn't reachable: :meth:`is_available` returns False
+so the router can surface a clear error."""
 
 from __future__ import annotations
 
@@ -45,28 +49,20 @@ sys.stdout.write(base64.b64encode(out.encode("utf-8")).decode())
 
 
 class DockerSandboxBackend:
-    """Docker sandbox backend."""
+    """Run tool callables inside an ephemeral Docker container."""
 
     def __init__(self, sandbox_config: SandboxConfig) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            sandbox_config (SandboxConfig): IN: sandbox config. OUT: Consumed during execution."""
+        """Cache the sandbox + backend configuration for per-call use."""
 
         self._config = sandbox_config
         self._backend_config = sandbox_config.backend_config
 
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
-        """Execute.
+        """Pickle ``(func, arguments)``, run it in a container, return the value.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            func (tp.Callable): IN: func. OUT: Consumed during execution.
-            arguments (dict): IN: arguments. OUT: Consumed during execution.
-        Returns:
-            tp.Any: OUT: Result of the operation."""
+        Raises ``RuntimeError`` on timeout, non-zero ``docker run`` exit,
+        a result-decoding failure, or when the wrapped callable raises
+        inside the container."""
 
         payload = pickle.dumps((func, arguments))
         encoded_payload = base64.b64encode(payload).decode()
@@ -106,12 +102,7 @@ class DockerSandboxBackend:
         return result_data["value"]
 
     def is_available(self) -> bool:
-        """Check whether available.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True if ``docker info`` succeeds within ten seconds."""
 
         try:
             proc = subprocess.run(
@@ -124,12 +115,7 @@ class DockerSandboxBackend:
             return False
 
     def get_capabilities(self) -> dict[str, tp.Any]:
-        """Retrieve the capabilities.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Describe image, resource limits and current daemon availability."""
 
         available = self.is_available()
         return {
@@ -142,13 +128,11 @@ class DockerSandboxBackend:
         }
 
     def _build_docker_command(self, tool_name: str) -> list[str]:
-        """Internal helper to build docker command.
+        """Assemble the ``docker run`` argv from the active config.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        Applies the memory cap, optional ``--network none``, the workspace
+        bind mount, any extra mounts, and forwarded env vars before
+        invoking ``python -c <container runner>``."""
 
         cmd: list[str] = ["docker", "run", "--rm", "-i"]
 

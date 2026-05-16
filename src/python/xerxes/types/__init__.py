@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Public type vocabulary for the Xerxes agent runtime.
+
+Aggregates the agent dataclasses, OpenAI-compatible message and tool schemas,
+function-execution event types, and the converters that move between the
+OpenAI wire format and the typed Xerxes equivalents. Higher-level packages
+import from here rather than the submodules.
+"""
 
 from .agent_types import Agent, AgentBaseFn, AgentFunction, Response, Result
 from .converters import convert_openai_messages, convert_openai_tools

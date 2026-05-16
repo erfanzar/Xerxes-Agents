@@ -13,8 +13,9 @@
 # limitations under the License.
 """Core data types for the channels package.
 
-Defines ``MessageDirection`` and ``ChannelMessage`` — the primary message
-representation used across all channel adapters.
+Defines ``MessageDirection`` and ``ChannelMessage`` — the platform-neutral
+message representation used by every adapter, the registry, the webhook
+dispatcher, and the daemon's channel runtime.
 """
 
 from __future__ import annotations
@@ -27,7 +28,12 @@ from uuid import uuid4
 
 
 class MessageDirection(Enum):
-    """Direction of a channel message."""
+    """Whether a ``ChannelMessage`` came from the user or is bound for them.
+
+    Attributes:
+        INBOUND: User → agent. Produced by adapters parsing webhooks.
+        OUTBOUND: Agent → user. Produced by the runtime when replying.
+    """
 
     INBOUND = "inbound"
     OUTBOUND = "outbound"
@@ -35,21 +41,35 @@ class MessageDirection(Enum):
 
 @dataclass
 class ChannelMessage:
-    """A single message exchanged through a channel.
+    """One message moving through a channel, in either direction.
+
+    The same shape is used inbound and outbound; the ``direction`` field
+    disambiguates. Adapters fill ``platform_message_id`` from the upstream
+    service while ``message_id`` is always a Xerxes-generated UUID — the
+    two are never the same and serve different purposes (audit trail vs.
+    reply threading).
 
     Attributes:
         text: Message body text.
-        channel: Channel name / identifier.
-        user_id: Global user ID (optional).
-        channel_user_id: Platform-specific user ID (optional).
-        room_id: Conversation / room / thread identifier (optional).
-        reply_to: ID of the message being replied to (optional).
-        message_id: Unique message ID generated automatically.
-        platform_message_id: ID assigned by the external platform (optional).
-        attachments: List of attachment metadata dicts.
-        timestamp: UTC timestamp of message creation.
-        direction: Whether the message is inbound or outbound.
-        metadata: Free-form key-value metadata.
+        channel: Channel name (matches ``Channel.name`` of the adapter).
+        user_id: Resolved global Xerxes user id, populated by
+            ``IdentityResolver`` for inbound messages. Optional.
+        channel_user_id: Platform-specific user id (Slack ``U..``,
+            Telegram numeric id, email address, etc.).
+        room_id: Conversation/room/thread identifier on the upstream
+            platform. Used as the reply destination for outbound messages.
+        reply_to: Upstream message id this message is replying to. Maps to
+            ``thread_ts`` on Slack, ``reply_to_message_id`` on Telegram, etc.
+        message_id: Xerxes-side UUID, generated automatically. Stable for
+            the lifetime of the dataclass.
+        platform_message_id: The id assigned by the external platform.
+            Empty for outbound messages that have not yet been sent.
+        attachments: Per-attachment metadata dicts; structure is
+            adapter-defined.
+        timestamp: Local wall-clock time at construction.
+        direction: ``INBOUND`` or ``OUTBOUND``.
+        metadata: Free-form key/value bag for per-platform extras
+            (Telegram ``chat_type``, Slack ``team_id``, ...).
     """
 
     text: str

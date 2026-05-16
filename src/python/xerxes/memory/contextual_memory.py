@@ -11,10 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Contextual memory module for Xerxes.
+"""Two-tier memory that combines short-term recall with long-term storage.
 
-Exports:
-    - ContextualMemory"""
+``ContextualMemory`` owns a ``ShortTermMemory`` deque and a
+``LongTermMemory`` backed by persistent storage. Items can be routed
+to either tier based on importance, and short-term items are
+auto-promoted once their access count crosses ``promotion_threshold``.
+A context stack allows callers to push/pop situational frames that are
+mixed into search results."""
 
 from datetime import datetime
 from typing import Any
@@ -25,10 +29,7 @@ from .short_term_memory import ShortTermMemory
 
 
 class ContextualMemory(Memory):
-    """Contextual memory.
-
-    Inherits from: Memory
-    """
+    """Composite short-term + long-term memory with a runtime context stack."""
 
     def __init__(
         self,
@@ -37,14 +38,17 @@ class ContextualMemory(Memory):
         promotion_threshold: int = 3,
         importance_threshold: float = 0.7,
     ) -> None:
-        """Initialize the instance.
+        """Wire up the two underlying tiers and tuning thresholds.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            short_term_capacity (int, optional): IN: short term capacity. Defaults to 20. OUT: Consumed during execution.
-            long_term_storage (Any | None, optional): IN: long term storage. Defaults to None. OUT: Consumed during execution.
-            promotion_threshold (int, optional): IN: promotion threshold. Defaults to 3. OUT: Consumed during execution.
-            importance_threshold (float, optional): IN: importance threshold. Defaults to 0.7. OUT: Consumed during execution."""
+            short_term_capacity: Maximum items held in the deque-backed
+                short-term tier.
+            long_term_storage: Optional ``MemoryStorage`` passed through
+                to the long-term tier (defaults to its own SQLite).
+            promotion_threshold: Number of accesses after which a
+                short-term item is copied into long-term storage.
+            importance_threshold: Importance score above which a saved
+                item bypasses short-term and goes straight to long-term."""
 
         super().__init__()
         self.short_term = ShortTermMemory(capacity=short_term_capacity)
@@ -54,12 +58,10 @@ class ContextualMemory(Memory):
         self.context_stack: list[dict[str, Any]] = []
 
     def push_context(self, context_type: str, context_data: dict[str, Any]) -> None:
-        """Push context.
+        """Push a labelled context frame onto the situational stack.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            context_type (str): IN: context type. OUT: Consumed during execution.
-            context_data (dict[str, Any]): IN: context data. OUT: Consumed during execution."""
+        Frames are timestamped and consulted during ``save`` (attached
+        to metadata) and ``search`` (used for relevance reranking)."""
 
         self.context_stack.append(
             {
@@ -70,22 +72,12 @@ class ContextualMemory(Memory):
         )
 
     def pop_context(self) -> dict[str, Any] | None:
-        """Pop context.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any] | None: OUT: Result of the operation."""
+        """Pop and return the most recent context frame, or ``None`` if empty."""
 
         return self.context_stack.pop() if self.context_stack else None
 
     def get_current_context(self) -> dict[str, Any] | None:
-        """Retrieve the current context.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any] | None: OUT: Result of the operation."""
+        """Return the top context frame without removing it."""
 
         return self.context_stack[-1] if self.context_stack else None
 
@@ -97,17 +89,20 @@ class ContextualMemory(Memory):
         to_long_term: bool = False,
         **kwargs,
     ) -> MemoryItem:
-        """Save.
+        """Save an item, routing to long-term when important or requested.
+
+        Items go directly to long-term when ``to_long_term`` is True or
+        ``importance >= importance_threshold``. Otherwise they enter
+        short-term and may be auto-promoted on repeated access.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            importance (float, optional): IN: importance. Defaults to 0.5. OUT: Consumed during execution.
-            to_long_term (bool, optional): IN: to long term. Defaults to False. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            MemoryItem: OUT: Result of the operation."""
+            content: Text payload to remember.
+            metadata: Annotations (importance + current context are
+                merged in automatically).
+            importance: Importance score in ``[0, 1]`` used for routing.
+            to_long_term: Force long-term placement irrespective of
+                importance.
+            **kwargs: Forwarded to the underlying tier's ``save``."""
 
         metadata = metadata or {}
 
@@ -132,17 +127,18 @@ class ContextualMemory(Memory):
         search_long_term: bool = True,
         **kwargs,
     ) -> list[MemoryItem]:
-        """Search.
+        """Search both tiers and rerank by current context.
+
+        Each result is tagged with ``metadata["source"]`` (``short_term``
+        or ``long_term``). When a context frame is active, scores are
+        blended with a context-overlap factor before sorting.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            search_long_term (bool, optional): IN: search long term. Defaults to True. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+            query: Free-form search string.
+            limit: Maximum number of merged results.
+            filters: Field-level filters passed to each tier.
+            search_long_term: When False, only short-term is queried.
+            **kwargs: Passed through to each tier's ``search``."""
 
         results = []
 
@@ -169,15 +165,12 @@ class ContextualMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve.
+        """Retrieve by id or filtered list across both tiers.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+        When ``memory_id`` is provided, short-term is checked first;
+        a short-term hit triggers a promotion check before being
+        returned. When ``memory_id`` is omitted, items from both tiers
+        are concatenated up to ``limit``."""
 
         if memory_id:
             item = self.short_term.retrieve(memory_id)
@@ -199,14 +192,7 @@ class ContextualMemory(Memory):
         return results[:limit]
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str): IN: memory id. OUT: Consumed during execution.
-            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Apply updates to the matching item in whichever tier owns it."""
 
         if self.short_term.update(memory_id, updates):
             return True
@@ -214,14 +200,7 @@ class ContextualMemory(Memory):
         return self.long_term.update(memory_id, updates)
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Delete from both tiers; returns the combined deletion count."""
 
         count = 0
         count += self.short_term.delete(memory_id, filters)
@@ -229,22 +208,18 @@ class ContextualMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Empty both tiers and the context stack."""
 
         self.short_term.clear()
         self.long_term.clear()
         self.context_stack.clear()
 
     def get_context_summary(self) -> str:
-        """Retrieve the context summary.
+        """Render a human-readable status block of context + recent + important memories.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        Combines the trailing three context frames, the five most
+        recent short-term items, and up to three high-importance
+        long-term items."""
 
         lines = []
 
@@ -269,11 +244,7 @@ class ContextualMemory(Memory):
         return "\n".join(lines) if lines else "No context available."
 
     def _check_promotion(self, item: MemoryItem) -> None:
-        """Internal helper to check promotion.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            item (MemoryItem): IN: item. OUT: Consumed during execution."""
+        """Copy the item into long-term storage once its access count crosses the threshold."""
 
         if item.access_count >= self.promotion_threshold:
             self.long_term.save(
@@ -288,13 +259,7 @@ class ContextualMemory(Memory):
             item.metadata["promoted"] = True
 
     def _rerank_by_context(self, results: list[MemoryItem]) -> list[MemoryItem]:
-        """Internal helper to rerank by context.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            results (list[MemoryItem]): IN: results. OUT: Consumed during execution.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+        """Blend each item's relevance with a context-overlap factor."""
 
         current_context = self.get_current_context()
         if not current_context:

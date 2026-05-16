@@ -13,9 +13,10 @@
 # limitations under the License.
 """Terminal UI package for Xerxes.
 
-Provides the interactive text-based user interface components used by the
-Xerxes agent system. The main entry point is :class:`XerxesTUI`.
-"""
+Houses the prompt_toolkit-based interactive surface that talks to the
+daemon over a Unix socket. :class:`XerxesTUI` is the orchestrator; the
+sibling modules supply the prompt, content blocks, completers, banner,
+skin engine, voice/clipboard helpers, and tip database."""
 
 from .app import XerxesTUI
 

@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tool pool module for Xerxes.
+"""Filtered, schema-ready view of an :class:`ExecutionRegistry` tool set.
 
-Exports:
-    - ToolPool
-    - assemble_tool_pool"""
+:class:`ToolPool` is an immutable snapshot of the tools that should be
+exposed to the LLM for one turn (or one sub-agent), already filtered by
+category, deny-list, safety, and MCP-inclusion rules. :func:`assemble_tool_pool`
+builds the pool from a populated registry.
+"""
 
 from __future__ import annotations
 
@@ -27,13 +29,14 @@ from .execution_registry import ExecutionRegistry, RegistryEntry
 
 @dataclass(frozen=True)
 class ToolPool:
-    """Tool pool.
+    """Immutable filtered set of tools exposed to one turn or sub-agent.
 
     Attributes:
-        tools (tuple[RegistryEntry, ...]): tools.
-        denied_tools (frozenset[str]): denied tools.
-        categories (tuple[str, ...]): categories.
-        safe_only (bool): safe only."""
+        tools: Tuple of registry entries that survived filtering.
+        denied_tools: Tool names that were explicitly excluded.
+        categories: Categories the pool was filtered to (empty = all).
+        safe_only: Whether only safe (no-permission-prompt) tools were kept.
+    """
 
     tools: tuple[RegistryEntry, ...] = ()
     denied_tools: frozenset[str] = frozenset()
@@ -42,45 +45,23 @@ class ToolPool:
 
     @property
     def tool_count(self) -> int:
-        """Return Tool count.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Number of tools surviving the filter chain."""
         return len(self.tools)
 
     @property
     def tool_names(self) -> tuple[str, ...]:
-        """Return Tool names.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tuple[str, ...]: OUT: Result of the operation."""
+        """Tuple of tool names in the pool, in registry order."""
         return tuple(t.name for t in self.tools)
 
     def get_tool(self, name: str) -> RegistryEntry | None:
-        """Retrieve the tool.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            name (str): IN: name. OUT: Consumed during execution.
-        Returns:
-            RegistryEntry | None: OUT: Result of the operation."""
-
+        """Look up an entry by exact name; ``None`` if not in the pool."""
         for t in self.tools:
             if t.name == name:
                 return t
         return None
 
     def to_schemas(self) -> list[dict[str, Any]]:
-        """To schemas.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+        """Return JSON tool schemas suitable for sending to the LLM."""
 
         schemas = []
         for entry in self.tools:
@@ -97,12 +78,7 @@ class ToolPool:
         return schemas
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the pool as a Markdown overview (counts, filters, tool list)."""
 
         lines = [
             "# Tool Pool",
@@ -128,17 +104,19 @@ def assemble_tool_pool(
     safe_only: bool = False,
     include_mcp: bool = True,
 ) -> ToolPool:
-    """Assemble tool pool.
+    """Build a filtered :class:`ToolPool` from ``registry``.
 
     Args:
-        registry (ExecutionRegistry | None, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
-        categories (list[str] | None, optional): IN: categories. Defaults to None. OUT: Consumed during execution.
-        deny_tools (set[str] | None, optional): IN: deny tools. Defaults to None. OUT: Consumed during execution.
-        deny_prefixes (list[str] | None, optional): IN: deny prefixes. Defaults to None. OUT: Consumed during execution.
-        safe_only (bool, optional): IN: safe only. Defaults to False. OUT: Consumed during execution.
-        include_mcp (bool, optional): IN: include mcp. Defaults to True. OUT: Consumed during execution.
-    Returns:
-        ToolPool: OUT: Result of the operation."""
+        registry: Populated :class:`ExecutionRegistry`; an empty pool is
+            returned when ``None``.
+        categories: When provided, restrict tools to these categories.
+        deny_tools: Set of tool names to exclude entirely.
+        deny_prefixes: Tools whose name starts with any of these prefixes
+            are excluded (useful for blocking ``mcp__foo__bar`` etc.).
+        safe_only: When ``True`` keep only tools flagged ``safe``.
+        include_mcp: When ``False`` drop tools whose ``source_hint`` mentions
+            ``"mcp"``.
+    """
 
     if registry is None:
         return ToolPool()

@@ -280,7 +280,6 @@ class ScriptArgs:
 
 
 def main(argv: list[str] | None = None) -> None:
-
     exit_code = 0
 
     if not format_code("xerxes", fix=True):

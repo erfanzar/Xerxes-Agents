@@ -11,12 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bootstrap module for Xerxes.
+"""Session bootstrap pipeline for Xerxes.
 
-Exports:
-    - BootstrapStage
-    - BootstrapResult
-    - bootstrap"""
+Collects environment, git, and ``XERXES.md`` context, registers the built-in
+slash commands and tool functions into a fresh :class:`ExecutionRegistry`,
+and synthesises the default system prompt. The :func:`bootstrap` function is
+called by the daemon and one-shot CLI paths whenever a new agent session is
+created.
+"""
 
 from __future__ import annotations
 
@@ -33,13 +35,15 @@ from .execution_registry import ExecutionRegistry
 
 @dataclass
 class BootstrapStage:
-    """Bootstrap stage.
+    """One step of the bootstrap pipeline with a timing and status record.
 
     Attributes:
-        name (str): name.
-        status (str): status.
-        detail (str): detail.
-        duration_ms (float): duration ms."""
+        name: Stable identifier of the stage (``"environment"``, ``"git_info"``,
+            ``"tools"``, etc.).
+        status: One of ``"ok"``, ``"skipped"``, or ``"failed"``.
+        detail: Short human-readable summary surfaced in the bootstrap report.
+        duration_ms: Wall-clock duration in milliseconds.
+    """
 
     name: str
     status: str = "ok"
@@ -49,13 +53,16 @@ class BootstrapStage:
 
 @dataclass
 class BootstrapResult:
-    """Bootstrap result.
+    """Aggregate output of a bootstrap run.
 
     Attributes:
-        stages (list[BootstrapStage]): stages.
-        registry (ExecutionRegistry): registry.
-        system_prompt (str): system prompt.
-        context (dict[str, Any]): context."""
+        stages: Ordered list of completed :class:`BootstrapStage` entries.
+        registry: Execution registry pre-populated with the built-in
+            commands and any agent functions passed to :func:`bootstrap`.
+        system_prompt: Fully rendered system prompt ready to feed to the LLM.
+        context: Snapshot of environment values (cwd, model, git info,
+            ``XERXES.md`` contents, etc.) used to build the prompt.
+    """
 
     stages: list[BootstrapStage] = field(default_factory=list)
     registry: ExecutionRegistry = field(default_factory=ExecutionRegistry)
@@ -64,21 +71,11 @@ class BootstrapResult:
 
     @property
     def ok(self) -> bool:
-        """Return Ok.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return ``True`` when no stage reported a ``"failed"`` status."""
         return all(s.status != "failed" for s in self.stages)
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render a Markdown bootstrap report for diagnostics and ``/doctor``."""
         lines = [
             "# Bootstrap Report",
             "",
@@ -101,18 +98,26 @@ def bootstrap(
     include_xerxes_md: bool = True,
     extra_context: str = "",
 ) -> BootstrapResult:
-    """Bootstrap.
+    """Run all bootstrap stages and return the assembled context, registry, and prompt.
 
     Args:
-        model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-        cwd (str | Path | None, optional): IN: cwd. Defaults to None. OUT: Consumed during execution.
-        tools (list[Any] | None, optional): IN: tools. Defaults to None. OUT: Consumed during execution.
-        commands (dict[str, Any] | None, optional): IN: commands. Defaults to None. OUT: Consumed during execution.
-        include_git_info (bool, optional): IN: include git info. Defaults to True. OUT: Consumed during execution.
-        include_xerxes_md (bool, optional): IN: include xerxes md. Defaults to True. OUT: Consumed during execution.
-        extra_context (str, optional): IN: extra context. Defaults to ''. OUT: Consumed during execution.
+        model: Display name of the active LLM, embedded into the system prompt.
+        cwd: Working directory used for git probing and ``XERXES.md`` lookup;
+            defaults to :func:`Path.cwd`.
+        tools: Optional agent function objects to register into the runtime's
+            :class:`ExecutionRegistry`.
+        commands: Optional mapping of slash-command name to handler. Built-in
+            command names without a matching handler are still registered as
+            stub entries so the TUI can list them.
+        include_git_info: When ``True`` (the default) probe ``git`` for the
+            branch, status, and last five commits.
+        include_xerxes_md: When ``True`` load the global and nearest project
+            ``XERXES.md`` files through the prompt scanner.
+        extra_context: Free-form text appended to the end of the system prompt.
+
     Returns:
-        BootstrapResult: OUT: Result of the operation."""
+        A populated :class:`BootstrapResult` carrying every stage's outcome.
+    """
 
     import time
 
@@ -216,12 +221,7 @@ def bootstrap(
 
 
 def _get_git_info(cwd: Path) -> str:
-    """Internal helper to get git info.
-
-    Args:
-        cwd (Path): IN: cwd. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return a short summary of the git repo at ``cwd`` or ``""`` if absent."""
 
     try:
         branch = subprocess.check_output(
@@ -254,12 +254,7 @@ def _get_git_info(cwd: Path) -> str:
 
 
 def _load_xerxes_md(cwd: Path) -> str:
-    """Internal helper to load xerxes md.
-
-    Args:
-        cwd (Path): IN: cwd. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Load and scan the global plus nearest-ancestor ``XERXES.md`` files."""
 
     from xerxes.core.paths import xerxes_subdir
     from xerxes.security.prompt_scanner import scan_context_content
@@ -295,13 +290,7 @@ def _load_xerxes_md(cwd: Path) -> str:
 
 
 def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
-    """Internal helper to build system prompt.
-
-    Args:
-        context (dict[str, Any]): IN: context. OUT: Consumed during execution.
-        extra (str, optional): IN: extra. Defaults to ''. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Render the default Xerxes system prompt from a bootstrap context dict."""
 
     parts = [
         "You are Xerxes, an AI coding assistant with access to tools via function calling.",

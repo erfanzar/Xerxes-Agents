@@ -11,11 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Fts index module for Xerxes.
+"""Pure FTS5 full-text index over session turns.
 
-Exports:
-    - logger
-    - SessionFTSIndex"""
+A simpler sibling of :mod:`xerxes.session.index`: no embeddings, no hybrid
+ranking, just a SQLite FTS5 virtual table indexed by ``(session_id, turn_id,
+agent_id, content)``. If the local SQLite build lacks FTS5 the index becomes
+a best-effort no-op so search callers degrade gracefully.
+
+Each public method opens its own short-lived connection so the index can be
+shared across threads without holding long-lived locks.
+"""
 
 from __future__ import annotations
 
@@ -31,14 +36,15 @@ logger = logging.getLogger(__name__)
 
 
 class SessionFTSIndex:
-    """Session ftsindex."""
+    """SQLite FTS5 index over the prompt/response text of every turn.
+
+    The index reflects the latest snapshot of each session: writes delete and
+    re-insert all rows for the session in one transaction, which keeps the
+    schema simple at the cost of being wasteful on append-only workloads.
+    """
 
     def __init__(self, db_path: str | Path) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            db_path (str | Path): IN: db path. OUT: Consumed during execution."""
+        """Open the index at ``db_path`` (parent dirs are created)."""
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -47,12 +53,7 @@ class SessionFTSIndex:
             self._ensure_schema()
 
     def _check_fts5(self) -> bool:
-        """Internal helper to check fts5.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Probe whether the SQLite build supports FTS5."""
 
         try:
             conn = sqlite3.connect(str(self._db_path))
@@ -69,10 +70,7 @@ class SessionFTSIndex:
             return False
 
     def _ensure_schema(self) -> None:
-        """Internal helper to ensure schema.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Create the ``session_fts`` virtual table if absent."""
 
         with sqlite3.connect(str(self._db_path)) as conn:
             conn.execute(
@@ -88,11 +86,7 @@ class SessionFTSIndex:
             conn.commit()
 
     def index_session(self, session: SessionRecord) -> None:
-        """Index session.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution."""
+        """Re-index every turn of ``session`` (delete-and-insert)."""
 
         if not self._fts_available:
             return
@@ -114,11 +108,7 @@ class SessionFTSIndex:
             conn.commit()
 
     def delete_session(self, session_id: str) -> None:
-        """Delete session.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution."""
+        """Drop every indexed row for ``session_id`` (no-op if FTS5 absent)."""
 
         if not self._fts_available:
             return
@@ -137,16 +127,12 @@ class SessionFTSIndex:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search.
+        """Run an FTS5 ``MATCH`` and return up to ``k`` ranked rows.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            k (int, optional): IN: k. Defaults to 10. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+        Empty queries and unavailable FTS5 both yield an empty list. Each
+        returned dict carries ``session_id``, ``turn_id``, ``agent_id``,
+        ``content`` and the raw FTS ``rank`` (lower is better in FTS5).
+        """
 
         if not self._fts_available or not query.strip():
             return []

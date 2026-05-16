@@ -11,10 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Entity memory module for Xerxes.
+"""Entity-centric memory tier with lightweight relationship tracking.
 
-Exports:
-    - EntityMemory"""
+``EntityMemory`` extracts noun-phrase and quoted entities from saved
+content, records first/last-seen timestamps and mention counts per
+entity, and infers a handful of common relationships (works_with,
+knows, created, ...) via regex patterns. It exposes graph-style
+queries like ``get_entity_info`` and ``get_related_entities``."""
 
 import re
 from collections import defaultdict
@@ -24,10 +27,7 @@ from .base import Memory, MemoryItem
 
 
 class EntityMemory(Memory):
-    """Entity memory.
-
-    Inherits from: Memory
-    """
+    """Memory tier that indexes content by extracted entities and relations."""
 
     def __init__(
         self,
@@ -35,13 +35,12 @@ class EntityMemory(Memory):
         max_items: int = 5000,
         enable_embeddings: bool = False,
     ) -> None:
-        """Initialize the instance.
+        """Initialise the entity tier and its auxiliary indexes.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
-            max_items (int, optional): IN: max items. Defaults to 5000. OUT: Consumed during execution.
-            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to False. OUT: Consumed during execution."""
+            storage: Optional ``MemoryStorage`` for durable persistence.
+            max_items: Soft cap on retained items.
+            enable_embeddings: Whether to compute embeddings on save."""
 
         super().__init__(storage=storage, max_items=max_items, enable_embeddings=enable_embeddings)
         self.entities: dict[str, dict[str, Any]] = {}
@@ -51,16 +50,14 @@ class EntityMemory(Memory):
     def save(
         self, content: str, metadata: dict[str, Any] | None = None, entities: list[str] | None = None, **kwargs
     ) -> MemoryItem:
-        """Save.
+        """Save ``content`` and index it under the supplied or extracted entities.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            entities (list[str] | None, optional): IN: entities. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            MemoryItem: OUT: Result of the operation."""
+            content: Text payload to remember.
+            metadata: Annotations; receives an ``entities`` field.
+            entities: Pre-extracted entity list; when omitted, entities
+                are inferred from ``content`` via ``_extract_entities``.
+            **kwargs: Accepted for protocol compatibility; unused."""
 
         metadata = metadata or {}
 
@@ -99,17 +96,18 @@ class EntityMemory(Memory):
         entity_filter: list[str] | None = None,
         **kwargs,
     ) -> list[MemoryItem]:
-        """Search.
+        """Return items whose indexed entities overlap with the query's.
+
+        Each candidate item's ``relevance_score`` is set to the overlap
+        ratio against the target entity set before sorting.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            entity_filter (list[str] | None, optional): IN: entity filter. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+            query: Text whose entities are extracted as the target set
+                unless ``entity_filter`` is supplied.
+            limit: Maximum results.
+            filters: Attribute-level filters applied to items.
+            entity_filter: Explicit entity allow-list overriding query
+                extraction."""
 
         query_entities = self._extract_entities(query)
         target_entities = entity_filter or query_entities
@@ -149,15 +147,7 @@ class EntityMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+        """Fetch by id, or scan items for the first ``limit`` matching ``filters``."""
 
         if memory_id:
             return self._index.get(memory_id)
@@ -180,14 +170,7 @@ class EntityMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str): IN: memory id. OUT: Consumed during execution.
-            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Apply ``updates`` to the item, re-indexing entities when content changes."""
 
         if memory_id not in self._index:
             return False
@@ -217,14 +200,11 @@ class EntityMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete.
+        """Remove the item with ``memory_id`` and unlink its entity mentions.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        Bulk filter-based deletion is not implemented; ``filters`` is
+        accepted for protocol compatibility but ignored. Returns 1 on
+        successful single delete, 0 otherwise."""
 
         count = 0
 
@@ -244,10 +224,7 @@ class EntityMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Drop every item, entity, relationship, and mention; purge storage entries."""
 
         self._items.clear()
         self._index.clear()
@@ -260,13 +237,7 @@ class EntityMemory(Memory):
                 self.storage.delete(key)
 
     def get_entity_info(self, entity: str) -> dict[str, Any]:
-        """Retrieve the entity info.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            entity (str): IN: entity. OUT: Consumed during execution.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Return a snapshot of ``entity``'s tracked metadata, mentions, and relations."""
 
         info = self.entities.get(entity, {})
         info["mentions"] = self.entity_mentions.get(entity, [])
@@ -282,14 +253,10 @@ class EntityMemory(Memory):
         return info
 
     def get_related_entities(self, entity: str, max_depth: int = 2) -> set[str]:
-        """Retrieve the related entities.
+        """Walk the relationship graph from ``entity`` up to ``max_depth`` hops.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            entity (str): IN: entity. OUT: Consumed during execution.
-            max_depth (int, optional): IN: max depth. Defaults to 2. OUT: Consumed during execution.
-        Returns:
-            set[str]: OUT: Result of the operation."""
+        Returns the set of entities reachable through any relationship
+        (in either direction), excluding ``entity`` itself."""
 
         related = set()
         to_explore = [(entity, 0)]
@@ -316,13 +283,7 @@ class EntityMemory(Memory):
         return related
 
     def _extract_entities(self, text: str) -> list[str]:
-        """Internal helper to extract entities.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Heuristic entity extraction: capitalised phrases + quoted strings."""
 
         entities = []
 
@@ -339,14 +300,10 @@ class EntityMemory(Memory):
         return entities
 
     def _extract_relationships(self, text: str, entities: list[str]) -> list[tuple[str, str, str]]:
-        """Internal helper to extract relationships.
+        """Match a handful of regex relationship templates over ``text``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-            entities (list[str]): IN: entities. OUT: Consumed during execution.
-        Returns:
-            list[tuple[str, str, str]]: OUT: Result of the operation."""
+        Returns ``(subject, relation, object)`` triples whose subject
+        and object both appear in ``entities``."""
 
         relationships = []
 
@@ -369,12 +326,7 @@ class EntityMemory(Memory):
         return relationships
 
     def _update_entity(self, entity: str, memory_item: MemoryItem) -> None:
-        """Internal helper to update entity.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            entity (str): IN: entity. OUT: Consumed during execution.
-            memory_item (MemoryItem): IN: memory item. OUT: Consumed during execution."""
+        """Increment the entity's frequency and append a context snippet."""
 
         if entity not in self.entities:
             self.entities[entity] = {"first_seen": memory_item.timestamp, "frequency": 0, "contexts": []}
@@ -385,10 +337,7 @@ class EntityMemory(Memory):
         self.entity_mentions[entity].append(memory_item.memory_id)
 
     def _save_entity_data(self) -> None:
-        """Internal helper to save entity data.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Persist the entity/relationship/mention tables to storage."""
 
         if self.storage:
             self.storage.save("_entity_entities", self.entities)

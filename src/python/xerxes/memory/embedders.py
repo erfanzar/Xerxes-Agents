@@ -11,19 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Embedders module for Xerxes.
+"""Pluggable text embedding backends used by retrieval and vector storage.
 
-Exports:
-    - logger
-    - Vector
-    - Embedder
-    - HashEmbedder
-    - SentenceTransformerEmbedder
-    - OpenAIEmbedder
-    - OllamaEmbedder
-    - get_default_embedder
-    - reset_default_embedder
-    - cosine_similarity"""
+Provides a small ``Embedder`` ABC with four concrete implementations:
+a dependency-free ``HashEmbedder`` (always available),
+``SentenceTransformerEmbedder`` (local CPU/GPU models),
+``OpenAIEmbedder`` (cloud), and ``OllamaEmbedder`` (local server).
+``get_default_embedder`` resolves one of these based on the
+``XERXES_EMBEDDER`` env var, then ``OPENAI_API_KEY``, then the
+presence of ``sentence_transformers``, falling back to hashing."""
 
 from __future__ import annotations
 
@@ -37,65 +33,43 @@ Vector = list[float]
 
 
 class Embedder(ABC):
-    """Embedder.
-
-    Inherits from: ABC
+    """Abstract text-to-vector encoder.
 
     Attributes:
-        name (str): name.
-        dim (int): dim."""
+        name: Short identifier used for diagnostics and dispatch.
+        dim: Embedding dimensionality; may be lazily set when the
+            underlying model is first loaded."""
 
     name: str = ""
     dim: int = 0
 
     @abstractmethod
     def embed(self, text: str) -> Vector:
-        """Embed.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            Vector: OUT: Result of the operation."""
+        """Encode ``text`` into a dense vector."""
         ...
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Embed batch.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
-        Returns:
-            list[Vector]: OUT: Result of the operation."""
+        """Encode a batch of texts; default implementation calls ``embed`` per item."""
 
         return [self.embed(t) for t in texts]
 
 
 class HashEmbedder(Embedder):
-    """Hash embedder.
+    """Dependency-free fallback embedder using hashed bag-of-words counts.
 
-    Inherits from: Embedder
-    """
+    Produces a normalised ``dim``-wide vector by hashing each token to
+    a bucket and accumulating uniform mass. Useful when no model is
+    installed and for deterministic tests."""
 
     name = "hash"
 
     def __init__(self, dim: int = 256) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            dim (int, optional): IN: dim. Defaults to 256. OUT: Consumed during execution."""
+        """Configure the output dimensionality."""
 
         self.dim = dim
 
     def embed(self, text: str) -> Vector:
-        """Embed.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            Vector: OUT: Result of the operation."""
+        """Return an L2-normalised hashed bag-of-words vector for ``text``."""
 
         tokens = text.lower().split()
         if not tokens:
@@ -112,28 +86,22 @@ class HashEmbedder(Embedder):
 
 
 class SentenceTransformerEmbedder(Embedder):
-    """Sentence transformer embedder.
+    """Wrapper around ``sentence-transformers`` models.
 
-    Inherits from: Embedder
-    """
+    The model is loaded lazily on the first call to ``embed`` or
+    ``embed_batch``; ``ImportError`` is raised with installation guidance
+    if the dependency is missing."""
 
     name = "sentence-transformers"
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model_name (str, optional): IN: model name. Defaults to 'all-MiniLM-L6-v2'. OUT: Consumed during execution."""
+        """Record the model name; defer loading until first use."""
 
         self.model_name = model_name
         self._model: tp.Any = None
 
     def _ensure_loaded(self) -> None:
-        """Internal helper to ensure loaded.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Lazily import sentence-transformers and load the configured model."""
 
         if self._model is not None:
             return
@@ -148,13 +116,7 @@ class SentenceTransformerEmbedder(Embedder):
         self.dim = int(self._model.get_sentence_embedding_dimension())
 
     def embed(self, text: str) -> Vector:
-        """Embed.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            Vector: OUT: Result of the operation."""
+        """Encode ``text`` via the loaded SentenceTransformer model."""
 
         self._ensure_loaded()
         if not text:
@@ -163,13 +125,7 @@ class SentenceTransformerEmbedder(Embedder):
         return vec.tolist()
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Embed batch.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
-        Returns:
-            list[Vector]: OUT: Result of the operation."""
+        """Encode ``texts`` in one model call for efficiency."""
 
         self._ensure_loaded()
         if not texts:
@@ -179,10 +135,11 @@ class SentenceTransformerEmbedder(Embedder):
 
 
 class OpenAIEmbedder(Embedder):
-    """Open aiembedder.
+    """Embedder backed by the OpenAI embeddings API.
 
-    Inherits from: Embedder
-    """
+    Reads ``OPENAI_API_KEY`` from the environment by default. ``dim``
+    is initially estimated from ``model_name`` and is updated to the
+    actual response width after the first successful call."""
 
     name = "openai"
 
@@ -192,13 +149,7 @@ class OpenAIEmbedder(Embedder):
         api_key: str | None = None,
         base_url: str | None = None,
     ) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model_name (str, optional): IN: model name. Defaults to 'text-embedding-3-small'. OUT: Consumed during execution.
-            api_key (str | None, optional): IN: api key. Defaults to None. OUT: Consumed during execution.
-            base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution."""
+        """Capture model name, API key (or env), and optional base URL override."""
 
         self.model_name = model_name
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -212,10 +163,11 @@ class OpenAIEmbedder(Embedder):
             self.dim = 1536
 
     def _ensure_client(self) -> None:
-        """Internal helper to ensure client.
+        """Lazily import the OpenAI SDK and construct the client.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Raises:
+            ImportError: ``openai`` is not installed.
+            RuntimeError: No API key is available."""
 
         if self._client is not None:
             return
@@ -231,13 +183,7 @@ class OpenAIEmbedder(Embedder):
         self._client = OpenAI(**kwargs)
 
     def embed(self, text: str) -> Vector:
-        """Embed.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            Vector: OUT: Result of the operation."""
+        """Request an embedding for ``text`` from the OpenAI API."""
 
         self._ensure_client()
         if not text:
@@ -248,13 +194,7 @@ class OpenAIEmbedder(Embedder):
         return vec
 
     def embed_batch(self, texts: tp.Sequence[str]) -> list[Vector]:
-        """Embed batch.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            texts (tp.Sequence[str]): IN: texts. OUT: Consumed during execution.
-        Returns:
-            list[Vector]: OUT: Result of the operation."""
+        """Request embeddings for ``texts`` in a single API call."""
 
         self._ensure_client()
         if not texts:
@@ -267,10 +207,10 @@ class OpenAIEmbedder(Embedder):
 
 
 class OllamaEmbedder(Embedder):
-    """Ollama embedder.
+    """Embedder backed by a local Ollama server.
 
-    Inherits from: Embedder
-    """
+    Targets ``OLLAMA_HOST`` (default ``http://localhost:11434``) and
+    requests embeddings from the ``/api/embeddings`` endpoint."""
 
     name = "ollama"
 
@@ -279,25 +219,17 @@ class OllamaEmbedder(Embedder):
         model_name: str = "nomic-embed-text",
         base_url: str | None = None,
     ) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model_name (str, optional): IN: model name. Defaults to 'nomic-embed-text'. OUT: Consumed during execution.
-            base_url (str | None, optional): IN: base url. Defaults to None. OUT: Consumed during execution."""
+        """Capture model name and Ollama base URL (defaults to env or localhost)."""
 
         self.model_name = model_name
         self.base_url = (base_url or os.environ.get("OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
         self.dim = 768
 
     def embed(self, text: str) -> Vector:
-        """Embed.
+        """POST to ``/api/embeddings`` and return the embedding list.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            Vector: OUT: Result of the operation."""
+        Raises:
+            ImportError: ``httpx`` is not installed."""
 
         if not text:
             return [0.0] * self.dim
@@ -321,10 +253,12 @@ _DEFAULT_CACHE: Embedder | None = None
 
 
 def get_default_embedder() -> Embedder:
-    """Retrieve the default embedder.
+    """Return a process-wide default embedder, constructing it on first use.
 
-    Returns:
-        Embedder: OUT: Result of the operation."""
+    Resolution order: ``XERXES_EMBEDDER`` env var (``hash``, ``openai``,
+    ``sentence-transformers``/``st``, ``ollama``), then ``OPENAI_API_KEY``,
+    then a locally installed ``sentence_transformers``, finally
+    ``HashEmbedder``."""
 
     global _DEFAULT_CACHE
     if _DEFAULT_CACHE is not None:
@@ -355,20 +289,19 @@ def get_default_embedder() -> Embedder:
 
 
 def reset_default_embedder() -> None:
-    """Reset default embedder."""
+    """Clear the cached default embedder so the next call re-resolves it.
+
+    Primarily used by tests that mutate ``XERXES_EMBEDDER`` between cases."""
 
     global _DEFAULT_CACHE
     _DEFAULT_CACHE = None
 
 
 def cosine_similarity(a: Vector, b: Vector) -> float:
-    """Cosine similarity.
+    """Compute cosine similarity between two equal-length vectors.
 
-    Args:
-        a (Vector): IN: a. OUT: Consumed during execution.
-        b (Vector): IN: b. OUT: Consumed during execution.
-    Returns:
-        float: OUT: Result of the operation."""
+    Returns ``0.0`` when the vectors have mismatched lengths or either
+    has zero norm."""
 
     if len(a) != len(b):
         return 0.0

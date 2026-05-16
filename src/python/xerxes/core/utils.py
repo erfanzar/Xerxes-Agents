@@ -11,11 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Core utility functions and base classes for Xerxes.
+"""Cross-cutting helpers: async/sync bridging, tool-schema reflection, token estimation.
 
-Provides ``run_sync`` for bridging async/sync code, ``XerxesBase`` as a
-strict Pydantic base model, ``function_to_json`` for OpenAI-compatible tool
-schema generation, and various text helpers.
+* :func:`run_sync` executes a coroutine from sync code, transparently spawning
+  a worker thread when a loop is already running.
+* :class:`XerxesBase` is the strict Pydantic v2 base used by data classes
+  across the codebase (``extra="forbid"``, ``validate_default=True``).
+* :func:`function_to_json` builds the OpenAI-compatible tool schema for any
+  Python callable by inspecting its signature, resolved type hints, and
+  Google-style docstring.
+* :func:`estimate_tokens` and :func:`estimate_messages_tokens` give the
+  cheap heuristic counts used when no provider tokenizer is available.
 """
 
 import asyncio
@@ -32,13 +38,11 @@ T = TypeVar("T")
 
 
 def run_sync(coro: Coroutine[Any, Any, T]) -> T:
-    """Run an async coroutine from synchronous code.
+    """Block until ``coro`` finishes, handling the nested-loop case.
 
-    Args:
-        coro (Coroutine[Any, Any, T]): IN: coroutine to execute.
-
-    Returns:
-        T: OUT: coroutine result.
+    When called outside any event loop, runs the coroutine directly via
+    :func:`asyncio.run`. When already inside a running loop, spawns a worker
+    thread with its own loop so we don't deadlock.
     """
     try:
         _loop = asyncio.get_running_loop()
@@ -53,18 +57,13 @@ def run_sync(coro: Coroutine[Any, Any, T]) -> T:
 
 
 class XerxesBase(BaseModel):
-    """Strict Pydantic base model used across Xerxes data classes."""
+    """Strict Pydantic base: forbids extra fields, validates defaults, uses enum values."""
 
     model_config = ConfigDict(extra="forbid", validate_default=True, use_enum_values=True)
 
 
 def debug_print(debug: bool, *args: str) -> None:
-    """Print a timestamped debug message when ``debug`` is enabled.
-
-    Args:
-        debug (bool): IN: whether to actually print.
-        *args (str): IN: message parts.
-    """
+    """Print ``args`` with an ANSI-coloured timestamp when ``debug`` is true."""
     if not debug:
         return
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -73,12 +72,7 @@ def debug_print(debug: bool, *args: str) -> None:
 
 
 def merge_fields(target: dict, source: dict) -> None:
-    """Recursively merge string or dict values from ``source`` into ``target``.
-
-    Args:
-        target (dict): IN: dictionary to mutate.
-        source (dict): IN: dictionary providing new values.
-    """
+    """Concatenate string fields and recurse into nested dicts; mutates ``target`` in place."""
     for key, value in source.items():
         if isinstance(value, str):
             target[key] += value
@@ -87,13 +81,7 @@ def merge_fields(target: dict, source: dict) -> None:
 
 
 def merge_chunk(final_response: dict, delta: dict) -> None:
-    """Merge a streaming delta chunk into an accumulating response dict.
-
-    Args:
-        final_response (dict): IN: accumulated response. OUT: mutated in
-            place with delta values merged.
-        delta (dict): IN: incremental chunk from the stream.
-    """
+    """Fold a streaming ``delta`` chunk (text and tool_calls) into the accumulator."""
     delta.pop("role", None)
     merge_fields(final_response, delta)
 
@@ -104,30 +92,14 @@ def merge_chunk(final_response: dict, delta: dict) -> None:
 
 
 def estimate_tokens(text: str, chars_per_token: float = 4.0) -> int:
-    """Estimate token count from character length.
-
-    Args:
-        text (str): IN: text to estimate.
-        chars_per_token (float): IN: average characters per token.
-            Defaults to 4.0.
-
-    Returns:
-        int: OUT: estimated token count (minimum 1 for non-empty text).
-    """
+    """Cheap heuristic token estimate from character length (≥ 1 for non-empty text)."""
     if not text:
         return 0
     return max(1, int(len(text) / chars_per_token))
 
 
 def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    """Estimate total tokens for a list of chat messages.
-
-    Args:
-        messages (list[dict[str, Any]]): IN: OpenAI-style message dicts.
-
-    Returns:
-        int: OUT: estimated token count.
-    """
+    """Sum :func:`estimate_tokens` over ``messages`` content with a 4-token per-message overhead."""
     total = 0
     for msg in messages:
         content = msg.get("content", "")
@@ -138,15 +110,7 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def get_callable_public_name(func: Callable[..., Any]) -> str:
-    """Return the public name for a callable.
-
-    Args:
-        func (Callable[..., Any]): IN: function or callable object.
-
-    Returns:
-        str: OUT: ``__xerxes_schema__['name']`` if available, otherwise
-        ``__name__`` or a string representation.
-    """
+    """Return the wire-facing name for ``func``: ``__xerxes_schema__['name']`` or ``__name__``."""
     schema = getattr(func, "__xerxes_schema__", None)
     if isinstance(schema, dict):
         name = schema.get("name")
@@ -156,17 +120,14 @@ def get_callable_public_name(func: Callable[..., Any]) -> str:
 
 
 def function_to_json(func: Callable[..., Any]) -> dict:
-    """Convert a Python callable to an OpenAI-compatible function JSON schema.
+    """Build an OpenAI-style ``{type:"function", function:{...}}`` schema for ``func``.
 
-    Args:
-        func (Callable[..., Any]): IN: function to describe.
-
-    Returns:
-        dict: OUT: JSON schema dict with ``type``, ``function.name``,
-        ``function.description``, and ``function.parameters``.
+    Parameter types are mapped from resolved type hints; descriptions come
+    from the function's Google-style ``Args:`` block. A ``__xerxes_schema__``
+    override (set by hand-tuned tools) wins over reflection.
 
     Raises:
-        ValueError: If the function signature cannot be inspected.
+        ValueError: When ``func``'s signature cannot be inspected.
     """
     schema = getattr(func, "__xerxes_schema__", None)
     custom_name = None

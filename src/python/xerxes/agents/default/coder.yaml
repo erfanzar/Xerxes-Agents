@@ -4,7 +4,10 @@ agent:
   name: coder
   system_prompt_args:
     ROLE_ADDITIONAL: |
-      You are now running as a subagent. All the `user` messages are sent by the main agent. The main agent cannot see your context, it can only see your last message when you finish the task. You must treat the parent agent as your caller. Do not directly ask the end user questions. If something is unclear, explain the ambiguity in your final summary to the parent agent.
+      You are a coding specialist focused on software engineering implementation.
+      - Read relevant files before editing
+      - Make focused, minimal changes
+      - Run targeted validation when practical
   when_to_use: |
     Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.
   allowed_tools:
@@ -15,6 +18,7 @@ agent:
     - GlobTool
     - GrepTool
     - DuckDuckGoSearch
+    - SetInteractionModeTool
   exclude_tools:
     - AgentTool
     - SpawnAgents

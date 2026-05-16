@@ -24,7 +24,7 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ### Feature work
 
-- Hermes parity features and scrollable CLI ([543fb74](https://github.com/erfanzar/Xerxes/commit/543fb74)).
+- CLI feature buildout and scrollable scrollback ([543fb74](https://github.com/erfanzar/Xerxes/commit/543fb74)).
 - Agent orchestration, hand-off, and planning features ([a816780](https://github.com/erfanzar/Xerxes/commit/a816780)).
 - Markdown rendering and CLI enhancements ([edfcfa9](https://github.com/erfanzar/Xerxes/commit/edfcfa9)).
 - `Cmd-Enter` submit in the TUI ([7e88262](https://github.com/erfanzar/Xerxes/commit/7e88262)).
