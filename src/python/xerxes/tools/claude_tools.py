@@ -1138,9 +1138,14 @@ def set_ask_user_question_callback(cb: Callable[[str], str] | None) -> None:
 
 
 class AskUserQuestionTool(AgentBaseFn):
-    """Ask a question to the human user.
+    """Ask a question to the human user; blocks until they answer in the TUI.
 
-    Pauses execution and waits for user input.
+    Always interactive — the daemon registers a callback at startup that
+    drives the TUI's :class:`QuestionRequestPanel`. If the callback is
+    somehow not wired (misconfigured host, broken bootstrap), the tool
+    returns a loud error instead of silently echoing the question back
+    to the model — the previous "non-interactive fallback" let real bugs
+    masquerade as features.
 
     Example:
         >>> AskUserQuestionTool.static_call(question="Should I proceed with deployment?")
@@ -1151,19 +1156,17 @@ class AskUserQuestionTool(AgentBaseFn):
         question: str,
         **context_variables,
     ) -> str:
-        """Ask the user a question.
-
-        Args:
-            question: The question to ask.
-            **context_variables: Additional context passed through to downstream calls.
-
-        Returns:
-            User's response or the question itself in non-interactive mode.
-        """
+        """Block on the user's answer and return it as text."""
         global _ask_user_question_callback
-        if _ask_user_question_callback is not None:
-            return _ask_user_question_callback(question)
-        return f"[AskUserQuestion] {question}\n(Waiting for user response — in non-interactive mode, this returns the question itself.)"
+        # The daemon installs the callback at startup; in any sane process
+        # this is non-None by the time a tool can dispatch. If it's missing
+        # we raise instead of fabricating an answer — the LLM would otherwise
+        # read the fake string back as if the user had typed it.
+        if _ask_user_question_callback is None:
+            raise RuntimeError(
+                "AskUserQuestion callback was never registered; daemon bootstrap is broken"
+            )
+        return _ask_user_question_callback(question)
 
 
 class EnterPlanModeTool(AgentBaseFn):

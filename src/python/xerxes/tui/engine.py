@@ -95,7 +95,7 @@ class BridgeClient:
 
         config = load_config()
         socket_path = Path(config.socket_path).expanduser()
-        required_protocol = 34
+        required_protocol = 35
         if self._daemon_protocol(socket_path) < required_protocol:
             self._stop_stale_daemon(Path(config.pid_file).expanduser(), socket_path)
         if not self._connect_socket(socket_path):
