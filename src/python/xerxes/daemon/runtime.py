@@ -581,6 +581,12 @@ class TurnRunner:
         self._pool = ThreadPoolExecutor(max_workers=max(1, max_workers))
         self._permission_lock = threading.Lock()
         self._permission_waiters: dict[str, queue.Queue[str]] = {}
+        # Mirror of ``_permission_waiters`` for the interactive
+        # ``AskUserQuestionTool``. The tool runs synchronously inside the
+        # worker thread, so we need a thread-safe ``Queue`` to park it on
+        # while the asyncio dispatcher routes the TUI's reply back.
+        self._question_lock = threading.Lock()
+        self._question_waiters: dict[str, queue.Queue[str]] = {}
         self._session_approvals: dict[str, set[str]] = {}
         self._subagent_buffer_lock = threading.Lock()
         self._subagent_parent_tool: dict[str, str] = {}
@@ -603,6 +609,89 @@ class TurnRunner:
         sink = self._event_sink
         if sink is not None:
             self._emit_subagent_summary(event_type, data, sink)
+
+    def ask_user_question(self, question: str) -> str:
+        """Blocking ``AskUserQuestionTool`` callback — drives the TUI question panel.
+
+        Runs on the worker thread that's executing the tool. Generates a
+        request id, emits a ``question_request`` wire event through the
+        installed sink (the daemon broadcasts it to every connected
+        client), then parks on a thread-safe queue until the asyncio
+        dispatcher delivers the answer via :meth:`respond_question`. The
+        active session's cancel flag is polled so a ``/cancel`` mid-question
+        unblocks us with ``[cancelled]`` instead of stranding the turn.
+
+        Returns the user's answer (multiple answers joined by newlines) or
+        a sentinel string when no client is connected / cancel was
+        requested. Never raises — failure modes degrade to the same
+        non-interactive fallback as the original tool.
+        """
+        from ..runtime.session_context import get_active_session
+
+        # ``set_event_sink`` is called during ``DaemonServer.run()`` before
+        # any turn can dispatch a tool, so the sink is reliably present
+        # whenever this method runs from the live daemon. The previous
+        # "no sink → fake answer" fallback masked real misconfiguration;
+        # if the sink were ever ``None`` here in production we'd rather
+        # see the resulting NoneType crash and a stack trace than a
+        # silent hallucinated answer.
+        sink = self._event_sink
+        if sink is None:
+            raise RuntimeError("TurnRunner.ask_user_question called before event sink installed")
+
+        request_id = uuid.uuid4().hex[:12]
+        waiter: queue.Queue[str] = queue.Queue()
+        with self._question_lock:
+            self._question_waiters[request_id] = waiter
+        try:
+            sink(
+                "question_request",
+                {
+                    "id": request_id,
+                    "tool_call_id": self._current_tool_call_id,
+                    "questions": [
+                        {
+                            "id": "q",
+                            "question": question,
+                            "options": [],
+                            "allow_free_form": True,
+                        }
+                    ],
+                },
+            )
+            session = get_active_session()
+            # Poll with a short timeout so a turn cancel can unblock us
+            # without leaving a dangling waiter for hours.
+            while True:
+                if session is not None and getattr(session, "cancel_requested", False):
+                    return "[cancelled]"
+                try:
+                    return waiter.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+        finally:
+            with self._question_lock:
+                self._question_waiters.pop(request_id, None)
+
+    async def respond_question(self, request_id: str, answers: dict[str, str] | str | None) -> bool:
+        """Deliver the TUI's answer to a parked ``ask_user_question`` waiter.
+
+        Accepts the per-question-id dict the TUI's ``QuestionRequestPanel``
+        sends, a bare string for free-form answers, or ``None`` (treated
+        as an empty answer). Returns ``False`` when the request id is
+        unknown — typically because the user answered after the turn was
+        cancelled, in which case the wait has already returned.
+        """
+        with self._question_lock:
+            waiter = self._question_waiters.get(request_id)
+        if waiter is None:
+            return False
+        if isinstance(answers, dict):
+            joined = "\n".join(str(v) for v in answers.values() if v is not None)
+        else:
+            joined = str(answers or "")
+        waiter.put_nowait(joined)
+        return True
 
     async def respond_permission(self, request_id: str, response: str) -> bool:
         """Resolve a pending permission prompt with the TUI's answer."""

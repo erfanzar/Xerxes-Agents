@@ -41,7 +41,7 @@ MIGRATED_ERROR = (
     "Old daemon task API was removed; use session.open, turn.submit, turn.cancel, session.list, and runtime.status."
 )
 DAEMON_PROTOCOL_VERSION = (
-    34  # bumped: assistant tool_call messages now carry reasoning_content (fixes Kimi 400 on next turn)
+    35  # bumped: AskUserQuestionTool now drives the TUI panel via TurnRunner.ask_user_question
 )
 
 
@@ -155,6 +155,16 @@ class DaemonServer:
         # Active ``/provider`` interactive panel state (``main``/``add``/
         # ``edit``/``remove`` step). Resolved by ``question_response``.
         self._provider_flow: dict[str, Any] | None = None
+
+        # Hook ``AskUserQuestionTool`` to the live TurnRunner so a tool
+        # call from inside any agent turn lights up the TUI's interactive
+        # question panel instead of dumping the question text as
+        # non-interactive fallback. The callback runs on the tool's worker
+        # thread; the TUI's eventual ``question_response`` RPC unblocks
+        # it via :meth:`TurnRunner.respond_question`.
+        from ..tools.claude_tools import set_ask_user_question_callback
+
+        set_ask_user_question_callback(self.turns.ask_user_question)
 
     async def run(self) -> None:
         """Start every transport and block until :meth:`shutdown` is invoked.
@@ -318,6 +328,12 @@ class DaemonServer:
             flow = self._provider_flow
             if flow is not None and flow.get("request_id") == rid:
                 await self._advance_provider_flow(answers, emit)
+            else:
+                # Fall through to the general-purpose waiter used by the
+                # ``AskUserQuestionTool`` callback. ``False`` means the
+                # request id was unknown (e.g. the turn was already
+                # cancelled) — fine, drop silently.
+                await self.turns.respond_question(rid, answers)
             return {"ok": True}
         if method == "fetch_models":
             return self._fetch_models(params)
