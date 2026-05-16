@@ -1367,32 +1367,24 @@ Ensure your response is valid JSON that can be parsed directly.
         return self.config.get(key, default)
 
     def set_step_callback(self, callback: Callable):
-        """Register a callback for execution step events.
+        """Register a callback invoked at each ``execute`` lifecycle event.
 
-        Args:
-            callback (Callable): A function accepting a step info dict.
-                IN: Stored in ``self.step_callback``.
-                OUT: Invoked during ``execute`` at key lifecycle points.
+        The callback receives a dict describing the current step (start,
+        retry, complete or error).
         """
 
         self.step_callback = callback
 
     def is_rate_limited(self) -> bool:
-        """Check whether the agent is currently rate limited.
-
-        Returns:
-            bool: ``True`` if the rate limit is active.
-                OUT: Negated result of ``_check_rate_limit``.
-        """
+        """Return ``True`` if the agent's RPM window is currently saturated."""
 
         return not self._check_rate_limit()
 
     def get_rate_limit_status(self) -> dict:
-        """Return detailed rate limit status.
+        """Return a wire dict describing the current RPM bucket.
 
-        Returns:
-            dict: Contains ``rate_limited``, ``max_rpm``, ``current_requests``,
-                and ``requests_remaining``. OUT: Empty status if ``max_rpm`` is ``None``.
+        When ``max_rpm`` is unset only the ``rate_limited`` and ``max_rpm``
+        fields are populated.
         """
 
         if not self.max_rpm:
@@ -1409,17 +1401,7 @@ Ensure your response is valid JSON that can be parsed directly.
         }
 
     def __eq__(self, other: object) -> bool:
-        """Compare two ``CortexAgent`` instances by identity fields.
-
-        Args:
-            other (object): The object to compare against.
-                IN: Checked for type and field equality.
-                OUT: Compared on ``role``, ``goal``, ``backstory``, and ``model``.
-
-        Returns:
-            bool: ``True`` if the agents are equivalent.
-                OUT: ``False`` for non-``CortexAgent`` objects.
-        """
+        """Compare agents on ``role``, ``goal``, ``backstory`` and ``model``."""
 
         if not isinstance(other, CortexAgent):
             return False
@@ -1431,12 +1413,7 @@ Ensure your response is valid JSON that can be parsed directly.
         )
 
     def __hash__(self) -> int:
-        """Compute a hash from the agent's identity fields.
-
-        Returns:
-            int: A stable hash derived from ``role``, ``goal``, ``backstory``,
-                and ``model``. OUT: Used for set membership and deduplication.
-        """
+        """Return a SHA-256-derived hash of the agent's identity fields."""
 
         identity_str = f"{self.role}|{self.goal}|{self.backstory}|{self.model or 'default'}"
 

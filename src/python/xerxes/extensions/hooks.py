@@ -56,19 +56,14 @@ class HookRunner:
         self._hooks: dict[str, list[HookCallback]] = {name: [] for name in HOOK_POINTS}
 
     def register(self, hook_point: str, callback: HookCallback) -> None:
-        """Add a callback to a hook point.
+        """Append ``callback`` to the list for ``hook_point``.
 
         Args:
-            hook_point (str): IN: Name from ``HOOK_POINTS``. OUT: Validates
-                membership and appends ``callback``.
-            callback (HookCallback): IN: Callable to invoke. OUT: Stored in
-                the internal list.
-
-        Returns:
-            None: OUT: Callback is registered.
+            hook_point: Hook name; must be a member of ``HOOK_POINTS``.
+            callback: Callable to invoke when the hook fires.
 
         Raises:
-            ValueError: OUT: If ``hook_point`` is not in ``HOOK_POINTS``.
+            ValueError: ``hook_point`` is not a known hook.
         """
 
         if hook_point not in HOOK_POINTS:
@@ -81,16 +76,14 @@ class HookRunner:
         )
 
     def unregister(self, hook_point: str, callback: HookCallback) -> bool:
-        """Remove a previously registered callback.
+        """Remove ``callback`` from ``hook_point``.
 
         Args:
-            hook_point (str): IN: Hook point name. OUT: Looked up in the
-                registry.
-            callback (HookCallback): IN: Exact callable to remove. OUT:
-                Removed by identity from the list.
+            hook_point: Hook name to mutate.
+            callback: Exact callable to drop (compared by identity).
 
         Returns:
-            bool: OUT: ``True`` if the callback was found and removed.
+            True if the callback was found and removed.
         """
 
         if hook_point not in self._hooks:
@@ -102,14 +95,10 @@ class HookRunner:
             return False
 
     def clear(self, hook_point: str | None = None) -> None:
-        """Remove all callbacks, globally or for a specific hook point.
+        """Drop callbacks for one hook point, or all of them.
 
         Args:
-            hook_point (str | None): IN: Specific hook to clear, or ``None``
-                for all. OUT: Empties the selected list(s).
-
-        Returns:
-            None: OUT: Selected callbacks are removed.
+            hook_point: Specific hook to clear; clears every hook when ``None``.
         """
 
         if hook_point:
@@ -118,17 +107,15 @@ class HookRunner:
             self._hooks = {name: [] for name in HOOK_POINTS}
 
     def run(self, hook_point: str, **kwargs) -> tp.Any:
-        """Execute callbacks for a hook point.
+        """Fire ``hook_point`` and return the aggregated result.
+
+        Mutation hooks (``before_tool_call``, ``after_tool_call``,
+        ``tool_result_persist``) thread a single value through callbacks.
+        Observation hooks return the list of non-``None`` results.
 
         Args:
-            hook_point (str): IN: Name of the hook to fire. OUT: Determines
-                mutation vs observation behaviour.
-            **kwargs: IN: Keyword arguments forwarded to each callback. OUT:
-                May be mutated for mutation hooks.
-
-        Returns:
-            tp.Any: OUT: Mutated value for mutation hooks, or list of results
-            for observation hooks.
+            hook_point: Hook name to fire.
+            **kwargs: Forwarded verbatim to each callback.
         """
 
         callbacks = self._hooks.get(hook_point, [])
@@ -141,19 +128,7 @@ class HookRunner:
             return self._run_observation(hook_point, callbacks, **kwargs)
 
     def _run_mutation(self, hook_point: str, callbacks: list[HookCallback], **kwargs) -> tp.Any:
-        """Run mutation hooks, allowing each callback to replace a value.
-
-        Args:
-            hook_point (str): IN: Hook name. OUT: Selects whether
-                ``arguments`` or ``result`` is the mutable key.
-            callbacks (list[HookCallback]): IN: Registered mutators. OUT:
-                Invoked sequentially; non-``None`` returns replace the current
-                value.
-            **kwargs: IN: Arguments / result dict. OUT: Mutated in place.
-
-        Returns:
-            tp.Any: OUT: Final mutated value.
-        """
+        """Thread ``arguments`` or ``result`` through every mutation callback."""
 
         if hook_point == "before_tool_call":
             mutated_key = "arguments"
@@ -172,17 +147,7 @@ class HookRunner:
         return current
 
     def _run_observation(self, hook_point: str, callbacks: list[HookCallback], **kwargs) -> list[tp.Any]:
-        """Run observation hooks, collecting non-``None`` return values.
-
-        Args:
-            hook_point (str): IN: Hook name. OUT: Used only for logging.
-            callbacks (list[HookCallback]): IN: Registered observers. OUT:
-                Invoked sequentially.
-            **kwargs: IN: Forwarded to each callback. OUT: Unchanged.
-
-        Returns:
-            list[tp.Any]: OUT: List of non-``None`` results from callbacks.
-        """
+        """Invoke each observer and collect non-``None`` results."""
 
         results = []
         for cb in callbacks:
@@ -195,14 +160,6 @@ class HookRunner:
         return results
 
     def has_hooks(self, hook_point: str) -> bool:
-        """Return whether any callbacks are registered for a hook point.
-
-        Args:
-            hook_point (str): IN: Hook name to query. OUT: Checked against the
-                internal registry.
-
-        Returns:
-            bool: OUT: ``True`` if at least one callback exists.
-        """
+        """Return ``True`` if at least one callback is registered for ``hook_point``."""
 
         return bool(self._hooks.get(hook_point))

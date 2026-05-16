@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Public surface of the Xerxes memory subsystem.
+
+Re-exports the four memory tiers (short-term, long-term, entity, user),
+their storage and embedder backends, the hybrid retriever, the
+``MemoryItem`` value type, the user profile store, the turn-indexer
+hook factory, and legacy compatibility aliases (``MemoryStore``,
+``MemoryEntry``, ``MemoryType``)."""
 
 from .base import Memory, MemoryItem
 from .compat import MemoryEntry, MemoryStore, MemoryType

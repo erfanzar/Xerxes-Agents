@@ -13,8 +13,12 @@
 # limitations under the License.
 """Email (SMTP) channel adapter.
 
-Supports sending outbound email via SMTP and parsing inbound email
-webhook payloads.
+Outbound: sends ``text/plain`` messages via ``smtplib`` (with optional
+STARTTLS+AUTH when credentials are supplied) or through an injected
+``smtp_sender`` callable for tests. Inbound: parses an existing
+mail-to-webhook bridge's JSON payload — the module does *not* run an
+IMAP poller, despite the filename. Subjects come in via
+``metadata['subject']``.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class EmailChannel(WebhookChannel):
-    """Channel implementation for email via SMTP."""
+    """SMTP-out / webhook-in email adapter."""
 
     name = "email"
 
@@ -43,20 +47,19 @@ class EmailChannel(WebhookChannel):
         *,
         smtp_sender: tp.Callable[[str, str, str, str], None] | None = None,
     ) -> None:
-        """Initialize the Email channel.
+        """Build the channel.
 
         Args:
-            smtp_host (str): IN: SMTP server hostname. Defaults to "localhost".
-                OUT: stored for outbound connections.
-            smtp_port (int): IN: SMTP server port. Defaults to 25.
-                OUT: stored for outbound connections.
-            smtp_user (str): IN: SMTP username. OUT: used for authentication.
-            smtp_password (str): IN: SMTP password. OUT: used for authentication.
-            from_address (str): IN: sender email address. Defaults to
-                ``smtp_user`` if not provided.
-            smtp_sender (Callable | None): IN: optional callable
-                ``(from_addr, to_addr, subject, body) -> None`` that bypasses
-                the built-in smtplib logic.
+            smtp_host: SMTP server hostname. Defaults to ``"localhost"``.
+            smtp_port: SMTP server port. Defaults to 25.
+            smtp_user: SMTP username. Triggers STARTTLS+AUTH on send.
+            smtp_password: SMTP password.
+            from_address: Envelope ``From`` and ``From:`` header. Falls
+                back to ``smtp_user`` when empty.
+            smtp_sender: Optional callable
+                ``(from_addr, to_addr, subject, body) → None`` that
+                bypasses ``smtplib``. Used by tests and by deployments
+                that want to plug in a custom mailer.
         """
         super().__init__()
         self.smtp_host = smtp_host
@@ -67,14 +70,19 @@ class EmailChannel(WebhookChannel):
         self._smtp_sender = smtp_sender
 
     def _parse_inbound(self, headers, body):
-        """Parse an email webhook payload into ``ChannelMessage``.
+        """Translate an email-bridge webhook payload into ``ChannelMessage``.
+
+        Expects a JSON shape like ``{"from": ..., "to": ..., "subject": ...,
+        "text": ..., "html": ..., "message_id": ...}`` produced by services
+        such as Mailgun routes or Postmark inbound. Prefers ``text``; falls
+        back to ``html`` when only an HTML body is provided.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed message, or empty when the payload is empty.
         """
         data = parse_json_body(body)
         if not data:
@@ -92,15 +100,20 @@ class EmailChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send an email message via SMTP.
+        """Send one email — via ``smtp_sender`` when set, otherwise ``smtplib``.
+
+        When ``smtp_user`` is non-empty the SMTP path attempts STARTTLS
+        (best-effort, ignored on failure) and authenticates before
+        ``send_message``. If ``smtplib`` is unavailable the call logs a
+        warning and returns without sending.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` or
-                ``channel_user_id`` is used as the recipient, ``text`` as the
-                body, and ``metadata["subject"]`` as the subject.
+            message: Outbound message. ``room_id`` or ``channel_user_id``
+                is the recipient; ``text`` is the body; subject comes from
+                ``metadata['subject']`` (defaults to ``"Re:"``).
 
         Raises:
-            ValueError: If neither ``room_id`` nor ``channel_user_id`` is set.
+            ValueError: Neither ``room_id`` nor ``channel_user_id`` is set.
         """
         to_addr = message.room_id or message.channel_user_id
         if not to_addr:

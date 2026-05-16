@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prompt scanner module for Xerxes.
+"""Static prompt-injection scanner for context files.
 
-Exports:
-    - logger
-    - scan_context_content
-    - scan_context_file"""
+When the user (or a tool) pulls external content into the model's
+context, that content can carry adversarial instructions —
+"ignore previous instructions", base64-wrapped curl payloads, hidden
+HTML, zero-width characters. This module runs a small set of regex
+and unicode checks; matched content is replaced with a ``[BLOCKED:
+...]`` placeholder so the model never sees the payload. The checks
+are cheap, deterministic and best-effort: they catch unsophisticated
+injections, not a targeted attacker."""
 
 from __future__ import annotations
 
@@ -74,29 +78,15 @@ _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
 
 
 def scan_context_content(content: str, filename: str = "unknown") -> str:
-    """Scan context content.
+    """Return ``content`` unchanged, or a ``[BLOCKED: ...]`` placeholder.
 
-    Args:
-        content (str): IN: content. OUT: Consumed during execution.
-        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Runs every compiled threat pattern and checks for known invisible
+    unicode codepoints. If any rule matches, the original content is
+    discarded and replaced with a short marker naming the matched
+    pattern ids. ``filename`` only appears in log messages and the
+    placeholder string."""
 
     findings: list[str] = []
-    """Scan context content.
-
-    Args:
-        content (str): IN: content. OUT: Consumed during execution.
-        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
-    """Scan context content.
-
-    Args:
-        content (str): IN: content. OUT: Consumed during execution.
-        filename (str, optional): IN: filename. Defaults to 'unknown'. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
 
     for char in _CONTEXT_INVISIBLE_CHARS:
         if char in content:
@@ -114,30 +104,13 @@ def scan_context_content(content: str, filename: str = "unknown") -> str:
 
 
 def scan_context_file(path: str | os.PathLike[str], filename: str | None = None) -> str:
-    """Scan context file.
+    """Read ``path`` as UTF-8 and pass through :func:`scan_context_content`.
 
-    Args:
-        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
-        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    Unreadable files produce a ``[BLOCKED: ... unreadable ...]`` placeholder
+    rather than propagating the IO error, so a single bad file cannot
+    cancel the surrounding context-load pipeline."""
 
     from pathlib import Path
-
-    """Scan context file.
-
-    Args:
-        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
-        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
-    """Scan context file.
-
-    Args:
-        path (str | os.PathLike[str]): IN: path. OUT: Consumed during execution.
-        filename (str | None, optional): IN: filename. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
 
     p = Path(path)
     name = filename or p.name

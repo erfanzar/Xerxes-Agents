@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transcript module for Xerxes.
+"""In-memory transcript store backing every :class:`QueryEngine` session.
 
-Exports:
-    - TranscriptEntry
-    - TranscriptStore"""
+:class:`TranscriptEntry` holds one role/content/metadata triple; :class:`TranscriptStore`
+keeps the ordered list plus compaction helpers that the query engine uses
+when ``compact_after_turns`` is exceeded. The store is also serialised in
+``QueryEngine.to_dict`` and converted to provider message dicts via
+:meth:`TranscriptStore.to_messages`.
+"""
 
 from __future__ import annotations
 
@@ -26,13 +29,16 @@ from typing import Any
 
 @dataclass
 class TranscriptEntry:
-    """Transcript entry.
+    """One message in the transcript.
 
     Attributes:
-        role (str): role.
-        content (str): content.
-        timestamp (str): timestamp.
-        metadata (dict[str, Any]): metadata."""
+        role: Conversational role (``"user"``, ``"assistant"``, ``"system"``,
+            ``"tool"``).
+        content: Rendered text content of the message.
+        timestamp: ISO-8601 timestamp captured when the entry was constructed.
+        metadata: Provider-specific extras (tool call ids, attachments, etc.)
+            merged into the message dict by :meth:`TranscriptStore.to_messages`.
+    """
 
     role: str
     content: str
@@ -42,47 +48,34 @@ class TranscriptEntry:
 
 @dataclass
 class TranscriptStore:
-    """Transcript store.
+    """Ordered list of :class:`TranscriptEntry` records with compaction helpers.
 
     Attributes:
-        entries (list[TranscriptEntry]): entries.
-        flushed (bool): flushed.
-        compaction_count (int): compaction count."""
+        entries: All messages in chronological order.
+        flushed: Whether the store has been persisted since its last write.
+        compaction_count: Number of times a compaction routine has run.
+    """
 
     entries: list[TranscriptEntry] = field(default_factory=list)
     flushed: bool = False
     compaction_count: int = 0
 
     def append(self, role: str, content: str, **metadata: Any) -> None:
-        """Append.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            role (str): IN: role. OUT: Consumed during execution.
-            content (str): IN: content. OUT: Consumed during execution.
-            **metadata: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
-
+        """Append a new entry built from ``role``, ``content`` and ``metadata``."""
         self.entries.append(TranscriptEntry(role=role, content=content, metadata=metadata))
         self.flushed = False
 
     def append_entry(self, entry: TranscriptEntry) -> None:
-        """Append entry.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            entry (TranscriptEntry): IN: entry. OUT: Consumed during execution."""
-
+        """Append an already-constructed :class:`TranscriptEntry`."""
         self.entries.append(entry)
         self.flushed = False
 
     def compact(self, keep_last: int = 10) -> int:
-        """Compact.
+        """Drop everything except the last ``keep_last`` entries.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            keep_last (int, optional): IN: keep last. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        Returns the number of entries removed (zero when no compaction was
+        necessary). Increments :attr:`compaction_count` on a non-empty drop.
+        """
 
         if len(self.entries) <= keep_last:
             return 0
@@ -92,14 +85,17 @@ class TranscriptStore:
         return removed
 
     def compact_with_summary(self, keep_last: int = 10, summarizer: Any = None) -> int:
-        """Compact with summary.
+        """Compact while preserving a synthesised summary of the dropped span.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            keep_last (int, optional): IN: keep last. Defaults to 10. OUT: Consumed during execution.
-            summarizer (Any, optional): IN: summarizer. Defaults to None. OUT: Consumed during execution.
+            keep_last: Number of most-recent entries kept verbatim.
+            summarizer: Optional callable ``(entries) -> str`` invoked on the
+                slice that would otherwise be discarded. The returned text is
+                prepended to the surviving entries as a system message.
+
         Returns:
-            int: OUT: Result of the operation."""
+            The number of entries that were summarised away.
+        """
 
         if len(self.entries) <= keep_last:
             return 0
@@ -120,22 +116,15 @@ class TranscriptStore:
         return removed
 
     def replay(self) -> tuple[TranscriptEntry, ...]:
-        """Replay.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tuple[TranscriptEntry, ...]: OUT: Result of the operation."""
-
+        """Return an immutable snapshot of every stored entry, in order."""
         return tuple(self.entries)
 
     def to_messages(self) -> list[dict[str, Any]]:
-        """To messages.
+        """Render entries as provider-style ``{"role", "content", ...}`` dicts.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+        Metadata fields are merged onto each dict so tool-call ids and other
+        provider-specific keys round-trip back into the streaming loop.
+        """
 
         messages = []
         for entry in self.entries:
@@ -145,51 +134,26 @@ class TranscriptStore:
         return messages
 
     def flush(self) -> None:
-        """Flush.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Mark the in-memory store as persisted by the caller."""
         self.flushed = True
 
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Drop every entry and reset the flushed flag."""
         self.entries.clear()
         self.flushed = False
 
     @property
     def turn_count(self) -> int:
-        """Return Turn count.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
-
+        """Number of user turns (entries with ``role == "user"``)."""
         return sum(1 for e in self.entries if e.role == "user")
 
     @property
     def message_count(self) -> int:
-        """Return Message count.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
-
+        """Total stored entries regardless of role."""
         return len(self.entries)
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the transcript as a truncated Markdown bullet list."""
 
         lines = ["# Transcript", "", f"Messages: {self.message_count}", ""]
         for entry in self.entries:

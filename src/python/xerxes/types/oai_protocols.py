@@ -11,20 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Oai protocols module for Xerxes.
+"""Pydantic models for the OpenAI-compatible HTTP API surface.
 
-Exports:
-    - OpenAIBaseModel
-    - ChatMessage
-    - DeltaMessage
-    - Function
-    - Tool
-    - DeltaFunctionCall
-    - DeltaToolCall
-    - UsageInfo
-    - FunctionDefinition
-    - ToolDefinition
-    - ... and 16 more."""
+These models back the OpenAI-compatible endpoints (chat completions,
+completions, token counting) the bridge and gateway expose. They accept
+unknown fields via ``extra="allow"`` so forward-compatible clients can pass
+additional parameters without failing validation.
+"""
 
 import time
 import typing as tp
@@ -35,17 +28,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIBaseModel(BaseModel):
-    """Extended BaseModel for OpenAI-compatible protocol objects.
+    """Pydantic base for OpenAI-compatible protocol objects.
 
-    Allows extra fields via ``model_config`` and tracks declared field names
-    as a class variable for validation.
+    Permits unknown fields and lazily caches the set of declared field
+    names (plus aliases) on first validation so request handlers can do quick
+    membership checks without re-introspecting the model.
 
     Attributes:
-        field_names: Cached set of declared field names (including aliases) for
-            this class. Lazily populated on first validation.
-
-    Inherits from:
-        BaseModel: Pydantic base for serialization and validation.
+        field_names: Cached set of declared field names plus aliases. Populated
+            on first call to the wrapping model validator.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -54,7 +45,11 @@ class OpenAIBaseModel(BaseModel):
     @model_validator(mode="wrap")
     @classmethod
     def __log_extra_fields__(cls, data, handler):
-        """Validate and normalize input data, building the field-names cache if needed."""
+        """Validate and populate :attr:`field_names` from ``model_fields`` once.
+
+        Returns the handler-validated result unchanged; the side effect is the
+        first-call population of the class-level ``field_names`` cache.
+        """
         result = handler(data)
         if not isinstance(data, dict):
             return result
@@ -70,15 +65,15 @@ class OpenAIBaseModel(BaseModel):
 
 
 class ChatMessage(OpenAIBaseModel):
-    """Chat message.
-
-    Inherits from: OpenAIBaseModel
+    """One message in an OpenAI chat-completions ``messages`` array.
 
     Attributes:
-        role (str): role.
-        content (str | list[tp.Mapping[str, str]]): content.
-        name (str | None): name.
-        function_call (dict[str, tp.Any] | None): function call."""
+        role: Role discriminator (``system`` / ``user`` / ``assistant`` /
+            ``tool`` / ``function``).
+        content: Plain text or a list of structured content parts.
+        name: Optional speaker name (used by function-style messages).
+        function_call: Optional legacy ``function_call`` payload.
+    """
 
     role: str
     content: str | list[tp.Mapping[str, str]]
@@ -87,14 +82,13 @@ class ChatMessage(OpenAIBaseModel):
 
 
 class DeltaMessage(OpenAIBaseModel):
-    """Delta message.
-
-    Inherits from: OpenAIBaseModel
+    """Streamed partial message delta in a chat-completion chunk.
 
     Attributes:
-        role (str | None): role.
-        content (str | list[tp.Mapping[str, str]] | None): content.
-        function_call (dict[str, tp.Any] | None): function call."""
+        role: Role for the first chunk; ``None`` thereafter.
+        content: Incremental text fragment or structured parts.
+        function_call: Streamed legacy ``function_call`` payload.
+    """
 
     role: str | None = None
     content: str | list[tp.Mapping[str, str]] | None = None
@@ -102,14 +96,13 @@ class DeltaMessage(OpenAIBaseModel):
 
 
 class Function(OpenAIBaseModel):
-    """Function.
-
-    Inherits from: OpenAIBaseModel
+    """OpenAI legacy ``function`` definition.
 
     Attributes:
-        name (str): name.
-        description (str | None): description.
-        parameters (dict[str, tp.Any]): parameters."""
+        name: Function identifier.
+        description: Human-readable summary.
+        parameters: JSON-schema dict describing the arguments.
+    """
 
     name: str
     description: str | None = None
@@ -117,41 +110,38 @@ class Function(OpenAIBaseModel):
 
 
 class Tool(OpenAIBaseModel):
-    """Tool.
-
-    Inherits from: OpenAIBaseModel
+    """OpenAI ``tool`` definition wrapping a :class:`Function`.
 
     Attributes:
-        type (str): type.
-        function (Function): function."""
+        type: Tool kind discriminator; always ``"function"`` today.
+        function: The wrapped function definition.
+    """
 
     type: str = "function"
     function: Function
 
 
 class DeltaFunctionCall(OpenAIBaseModel):
-    """Delta function call.
-
-    Inherits from: OpenAIBaseModel
+    """Streamed delta for a function-call payload.
 
     Attributes:
-        name (str | None): name.
-        arguments (str | None): arguments."""
+        name: Function name fragment (typically only in the first chunk).
+        arguments: Incremental JSON-argument fragment.
+    """
 
     name: str | None = None
     arguments: str | None = None
 
 
 class DeltaToolCall(OpenAIBaseModel):
-    """Delta tool call.
-
-    Inherits from: OpenAIBaseModel
+    """Streamed delta for one entry of the ``tool_calls`` list.
 
     Attributes:
-        id (str | None): id.
-        type (tp.Literal['function'] | None): type.
-        index (int): index.
-        function (DeltaFunctionCall | None): function."""
+        id: Tool-call id (first chunk only).
+        type: Tool kind; always ``"function"`` today.
+        index: Position in the ``tool_calls`` array; used to merge deltas.
+        function: Function-call delta payload.
+    """
 
     id: str | None = None
     type: tp.Literal["function"] | None = None
@@ -160,16 +150,15 @@ class DeltaToolCall(OpenAIBaseModel):
 
 
 class UsageInfo(OpenAIBaseModel):
-    """Usage info.
-
-    Inherits from: OpenAIBaseModel
+    """Token usage and timing report.
 
     Attributes:
-        prompt_tokens (int): prompt tokens.
-        completion_tokens (int | None): completion tokens.
-        total_tokens (int): total tokens.
-        tokens_per_second (float): tokens per second.
-        processing_time (float): processing time."""
+        prompt_tokens: Tokens consumed by the prompt.
+        completion_tokens: Tokens emitted in the completion.
+        total_tokens: Sum of prompt and completion tokens.
+        tokens_per_second: Observed throughput.
+        processing_time: Total wall-clock processing time in seconds.
+    """
 
     prompt_tokens: int = 0
     completion_tokens: int | None = 0
@@ -179,14 +168,13 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class FunctionDefinition(OpenAIBaseModel):
-    """Function definition.
-
-    Inherits from: OpenAIBaseModel
+    """Function definition used by the modern ``tools`` field.
 
     Attributes:
-        name (str): name.
-        description (str | None): description.
-        parameters (dict[str, tp.Any]): parameters."""
+        name: Function identifier.
+        description: Human-readable summary.
+        parameters: JSON-schema dict describing the arguments.
+    """
 
     name: str
     description: str | None = None
@@ -194,45 +182,43 @@ class FunctionDefinition(OpenAIBaseModel):
 
 
 class ToolDefinition(OpenAIBaseModel):
-    """Tool definition.
-
-    Inherits from: OpenAIBaseModel
+    """Modern OpenAI tool definition wrapping a :class:`FunctionDefinition`.
 
     Attributes:
-        type (str): type.
-        function (FunctionDefinition): function."""
+        type: Tool kind discriminator; always ``"function"`` today.
+        function: The wrapped function definition.
+    """
 
     type: str = "function"
     function: FunctionDefinition
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
-    """Chat completion request.
-
-    Inherits from: OpenAIBaseModel
+    """Request body for ``POST /v1/chat/completions``.
 
     Attributes:
-        model (str): model.
-        messages (list[ChatMessage]): messages.
-        max_tokens (int): max tokens.
-        presence_penalty (float): presence penalty.
-        frequency_penalty (float): frequency penalty.
-        repetition_penalty (float): repetition penalty.
-        temperature (float): temperature.
-        top_p (float): top p.
-        top_k (int): top k.
-        min_p (float): min p.
-        suppress_tokens (list[int]): suppress tokens.
-        functions (list[FunctionDefinition] | None): functions.
-        function_call (str | dict[str, tp.Any] | None): function call.
-        tools (list[ToolDefinition] | None): tools.
-        tool_choice (str | dict[str, tp.Any] | None): tool choice.
-        n (int | None): n.
-        stream (bool | None): stream.
-        stop (str | list[str] | None): stop.
-        logit_bias (dict[str, float] | None): logit bias.
-        user (str | None): user.
-        chat_template_kwargs (dict[str, int | float | str | bool] | None): chat template kwargs."""
+        model: Target model identifier.
+        messages: Conversation history.
+        max_tokens: Maximum tokens to generate.
+        presence_penalty: OpenAI presence penalty.
+        frequency_penalty: OpenAI frequency penalty.
+        repetition_penalty: Extra repetition penalty (vLLM extension).
+        temperature: Sampling temperature.
+        top_p: Nucleus-sampling cutoff.
+        top_k: Top-k sampling cutoff.
+        min_p: Minimum probability cutoff.
+        suppress_tokens: Token ids that the sampler must never emit.
+        functions: Legacy function definitions.
+        function_call: Legacy function-call selector.
+        tools: Modern tool definitions.
+        tool_choice: Modern tool-choice selector.
+        n: Number of completions to generate.
+        stream: Whether to stream the response.
+        stop: Stop sequence(s).
+        logit_bias: Per-token logit bias map.
+        user: End-user identifier for abuse tracking.
+        chat_template_kwargs: Extra kwargs forwarded to the chat template.
+    """
 
     model: str
     messages: list[ChatMessage]
@@ -258,14 +244,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
-    """Chat completion response choice.
-
-    Inherits from: OpenAIBaseModel
+    """One element of the ``choices`` array on a non-streaming chat response.
 
     Attributes:
-        index (int): index.
-        message (ChatMessage): message.
-        finish_reason (tp.Literal['stop', 'length', 'function_call', 'tool_calls', 'abort'] | None): finish reason."""
+        index: Choice index within the response.
+        message: Assembled assistant message.
+        finish_reason: Why generation stopped.
+    """
 
     index: int
     message: ChatMessage
@@ -273,17 +258,16 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
-    """Chat completion response.
-
-    Inherits from: OpenAIBaseModel
+    """Non-streaming chat-completions response body.
 
     Attributes:
-        id (str): id.
-        object (str): object.
-        created (int): created.
-        model (str): model.
-        choices (list[ChatCompletionResponseChoice]): choices.
-        usage (UsageInfo): usage."""
+        id: Response identifier (auto-generated).
+        object: API object discriminator (always ``"chat.completion"``).
+        created: Unix timestamp at creation.
+        model: Model that produced the response.
+        choices: Generated choices.
+        usage: Token usage report.
+    """
 
     id: str = Field(default_factory=lambda: f"chat-{uuid.uuid4().hex}")
     object: str = "chat.completion"
@@ -294,14 +278,13 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
 
 class ChatCompletionStreamResponseChoice(OpenAIBaseModel):
-    """Chat completion stream response choice.
-
-    Inherits from: OpenAIBaseModel
+    """One element of the ``choices`` array on a streaming chat chunk.
 
     Attributes:
-        index (int): index.
-        delta (DeltaMessage): delta.
-        finish_reason (tp.Literal['stop', 'length', 'function_call'] | None): finish reason."""
+        index: Choice index within the response.
+        delta: Streamed message delta.
+        finish_reason: Final finish reason on the terminating chunk only.
+    """
 
     index: int
     delta: DeltaMessage
@@ -309,17 +292,17 @@ class ChatCompletionStreamResponseChoice(OpenAIBaseModel):
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
-    """Chat completion stream response.
-
-    Inherits from: OpenAIBaseModel
+    """One SSE chunk in a streaming chat-completions response.
 
     Attributes:
-        id (str): id.
-        object (str): object.
-        created (int): created.
-        model (str): model.
-        choices (list[ChatCompletionStreamResponseChoice]): choices.
-        usage (UsageInfo): usage."""
+        id: Response identifier (auto-generated, stable across chunks of a
+            single response when the server reuses it).
+        object: API object discriminator (always ``"chat.completion.chunk"``).
+        created: Unix timestamp at chunk creation.
+        model: Model that produced the response.
+        choices: Streamed choice deltas.
+        usage: Token usage (typically only on the final chunk).
+    """
 
     id: str = Field(default_factory=lambda: f"chat-{uuid.uuid4().hex}")
     object: str = "chat.completion.chunk"
@@ -330,40 +313,38 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
 
 
 class CountTokenRequest(OpenAIBaseModel):
-    """Count token request.
-
-    Inherits from: OpenAIBaseModel
+    """Request body for the token-counting endpoint.
 
     Attributes:
-        model (str): model.
-        conversation (str | list[ChatMessage]): conversation."""
+        model: Model whose tokenizer should be used.
+        conversation: Plain prompt string or full chat history.
+    """
 
     model: str
     conversation: str | list[ChatMessage]
 
 
 class CompletionRequest(OpenAIBaseModel):
-    """Completion request.
-
-    Inherits from: OpenAIBaseModel
+    """Request body for ``POST /v1/completions`` (legacy text completion).
 
     Attributes:
-        model (str): model.
-        prompt (str | list[str]): prompt.
-        max_tokens (int): max tokens.
-        presence_penalty (float): presence penalty.
-        frequency_penalty (float): frequency penalty.
-        repetition_penalty (float): repetition penalty.
-        temperature (float): temperature.
-        top_p (float): top p.
-        top_k (int): top k.
-        min_p (float): min p.
-        suppress_tokens (list[int]): suppress tokens.
-        n (int | None): n.
-        stream (bool | None): stream.
-        stop (str | list[str] | None): stop.
-        logit_bias (dict[str, float] | None): logit bias.
-        user (str | None): user."""
+        model: Target model identifier.
+        prompt: Prompt text or list of prompts for batch generation.
+        max_tokens: Maximum tokens to generate.
+        presence_penalty: OpenAI presence penalty.
+        frequency_penalty: OpenAI frequency penalty.
+        repetition_penalty: Extra repetition penalty.
+        temperature: Sampling temperature.
+        top_p: Nucleus-sampling cutoff.
+        top_k: Top-k sampling cutoff.
+        min_p: Minimum probability cutoff.
+        suppress_tokens: Token ids that must never be emitted.
+        n: Number of completions to generate.
+        stream: Whether to stream the response.
+        stop: Stop sequence(s).
+        logit_bias: Per-token logit bias map.
+        user: End-user identifier.
+    """
 
     model: str
     prompt: str | list[str]
@@ -384,15 +365,14 @@ class CompletionRequest(OpenAIBaseModel):
 
 
 class CompletionLogprobs(OpenAIBaseModel):
-    """Completion logprobs.
-
-    Inherits from: OpenAIBaseModel
+    """Per-token logprob report for a completion choice.
 
     Attributes:
-        tokens (list[str]): tokens.
-        token_logprobs (list[float]): token logprobs.
-        top_logprobs (list[dict[str, float]] | None): top logprobs.
-        text_offset (list[int] | None): text offset."""
+        tokens: Decoded token strings.
+        token_logprobs: Logprob of each emitted token.
+        top_logprobs: Top-k alternatives per position.
+        text_offset: Character offset of each token within the response text.
+    """
 
     tokens: list[str]
     token_logprobs: list[float]
@@ -401,15 +381,14 @@ class CompletionLogprobs(OpenAIBaseModel):
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
-    """Completion response choice.
-
-    Inherits from: OpenAIBaseModel
+    """One element of the ``choices`` array on a non-streaming completion.
 
     Attributes:
-        text (str): text.
-        index (int): index.
-        logprobs (CompletionLogprobs | None): logprobs.
-        finish_reason (tp.Literal['stop', 'length', 'function_call'] | None): finish reason."""
+        text: Generated text.
+        index: Choice index.
+        logprobs: Optional logprob report.
+        finish_reason: Why generation stopped.
+    """
 
     text: str
     index: int
@@ -418,17 +397,16 @@ class CompletionResponseChoice(OpenAIBaseModel):
 
 
 class CompletionResponse(OpenAIBaseModel):
-    """Completion response.
-
-    Inherits from: OpenAIBaseModel
+    """Non-streaming completion response body.
 
     Attributes:
-        id (str): id.
-        object (str): object.
-        created (int): created.
-        model (str): model.
-        choices (list[CompletionResponseChoice]): choices.
-        usage (UsageInfo): usage."""
+        id: Response identifier (auto-generated).
+        object: API object discriminator (always ``"text_completion"``).
+        created: Unix timestamp at creation.
+        model: Model that produced the response.
+        choices: Generated choices.
+        usage: Token usage report.
+    """
 
     id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex}")
     object: str = "text_completion"
@@ -439,15 +417,14 @@ class CompletionResponse(OpenAIBaseModel):
 
 
 class CompletionStreamResponseChoice(OpenAIBaseModel):
-    """Completion stream response choice.
-
-    Inherits from: OpenAIBaseModel
+    """One element of the ``choices`` array on a streaming completion chunk.
 
     Attributes:
-        index (int): index.
-        text (str): text.
-        logprobs (CompletionLogprobs | None): logprobs.
-        finish_reason (tp.Literal['stop', 'length', 'function_call'] | None): finish reason."""
+        index: Choice index.
+        text: Streamed text fragment.
+        logprobs: Optional logprob report.
+        finish_reason: Final finish reason on the terminating chunk only.
+    """
 
     index: int
     text: str
@@ -456,17 +433,16 @@ class CompletionStreamResponseChoice(OpenAIBaseModel):
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
-    """Completion stream response.
-
-    Inherits from: OpenAIBaseModel
+    """One SSE chunk in a streaming completion response.
 
     Attributes:
-        id (str): id.
-        object (str): object.
-        created (int): created.
-        model (str): model.
-        choices (list[CompletionStreamResponseChoice]): choices.
-        usage (UsageInfo | None): usage."""
+        id: Response identifier.
+        object: API object discriminator (always ``"text_completion.chunk"``).
+        created: Unix timestamp at chunk creation.
+        model: Model that produced the response.
+        choices: Streamed choice deltas.
+        usage: Token usage (typically only on the final chunk).
+    """
 
     id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex}")
     object: str = "text_completion.chunk"
@@ -477,27 +453,25 @@ class CompletionStreamResponse(OpenAIBaseModel):
 
 
 class FunctionCall(OpenAIBaseModel):
-    """Function call.
-
-    Inherits from: OpenAIBaseModel
+    """Legacy assembled function-call payload.
 
     Attributes:
-        name (str): name.
-        arguments (str): arguments."""
+        name: Function identifier.
+        arguments: JSON-encoded argument string.
+    """
 
     name: str
     arguments: str
 
 
 class ToolCall(OpenAIBaseModel):
-    """Tool call.
-
-    Inherits from: OpenAIBaseModel
+    """Assembled modern tool-call payload.
 
     Attributes:
-        id (str): id.
-        type (str): type.
-        function (FunctionCall): function."""
+        id: Tool-call identifier.
+        type: Tool kind; always ``"function"`` today.
+        function: Function-call payload.
+    """
 
     id: str
     type: str = "function"
@@ -505,28 +479,31 @@ class ToolCall(OpenAIBaseModel):
 
 
 class FunctionCallFormat(StrEnum):
-    """Function call format.
+    """Wire format families used by self-hosted models for tool calls.
 
-    Inherits from: StrEnum
+    Attributes:
+        OPENAI: Structured OpenAI ``tool_calls`` payload.
+        JSON_SCHEMA: Plain JSON object validating against a tool's schema.
+        XML_TAG: ``<tool_call>...</tool_call>`` XML-tag form.
+        GORILLA: Gorilla function-call format.
+        QWEN: Qwen-family ``<tool_call>`` format.
     """
 
     OPENAI = "openai"
     JSON_SCHEMA = "json_schema"
-    HERMES = "hermes"
+    XML_TAG = "xml_tag"
     GORILLA = "gorilla"
     QWEN = "qwen"
-    NOUS = "nous"
 
 
 class ExtractedToolCallInformation(OpenAIBaseModel):
-    """Extracted tool call information.
-
-    Inherits from: OpenAIBaseModel
+    """Result returned by a server-side tool-call extractor.
 
     Attributes:
-        tools_called (bool): tools called.
-        tool_calls (list[ToolCall]): tool calls.
-        content (str | None): content."""
+        tools_called: Whether any tool calls were detected.
+        tool_calls: Parsed tool calls (may be empty).
+        content: Non-tool text portion of the response, if any.
+    """
 
     tools_called: bool
     tool_calls: list[ToolCall]

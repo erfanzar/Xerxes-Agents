@@ -11,16 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Audit event collection and emission for the Xerxes framework.
+"""Audit event collection and emission.
 
-This module exports collectors, emitters, event dataclasses, and an
-OpenTelemetry exporter for instrumenting agent behavior.
+Three layers compose the subsystem:
 
-Main exports:
-    - AuditCollector, InMemoryCollector, JSONLSinkCollector, CompositeCollector
-    - AuditEmitter: High-level event emission facade.
-    - AuditEvent and subclasses: Structured event types.
-    - OTelCollector: OpenTelemetry trace exporter.
+* :mod:`events` — typed dataclasses for every event the agent emits
+  (turn lifecycle, tool calls, sandbox / policy decisions, skill
+  events, hook mutations, agent switches, generic errors).
+* :class:`AuditEmitter` — convenience facade that constructs the
+  correct event subclass and forwards to a collector after injecting
+  the session id.
+* Collectors — :class:`InMemoryCollector`, :class:`JSONLSinkCollector`,
+  :class:`CompositeCollector`, and :class:`OTelCollector` (spans /
+  events via OpenTelemetry, with a noop log fallback).
 """
 
 from __future__ import annotations

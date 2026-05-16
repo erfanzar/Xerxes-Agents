@@ -11,11 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Sub-agent task manager with git worktree isolation support.
+"""Worktree-isolated subagent spawning, lifecycle, and cancellation.
 
-This module provides :class:`SubAgentManager` and :class:`SubAgentTask`, which
-enable spawning, monitoring, and cancelling sub-agent tasks in a thread pool.
-Tasks may optionally run in isolated git worktrees.
+A :class:`SubAgentManager` runs subagent prompts on a thread pool
+(:class:`~concurrent.futures.ThreadPoolExecutor`) and tracks each one as a
+:class:`SubAgentTask`. Tasks transition through ``pending → running →
+{completed, failed, cancelled}`` and may run in an isolated git worktree
+(branch ``xerxes-agent-<hex>``) when ``isolation == "worktree"``.
+
+Cancellation is cooperative: ``cancel()`` flips ``_cancel_flag`` and marks
+the task ``cancelled``; the streaming loop polls the flag between steps and
+exits at the next safe boundary. A task already in a terminal state cannot
+be cancelled. Worktrees are removed automatically only when they have no
+uncommitted changes or unpushed commits — anything else is left for the user
+to inspect.
+
+The per-task ``_inbox`` queue lets a parent send follow-up prompts to a
+running subagent; messages enqueued after the first run are picked up in
+order, each driving another streaming pass with the same effective config.
 """
 
 from __future__ import annotations
@@ -43,23 +56,38 @@ _SUBAGENT_BLOCKED_TOOLS = {
     "SkillTool",
 }
 
+_SUBAGENT_CALLER_PROMPT = (
+    "You are now running as a subagent. All the `user` messages are sent by the main agent. "
+    "The main agent cannot see your context, it can only see your last message when you finish the task. "
+    "You must treat the parent agent as your caller. Do not directly ask the end user questions. "
+    "If something is unclear, explain the ambiguity in your final summary to the parent agent."
+)
+
 
 @dataclass
 class SubAgentTask:
-    """Represents a spawned sub-agent task and its lifecycle state.
+    """One spawned subagent and the state needed to observe and cancel it.
+
+    The terminal states are ``completed``, ``failed`` and ``cancelled``; once
+    ``_done_event`` is set the task will not transition again. ``_cancel_flag``
+    is the cooperative cancellation signal polled by the streaming loop.
 
     Attributes:
-        id (str): Unique task identifier.
-        prompt (str): The prompt sent to the sub-agent.
-        status (str): Current status (e.g., ``"pending"``, ``"running"``, ``"completed"``).
-        result (str | None): Final result string, if any.
-        depth (int): Delegation depth level.
-        name (str): Human-readable short name.
-        agent_def_name (str): Name of the agent definition used.
-        worktree_path (str): Git worktree path, if isolation was used.
-        worktree_branch (str): Git worktree branch name, if used.
-        error (str): Error message, if the task failed.
-        messages_sent (int): Count of messages sent to the task inbox.
+        id: Unique 12-char hex task id.
+        prompt: Initial prompt sent to the subagent.
+        status: One of ``pending``, ``running``, ``completed``, ``failed``,
+            ``cancelled``.
+        result: Final assistant text (truncated to 500 chars when emitted in
+            events).
+        depth: Delegation depth — refused if it would exceed
+            :attr:`SubAgentManager.max_depth`.
+        name: Short human label used for lookups via
+            :meth:`SubAgentManager.get_by_name`.
+        agent_def_name: Backing :class:`AgentDefinition` name, if any.
+        worktree_path: Filesystem path of the isolated git worktree, when used.
+        worktree_branch: Branch name created for the worktree.
+        error: Failure message when ``status == "failed"``.
+        messages_sent: Count of follow-ups delivered via ``send_message``.
     """
 
     id: str = ""
@@ -79,11 +107,11 @@ class SubAgentTask:
     _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
-        """Return a serializable snapshot of the task state.
+        """Return a JSON-safe dict view of the task.
 
-        Returns:
-            dict[str, Any]: OUT: Summarized fields including prompt preview,
-                result preview, and inbox size.
+        The prompt is truncated to 200 chars and the result to 500 chars so
+        the snapshot is cheap to log and ship over the bridge. Internal
+        synchronisation primitives (future, event, cancel flag) are omitted.
         """
         return {
             "id": self.id,
@@ -102,14 +130,7 @@ class SubAgentTask:
 
 
 def _git_root(cwd: str) -> str | None:
-    """Determine the git repository root for a directory.
-
-    Args:
-        cwd (str): IN: Working directory to query. OUT: Passed to ``git``.
-
-    Returns:
-        str | None: OUT: Absolute path to the repository root, or ``None``.
-    """
+    """Return the git toplevel of ``cwd``, or ``None`` if not a repo."""
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -124,14 +145,10 @@ def _git_root(cwd: str) -> str | None:
 
 
 def _create_worktree(base_dir: str) -> tuple[str, str]:
-    """Create a new git worktree for isolated sub-agent execution.
+    """Create a fresh git worktree on a new ``xerxes-agent-*`` branch.
 
-    Args:
-        base_dir (str): IN: Base git repository directory. OUT: Used as the
-            working directory for ``git worktree add``.
-
-    Returns:
-        tuple[str, str]: OUT: ``(worktree_path, branch_name)``.
+    Returns ``(worktree_path, branch_name)``. Raises
+    :class:`subprocess.CalledProcessError` if ``git worktree add`` fails.
     """
     branch = f"xerxes-agent-{uuid.uuid4().hex[:8]}"
     wt_path = tempfile.mkdtemp(prefix="xerxes-agent-wt-")
@@ -147,14 +164,7 @@ def _create_worktree(base_dir: str) -> tuple[str, str]:
 
 
 def _remove_worktree(wt_path: str, branch: str, base_dir: str) -> None:
-    """Remove a git worktree and its associated branch.
-
-    Args:
-        wt_path (str): IN: Path to the worktree directory. OUT: Passed to
-            ``git worktree remove``.
-        branch (str): IN: Branch name to delete. OUT: Passed to ``git branch -D``.
-        base_dir (str): IN: Base repository directory. OUT: Used as cwd for git.
-    """
+    """Force-remove ``wt_path`` and delete its branch, swallowing errors."""
     try:
         subprocess.run(
             ["git", "worktree", "remove", "--force", wt_path],
@@ -174,14 +184,10 @@ def _remove_worktree(wt_path: str, branch: str, base_dir: str) -> None:
 
 
 def _has_worktree_changes(wt_path: str) -> bool:
-    """Check whether a worktree has uncommitted changes or commits.
+    """Return ``True`` if ``wt_path`` has uncommitted edits or unpushed commits.
 
-    Args:
-        wt_path (str): IN: Path to the worktree. OUT: Queried via ``git status``
-            and ``git log``.
-
-    Returns:
-        bool: OUT: ``True`` if there are uncommitted changes or unpushed commits.
+    Used to decide whether a worktree is safe to auto-remove after a subagent
+    finishes; anything dirty is left in place for the user to inspect.
     """
     try:
         r = subprocess.run(
@@ -204,20 +210,21 @@ def _has_worktree_changes(wt_path: str) -> bool:
 
 
 class SubAgentManager:
-    """Manages the lifecycle of sub-agent tasks, including spawning and cancellation.
+    """Owns the thread pool and registry for all live subagent tasks.
 
-    Tasks run in a :class:`~concurrent.futures.ThreadPoolExecutor` and may
-    optionally be isolated in git worktrees.
+    The manager is a process-singleton in practice: the streaming loop hands
+    every spawn through it so cancellation, name lookup, and inbox delivery
+    work uniformly. ``tasks`` is the canonical registry; ``_by_name`` is the
+    secondary lookup populated when callers supply a name on ``spawn``.
     """
 
     def __init__(self, max_concurrent: int = 8, max_depth: int = 5):
-        """Initialize the sub-agent manager.
+        """Build a manager backed by a thread pool of ``max_concurrent``.
 
         Args:
-            max_concurrent (int): IN: Maximum number of concurrent tasks. OUT:
-                Sets the thread pool worker count.
-            max_depth (int): IN: Maximum sub-agent delegation depth. OUT: Used
-                to block spawns that would exceed this depth.
+            max_concurrent: Initial worker count for the thread pool.
+            max_depth: Hard cap on delegation depth. Spawns at or beyond this
+                depth fail immediately with status ``failed``.
         """
         self.tasks: dict[str, SubAgentTask] = {}
         self._by_name: dict[str, str] = {}
@@ -229,18 +236,11 @@ class SubAgentManager:
         self._tool_schemas: list[dict[str, Any]] | None = None
 
     def ensure_capacity(self, min_concurrent: int) -> bool:
-        """Increase worker capacity before a new batch is submitted.
+        """Grow the pool to at least ``min_concurrent`` workers.
 
-        ``ThreadPoolExecutor`` cannot resize in place, so this swaps in a new
-        executor for future submissions. Existing and queued futures in the old
-        executor are left to finish.
-
-        Args:
-            min_concurrent (int): IN: Minimum worker count needed. OUT: Used to
-                decide whether to replace the executor.
-
-        Returns:
-            bool: OUT: ``True`` if capacity is now at least ``min_concurrent``.
+        :class:`ThreadPoolExecutor` cannot resize, so this swaps in a fresh
+        executor for future submissions. Tasks already running in the old
+        executor keep running on their original threads.
         """
         if min_concurrent <= self.max_concurrent:
             return True
@@ -250,11 +250,11 @@ class SubAgentManager:
         return True
 
     def set_runner(self, runner: Any) -> None:
-        """Set the agent runner callable used to execute sub-agent prompts.
+        """Install the callable that drives a subagent for one prompt.
 
-        Args:
-            runner (Any): IN: Callable that runs a sub-agent. OUT: Stored for
-                use during task execution.
+        When unset, the manager falls back to running the in-process
+        streaming loop directly via :func:`_run_streaming_loop`. Setting a
+        custom runner lets tests stub out execution.
         """
         self._agent_runner = runner
 
@@ -268,27 +268,33 @@ class SubAgentManager:
         isolation: str = "",
         name: str = "",
     ) -> SubAgentTask:
-        """Spawn a new sub-agent task.
+        """Spawn a subagent and submit it to the thread pool.
+
+        The task is registered before submission so callers see it via
+        :meth:`list_tasks` even if the future has not started yet. Returns
+        immediately; use :meth:`wait` to block on completion.
+
+        If ``depth >= max_depth`` or worktree creation fails, the task is
+        returned already in ``failed`` state (no work is scheduled) and a
+        descriptive ``error`` / ``result`` are recorded.
 
         Args:
-            prompt (str): IN: The user prompt for the sub-agent. OUT: May be
-                appended with worktree instructions if isolation is enabled.
-            config (dict[str, Any]): IN: Runtime configuration dict. OUT: May be
-                mutated with agent-specific overrides.
-            system_prompt (str): IN: Base system prompt. OUT: May be prefixed with
-                the agent definition's system prompt.
-            depth (int): IN: Current delegation depth. OUT: Incremented for the
-                spawned task and checked against ``max_depth``.
-            agent_def (AgentDefinition | None): IN: Optional agent definition. OUT:
-                Used to override model, system prompt, tools, and isolation.
-            isolation (str): IN: Isolation mode (e.g., ``"worktree"``). OUT:
-                Defaults to the agent definition's isolation if empty.
-            name (str): IN: Optional human-readable task name. OUT: Stored and
-                used for name-based lookups.
-
-        Returns:
-            SubAgentTask: OUT: The spawned task object (may already be marked
-                failed if depth or worktree creation failed).
+            prompt: Initial subagent prompt. Worktree instructions are
+                appended automatically when isolation is enabled.
+            config: Runtime config copied into the task; ``_tools_*`` keys
+                are derived from ``agent_def`` if provided.
+            system_prompt: Base system prompt prepended to the subagent's
+                conversation. ``agent_def.system_prompt`` is layered on top
+                with the caller-context preamble.
+            depth: Current delegation depth; passed through ``depth+1`` to
+                the inner loop and checked against ``max_depth``.
+            agent_def: Optional :class:`AgentDefinition` whose model, system
+                prompt, tool allow/deny lists, and isolation override the
+                defaults.
+            isolation: ``"worktree"`` to run in an isolated branch; empty
+                falls back to ``agent_def.isolation``.
+            name: Optional short name registered for
+                :meth:`get_by_name` / :meth:`send_message` lookups.
         """
         task_id = uuid.uuid4().hex[:12]
         short_name = name or task_id[:8]
@@ -317,7 +323,7 @@ class SubAgentManager:
             if agent_def.model:
                 eff_config["model"] = agent_def.model
             if agent_def.system_prompt:
-                eff_system = agent_def.system_prompt.rstrip() + "\n\n" + system_prompt
+                eff_system = _SUBAGENT_CALLER_PROMPT + "\n\n" + agent_def.system_prompt.rstrip() + "\n\n" + system_prompt
             if not isolation and agent_def.isolation:
                 isolation = agent_def.isolation
 
@@ -358,13 +364,8 @@ class SubAgentManager:
         runner = self._agent_runner
 
         def _run() -> None:
-            """Internal helper to run."""
+            """Execute the task body, drain the inbox, and finalise state."""
             from xerxes.runtime.config_context import emit_event
-
-            """Internal helper to run.
-            """
-            """Internal helper to run.
-            """
 
             task.status = "running"
             emit_event(
@@ -461,15 +462,11 @@ class SubAgentManager:
         return task
 
     def wait(self, task_id: str, timeout: float | None = None) -> SubAgentTask | None:
-        """Wait for a task to complete.
+        """Block until ``task_id`` reaches a terminal state or ``timeout``.
 
-        Args:
-            task_id (str): IN: Task identifier. OUT: Looked up in the task registry.
-            timeout (float | None): IN: Maximum seconds to wait. OUT: Passed to
-                the task completion event.
-
-        Returns:
-            SubAgentTask | None: OUT: The task object, or ``None`` if not found.
+        Returns the task object whether or not the wait timed out — callers
+        should check ``status`` to distinguish. ``None`` is returned only
+        when ``task_id`` is unknown.
         """
         task = self.tasks.get(task_id)
         if task is None:
@@ -484,17 +481,11 @@ class SubAgentManager:
         task_ids: list[str] | None = None,
         timeout: float | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Wait for multiple tasks and return their snapshots.
+        """Wait on a batch of tasks and split snapshots by terminal state.
 
-        Args:
-            task_ids (list[str] | None): IN: Specific IDs to wait for. OUT: Defaults
-                to all pending/running tasks if ``None``.
-            timeout (float | None): IN: Per-task wait timeout. OUT: Passed to
-                :meth:`wait`.
-
-        Returns:
-            dict[str, list[dict[str, Any]]]: OUT: Mapping with ``"completed"`` and
-                ``"pending"`` snapshot lists.
+        ``task_ids`` defaults to every pending or running task. The returned
+        dict has two keys, ``"completed"`` and ``"pending"`` — tasks that
+        timed out before reaching a terminal state land in ``pending``.
         """
         ids = task_ids or [tid for tid, t in self.tasks.items() if t.status in ("pending", "running")]
         completed = []
@@ -510,15 +501,12 @@ class SubAgentManager:
         return {"completed": completed, "pending": pending}
 
     def send_message(self, task_id_or_name: str, message: str) -> bool:
-        """Send a follow-up message to a running or pending task.
+        """Enqueue ``message`` for a running or pending subagent.
 
-        Args:
-            task_id_or_name (str): IN: Task ID or registered name. OUT: Resolved
-                to a task ID.
-            message (str): IN: Message text to enqueue. OUT: Put into the task inbox.
-
-        Returns:
-            bool: OUT: ``True`` if the message was delivered.
+        The inbox is drained after the current run completes; once a task
+        has reached a terminal state, follow-ups are rejected and ``False``
+        is returned. ``task_id_or_name`` may be either the raw task id or
+        the name supplied to :meth:`spawn`.
         """
         task_id = self._by_name.get(task_id_or_name, task_id_or_name)
         task = self.tasks.get(task_id)
@@ -531,25 +519,17 @@ class SubAgentManager:
         return True
 
     def get_result(self, task_id: str) -> str | None:
-        """Get the result of a task.
-
-        Args:
-            task_id (str): IN: Task identifier. OUT: Looked up in the registry.
-
-        Returns:
-            str | None: OUT: The task result, or ``None`` if not found.
-        """
+        """Return the current ``result`` string for ``task_id`` (may be partial)."""
         task = self.tasks.get(task_id)
         return task.result if task else None
 
     def cancel(self, task_id: str) -> bool:
-        """Cancel a single running or pending task.
+        """Cooperatively cancel a pending or running task.
 
-        Args:
-            task_id (str): IN: Task identifier. OUT: Used to set the cancel flag.
-
-        Returns:
-            bool: OUT: ``True`` if the task was found and eligible for cancellation.
+        Sets ``_cancel_flag`` (polled by the streaming loop), transitions the
+        task to ``cancelled``, and releases :meth:`wait` callers. Tasks
+        already in a terminal state are not touched and ``False`` is
+        returned.
         """
         task = self.tasks.get(task_id)
         if task is None:
@@ -563,11 +543,7 @@ class SubAgentManager:
         return False
 
     def cancel_all(self) -> int:
-        """Cancel all running and pending tasks.
-
-        Returns:
-            int: OUT: Number of tasks cancelled.
-        """
+        """Cancel every non-terminal task; return how many were transitioned."""
         n = 0
         for task in self.tasks.values():
             if task.status in ("running", "pending"):
@@ -579,46 +555,33 @@ class SubAgentManager:
         return n
 
     def list_tasks(self) -> list[SubAgentTask]:
-        """List all tracked tasks.
-
-        Returns:
-            list[SubAgentTask]: OUT: All task objects.
-        """
+        """Return every tracked :class:`SubAgentTask`."""
         return list(self.tasks.values())
 
     def list_snapshots(self) -> list[dict[str, Any]]:
-        """Return snapshots of all tracked tasks.
-
-        Returns:
-            list[dict[str, Any]]: OUT: Snapshot dicts for every task.
-        """
+        """Return :meth:`SubAgentTask.snapshot` for every tracked task."""
         return [t.snapshot() for t in self.tasks.values()]
 
     def get_by_name(self, name: str) -> SubAgentTask | None:
-        """Look up a task by its registered name.
-
-        Args:
-            name (str): IN: Registered task name. OUT: Resolved via internal name map.
-
-        Returns:
-            SubAgentTask | None: OUT: The matching task, or ``None``.
-        """
+        """Return the task registered under ``name`` (from :meth:`spawn`)."""
         task_id = self._by_name.get(name)
         return self.tasks.get(task_id) if task_id else None
 
     def shutdown(self) -> None:
-        """Cancel all active tasks and shut down the thread pool."""
+        """Signal cancellation on every active task and join the pool.
+
+        Sets ``_cancel_flag`` on running and pending tasks so the streaming
+        loop exits at the next checkpoint, then waits for the executor to
+        drain. Subagents that ignore the flag will still keep the pool open
+        until they finish naturally.
+        """
         for task in self.tasks.values():
             if task.status in ("running", "pending"):
                 task._cancel_flag = True
         self._pool.shutdown(wait=True)
 
     def summary(self) -> str:
-        """Return a Markdown summary of all tasks.
-
-        Returns:
-            str: OUT: Formatted summary with counts and per-task status lines.
-        """
+        """Return a Markdown overview suitable for the ``/agents`` view."""
         lines = [
             "# Sub-Agent Tasks",
             "",
@@ -643,21 +606,13 @@ def _run_streaming_loop(
     tool_executor: Any = None,
     tool_schemas: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Run the agent streaming loop for a sub-agent task.
+    """Drive :func:`xerxes.streaming.loop.run` for one subagent prompt.
 
-    Args:
-        prompt (str): IN: User prompt for the sub-agent. OUT: Passed to the loop.
-        config (dict[str, Any]): IN: Runtime configuration. OUT: Passed to the loop.
-        system_prompt (str): IN: System prompt text. OUT: Passed to the loop.
-        depth (int): IN: Delegation depth. OUT: Passed to the loop.
-        task (SubAgentTask): IN: The task being executed. OUT: Used for ID and
-            name in emitted events.
-        tool_executor (Any): IN: Optional tool executor. OUT: Passed to the loop.
-        tool_schemas (list[dict[str, Any]] | None): IN: Optional tool schemas. OUT:
-            Passed to the loop.
-
-    Returns:
-        str: OUT: Concatenated text output from the streaming loop.
+    Tool schemas and executor are filtered via :func:`_filter_subagent_tools`
+    so a subagent never inherits orchestration tools that would let it spawn
+    another swarm. Streaming events are re-emitted as ``agent_*`` events on
+    the bridge so the TUI can render them. Returns the concatenated text
+    output, which the caller assigns to ``task.result``.
     """
     from xerxes.runtime.config_context import emit_event
     from xerxes.streaming.events import AgentState, TextChunk, ThinkingChunk, ToolEnd, ToolStart
@@ -739,11 +694,14 @@ def _filter_subagent_tools(
     config: dict[str, Any],
     is_subagent: bool,
 ) -> tuple[list[dict[str, Any]] | None, Any]:
-    """Apply agent-definition tool limits and block recursive delegation tools.
+    """Apply per-agent tool allow/deny lists and block recursive delegation.
 
-    Sub-agents should execute the task assigned by the parent. They should not
-    inherit top-level orchestration tools that let them spawn their own agent
-    swarms or re-trigger active skills such as deepscan.
+    Reads three keys out of ``config`` populated by :meth:`SubAgentManager.spawn`:
+    ``_tools_whitelist``, ``_tools_allowed``, ``_tools_excluded``. When
+    ``is_subagent`` is true, orchestration tools listed in
+    :data:`_SUBAGENT_BLOCKED_TOOLS` are removed unless
+    ``_allow_subagent_delegation`` is set, preventing a subagent from
+    re-triggering Skill, SpawnAgents, etc.
     """
     if tool_schemas is None:
         return None, tool_executor

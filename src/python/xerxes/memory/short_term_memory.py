@@ -11,10 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Short term memory module for Xerxes.
+"""In-process short-term memory tier backed by a bounded deque.
 
-Exports:
-    - ShortTermMemory"""
+``ShortTermMemory`` holds the most recent ``capacity`` items in FIFO
+order, drops the oldest automatically once full, and performs lexical
+search (substring or token-overlap) over the buffer. It is the hot
+path for working context and is paired with ``LongTermMemory`` inside
+``ContextualMemory``."""
 
 from collections import deque
 from datetime import datetime
@@ -24,10 +27,7 @@ from .base import Memory, MemoryItem
 
 
 class ShortTermMemory(Memory):
-    """Short term memory.
-
-    Inherits from: Memory
-    """
+    """Bounded recency-ordered memory tier."""
 
     def __init__(
         self,
@@ -35,13 +35,13 @@ class ShortTermMemory(Memory):
         storage: Any | None = None,
         enable_embeddings: bool = False,
     ) -> None:
-        """Initialize the instance.
+        """Initialise the deque with the given capacity.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            capacity (int, optional): IN: capacity. Defaults to 20. OUT: Consumed during execution.
-            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
-            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to False. OUT: Consumed during execution."""
+            capacity: Maximum items retained; oldest items are evicted
+                automatically when the buffer is full.
+            storage: Optional ``MemoryStorage`` used to mirror items.
+            enable_embeddings: Whether to compute embeddings on save."""
 
         super().__init__(storage=storage, max_items=capacity, enable_embeddings=enable_embeddings)
         self._items = deque(maxlen=capacity)
@@ -55,18 +55,15 @@ class ShortTermMemory(Memory):
         conversation_id: str | None = None,
         **kwargs,
     ) -> MemoryItem:
-        """Save.
+        """Append a new short-term item and mirror it to storage if configured.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            user_id (str | None, optional): IN: user id. Defaults to None. OUT: Consumed during execution.
-            conversation_id (str | None, optional): IN: conversation id. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            MemoryItem: OUT: Result of the operation."""
+            content: Text payload to remember.
+            metadata: Annotations; ``**kwargs`` are folded in.
+            agent_id: Producing agent identifier.
+            user_id: Owning user identifier.
+            conversation_id: Originating conversation identifier.
+            **kwargs: Extra annotations merged into ``metadata``."""
 
         metadata = metadata or {}
         metadata.update(kwargs)
@@ -91,17 +88,19 @@ class ShortTermMemory(Memory):
     def search(
         self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, min_relevance: float = 0.0, **kwargs
     ) -> list[MemoryItem]:
-        """Search.
+        """Scan items newest-first, scoring by substring or token overlap.
+
+        Each candidate is checked against simple ``agent_id``/``user_id``/
+        ``conversation_id`` filters. Matches receive a ``relevance_score``
+        of 1.0 for substring hits or the fraction of query words found
+        for partial hits.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            min_relevance (float, optional): IN: min relevance. Defaults to 0.0. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+            query: Free-form search string.
+            limit: Maximum results.
+            filters: Identity filters (agent/user/conversation).
+            min_relevance: Drop items below this score.
+            **kwargs: Accepted for protocol compatibility; unused."""
 
         query_lower = query.lower()
         matches = []
@@ -144,15 +143,9 @@ class ShortTermMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve.
+        """Fetch by id or by reverse-iterating filtered items up to ``limit``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+        Each returned item has its access counters bumped."""
 
         if memory_id:
             item = self._index.get(memory_id)
@@ -182,14 +175,7 @@ class ShortTermMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str): IN: memory id. OUT: Consumed during execution.
-            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Apply field updates and mirror the change to storage."""
 
         if memory_id not in self._index:
             return False
@@ -205,14 +191,7 @@ class ShortTermMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Delete a single item by id or every item matching ``filters``."""
 
         count = 0
 
@@ -245,10 +224,7 @@ class ShortTermMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Drop every item and purge mirrored ``stm_*`` rows from storage."""
 
         if self.storage:
             for item in self._items:
@@ -258,24 +234,13 @@ class ShortTermMemory(Memory):
         self._index.clear()
 
     def get_recent(self, n: int = 5) -> list[MemoryItem]:
-        """Retrieve the recent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            n (int, optional): IN: n. Defaults to 5. OUT: Consumed during execution.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+        """Return the ``n`` most recently added items in chronological order."""
 
         items = list(self._items)
         return items[-n:] if len(items) > n else items
 
     def summarize(self) -> str:
-        """Summarize.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render a per-conversation block of the trailing three items each."""
 
         if not self._items:
             return "No recent memories."

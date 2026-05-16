@@ -11,20 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Setup module for Xerxes.
-
-Exports:
-    - HERMES_HOME
-    - TOKEN_PATH
-    - CLIENT_SECRET_PATH
-    - PENDING_AUTH_PATH
-    - SCOPES
-    - REQUIRED_PACKAGES
-    - REDIRECT_URI
-    - install_deps
-    - check_auth
-    - store_client_secret
-    - ... and 4 more."""
+"""Interactive Google Workspace OAuth setup for the Xerxes."""
 
 import argparse
 import json
@@ -34,17 +21,17 @@ import sys
 from pathlib import Path
 
 try:
-    from hermes_constants import display_hermes_home, get_hermes_home
+    from xerxes_constants import display_xerxes_home, get_xerxes_home
 except ModuleNotFoundError:
     HERMES_AGENT_ROOT = Path(__file__).resolve().parents[4]
     if HERMES_AGENT_ROOT.exists():
         sys.path.insert(0, str(HERMES_AGENT_ROOT))
-    from hermes_constants import display_hermes_home, get_hermes_home
+    from xerxes_constants import display_xerxes_home, get_xerxes_home
 
-HERMES_HOME = get_hermes_home()
-TOKEN_PATH = HERMES_HOME / "google_token.json"
-CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
-PENDING_AUTH_PATH = HERMES_HOME / "google_oauth_pending.json"
+XERXES_HOME = get_xerxes_home()
+TOKEN_PATH = XERXES_HOME / "google_token.json"
+CLIENT_SECRET_PATH = XERXES_HOME / "google_client_secret.json"
+PENDING_AUTH_PATH = XERXES_HOME / "google_oauth_pending.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -63,12 +50,7 @@ REDIRECT_URI = "http://localhost:1"
 
 
 def _load_token_payload(path: Path = TOKEN_PATH) -> dict:
-    """Internal helper to load token payload.
-
-    Args:
-        path (Path, optional): IN: path. Defaults to TOKEN_PATH. OUT: Consumed during execution.
-    Returns:
-        dict: OUT: Result of the operation."""
+    """Return the parsed token JSON at ``path``, or an empty dict on failure."""
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -76,12 +58,7 @@ def _load_token_payload(path: Path = TOKEN_PATH) -> dict:
 
 
 def _missing_scopes_from_payload(payload: dict) -> list[str]:
-    """Internal helper to missing scopes from payload.
-
-    Args:
-        payload (dict): IN: payload. OUT: Consumed during execution.
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Return the scopes that ``SCOPES`` requires but ``payload`` did not grant."""
     raw = payload.get("scopes") or payload.get("scope")
     if not raw:
         return []
@@ -90,25 +67,17 @@ def _missing_scopes_from_payload(payload: dict) -> list[str]:
 
 
 def _format_missing_scopes(missing_scopes: list[str]) -> str:
-    """Internal helper to format missing scopes.
-
-    Args:
-        missing_scopes (list[str]): IN: missing scopes. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Render ``missing_scopes`` as a bulleted human-readable warning."""
     bullets = "\n".join(f"  - {scope}" for scope in missing_scopes)
     return (
         "Token is valid but missing required Google Workspace scopes:\n"
         f"{bullets}\n"
-        "Run the Google Workspace setup again from this same Hermes profile to refresh consent."
+        "Run the Google Workspace setup again from this same Xerxes profile to refresh consent."
     )
 
 
 def install_deps():
-    """Install deps.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Install the Google API Python client packages via pip if absent."""
 
     import importlib.util
 
@@ -134,10 +103,7 @@ def install_deps():
 
 
 def _ensure_deps():
-    """Internal helper to ensure deps.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Install Google API dependencies on first use; exit when installation fails."""
 
     import importlib.util
 
@@ -147,10 +113,7 @@ def _ensure_deps():
 
 
 def check_auth():
-    """Check auth.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print a status line describing the stored token and return True when valid."""
 
     if not TOKEN_PATH.exists():
         print(f"NOT_AUTHENTICATED: No token at {TOKEN_PATH}")
@@ -196,12 +159,7 @@ def check_auth():
 
 
 def store_client_secret(path: str):
-    """Store client secret.
-
-    Args:
-        path (str): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Copy a Google OAuth client secret JSON from ``path`` into the Xerxes home."""
 
     src = Path(path).expanduser().resolve()
     if not src.exists():
@@ -224,13 +182,7 @@ def store_client_secret(path: str):
 
 
 def _save_pending_auth(*, state: str, code_verifier: str):
-    """Internal helper to save pending auth.
-
-    Args:
-        state (str): IN: state. OUT: Consumed during execution.
-        code_verifier (str): IN: code verifier. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Persist OAuth ``state`` and PKCE ``code_verifier`` between auth-url and auth-code."""
 
     PENDING_AUTH_PATH.write_text(
         json.dumps(
@@ -245,10 +197,7 @@ def _save_pending_auth(*, state: str, code_verifier: str):
 
 
 def _load_pending_auth() -> dict:
-    """Internal helper to load pending auth.
-
-    Returns:
-        dict: OUT: Result of the operation."""
+    """Return the saved pending-auth state, exiting with a fix-it hint on failure."""
 
     if not PENDING_AUTH_PATH.exists():
         print("ERROR: No pending OAuth session found. Run --auth-url first.")
@@ -270,12 +219,7 @@ def _load_pending_auth() -> dict:
 
 
 def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
-    """Internal helper to extract code and state.
-
-    Args:
-        code_or_url (str): IN: code or url. OUT: Consumed during execution.
-    Returns:
-        tuple[str, str | None]: OUT: Result of the operation."""
+    """Parse a bare OAuth code or a full redirect URL into ``(code, state)``."""
 
     if not code_or_url.startswith("http"):
         return code_or_url, None
@@ -293,10 +237,7 @@ def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
 
 
 def get_auth_url():
-    """Retrieve the auth url.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the Google OAuth consent URL and store the PKCE state on disk."""
 
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
@@ -321,12 +262,7 @@ def get_auth_url():
 
 
 def exchange_auth_code(code: str):
-    """Exchange auth code.
-
-    Args:
-        code (str): IN: code. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Exchange ``code`` for a long-lived token and save it to ``TOKEN_PATH``."""
 
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
@@ -392,14 +328,11 @@ def exchange_auth_code(code: str):
     TOKEN_PATH.write_text(json.dumps(token_payload, indent=2))
     PENDING_AUTH_PATH.unlink(missing_ok=True)
     print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
-    print(f"Profile-scoped token location: {display_hermes_home()}/google_token.json")
+    print(f"Profile-scoped token location: {display_xerxes_home()}/google_token.json")
 
 
 def revoke():
-    """Revoke.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Revoke the stored OAuth token with Google and remove it from disk."""
 
     if not TOKEN_PATH.exists():
         print("No token to revoke.")
@@ -433,11 +366,8 @@ def revoke():
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
-    parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Hermes")
+    """Parse setup CLI args and dispatch to the requested OAuth action."""
+    parser = argparse.ArgumentParser(description="Google Workspace OAuth setup for Xerxes")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true", help="Check if auth is valid (exit 0=yes, 1=no)")
     group.add_argument("--client-secret", metavar="PATH", help="Store OAuth client_secret.json")

@@ -44,14 +44,32 @@ def test_agent_tool_result_is_not_rendered_in_tui_history() -> None:
     assert "large completed sub-agent output" not in prompt.committed[0][1]
 
 
-def test_tool_block_renders_all_subagent_tool_calls_without_overflow_cap() -> None:
+def test_tool_block_renders_last_five_subagent_tool_calls() -> None:
     block = _ToolCallBlock("block", "parent", "SpawnAgents", '{"agents":[]}')
 
     for idx in range(12):
-        block.append_sub_tool_call(f"sub-{idx}", f"Tool{idx}", "{}")
+        block.append_sub_tool_call(f"sub-{idx}", f"Tool-{idx:02d}", "{}")
 
     rendered = block.compose()
 
-    for idx in range(12):
-        assert f"Tool{idx}" in rendered
-    assert "more sub-agent tool calls" not in rendered
+    for idx in range(7):
+        assert f"Tool-{idx:02d}" not in rendered
+    for idx in range(7, 12):
+        assert f"Tool-{idx:02d}" in rendered
+
+
+def test_tool_block_does_not_leak_markup_tags_for_json_list_args() -> None:
+    block = _ToolCallBlock(
+        "block",
+        "parent",
+        "SpawnAgents",
+        '{"agents":[{"prompt":"Analyze project structure. Scan all directories up to 4 levels deep"}]}',
+    )
+
+    rendered = block.compose()
+
+    assert "[/dim]" not in rendered
+    assert "[dim]" not in rendered
+    assert "Used" not in rendered
+    assert "Using SpawnAgents" in rendered
+    assert "({'prompt'" in rendered

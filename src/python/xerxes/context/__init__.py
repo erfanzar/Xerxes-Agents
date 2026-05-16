@@ -11,13 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Public exports for the Xerxes context compaction package.
+"""Conversation-context utilities: pruning, compaction, and overflow storage.
 
-Provides token counting and various strategies for compacting conversation
-history when it exceeds a target token budget.
+Composition of this package, in order of how aggressively they reduce
+context:
+
+* :mod:`tool_result_pruner` — cheap pre-pruning of oversize tool outputs.
+* :mod:`tool_result_storage` — overflow huge tool outputs to disk and
+  replace them with reference placeholders.
+* :mod:`compaction_strategies` — pluggable rolling strategies
+  (truncate, sliding window, priority, LLM summarization).
+* :mod:`compressor` — the orchestrator that decides when to compact
+  and which summarizer to use.
+* :mod:`advanced_compressor` — the multi-stage prune-then-summarise stack.
+* :mod:`token_counter` — model-aware token estimation.
 """
 
-from .advanced_compressor import HermesCompressionStrategy
+from .advanced_compressor import AdvancedCompressionStrategy
 from .compaction_strategies import (
     BaseCompactionStrategy,
     PriorityBasedStrategy,
@@ -26,15 +36,42 @@ from .compaction_strategies import (
     TruncateStrategy,
     get_compaction_strategy,
 )
+from .compressor import (
+    COMPACTION_REFERENCE_PREFIX,
+    CompressionResult,
+    ContextCompressor,
+    Summarizer,
+    naive_summarizer,
+)
 from .token_counter import SmartTokenCounter
+from .tool_result_pruner import (
+    DEFAULT_HEAD_LINES,
+    DEFAULT_MAX_CHARS,
+    DEFAULT_TAIL_LINES,
+    prune_messages,
+    prune_tool_result,
+)
+from .tool_result_storage import DEFAULT_INLINE_LIMIT_CHARS, ToolResultStorage
 
 __all__ = [
+    "COMPACTION_REFERENCE_PREFIX",
+    "DEFAULT_HEAD_LINES",
+    "DEFAULT_INLINE_LIMIT_CHARS",
+    "DEFAULT_MAX_CHARS",
+    "DEFAULT_TAIL_LINES",
+    "AdvancedCompressionStrategy",
     "BaseCompactionStrategy",
-    "HermesCompressionStrategy",
+    "CompressionResult",
+    "ContextCompressor",
     "PriorityBasedStrategy",
     "SlidingWindowStrategy",
     "SmartTokenCounter",
     "SummarizationStrategy",
+    "Summarizer",
+    "ToolResultStorage",
     "TruncateStrategy",
     "get_compaction_strategy",
+    "naive_summarizer",
+    "prune_messages",
+    "prune_tool_result",
 ]

@@ -11,12 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Index module for Xerxes.
+"""Hybrid SQLite + embedding index over session turns.
 
-Exports:
-    - logger
-    - SearchHit
-    - SessionIndex"""
+:class:`SessionIndex` keeps a row per turn in a SQLite database, plus an FTS5
+virtual table when the SQLite build supports it. :meth:`SessionIndex.search`
+performs a BM25 keyword pass (or ``LIKE`` fallback) and, if an
+:class:`~xerxes.memory.embedders.Embedder` was supplied, blends in cosine
+similarity over stored embeddings. The DB path may be ``":memory:"`` for
+tests.
+"""
 
 from __future__ import annotations
 
@@ -36,19 +39,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SearchHit:
-    """Search hit.
+    """One ranked result from a session search.
 
     Attributes:
-        session_id (str): session id.
-        turn_id (str): turn id.
-        agent_id (str | None): agent id.
-        prompt (str): prompt.
-        response (str): response.
-        score (float): score.
-        bm25_score (float): bm25 score.
-        semantic_score (float): semantic score.
-        timestamp (str): timestamp.
-        metadata (dict[str, tp.Any]): metadata."""
+        session_id: Session the hit belongs to.
+        turn_id: Turn within the session.
+        agent_id: Agent that produced the turn, if known.
+        prompt: First 500 characters of the original prompt.
+        response: First 1000 characters of the agent response.
+        score: Blended final ranking score (higher is better).
+        bm25_score: Normalised keyword component.
+        semantic_score: Cosine similarity component (0 if no embedder).
+        timestamp: Turn ``started_at`` string.
+        metadata: Per-turn metadata copied through from the record.
+    """
 
     session_id: str
     turn_id: str
@@ -63,7 +67,13 @@ class SearchHit:
 
 
 class SessionIndex:
-    """Session index."""
+    """SQLite-backed hybrid search index over session turns.
+
+    The connection is opened with ``check_same_thread=False`` because the
+    daemon reuses the index across threads; concurrent writes are serialised
+    by SQLite itself. FTS5 is detected at construction time — if the SQLite
+    build lacks it, the index falls back to a ``LIKE`` scan.
+    """
 
     def __init__(
         self,
@@ -71,12 +81,13 @@ class SessionIndex:
         *,
         embedder: Embedder | None = None,
     ) -> None:
-        """Initialize the instance.
+        """Open (or create) the index DB at ``db_path``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            db_path (str | Path, optional): IN: db path. Defaults to ':memory:'. OUT: Consumed during execution.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution."""
+            db_path: SQLite path, or ``":memory:"`` for an ephemeral index.
+            embedder: Optional embedder used to compute and rank vectors. If
+                ``None``, search degrades to a pure BM25/LIKE result set.
+        """
 
         if isinstance(db_path, Path):
             db_path = str(db_path)
@@ -89,12 +100,7 @@ class SessionIndex:
         self._has_fts = self._init_schema()
 
     def _init_schema(self) -> bool:
-        """Internal helper to init schema.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Create the ``turns`` table and (if available) ``turns_fts``."""
 
         cur = self._conn.cursor()
         cur.execute(
@@ -127,10 +133,7 @@ class SessionIndex:
         return has_fts
 
     def close(self) -> None:
-        """Close.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Close the underlying SQLite connection, ignoring errors."""
 
         try:
             self._conn.close()
@@ -138,13 +141,7 @@ class SessionIndex:
             pass
 
     def index_session(self, session: SessionRecord) -> int:
-        """Index session.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session (SessionRecord): IN: session. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Index every turn of ``session`` and return the count."""
 
         n = 0
         for turn in session.turns:
@@ -153,12 +150,12 @@ class SessionIndex:
         return n
 
     def index_turn(self, session_id: str, turn: TurnRecord) -> None:
-        """Index turn.
+        """Upsert ``turn`` into the SQLite + FTS tables.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-            turn (TurnRecord): IN: turn. OUT: Consumed during execution."""
+        Computes and stores an embedding when an :class:`Embedder` is
+        configured; embedding failures are swallowed and the row is still
+        indexed so keyword search keeps working.
+        """
 
         prompt = turn.prompt or ""
         response = turn.response_content or ""
@@ -196,13 +193,7 @@ class SessionIndex:
         self._conn.commit()
 
     def remove_session(self, session_id: str) -> int:
-        """Remove session.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Delete every indexed turn for ``session_id`` and return the count."""
 
         cur = self._conn.cursor()
         cur.execute("SELECT turn_id FROM turns WHERE session_id = ?", (session_id,))
@@ -225,17 +216,20 @@ class SessionIndex:
         session_id: str | None = None,
         weights: tuple[float, float] = (0.6, 0.4),
     ) -> list[SearchHit]:
-        """Search.
+        """Run a hybrid BM25 + cosine similarity search and return top hits.
+
+        Pulls ``4 * k`` candidates via FTS5 (or LIKE), normalises their BM25
+        scores, optionally blends in cosine similarity over stored
+        embeddings, and returns the top ``k`` ordered by the combined score.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            k (int, optional): IN: k. Defaults to 10. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
-            weights (tuple[float, float], optional): IN: weights. Defaults to (0.6, 0.4). OUT: Consumed during execution.
-        Returns:
-            list[SearchHit]: OUT: Result of the operation."""
+            query: Free-text search query.
+            k: Maximum hits to return.
+            agent_id: Restrict to turns by this agent.
+            session_id: Restrict to a single session.
+            weights: ``(bm25, semantic)`` mix. Negative or zero totals fall
+                back to ``(0.5, 0.5)``.
+        """
 
         if not query.strip():
             return []
@@ -291,16 +285,7 @@ class SessionIndex:
         agent_id: str | None,
         session_id: str | None,
     ) -> list[dict[str, tp.Any]]:
-        """Internal helper to fetch candidates.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            k (int): IN: k. OUT: Consumed during execution.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-            session_id (str | None): IN: session id. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+        """Return BM25 candidates via FTS5, with a ``LIKE`` fallback."""
 
         cur = self._conn.cursor()
         rows: list[dict[str, tp.Any]] = []

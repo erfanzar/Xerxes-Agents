@@ -11,14 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Bridge module for Xerxes.
+"""Glue between :mod:`xerxes.tools`, :class:`ExecutionRegistry`, and :class:`QueryEngine`.
 
-Exports:
-    - logger
-    - populate_registry
-    - build_tool_executor
-    - create_query_engine
-    - bootstrap_xerxes"""
+The bridge module is the single entry point legacy callers use to wire up a
+fully-loaded runtime: it registers every tool in :mod:`xerxes.tools` into a
+fresh :class:`ExecutionRegistry`, builds a tool executor that dispatches by
+name (with type coercion and ``context_variables`` injection), and finally
+constructs a :class:`QueryEngine` pre-loaded with the registry and executor.
+:func:`bootstrap_xerxes` glues that together with :func:`xerxes.runtime.bootstrap.bootstrap`
+for one-shot CLI runs.
+"""
 
 from __future__ import annotations
 
@@ -34,14 +36,11 @@ def _runtime_context(
     agent: Any = None,
     extra_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Internal helper to runtime context.
+    """Build the ``context_variables`` dict tools receive at call time.
 
-    Args:
-        xerxes_instance (Any, optional): IN: xerxes instance. Defaults to None. OUT: Consumed during execution.
-        agent (Any, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        extra_context (dict[str, Any] | None, optional): IN: extra context. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+    Merges ``extra_context`` with the agent id and the parent instance's
+    memory store when available; never overwrites caller-provided keys.
+    """
 
     context = dict(extra_context or {})
     if agent is not None:
@@ -62,15 +61,14 @@ def _call_tool_handler(
     xerxes_instance: Any = None,
     agent: Any = None,
 ) -> Any:
-    """Internal helper to call tool handler.
+    """Invoke ``handler`` with type-coerced kwargs and an injected context.
 
-    Args:
-        handler (Any): IN: handler. OUT: Consumed during execution.
-        tool_input (dict[str, Any]): IN: tool input. OUT: Consumed during execution.
-        xerxes_instance (Any, optional): IN: xerxes instance. Defaults to None. OUT: Consumed during execution.
-        agent (Any, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    Reads ``handler``'s signature to decide whether to pass a
+    ``context_variables`` kwarg explicitly or splat the runtime context
+    through ``**kwargs``. JSON-encoded list/dict strings and string-encoded
+    primitives are coerced into the parameter's declared type before the
+    call.
+    """
 
     call_kwargs = dict(tool_input)
     context = _runtime_context(
@@ -104,13 +102,12 @@ def _coerce_argument_types(
     arguments: dict[str, Any],
     signature: inspect.Signature,
 ) -> dict[str, Any]:
-    """Internal helper to coerce argument types.
+    """Coerce LLM-provided string arguments to the handler's declared types.
 
-    Args:
-        arguments (dict[str, Any]): IN: arguments. OUT: Consumed during execution.
-        signature (inspect.Signature): IN: signature. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+    Handles ``int``, ``float``, ``bool``, ``list[X]``, and ``dict[K, V]``
+    annotations (including ``Optional`` unwrapping). Unknown or mismatched
+    annotations are left untouched so the handler can decide what to do.
+    """
 
     import json
     import typing
@@ -174,16 +171,20 @@ def populate_registry(
     include_ai: bool = True,
     include_memory: bool = True,
 ) -> Any:
-    """Populate registry.
+    """Register every tool from :mod:`xerxes.tools` plus default slash commands.
 
     Args:
-        registry (Any, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
-        include_web (bool, optional): IN: include web. Defaults to True. OUT: Consumed during execution.
-        include_system (bool, optional): IN: include system. Defaults to True. OUT: Consumed during execution.
-        include_ai (bool, optional): IN: include ai. Defaults to True. OUT: Consumed during execution.
-        include_memory (bool, optional): IN: include memory. Defaults to True. OUT: Consumed during execution.
+        registry: Existing :class:`ExecutionRegistry` to extend; a fresh one
+            is created when ``None``.
+        include_web: Whether to register web-search/scrape tools.
+        include_system: Whether to register shell/filesystem tools.
+        include_ai: Whether to register AI/sub-agent tools.
+        include_memory: Whether to register the memory tools.
+
     Returns:
-        Any: OUT: Result of the operation."""
+        The registry, now populated with the selected tool categories and
+        the standard slash-command stubs.
+    """
 
     from xerxes.runtime.execution_registry import ExecutionRegistry
     from xerxes.streaming.permissions import SAFE_TOOLS
@@ -272,14 +273,13 @@ def populate_registry(
 
 
 def _build_tool_schema(name: str, description: str, handler: Any) -> dict[str, Any]:
-    """Internal helper to build tool schema.
+    """Derive a JSON tool schema from ``handler``'s signature.
 
-    Args:
-        name (str): IN: name. OUT: Consumed during execution.
-        description (str): IN: description. OUT: Consumed during execution.
-        handler (Any): IN: handler. OUT: Consumed during execution.
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+    Skips ``self``, ``cls``, ``context_variables``, ``_``-prefixed, and
+    ``*args``/``**kwargs`` parameters. Annotations map to JSON types
+    (``str``/``int``/``float``/``bool``/``list``); anything else falls back
+    to ``"string"``. Parameters without a default are marked required.
+    """
 
     schema: dict[str, Any] = {
         "name": name,
@@ -345,23 +345,16 @@ def build_tool_executor(
     agent: Any = None,
     registry: Any = None,
 ) -> Any:
-    """Build tool executor.
+    """Return a ``(tool_name, tool_input) -> str`` callable for the streaming loop.
 
-    Args:
-        xerxes_instance (Any, optional): IN: xerxes instance. Defaults to None. OUT: Consumed during execution.
-        agent (Any, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        registry (Any, optional): IN: registry. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    The returned executor resolves a tool by checking ``registry`` first, then
+    the agent's ``functions`` list, then :mod:`xerxes.tools` as a final fall-back.
+    Handler exceptions are stringified into the returned value rather than
+    propagated, so the LLM can recover by trying a different tool.
+    """
 
     def executor(tool_name: str, tool_input: dict[str, Any]) -> str:
-        """Executor.
-
-        Args:
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            tool_input (dict[str, Any]): IN: tool input. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Dispatch ``tool_name`` against the resolution chain and return text."""
         if registry is not None:
             entry = registry.get_tool(tool_name)
             if entry is not None and entry.handler is not None:
@@ -423,16 +416,13 @@ def create_query_engine(
     system_prompt: str = "",
     **config_kwargs: Any,
 ) -> Any:
-    """Create query engine.
+    """Build a fully-wired :class:`QueryEngine` for ``agent``.
 
-    Args:
-        xerxes_instance (Any, optional): IN: xerxes instance. Defaults to None. OUT: Consumed during execution.
-        agent (Any, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-        system_prompt (str, optional): IN: system prompt. Defaults to ''. OUT: Consumed during execution.
-        **config_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Any: OUT: Result of the operation."""
+    Populates an :class:`ExecutionRegistry` via :func:`populate_registry`,
+    derives the matching tool executor and schemas, and stashes them on the
+    returned engine as ``_default_tool_executor`` / ``_default_tool_schemas``
+    so consumers can re-use them on subsequent ``submit`` calls.
+    """
 
     from xerxes.runtime.query_engine import QueryEngine
 
@@ -463,15 +453,13 @@ def bootstrap_xerxes(
     model: str = "",
     extra_context: str = "",
 ) -> Any:
-    """Bootstrap xerxes.
+    """Run :func:`xerxes.runtime.bootstrap.bootstrap` then add all tools.
 
-    Args:
-        xerxes_instance (Any, optional): IN: xerxes instance. Defaults to None. OUT: Consumed during execution.
-        agent (Any, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-        extra_context (str, optional): IN: extra context. Defaults to ''. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    Convenience for legacy entry points: invokes the standard bootstrap
+    pipeline using ``agent.functions`` as the tool source, then layers the
+    full :mod:`xerxes.tools` set into the same registry via
+    :func:`populate_registry`.
+    """
 
     from xerxes.runtime.bootstrap import bootstrap
 

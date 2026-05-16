@@ -11,10 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""OAuth 2.0 client for channel integrations.
+"""OAuth 2.0 authorization-code client used by channel integrations.
 
-Manages authorization URLs, state validation, token exchange, refresh, and
-persistent token storage.
+Handles authorisation URL construction, CSRF state issuance and
+validation, ``code → token`` exchange, refresh, and per-installation
+token persistence through ``MemoryStorage``. Refresh is serialised per
+``install_id`` because most providers rotate the refresh token on every
+call — without the lock two concurrent refreshes would race and one
+caller would end up holding an invalidated refresh token.
 """
 
 from __future__ import annotations
@@ -36,7 +40,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OAuthProvider:
-    """Configuration for an OAuth 2.0 identity provider."""
+    """Static configuration describing one OAuth 2.0 identity provider.
+
+    Attributes:
+        name: Short identifier; used as the storage-key prefix.
+        client_id: OAuth client id issued by the provider.
+        client_secret: OAuth client secret. Treat as sensitive.
+        authorize_url: Endpoint hosting the user-facing consent UI.
+        token_url: Endpoint that exchanges codes/refresh tokens for access
+            tokens.
+        scopes: Scopes requested when building the authorize URL.
+        redirect_uri: Callback URL registered with the provider.
+        extra_authorize_params: Provider-specific extras merged into the
+            authorize URL (e.g. ``access_type=offline`` for Google).
+    """
 
     name: str
     client_id: str
@@ -50,7 +67,19 @@ class OAuthProvider:
 
 @dataclass
 class OAuthToken:
-    """OAuth 2.0 access token with metadata."""
+    """A persisted OAuth 2.0 access token plus metadata.
+
+    Attributes:
+        provider: Name of the issuing ``OAuthProvider``.
+        access_token: Bearer token used on API calls.
+        refresh_token: Long-lived token used by ``OAuthClient.refresh``.
+            Empty when the provider does not return one.
+        expires_at: Absolute Unix timestamp at which ``access_token`` stops
+            working. ``0.0`` means "unknown / non-expiring".
+        scopes: Granted scope list.
+        raw: Full token-endpoint payload, retained for provider-specific
+            fields the dataclass does not model.
+    """
 
     provider: str
     access_token: str
@@ -60,21 +89,24 @@ class OAuthToken:
     raw: dict[str, tp.Any] | None = None
 
     def __post_init__(self) -> None:
-        """Ensure ``scopes`` and ``raw`` are initialized to empty collections."""
+        """Coerce ``scopes`` and ``raw`` from ``None`` to empty containers."""
         if self.scopes is None:
             self.scopes = []
         if self.raw is None:
             self.raw = {}
 
     def is_expired(self, *, now: float | None = None) -> bool:
-        """Check whether the token is expired (with a 60-second buffer).
+        """Return whether the token has expired (with a 60-second skew buffer).
+
+        The 60-second buffer means the token is treated as expired slightly
+        early so callers can refresh before in-flight requests fail.
 
         Args:
-            now (float | None): IN: optional Unix timestamp. Defaults to the
-                current time.
+            now: Optional Unix timestamp override; defaults to ``time.time()``.
 
         Returns:
-            bool: OUT: ``True`` if expired or about to expire.
+            ``True`` if the token is expired or expiring within 60 seconds.
+            Always ``False`` when ``expires_at`` is ``0.0`` (unknown).
         """
         now = time.time() if now is None else now
         if self.expires_at == 0.0:
@@ -82,11 +114,7 @@ class OAuthToken:
         return now + 60.0 >= self.expires_at
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the token to a plain dictionary.
-
-        Returns:
-            dict[str, Any]: OUT: field names mapped to their values.
-        """
+        """Serialise the token to a JSON-friendly dict for ``MemoryStorage``."""
         return {
             "provider": self.provider,
             "access_token": self.access_token,
@@ -98,13 +126,13 @@ class OAuthToken:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> OAuthToken:
-        """Deserialize a token from a plain dictionary.
+        """Rebuild a token from the output of ``to_dict``.
 
         Args:
-            data (dict[str, Any]): IN: dictionary produced by ``to_dict``.
+            data: Mapping previously written by ``to_dict``.
 
         Returns:
-            OAuthToken: OUT: reconstructed token instance.
+            Reconstructed token.
         """
         return cls(
             provider=data["provider"],
@@ -117,7 +145,14 @@ class OAuthToken:
 
 
 class OAuthClient:
-    """OAuth 2.0 authorization-code flow client with token persistence."""
+    """OAuth 2.0 authorization-code flow with token persistence and refresh locking.
+
+    Issues CSRF-protected authorize URLs, consumes the matching state on
+    callback, exchanges codes for tokens, refreshes tokens before they
+    expire, and persists tokens through ``MemoryStorage`` keyed by
+    ``(provider, install_id)`` so different workspaces / accounts can keep
+    independent credentials.
+    """
 
     STATE_TTL_SECONDS = 600.0
 
@@ -128,28 +163,34 @@ class OAuthClient:
         storage: MemoryStorage | None = None,
         http_client: tp.Any | None = None,
     ) -> None:
-        """Initialize the OAuth client.
+        """Build the client.
 
         Args:
-            provider (OAuthProvider): IN: provider configuration.
-                OUT: stored for building authorization and token requests.
-            storage (MemoryStorage | None): IN: optional storage backend for
-                persisting tokens.
-            http_client (Any | None): IN: optional HTTP client callable used
-                for token endpoint requests. OUT: forwarded to ``_post_form``.
+            provider: Provider configuration used for every authorize and
+                token request.
+            storage: Optional backend that persists tokens. Without it
+                ``get_token`` always returns ``None`` and tokens live only
+                inside the current process.
+            http_client: Optional callable replacing ``httpx`` for the token
+                endpoint. Receives ``(url, data=...)`` and must return a dict
+                or JSON-decodable string. Used heavily in tests.
         """
         self.provider = provider
         self.storage = storage
         self._http = http_client
         self._lock = threading.Lock()
         self._states: dict[str, float] = {}
+        self._refresh_locks: dict[str, threading.Lock] = {}
 
     def authorize_url(self) -> tuple[str, str]:
-        """Build the provider authorization URL and a CSRF state token.
+        """Build the provider's consent URL and a fresh CSRF state token.
+
+        The state token is recorded internally with a TTL and must be passed
+        back through ``consume_state`` once the OAuth callback returns.
 
         Returns:
-            tuple[str, str]: OUT: ``(full_authorize_url, state)``. The state
-            is tracked internally for later validation.
+            ``(full_authorize_url, state)``. The state must be round-tripped
+            through the callback to defeat CSRF.
         """
         state = secrets.token_urlsafe(24)
         with self._lock:
@@ -167,13 +208,16 @@ class OAuthClient:
         return f"{self.provider.authorize_url}?{urllib.parse.urlencode(params)}", state
 
     def consume_state(self, state: str) -> bool:
-        """Validate and consume a CSRF state token.
+        """Validate and atomically consume a previously issued CSRF state.
+
+        States can only be used once; reuse returns ``False``. Stale entries
+        beyond ``STATE_TTL_SECONDS`` are GC'd opportunistically here.
 
         Args:
-            state (str): IN: state value received from the OAuth callback.
+            state: Value received from the OAuth callback.
 
         Returns:
-            bool: OUT: ``True`` if the state exists and has not expired.
+            ``True`` only when the state was outstanding and within its TTL.
         """
         with self._lock:
             ts = self._states.pop(state, None)
@@ -183,7 +227,7 @@ class OAuthClient:
         return (time.time() - ts) <= self.STATE_TTL_SECONDS
 
     def _gc_states(self) -> None:
-        """Remove expired state entries."""
+        """Drop state tokens older than ``STATE_TTL_SECONDS``."""
         cutoff = time.time() - self.STATE_TTL_SECONDS
         for s, ts in list(self._states.items()):
             if ts < cutoff:
@@ -197,21 +241,24 @@ class OAuthClient:
         state_received: str | None = None,
         expected_state: str | None = None,
     ) -> OAuthToken:
-        """Exchange an authorization code for an access token.
+        """Trade an authorization code for an access token and persist it.
+
+        When both ``state_received`` and ``expected_state`` are supplied the
+        client checks they match before talking to the provider — callers
+        that already validated via ``consume_state`` may omit them.
 
         Args:
-            code (str): IN: authorization code from the OAuth callback.
-            install_id (str): IN: installation identifier for token storage.
-                Defaults to "default".
-            state_received (str | None): IN: state received with the callback.
-            expected_state (str | None): IN: state originally issued. OUT:
-                compared against ``state_received`` when both are provided.
+            code: Authorization code returned to the OAuth callback.
+            install_id: Per-installation key used for token storage. Distinct
+                values give per-workspace / per-account isolation.
+            state_received: Value echoed back by the provider on the callback.
+            expected_state: Value originally issued by ``authorize_url``.
 
         Returns:
-            OAuthToken: OUT: newly obtained token, persisted to storage.
+            The newly obtained token, also written to storage.
 
         Raises:
-            ValueError: If the received state does not match the expected state.
+            ValueError: ``state_received`` does not match ``expected_state``.
         """
         if expected_state is not None and state_received != expected_state:
             raise ValueError("OAuth state mismatch — refusing token exchange")
@@ -228,17 +275,20 @@ class OAuthClient:
         return token
 
     def refresh(self, install_id: str = "default") -> OAuthToken:
-        """Refresh the access token for an installation.
+        """Refresh the access token for ``install_id`` using its refresh token.
+
+        Carries the existing refresh token forward when the provider does
+        not return a new one in the response.
 
         Args:
-            install_id (str): IN: installation identifier. Defaults to
-                "default".
+            install_id: Installation identifier used at exchange time.
 
         Returns:
-            OAuthToken: OUT: newly refreshed token, persisted to storage.
+            The refreshed token, also persisted to storage.
 
         Raises:
-            RuntimeError: If no stored token or refresh token is available.
+            RuntimeError: No stored token, or the stored token has no
+                refresh token (the user must re-authorise).
         """
         token = self.get_token(install_id)
         if token is None or not token.refresh_token:
@@ -257,47 +307,61 @@ class OAuthClient:
         return new_token
 
     def get_valid_token(self, install_id: str = "default") -> OAuthToken | None:
-        """Retrieve a non-expired token, refreshing if necessary.
+        """Return a fresh token, refreshing transparently when needed.
+
+        Concurrent refreshes for the same ``install_id`` are serialised by a
+        per-installation lock; without that two callers can both POST to the
+        token endpoint, the provider rotates the refresh token on each call,
+        and one of the responses wins the storage write — the other caller
+        is then holding an invalidated refresh token and the next refresh
+        fails permanently.
 
         Args:
-            install_id (str): IN: installation identifier. Defaults to
-                "default".
+            install_id: Installation identifier.
 
         Returns:
-            OAuthToken | None: OUT: valid token, or ``None`` if unavailable
-            or refresh failed.
+            A non-expired token, or ``None`` when no token is stored or the
+            refresh attempt failed.
         """
         token = self.get_token(install_id)
         if token is None:
             return None
         if not token.is_expired():
             return token
-        try:
-            return self.refresh(install_id)
-        except Exception:
-            logger.warning("OAuth refresh failed", exc_info=True)
-            return None
+        # Serialize refreshes per install_id. Without this, two concurrent
+        # callers can both POST to the token endpoint; the provider may
+        # rotate refresh_token on each call and one of the responses wins
+        # the storage write — the other caller now holds an invalidated
+        # refresh_token and the next refresh fails permanently.
+        with self._lock:
+            lock = self._refresh_locks.setdefault(install_id, threading.Lock())
+        with lock:
+            # Re-read inside the lock: a concurrent caller may have just
+            # refreshed for us.
+            current = self.get_token(install_id)
+            if current is not None and not current.is_expired():
+                return current
+            try:
+                return self.refresh(install_id)
+            except Exception:
+                logger.warning("OAuth refresh failed", exc_info=True)
+                return None
 
     def _store_key(self, install_id: str) -> str:
-        """Build the storage key for an installation's token.
-
-        Args:
-            install_id (str): IN: installation identifier.
-
-        Returns:
-            str: OUT: prefixed storage key.
-        """
+        """Return the ``MemoryStorage`` key for one installation's token."""
         return f"_oauth_{self.provider.name}_{install_id}"
 
     def get_token(self, install_id: str = "default") -> OAuthToken | None:
-        """Load a token from storage.
+        """Read the stored token for ``install_id`` without touching the network.
+
+        Tolerant of storage and deserialisation errors — any failure yields
+        ``None`` so callers can fall back to a fresh authorize flow.
 
         Args:
-            install_id (str): IN: installation identifier. Defaults to
-                "default".
+            install_id: Installation identifier.
 
         Returns:
-            OAuthToken | None: OUT: deserialized token, or ``None``.
+            The deserialised token, or ``None`` when missing or invalid.
         """
         if self.storage is None:
             return None
@@ -313,12 +377,7 @@ class OAuthClient:
             return None
 
     def _save_token(self, install_id: str, token: OAuthToken) -> None:
-        """Persist a token to storage.
-
-        Args:
-            install_id (str): IN: installation identifier.
-            token (OAuthToken): IN: token to save.
-        """
+        """Best-effort persist of one token; storage errors are logged not raised."""
         if self.storage is None:
             return
         try:
@@ -327,17 +386,21 @@ class OAuthClient:
             logger.warning("Failed to persist OAuth token", exc_info=True)
 
     def _post_form(self, url: str, data: dict[str, tp.Any]) -> dict[str, tp.Any]:
-        """POST form data to a URL and return the JSON response.
+        """POST ``application/x-www-form-urlencoded`` to ``url`` and decode the body.
+
+        Falls back to parsing the response as a query string when JSON
+        decoding fails — some providers (notably old Slack tier) reply with
+        form-encoded payloads.
 
         Args:
-            url (str): IN: target URL.
-            data (dict[str, Any]): IN: form fields.
+            url: Target URL.
+            data: Form fields.
 
         Returns:
-            dict[str, Any]: OUT: parsed JSON response.
+            Parsed response, either from JSON or from query-string decoding.
 
         Raises:
-            RuntimeError: If ``httpx`` is required but not installed.
+            RuntimeError: ``httpx`` is needed but not installed.
         """
         if self._http is not None:
             response = self._http(url, data=data)
@@ -354,16 +417,20 @@ class OAuthClient:
             return dict(urllib.parse.parse_qsl(resp.text))
 
     def _token_from_payload(self, payload: dict[str, tp.Any]) -> OAuthToken:
-        """Build an ``OAuthToken`` from a token-endpoint response.
+        """Build an ``OAuthToken`` from a raw token-endpoint response.
+
+        Handles two access-token shapes: top-level (most providers) and the
+        nested ``authed_user.access_token`` used by Slack user-tokens.
 
         Args:
-            payload (dict[str, Any]): IN: raw JSON response from the token URL.
+            payload: Raw JSON response from ``token_url``.
 
         Returns:
-            OAuthToken: OUT: populated token instance.
+            Populated token. ``expires_at`` is ``0.0`` when the provider
+            omitted ``expires_in``.
 
         Raises:
-            RuntimeError: If the payload lacks an ``access_token``.
+            RuntimeError: The payload contains no usable ``access_token``.
         """
         access = payload.get("access_token") or payload.get("authed_user", {}).get("access_token", "")
         if not access:

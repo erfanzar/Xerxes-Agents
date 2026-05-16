@@ -13,8 +13,16 @@
 # limitations under the License.
 """FastAPI routers for the Xerxes API server.
 
-This module defines route handlers for chat completions, model listing, health
-checks, and a unified router that dispatches between standard and Cortex backends.
+Provides individual routers for the standard chat backend, Cortex
+chat backend, models listing, and health check, plus a
+:class:`UnifiedChatRouter` that picks the right backend based on the
+``model`` field of the incoming request.
+
+Endpoints:
+
+* ``POST /v1/chat/completions`` — chat completions (sync or SSE stream).
+* ``GET  /v1/models`` — list available models.
+* ``GET  /health`` — server health and registered agent count.
 """
 
 import time
@@ -32,39 +40,30 @@ from .models import HealthResponse, ModelInfo, ModelsResponse
 
 
 class ChatRouter:
-    """Router for standard agent chat completions."""
+    """Single-agent ``/v1/chat/completions`` router.
+
+    Looks up the requested model in ``agents`` and dispatches to
+    :class:`CompletionService`. Returns either a ``ChatCompletionResponse``
+    or an SSE ``StreamingResponse`` depending on ``request.stream``.
+    """
 
     def __init__(self, agents: dict[str, Agent], completion_service: CompletionService):
-        """Initialize the chat router.
-
-        Args:
-            agents (dict[str, Agent]): IN: Registered agents by model ID. OUT:
-                Used for model lookup.
-            completion_service (CompletionService): IN: Standard completion backend.
-                OUT: Used to process chat requests.
-        """
+        """Bind the router to the agent registry and completion backend."""
         self.agents = agents
         self.completion_service = completion_service
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        """Register FastAPI routes on the internal router."""
+        """Attach the chat completions endpoint to the FastAPI router."""
 
         @self.router.post("/v1/chat/completions")
         async def chat_completions(request: ChatCompletionRequest):
-            """Handle a chat completion request for a standard agent.
+            """Run one chat completion for the requested agent model.
 
-            Args:
-                request (ChatCompletionRequest): IN: The incoming chat request.
-                    OUT: Validated and dispatched to the completion service.
-
-            Returns:
-                ChatCompletionResponse | StreamingResponse: OUT: Synchronous or
-                    streaming response depending on ``request.stream``.
-
-            Raises:
-                HTTPException: If the model is not found or an internal error occurs.
+            Raises HTTP 404 if the model is not registered and HTTP 500
+            on any other exception. Streaming responses use
+            ``text/event-stream``.
             """
             try:
                 agent = self.agents.get(request.model)
@@ -94,29 +93,20 @@ class ChatRouter:
 
 
 class ModelsRouter:
-    """Router for the ``/v1/models`` endpoint."""
+    """Router that serves ``GET /v1/models``."""
 
     def __init__(self, agents: dict[str, Agent]):
-        """Initialize the models router.
-
-        Args:
-            agents (dict[str, Agent]): IN: Registered agents by model ID. OUT:
-                Enumerated in the models list.
-        """
+        """Bind to the agent registry the response is derived from."""
         self.agents = agents
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        """Register FastAPI routes on the internal router."""
+        """Attach the models listing endpoint."""
 
         @self.router.get("/v1/models")
         async def list_models() -> ModelsResponse:
-            """List available models.
-
-            Returns:
-                ModelsResponse: OUT: Response containing all registered agent models.
-            """
+            """Return one :class:`ModelInfo` per registered agent."""
             models = []
             for agent_id, _ in self.agents.items():
                 models.append(ModelInfo(id=agent_id, created=int(time.time())))
@@ -124,64 +114,42 @@ class ModelsRouter:
 
 
 class HealthRouter:
-    """Router for the ``/health`` endpoint."""
+    """Router that serves ``GET /health``."""
 
     def __init__(self, agents: dict[str, Agent]):
-        """Initialize the health router.
-
-        Args:
-            agents (dict[str, Agent]): IN: Registered agents. OUT: Counted for
-                the health response.
-        """
+        """Bind to the agent registry whose size populates ``agents``."""
         self.agents = agents
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        """Register FastAPI routes on the internal router."""
+        """Attach the health endpoint."""
 
         @self.router.get("/health")
         async def health_check() -> HealthResponse:
-            """Return server health status.
-
-            Returns:
-                HealthResponse: OUT: Status and registered agent count.
-            """
+            """Return ``status="healthy"`` and the current agent count."""
             return HealthResponse(status="healthy", agents=len(self.agents))
 
 
 class CortexChatRouter:
-    """Router for Cortex-backed chat completions."""
+    """Cortex-only ``/v1/chat/completions`` router.
+
+    Skips agent-id lookup; the Cortex service resolves the requested
+    variant from the model name.
+    """
 
     def __init__(self, cortex_completion_service: CortexCompletionService):
-        """Initialize the Cortex chat router.
-
-        Args:
-            cortex_completion_service (CortexCompletionService): IN: Cortex
-                completion backend. OUT: Used to process chat requests.
-        """
+        """Bind the router to the Cortex completion backend."""
         self.cortex_completion_service = cortex_completion_service
         self.router = APIRouter()
         self._setup_routes()
 
     def _setup_routes(self) -> None:
-        """Register FastAPI routes on the internal router."""
+        """Attach the Cortex chat completions endpoint."""
 
         @self.router.post("/v1/chat/completions")
         async def cortex_chat_completions(request: ChatCompletionRequest):
-            """Handle a chat completion request via the Cortex backend.
-
-            Args:
-                request (ChatCompletionRequest): IN: The incoming chat request.
-                    OUT: Dispatched to the Cortex completion service.
-
-            Returns:
-                ChatCompletionResponse | StreamingResponse: OUT: Synchronous or
-                    streaming response.
-
-            Raises:
-                HTTPException: On internal errors.
-            """
+            """Run one Cortex chat completion (streaming or sync)."""
             try:
                 messages_history = MessageConverter.convert_openai_to_xerxes(request.messages)
 
@@ -202,7 +170,13 @@ class CortexChatRouter:
 
 
 class UnifiedChatRouter:
-    """Unified router that dispatches to standard or Cortex backends by model name."""
+    """Dispatches ``/v1/chat/completions`` between standard and Cortex backends.
+
+    Routing is decided by the ``model`` field: a name containing
+    ``"cortex"`` goes to :class:`CortexCompletionService`; anything
+    else is looked up in ``agents`` and run through
+    :class:`CompletionService`.
+    """
 
     def __init__(
         self,
@@ -210,16 +184,7 @@ class UnifiedChatRouter:
         completion_service: CompletionService | None = None,
         cortex_completion_service: CortexCompletionService | None = None,
     ):
-        """Initialize the unified chat router.
-
-        Args:
-            agents (dict[str, Agent] | None): IN: Standard registered agents. OUT:
-                Used when the requested model is not a Cortex model.
-            completion_service (CompletionService | None): IN: Standard completion
-                backend. OUT: Used for non-Cortex model requests.
-            cortex_completion_service (CortexCompletionService | None): IN: Cortex
-                completion backend. OUT: Used when the model name contains ``"cortex"``.
-        """
+        """Bind to whichever backends this server has available."""
         self.agents = agents or {}
         self.completion_service = completion_service
         self.cortex_completion_service = cortex_completion_service
@@ -227,30 +192,14 @@ class UnifiedChatRouter:
         self._setup_routes()
 
     def _is_cortex_model(self, model_name: str) -> bool:
-        """Check whether a model name refers to the Cortex backend.
-
-        Args:
-            model_name (str): IN: Requested model identifier. OUT: Checked for
-                the substring ``"cortex"``.
-
-        Returns:
-            bool: OUT: ``True`` if the model is a Cortex model.
-        """
+        """Return ``True`` when ``model_name`` should route to Cortex."""
         if not model_name:
             return False
 
         return "cortex" in model_name.lower()
 
     def _normalize_cortex_model(self, model_name: str) -> str:
-        """Normalize a Cortex model name for internal routing.
-
-        Args:
-            model_name (str): IN: Raw model name. OUT: Lowercased and stripped
-                of prefix separators.
-
-        Returns:
-            str: OUT: Normalized model name starting with ``"cortex"``.
-        """
+        """Strip prefixes / separators and return the canonical Cortex name."""
         normalized = model_name.lower()
         for sep in [":", ".", "_"]:
             normalized = normalized.replace(sep, "-")
@@ -265,23 +214,14 @@ class UnifiedChatRouter:
         return normalized
 
     def _setup_routes(self) -> None:
-        """Register FastAPI routes on the internal router."""
+        """Attach the unified chat completions endpoint."""
 
         @self.router.post("/v1/chat/completions")
         async def unified_chat_completions(request: ChatCompletionRequest):
-            """Handle a chat completion request, routing to Cortex or standard backend.
+            """Route to Cortex or single-agent backend based on ``model``.
 
-            Args:
-                request (ChatCompletionRequest): IN: The incoming chat request.
-                    OUT: Routed based on model name.
-
-            Returns:
-                ChatCompletionResponse | StreamingResponse: OUT: Response from
-                    the selected backend.
-
-            Raises:
-                HTTPException: If the requested backend is unavailable or the
-                    model is not found.
+            Raises HTTP 404 when the chosen backend is not configured
+            or when a non-Cortex model id is not registered.
             """
             try:
                 original_model = request.model

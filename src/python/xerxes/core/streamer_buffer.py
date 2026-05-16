@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Thread-safe buffer for streaming LLM responses.
+"""Thread-safe buffer that bridges async stream producers to sync consumers.
 
-``StreamerBuffer`` bridges asynchronous producers and synchronous consumers
-via a ``queue.Queue``, yielding items through a generator and supporting
-graceful shutdown via ``KILL_TAG``.
+LLM providers feed chunks from an async producer (HTTP stream task), while
+the agent loop iterates them synchronously. :class:`StreamerBuffer` wraps a
+``queue.Queue`` so the producer ``put``s items, the consumer pulls them via
+:meth:`StreamerBuffer.stream`, and either side can request a graceful
+shutdown by sending the sentinel :data:`KILL_TAG`. The buffer is fully
+thread-safe; closing it idempotently signals every consumer.
 """
 
 import os
@@ -36,15 +39,16 @@ KILL_TAG = "/<[KILL-LOOP]>/"
 
 
 class StreamerBuffer:
-    """Thread-safe queue wrapper for streaming response chunks."""
+    """Thread-safe queue carrying streaming chunks plus producer/consumer bookkeeping.
+
+    The optional ``thread``/``task``/``result_holder``/``exception_holder``
+    fields are populated by helpers that adopt the buffer's lifetime to a
+    background producer (so the consumer can wait on the producer's result
+    via :attr:`get_result` / :attr:`aget_result` after :meth:`stream` exits).
+    """
 
     def __init__(self, maxsize: int = 0):
-        """Initialize the buffer.
-
-        Args:
-            maxsize (int): IN: maximum queue size (0 = unlimited).
-                Defaults to 0.
-        """
+        """Build the queue (``maxsize=0`` means unbounded)."""
         self._queue: queue.Queue[StreamingResponseType | None] = queue.Queue(maxsize=maxsize)
         self._closed = False
         self._lock = threading.Lock()
@@ -57,11 +61,7 @@ class StreamerBuffer:
         self.aget_result: tp.Callable[[], tp.Awaitable[tp.Any]] | None = None
 
     def put(self, item: StreamingResponseType | None) -> None:
-        """Enqueue an item (or ``None`` as a heartbeat).
-
-        Args:
-            item (StreamingResponseType | None): IN: chunk to enqueue.
-        """
+        """Enqueue ``item`` (``None`` is treated as a heartbeat by consumers); drops if closed."""
         if DEBUG_STREAMING:
             import sys
 
@@ -77,27 +77,14 @@ class StreamerBuffer:
             print("[StreamerBuffer] WARNING: Buffer closed, dropping item", file=sys.stderr)
 
     def get(self, timeout: float | None = None) -> StreamingResponseType | None:
-        """Dequeue an item, optionally blocking up to ``timeout``.
-
-        Args:
-            timeout (float | None): IN: seconds to wait. ``None`` blocks
-                indefinitely.
-
-        Returns:
-            StreamingResponseType | None: OUT: dequeued item, or ``None`` on
-            timeout.
-        """
+        """Pop the next item, returning ``None`` on timeout."""
         try:
             return self._queue.get(timeout=timeout)
         except queue.Empty:
             return None
 
     def stream(self) -> Generator[StreamingResponseType, None, None]:
-        """Yield items from the buffer until ``KILL_TAG`` is received.
-
-        Yields:
-            StreamingResponseType: OUT: individual response chunks.
-        """
+        """Iterate items as they arrive, exiting cleanly when :data:`KILL_TAG` is dequeued."""
         while True:
             try:
                 item = self.get(timeout=1.0)
@@ -116,7 +103,7 @@ class StreamerBuffer:
                 continue
 
     def close(self) -> None:
-        """Close the buffer and signal consumers to stop."""
+        """Idempotently close the buffer; enqueues :data:`KILL_TAG` so consumers can exit."""
         with self._lock:
             if not self._closed:
                 self._closed = True
@@ -124,19 +111,11 @@ class StreamerBuffer:
 
     @property
     def closed(self) -> bool:
-        """Whether the buffer has been closed.
-
-        Returns:
-            bool: OUT: ``True`` if closed.
-        """
+        """``True`` once :meth:`close` has been called."""
         return self._closed
 
     def maybe_finish(self, arg: tp.Any) -> None:
-        """Close the buffer if the argument is ``None`` and a finish signal was seen.
-
-        Args:
-            arg (Any): IN: arbitrary value (typically a function result).
-        """
+        """Close the buffer when ``arg`` is ``None`` after a :class:`Completion` was seen."""
         if arg is None and self._finish_hit:
             self.close()
 

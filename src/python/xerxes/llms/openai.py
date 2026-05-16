@@ -11,10 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Openai module for Xerxes.
+"""OpenAI provider adapter (and the OpenAI-compatible base for others).
 
-Exports:
-    - OpenAILLM"""
+:class:`OpenAILLM` wraps both the sync and async ``openai`` SDK
+clients. ``stream_completion`` / ``astream_completion`` yield the
+normalised chunk dicts described in :class:`BaseLLM` (``content``,
+``buffered_content``, ``function_calls``, ``tool_calls``,
+``is_final``, plus optional ``reasoning_content`` for o-series
+models). When the configured ``base_url`` points at a third-party
+gateway, extra OpenAI-incompatible sampling parameters (``top_k``,
+``min_p``, ``repetition_penalty``) are passed through ``extra_body``.
+"""
 
 from __future__ import annotations
 
@@ -28,37 +35,25 @@ from .base import BaseLLM, LLMConfig
 
 
 class _AsyncIteratorFromSyncStream:
-    """Async iterator from sync stream."""
+    """Adapt a synchronous iterator to the async iterator protocol.
+
+    Used when a provider returns a sync stream but the caller expects
+    ``async for``; ``next()`` is offloaded to a worker thread.
+    """
 
     def __init__(self, iterator: Any):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            iterator (Any): IN: iterator. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Wrap ``iterator`` and prepare the sentinel for end-of-stream."""
 
         self._iterator = iter(iterator)
         self._sentinel = object()
 
     def __aiter__(self) -> _AsyncIteratorFromSyncStream:
-        """Dunder method for aiter.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            _AsyncIteratorFromSyncStream: OUT: Result of the operation."""
+        """Return ``self`` (the async iterator protocol)."""
 
         return self
 
     async def __anext__(self) -> Any:
-        """Asynchronously Dunder method for anext.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Pull the next element via :func:`asyncio.to_thread`."""
 
         value = await asyncio.to_thread(next, self._iterator, self._sentinel)
         if value is self._sentinel:
@@ -67,9 +62,11 @@ class _AsyncIteratorFromSyncStream:
 
 
 class OpenAILLM(BaseLLM):
-    """Open aillm.
+    """OpenAI provider adapter using the official ``openai`` SDK.
 
-    Inherits from: BaseLLM
+    Supports both Chat Completions and the o-series reasoning models;
+    falls through extra sampling parameters via ``extra_body`` for
+    OpenAI-compatible gateways.
     """
 
     def __init__(
@@ -79,16 +76,7 @@ class OpenAILLM(BaseLLM):
         async_client: Any | None = None,
         **kwargs,
     ):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LLMConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-            client (Any | None, optional): IN: client. Defaults to None. OUT: Consumed during execution.
-            async_client (Any | None, optional): IN: async client. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Build (or accept) the sync/async SDK clients and bind config."""
 
         if config is None:
             config = LLMConfig(
@@ -103,10 +91,7 @@ class OpenAILLM(BaseLLM):
         super().__init__(config)
 
     def _initialize_client(self) -> None:
-        """Internal helper to initialize client.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Construct sync/async ``openai`` clients unless already provided."""
 
         if self.client is None:
             try:
@@ -133,12 +118,12 @@ class OpenAILLM(BaseLLM):
         self._auto_fetch_model_info()
 
     def _supports_openai_compatible_sampling_params(self) -> bool:
-        """Internal helper to supports openai compatible sampling params.
+        """Return ``True`` when the configured base URL is a third-party gateway.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Third-party OpenAI-compatible servers (Together, OpenRouter,
+        local LMStudio) typically accept ``top_k`` / ``min_p`` /
+        ``repetition_penalty``; the official OpenAI hosts do not.
+        """
 
         if not self.config.base_url:
             return False
@@ -165,21 +150,12 @@ class OpenAILLM(BaseLLM):
         tools: list[dict] | None = None,
         **kwargs,
     ) -> Any:
-        """Asynchronously Generate completion.
+        """Call ``chat.completions.create`` with merged config + per-call params.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            prompt (str | list[dict[str, str]]): IN: prompt. OUT: Consumed during execution.
-            model (str | None, optional): IN: model. Defaults to None. OUT: Consumed during execution.
-            temperature (float | None, optional): IN: temperature. Defaults to None. OUT: Consumed during execution.
-            max_tokens (int | None, optional): IN: max tokens. Defaults to None. OUT: Consumed during execution.
-            top_p (float | None, optional): IN: top p. Defaults to None. OUT: Consumed during execution.
-            stop (list[str] | None, optional): IN: stop. Defaults to None. OUT: Consumed during execution.
-            stream (bool | None, optional): IN: stream. Defaults to None. OUT: Consumed during execution.
-            tools (list[dict] | None, optional): IN: tools. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        Sampling parameters not native to OpenAI (``top_k``, ``min_p``,
+        ``repetition_penalty``) are merged into ``extra_body`` when
+        :meth:`_supports_openai_compatible_sampling_params` is true.
+        """
 
         if isinstance(prompt, str):
             messages = [{"role": "user", "content": prompt}]
@@ -257,13 +233,7 @@ class OpenAILLM(BaseLLM):
 
     @staticmethod
     def _get_openai_field(obj: Any, field: str) -> Any:
-        """Internal helper to get openai field.
-
-        Args:
-            obj (Any): IN: obj. OUT: Consumed during execution.
-            field (str): IN: field. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Read ``field`` from an SDK object, dict, or its ``model_extra``."""
 
         if obj is None:
             return None
@@ -281,13 +251,7 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _stringify_reasoning(cls, value: Any) -> str:
-        """Internal helper to stringify reasoning.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            value (Any): IN: value. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Flatten any reasoning payload shape into a plain string."""
 
         if value is None:
             return ""
@@ -336,13 +300,7 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _extract_reasoning_from_message(cls, message: Any) -> str:
-        """Internal helper to extract reasoning from message.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            message (Any): IN: message. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Pull a reasoning string from a non-streaming OpenAI message."""
 
         for field in ("reasoning_content", "reasoning", "delta_reasoning"):
             text = cls._stringify_reasoning(cls._get_openai_field(message, field))
@@ -364,13 +322,7 @@ class OpenAILLM(BaseLLM):
 
     @classmethod
     def _extract_reasoning_from_chunk(cls, chunk: Any) -> str:
-        """Internal helper to extract reasoning from chunk.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            chunk (Any): IN: chunk. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Pull a reasoning delta from a streaming OpenAI chunk."""
 
         event_type = str(cls._get_openai_field(chunk, "type") or "")
         if event_type in {
@@ -398,13 +350,7 @@ class OpenAILLM(BaseLLM):
         return ""
 
     def extract_content(self, response: Any) -> str:
-        """Extract content.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return the assistant message text, or ``""`` if only tool calls."""
 
         if hasattr(response, "choices") and response.choices:
             message = response.choices[0].message
@@ -418,13 +364,7 @@ class OpenAILLM(BaseLLM):
         return ""
 
     def extract_reasoning_content(self, response: Any) -> str:
-        """Extract reasoning content.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return the o-series ``reasoning_content`` field, or ``""``."""
 
         if hasattr(response, "choices") and response.choices:
             message = response.choices[0].message
@@ -434,14 +374,11 @@ class OpenAILLM(BaseLLM):
         return ""
 
     async def process_streaming_response(self, response: Any, callback: Callable[[str, Any], None]) -> str:
-        """Asynchronously Process streaming response.
+        """Drain a stream, invoking ``callback(text, chunk)`` for each delta.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            callback (Callable[[str, Any], None]): IN: callback. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        Returns the concatenated assistant text. Reasoning deltas are
+        also forwarded to ``callback`` but not added to the return value.
+        """
 
         accumulated_content = ""
 
@@ -460,14 +397,12 @@ class OpenAILLM(BaseLLM):
         return accumulated_content
 
     def stream_completion(self, response: Any, agent: Any | None = None) -> Iterator[dict[str, Any]]:
-        """Stream completion.
+        """Yield normalised chunk dicts from a sync OpenAI stream.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Iterator[dict[str, Any]]: OUT: Result of the operation."""
+        See :class:`BaseLLM.stream_completion` for the chunk schema.
+        OpenAI-specific extras: ``reasoning_content`` (o-series)
+        and accumulated ``buffered_reasoning_content``.
+        """
 
         buffered_content = ""
         buffered_reasoning_content = ""
@@ -570,20 +505,10 @@ class OpenAILLM(BaseLLM):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Astream completion.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            response (Any): IN: response. OUT: Consumed during execution.
-            agent (Any | None, optional): IN: agent. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+        """Async variant of :meth:`stream_completion` for an ``AsyncStream``."""
 
         async def _gen() -> AsyncIterator[dict[str, Any]]:
-            """Asynchronously Internal helper to gen.
-
-            Returns:
-                AsyncIterator[dict[str, Any]]: OUT: Result of the operation."""
+            """Inner generator implementing the actual async iteration."""
             buffered_content = ""
             buffered_reasoning_content = ""
             function_calls: list[dict[str, Any]] = []
@@ -682,13 +607,7 @@ class OpenAILLM(BaseLLM):
         return _gen()
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
-        """Parse tool calls.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_data (Any): IN: raw data. OUT: Consumed during execution.
-        Returns:
-            list[dict[str, Any]]: OUT: Result of the operation."""
+        """Return ``[{id, name, arguments}, ...]`` from an OpenAI message."""
 
         tool_calls = []
         if hasattr(raw_data, "tool_calls") and raw_data.tool_calls:
@@ -703,12 +622,7 @@ class OpenAILLM(BaseLLM):
         return tool_calls
 
     def fetch_model_info(self) -> dict[str, Any]:
-        """Fetch model info.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Query ``models.list`` for ``max_model_len`` and metadata if present."""
 
         try:
             assert self.client is not None
@@ -724,10 +638,7 @@ class OpenAILLM(BaseLLM):
         return {}
 
     async def close(self) -> None:
-        """Asynchronously Close.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Close both sync and async ``openai`` clients (best effort)."""
 
         if self.async_client is not None:
             if hasattr(self.async_client, "aclose"):

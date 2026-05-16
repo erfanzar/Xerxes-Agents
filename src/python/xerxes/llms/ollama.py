@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ollama module for Xerxes.
+"""Ollama provider adapter for self-hosted local models.
 
-Exports:
-    - OllamaLLM
-    - LocalLLM"""
+:class:`OllamaLLM` talks directly to an Ollama HTTP daemon (default
+``http://localhost:11434``) over ``httpx``. :class:`LocalLLM` is a
+thin alias used by ``create_llm("local")``. Streaming emits the
+normalised chunk dicts described in :class:`BaseLLM`.
+"""
 
 from __future__ import annotations
 

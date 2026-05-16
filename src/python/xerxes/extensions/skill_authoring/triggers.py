@@ -33,17 +33,12 @@ class SkillAuthoringConfig:
     """Thresholds for auto-authoring a skill from a turn.
 
     Attributes:
-        min_tool_calls (int): IN: Minimum events required. OUT: Checked by
-            ``should_author``.
-        require_success (bool): IN: Whether failures disqualify. OUT: Checked
-            by ``should_author``.
-        max_retries_allowed (int): IN: Retry tolerance. OUT: Checked by
-            ``should_author``.
-        min_unique_tools (int): IN: Minimum distinct tools. OUT: Checked by
-            ``should_author``.
-        skip_if_skill_signature_exists (bool): IN: Duplicate detection. OUT:
-            Checked by ``should_author``.
-        enabled (bool): IN: Master switch. OUT: Checked by ``should_author``.
+        min_tool_calls: Minimum number of tool calls in the candidate.
+        require_success: When True, unrecovered failures disqualify the turn.
+        max_retries_allowed: Maximum tolerated retries.
+        min_unique_tools: Minimum distinct tools used.
+        skip_if_skill_signature_exists: Skip when an existing skill covers the tool set.
+        enabled: Master switch for the trigger.
     """
 
     min_tool_calls: int = 5
@@ -62,28 +57,18 @@ class SkillAuthoringTrigger:
         config: SkillAuthoringConfig | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
-        """Initialize with config and optional registry for duplicate checks.
+        """Initialize with thresholds and an optional registry for duplicate checks.
 
         Args:
-            config (SkillAuthoringConfig | None): IN: Thresholds. OUT: Defaults
-                to a new ``SkillAuthoringConfig``.
-            skill_registry (SkillRegistry | None): IN: Registry for duplicate
-                detection. OUT: Used by ``_has_existing_skill``.
+            config: Authoring thresholds; defaults to ``SkillAuthoringConfig()``.
+            skill_registry: Used by ``_has_existing_skill`` to skip duplicates.
         """
 
         self.config = config or SkillAuthoringConfig()
         self.skill_registry = skill_registry
 
     def should_author(self, candidate: SkillCandidate) -> bool:
-        """Return whether ``candidate`` meets all authoring thresholds.
-
-        Args:
-            candidate (SkillCandidate): IN: Observed turn data. OUT: Evaluated
-                against every config threshold.
-
-        Returns:
-            bool: OUT: ``True`` if the candidate qualifies for skill creation.
-        """
+        """Return whether ``candidate`` meets every configured threshold."""
 
         cfg = self.config
         if not cfg.enabled:
@@ -107,15 +92,7 @@ class SkillAuthoringTrigger:
         return True
 
     def reason(self, candidate: SkillCandidate) -> str:
-        """Return a human-readable explanation of the authoring decision.
-
-        Args:
-            candidate (SkillCandidate): IN: Observed turn data. OUT: Evaluated
-                to produce the message.
-
-        Returns:
-            str: OUT: Reason string; ``"skill-worthy"`` if all checks pass.
-        """
+        """Return a human-readable rationale; ``"skill-worthy"`` when all checks pass."""
 
         cfg = self.config
         if not cfg.enabled:
@@ -133,15 +110,7 @@ class SkillAuthoringTrigger:
         return "skill-worthy"
 
     def _terminal_failures(self, candidate: SkillCandidate) -> list[int]:
-        """Identify event indices that failed and were not later retried.
-
-        Args:
-            candidate (SkillCandidate): IN: Observed turn data. OUT: Scanned
-                for failures and recoveries.
-
-        Returns:
-            list[int]: OUT: Indices of unrecovered failures.
-        """
+        """Return event indices that failed and were not subsequently recovered."""
 
         recovered: set[int] = set()
         for ev in candidate.events:
@@ -157,16 +126,7 @@ class SkillAuthoringTrigger:
         return out
 
     def _has_existing_skill(self, candidate: SkillCandidate) -> bool:
-        """Check whether a skill already covers the candidate's tool set.
-
-        Args:
-            candidate (SkillCandidate): IN: Observed turn data. OUT: Compared
-                against registry skills.
-
-        Returns:
-            bool: OUT: ``True`` if an existing skill's tags or required_tools
-            superset the candidate's unique tools.
-        """
+        """Return True when an existing registered skill already covers the tool set."""
 
         if self.skill_registry is None:
             return False

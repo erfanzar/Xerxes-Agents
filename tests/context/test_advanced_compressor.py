@@ -15,7 +15,7 @@
 
 from xerxes.context.advanced_compressor import (
     SUMMARY_PREFIX,
-    HermesCompressionStrategy,
+    AdvancedCompressionStrategy,
     _prune_tool_results,
     _summarize_tool_result,
 )
@@ -74,11 +74,11 @@ class TestPruneToolResults:
         assert pruned == messages
 
 
-class TestHermesCompressionStrategy:
-    """Tests for HermesCompressionStrategy."""
+class TestAdvancedCompressionStrategy:
+    """Tests for :class:`AdvancedCompressionStrategy`."""
 
     def test_no_compaction_needed(self):
-        strategy = HermesCompressionStrategy(target_tokens=100_000)
+        strategy = AdvancedCompressionStrategy(target_tokens=100_000)
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hi"},
@@ -89,7 +89,7 @@ class TestHermesCompressionStrategy:
         assert stats["original_count"] == 3
 
     def test_tool_pruning_happens(self):
-        strategy = HermesCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=100)
+        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=100)
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Run tests"},
@@ -110,7 +110,7 @@ class TestHermesCompressionStrategy:
         assert "x" * 10 not in tool_msg["content"]  # Original content was pruned
 
     def test_summary_has_handoff_framing(self):
-        strategy = HermesCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
+        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Question 1"},
@@ -128,7 +128,7 @@ class TestHermesCompressionStrategy:
         assert SUMMARY_PREFIX in summary_msg["content"]
 
     def test_iterative_compaction(self):
-        strategy = HermesCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
+        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Q1"},
@@ -157,7 +157,7 @@ class TestHermesCompressionStrategy:
         assert stats2["compaction_count"] == 2
 
     def test_tail_protection(self):
-        strategy = HermesCompressionStrategy(target_tokens=1000, preserve_recent=2, tail_token_budget=100)
+        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=2, tail_token_budget=100)
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Old message 1"},
@@ -174,5 +174,5 @@ class TestHermesCompressionStrategy:
         from xerxes.context import get_compaction_strategy
         from xerxes.types.function_execution_types import CompactionStrategy
 
-        strategy = get_compaction_strategy(CompactionStrategy.HERMES, target_tokens=4000)
-        assert isinstance(strategy, HermesCompressionStrategy)
+        strategy = get_compaction_strategy(CompactionStrategy.ADVANCED, target_tokens=4000)
+        assert isinstance(strategy, AdvancedCompressionStrategy)

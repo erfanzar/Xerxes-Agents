@@ -21,27 +21,22 @@ def interpolate_inputs(
     input_string: str | None,
     inputs: dict[str, str | int | float | dict[str, Any] | list[Any]],
 ) -> str:
-    """Interpolate template variables into a string.
+    """Substitute ``{var}`` placeholders in ``input_string`` with values.
 
-    Replaces ``{variable_name}`` placeholders in *input_string* with values
-    from *inputs*. Supports scalar values, dicts, and lists (serialized as JSON).
+    Scalars (``str``, ``int``, ``float``, ``bool``) are stringified directly;
+    ``dict`` and ``list`` values are JSON-encoded (falling back to ``str``);
+    ``None`` becomes the empty string.
 
     Args:
-        input_string (str | None): The template string containing ``{var}``
-            placeholders. IN: A template with named placeholders or ``None``.
-            OUT: Parsed to extract placeholder keys for substitution.
-        inputs (dict): Mapping of variable names to replacement values.
-            IN: Keys must match placeholders in *input_string*; values may be
-            ``str``, ``int``, ``float``, ``bool``, ``dict``, or ``list``.
-            OUT: Values are converted to strings and substituted into the template.
+        input_string: Template string; ``None`` is treated as ``""``.
+        inputs: Mapping from placeholder key to replacement value.
 
     Returns:
-        str: The interpolated string with all placeholders replaced.
-            OUT: A fully resolved string ready for use.
+        The fully interpolated string.
 
     Raises:
-        KeyError: If a placeholder key is missing from *inputs*.
-        ValueError: If a value has an unsupported type.
+        KeyError: A placeholder key is missing from ``inputs``.
+        ValueError: A value has an unsupported type.
     """
 
     if not input_string:
@@ -50,16 +45,7 @@ def interpolate_inputs(
     pattern = r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}"
 
     def replacer(match) -> str:
-        """Replace a single regex match with the corresponding input value.
-
-        Args:
-            match: A regex ``Match`` object for a ``{key}`` placeholder.
-                IN: Contains the placeholder key as group 1.
-                OUT: Used to look up the key in *inputs* and return its string form.
-
-        Returns:
-            str: The string representation of the matched input value.
-        """
+        """Return the stringified value for one matched ``{key}`` placeholder."""
         key = match.group(1)
         if key not in inputs:
             raise KeyError(f"Missing required template variable '{key}'")
@@ -84,17 +70,7 @@ def interpolate_inputs(
 
 
 def extract_template_variables(input_string: str) -> set[str]:
-    """Extract all template variable names from a string.
-
-    Args:
-        input_string (str): The template string to scan.
-            IN: A string potentially containing ``{var}`` placeholders.
-            OUT: Parsed to identify all unique placeholder keys.
-
-    Returns:
-        set[str]: A set of unique variable names found in the template.
-            OUT: Empty set if no placeholders exist.
-    """
+    """Return the set of unique ``{var}`` placeholder names in a template."""
 
     if not input_string:
         return set()
@@ -106,23 +82,18 @@ def extract_template_variables(input_string: str) -> set[str]:
 def validate_inputs_for_template(
     template_string: str, inputs: dict[str, Any], allow_extra: bool = True
 ) -> tuple[bool, list[str]]:
-    """Validate that inputs satisfy the requirements of a template.
+    """Check whether ``inputs`` satisfies the placeholders in a template.
 
     Args:
-        template_string (str): The template string to validate against.
-            IN: Contains ``{var}`` placeholders defining required variables.
-            OUT: Scanned to determine required variable names.
-        inputs (dict): The candidate inputs to check.
-            IN: Mapping of variable names to values provided by the caller.
-            OUT: Compared against required variables to detect missing or extra keys.
-        allow_extra (bool): Whether extra keys in *inputs* are permitted.
-            IN: ``True`` to ignore extra keys; ``False`` to treat them as errors.
-            OUT: Controls whether unexpected variables generate validation errors.
+        template_string: Template whose required variables are derived from
+            its ``{var}`` placeholders.
+        inputs: Candidate input mapping to validate.
+        allow_extra: When ``False``, keys in ``inputs`` that are not used by
+            the template are flagged as errors.
 
     Returns:
-        tuple[bool, list[str]]: A boolean indicating overall validity and a list
-            of error messages. OUT: ``(True, [])`` when valid; otherwise
-            ``(False, [error1, ...])``.
+        ``(is_valid, errors)`` — ``errors`` is empty on success and contains
+        one human-readable string per missing or extra key on failure.
     """
 
     required_vars = extract_template_variables(template_string)

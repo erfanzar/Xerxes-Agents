@@ -4,7 +4,6 @@ description: "go to Documents Projects Spectrax"
 version: 0.1.0
 tags: [ListDir, ReadFile]
 required_tools: [ListDir, ReadFile]
-author: hermes-skill-authoring
 ---
 # When to use
 

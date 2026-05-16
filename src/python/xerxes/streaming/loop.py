@@ -11,13 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Loop module for Xerxes.
+"""Core agent loop: stream tokens, route tool calls, and gate on permissions.
 
-Exports:
-    - logger
-    - MAX_TOOL_TURNS
-    - run
-    - arun"""
+The loop is the single sync generator that drives a turn end-to-end: it
+appends the user message, streams from the active provider (Anthropic or any
+OpenAI-compatible endpoint), parses thinking tags, dispatches tool calls
+through the permission system, executes the tools, and feeds results back
+until the model stops requesting tools or :data:`MAX_TOOL_TURNS` is exhausted.
+
+:func:`arun` adapts the sync generator to an async generator by running
+``next()`` in the default executor. ``_stream_anthropic`` and
+``_stream_openai_compat`` are the provider adapters; the rest are private
+helpers for thinking-tag splitting, prompt caching, and request-config
+parsing.
+"""
 
 from __future__ import annotations
 
@@ -48,14 +55,25 @@ from .permissions import (
     check_permission,
     format_permission_description,
 )
+from .prompt_caching import (
+    extract_cache_tokens,
+    wrap_system_with_cache,
+    wrap_tools_with_cache,
+)
 
 
 class _ThinkingParser:
-    """Thinking parser.
+    """Incremental splitter for ``<think>...</think>`` / ``<thinking>...</thinking>`` tags.
+
+    Streamed text deltas may arrive with tags split across chunk boundaries;
+    the parser buffers the partial input, emits :class:`TextChunk` for visible
+    text and :class:`ThinkingChunk` for reasoning, and flushes any trailing
+    thinking buffer when fed an empty chunk.
 
     Attributes:
-        _OPEN_TAGS (tuple[str, ...]): open tags.
-        _CLOSE_TAGS (tuple[str, ...]): close tags."""
+        _OPEN_TAGS: Recognised opening tags.
+        _CLOSE_TAGS: Recognised closing tags.
+    """
 
     __slots__ = ("_buffer", "_in_thinking", "_thinking_buf")
 
@@ -63,23 +81,17 @@ class _ThinkingParser:
     _CLOSE_TAGS: tuple[str, ...] = ("</think>", "</thinking>")
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Initialise empty buffers and start in visible-text mode."""
         self._buffer = ""
         self._in_thinking = False
         self._thinking_buf = ""
 
     @staticmethod
     def _find_any(text: str, tags: tuple[str, ...]) -> tuple[int, str]:
-        """Internal helper to find any.
+        """Return the earliest occurrence of any tag and the tag itself.
 
-        Args:
-            text (str): IN: text. OUT: Consumed during execution.
-            tags (tuple[str, ...]): IN: tags. OUT: Consumed during execution.
-        Returns:
-            tuple[int, str]: OUT: Result of the operation."""
+        Returns ``(-1, "")`` when no tag matches.
+        """
 
         earliest_idx = -1
         earliest_tag = ""
@@ -91,13 +103,19 @@ class _ThinkingParser:
         return earliest_idx, earliest_tag
 
     def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
-        """Process.
+        """Feed a streamed text fragment and emit any completed chunks.
+
+        Pass ``""`` after the stream ends to flush a still-open thinking
+        block. The parser preserves state across calls, so partial tags
+        straddling chunk boundaries are handled correctly.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            chunk_text (str): IN: chunk text. OUT: Consumed during execution.
+            chunk_text: Newly received text delta (may be empty for flush).
+
         Returns:
-            list[TextChunk | ThinkingChunk]: OUT: Result of the operation."""
+            Ordered list of visible-text and reasoning chunks ready to yield
+            downstream.
+        """
 
         events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
@@ -144,12 +162,10 @@ class _ThinkingParser:
 def _parse_thinking_tags(
     text: str,
 ) -> tuple[str, str]:
-    """Internal helper to parse thinking tags.
+    """Split a complete text blob into ``(visible, thinking)``.
 
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-    Returns:
-        tuple[str, str]: OUT: Result of the operation."""
+    Convenience over :class:`_ThinkingParser` for non-streaming callers.
+    """
 
     thinking_pattern = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
     thinking_parts = thinking_pattern.findall(text)
@@ -203,20 +219,38 @@ def run(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> Generator[StreamEvent, None, None]:
-    """Run.
+    """Drive a full turn: stream LLM output, run tools, and yield stream events.
+
+    Appends the user message to ``state.messages``, then loops up to
+    :data:`MAX_TOOL_TURNS` times: stream a response, parse thinking tags,
+    record token usage and tool calls, gate each tool through the permission
+    system, execute it, and feed the result back. Exits on the first
+    iteration that produces no tool calls.
 
     Args:
-        user_message (str): IN: user message. OUT: Consumed during execution.
-        state (AgentState): IN: state. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
-        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
-        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
-        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
-        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Generator[StreamEvent, None, None]: OUT: Result of the operation."""
+        user_message: Raw user text appended to the conversation.
+        state: Session state. Mutated in place — messages, token totals,
+            thinking content, and tool_executions are appended.
+        config: Provider config dict (``model``, ``api_key``, ``permission_mode``,
+            ``thinking``, sampling parameters, etc.).
+        system_prompt: System prompt prepended to the request.
+        tool_executor: Callable that runs a tool by name and returns its
+            string result. When ``None``, the loop emits a stub message.
+        tool_schemas: JSON-schema tool definitions exposed to the model.
+        depth: Reserved subagent-depth marker (unused inside the loop).
+        cancel_check: Optional poll invoked before each turn; returning
+            ``True`` yields a ``[Cancelled]`` chunk and ends the loop.
+        runtime_features_state: Optional runtime container holding an
+            ``authoring_pipeline``; when present its ``on_turn_end`` is called
+            and any authored skill is surfaced as :class:`SkillSuggestion`.
+
+    Yields:
+        Stream events in arrival order: :class:`TextChunk` /
+        :class:`ThinkingChunk` while streaming, :class:`ToolStart`,
+        optional :class:`PermissionRequest`, :class:`ToolEnd` per tool,
+        :class:`TurnDone` at the end of every assistant turn, and
+        :class:`SkillSuggestion` when authoring fires.
+    """
 
     from xerxes.llms.registry import detect_provider, get_provider_config
 
@@ -235,6 +269,9 @@ def run(
 
     for _turn in range(MAX_TOOL_TURNS):
         if cancel_check and cancel_check():
+            # Surface the cancellation so the caller can render a "stopped"
+            # marker instead of treating the silent return as a clean finish.
+            yield TextChunk("\n[Cancelled]")
             return
 
         state.turn_count += 1
@@ -244,6 +281,8 @@ def run(
         tool_calls: list[dict[str, Any]] = []
         in_tokens = 0
         out_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         thinking_parser = _ThinkingParser()
 
         try:
@@ -272,6 +311,8 @@ def run(
                     tool_calls = chunk.get("tool_calls", [])
                     in_tokens = chunk.get("in_tokens", 0)
                     out_tokens = chunk.get("out_tokens", 0)
+                    cache_read_tokens = chunk.get("cache_read_tokens", 0)
+                    cache_creation_tokens = chunk.get("cache_creation_tokens", 0)
 
             remaining = thinking_parser.process("")
             for sub in remaining:
@@ -298,12 +339,16 @@ def run(
             state.thinking_content.append("")
         state.total_input_tokens += in_tokens
         state.total_output_tokens += out_tokens
+        state.total_cache_read_tokens += cache_read_tokens
+        state.total_cache_creation_tokens += cache_creation_tokens
 
         yield TurnDone(
             input_tokens=in_tokens,
             output_tokens=out_tokens,
             tool_calls_count=len(tool_calls),
             model=model,
+            cache_read_tokens=cache_read_tokens,
+            cache_creation_tokens=cache_creation_tokens,
         )
 
         if runtime_features_state is not None and runtime_features_state.authoring_pipeline is not None:
@@ -386,6 +431,14 @@ def run(
                     "content": result,
                 }
             )
+    else:
+        # The for-else fires when we exhausted MAX_TOOL_TURNS without ever
+        # hitting the ``break`` that fires on "no more tool calls". Without
+        # this branch the run silently stops mid-conversation and looks
+        # identical to a normal completion.
+        yield TextChunk(
+            f"\n[Stopped: reached max tool turns ({MAX_TOOL_TURNS}). Ask me to continue if there's more to do.]"
+        )
 
 
 async def arun(
@@ -399,22 +452,20 @@ async def arun(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> AsyncGenerator[StreamEvent, None]:
-    """Asynchronously Arun.
+    """Async adapter around :func:`run`.
 
-    Args:
-        user_message (str): IN: user message. OUT: Consumed during execution.
-        state (AgentState): IN: state. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
-        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
-        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
-        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
-        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        AsyncGenerator[StreamEvent, None]: OUT: Result of the operation."""
+    Runs ``next()`` on the sync generator inside the default thread executor
+    so the event loop stays responsive while provider IO blocks. All arguments
+    are forwarded unchanged to :func:`run`.
 
-    loop = asyncio.get_event_loop()
+    Yields:
+        The same stream events as :func:`run`, in order.
+    """
+
+    # arun is an async generator, so a running loop is guaranteed. Prefer
+    # get_running_loop() — get_event_loop() is deprecated in 3.12+ and emits
+    # a DeprecationWarning when no loop exists.
+    loop = asyncio.get_running_loop()
 
     gen = run(
         user_message=user_message,
@@ -429,7 +480,7 @@ async def arun(
     )
 
     class _Sentinel:
-        """Sentinel."""
+        """Marker returned by ``next(..., _sentinel)`` when the generator is exhausted."""
 
         pass
 
@@ -449,17 +500,11 @@ def _stream_llm(
     tool_schemas: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream llm.
+    """Dispatch streaming to the correct provider adapter.
 
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        provider_type (str): IN: provider type. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    Yields ``TextChunk`` / ``ThinkingChunk`` while the stream is open and, at
+    the end, a single dict with ``tool_calls`` and token counters.
+    """
 
     from xerxes.llms.registry import PROVIDERS, bare_model, detect_provider
 
@@ -486,17 +531,13 @@ def _stream_anthropic(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream anthropic.
+    """Stream from the Anthropic Messages API, with optional prompt caching.
 
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    Wraps the system prompt and last tool schema with ``cache_control:
+    ephemeral`` when caching is enabled, falls back to token-count estimation
+    when the SDK reports zero usage, and dumps the request body to
+    ``debug_request.json`` when ``config["debug"]`` is set.
+    """
 
     try:
         import anthropic
@@ -520,14 +561,28 @@ def _stream_anthropic(
 
     api_messages = messages_to_anthropic(conversation_messages)
 
+    # Prompt caching: when enabled (default on for Anthropic), wrap the system
+    # prompt and the last tool schema with cache_control: ephemeral so the
+    # request prefix is cacheable for ~5 minutes. /compact will change the
+    # system prompt and invalidate the cache on the next turn — that's fine
+    # and expected.
+    use_caching = bool(config.get("prompt_caching", True))
+    system_param: Any = combined_system
+    tools_param = tool_schemas
+    if use_caching:
+        if combined_system:
+            system_param = wrap_system_with_cache(combined_system)
+        if tool_schemas:
+            tools_param = wrap_tools_with_cache(tool_schemas)
+
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": config.get("max_tokens", 8192),
-        "system": combined_system,
+        "system": system_param,
         "messages": api_messages,
     }
-    if tool_schemas:
-        kwargs["tools"] = tool_schemas
+    if tools_param:
+        kwargs["tools"] = tools_param
     if config.get("thinking"):
         kwargs["thinking"] = {
             "type": "enabled",
@@ -582,6 +637,7 @@ def _stream_anthropic(
 
         in_tok = getattr(final.usage, "input_tokens", 0) or 0
         out_tok = getattr(final.usage, "output_tokens", 0) or 0
+        cache_read_tok, cache_creation_tok = extract_cache_tokens(final.usage)
         if in_tok == 0 or out_tok == 0:
             from xerxes.core.utils import estimate_messages_tokens
 
@@ -599,6 +655,8 @@ def _stream_anthropic(
             "tool_calls": tool_calls,
             "in_tokens": in_tok,
             "out_tokens": out_tok,
+            "cache_read_tokens": cache_read_tok,
+            "cache_creation_tokens": cache_creation_tok,
         }
 
 
@@ -610,17 +668,13 @@ def _stream_openai_compat(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream openai compat.
+    """Stream from any OpenAI-compatible chat-completions endpoint.
 
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    Applies per-provider quirks (MiniMax has to merge sequential user
+    messages and rejects ``stream_options``), accumulates streamed
+    ``tool_calls`` chunks by index, and emits ``reasoning_content`` deltas as
+    :class:`ThinkingChunk` events.
+    """
 
     try:
         from openai import BadRequestError, OpenAI
@@ -825,12 +879,7 @@ def _stream_openai_compat(
 
 
 def _tools_to_openai(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Internal helper to tools to openai.
-
-    Args:
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
+    """Convert neutral tool schemas to OpenAI ``{"type": "function", ...}`` form."""
 
     return [
         {

@@ -11,10 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Merge runs module for Xerxes.
-
-Exports:
-    - merge_runs"""
+"""Coalesce adjacent ``<w:r>`` runs in an unpacked DOCX tree to shrink the diff surface."""
 
 from pathlib import Path
 
@@ -22,12 +19,7 @@ import defusedxml.minidom
 
 
 def merge_runs(input_dir: str) -> tuple[int, str]:
-    """Merge runs.
-
-    Args:
-        input_dir (str): IN: input dir. OUT: Consumed during execution.
-    Returns:
-        tuple[int, str]: OUT: Result of the operation."""
+    """Merge identically-styled adjacent runs in ``document.xml`` under ``input_dir``."""
     doc_xml = Path(input_dir) / "word" / "document.xml"
 
     if not doc_xml.exists():
@@ -54,22 +46,11 @@ def merge_runs(input_dir: str) -> tuple[int, str]:
 
 
 def _find_elements(root, tag: str) -> list:
-    """Internal helper to find elements.
-
-    Args:
-        root (Any): IN: root. OUT: Consumed during execution.
-        tag (str): IN: tag. OUT: Consumed during execution.
-    Returns:
-        list: OUT: Result of the operation."""
+    """Return every descendant of ``root`` whose local name equals ``tag``."""
     results = []
 
     def traverse(node):
-        """Traverse.
-
-        Args:
-            node (Any): IN: node. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Depth-first walker appending matches to the enclosing ``results``."""
         if node.nodeType == node.ELEMENT_NODE:
             name = node.localName or node.tagName
             if name == tag or name.endswith(f":{tag}"):
@@ -82,13 +63,7 @@ def _find_elements(root, tag: str) -> list:
 
 
 def _get_child(parent, tag: str):
-    """Internal helper to get child.
-
-    Args:
-        parent (Any): IN: parent. OUT: Consumed during execution.
-        tag (str): IN: tag. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return the first direct child of ``parent`` with local name ``tag``, or ``None``."""
     for child in parent.childNodes:
         if child.nodeType == child.ELEMENT_NODE:
             name = child.localName or child.tagName
@@ -98,13 +73,7 @@ def _get_child(parent, tag: str):
 
 
 def _get_children(parent, tag: str) -> list:
-    """Internal helper to get children.
-
-    Args:
-        parent (Any): IN: parent. OUT: Consumed during execution.
-        tag (str): IN: tag. OUT: Consumed during execution.
-    Returns:
-        list: OUT: Result of the operation."""
+    """Return every direct child of ``parent`` with local name ``tag``."""
     results = []
     for child in parent.childNodes:
         if child.nodeType == child.ELEMENT_NODE:
@@ -115,13 +84,7 @@ def _get_children(parent, tag: str) -> list:
 
 
 def _is_adjacent(elem1, elem2) -> bool:
-    """Internal helper to is adjacent.
-
-    Args:
-        elem1 (Any): IN: elem1. OUT: Consumed during execution.
-        elem2 (Any): IN: elem2. OUT: Consumed during execution.
-    Returns:
-        bool: OUT: Result of the operation."""
+    """Return whether ``elem2`` follows ``elem1`` with only whitespace text between them."""
     node = elem1.nextSibling
     while node:
         if node == elem2:
@@ -135,25 +98,14 @@ def _is_adjacent(elem1, elem2) -> bool:
 
 
 def _remove_elements(root, tag: str):
-    """Internal helper to remove elements.
-
-    Args:
-        root (Any): IN: root. OUT: Consumed during execution.
-        tag (str): IN: tag. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Detach every descendant of ``root`` whose local name equals ``tag``."""
     for elem in _find_elements(root, tag):
         if elem.parentNode:
             elem.parentNode.removeChild(elem)
 
 
 def _strip_run_rsid_attrs(root):
-    """Internal helper to strip run rsid attrs.
-
-    Args:
-        root (Any): IN: root. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Remove ``rsid`` attributes from every ``<w:r>`` element under ``root``."""
     for run in _find_elements(root, "r"):
         for attr in list(run.attributes.values()):
             if "rsid" in attr.name.lower():
@@ -161,12 +113,7 @@ def _strip_run_rsid_attrs(root):
 
 
 def _merge_runs_in(container) -> int:
-    """Internal helper to merge runs in.
-
-    Args:
-        container (Any): IN: container. OUT: Consumed during execution.
-    Returns:
-        int: OUT: Result of the operation."""
+    """Merge identically-styled adjacent runs inside ``container`` and return the count."""
     merge_count = 0
     run = _first_child_run(container)
 
@@ -187,12 +134,7 @@ def _merge_runs_in(container) -> int:
 
 
 def _first_child_run(container):
-    """Internal helper to first child run.
-
-    Args:
-        container (Any): IN: container. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return the first direct child run of ``container``, or ``None``."""
     for child in container.childNodes:
         if child.nodeType == child.ELEMENT_NODE and _is_run(child):
             return child
@@ -200,12 +142,7 @@ def _first_child_run(container):
 
 
 def _next_element_sibling(node):
-    """Internal helper to next element sibling.
-
-    Args:
-        node (Any): IN: node. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return the next sibling element of ``node``, skipping text and comments."""
     sibling = node.nextSibling
     while sibling:
         if sibling.nodeType == sibling.ELEMENT_NODE:
@@ -215,12 +152,7 @@ def _next_element_sibling(node):
 
 
 def _next_sibling_run(node):
-    """Internal helper to next sibling run.
-
-    Args:
-        node (Any): IN: node. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return the next sibling element of ``node`` that is itself a run."""
     sibling = node.nextSibling
     while sibling:
         if sibling.nodeType == sibling.ELEMENT_NODE:
@@ -231,24 +163,13 @@ def _next_sibling_run(node):
 
 
 def _is_run(node) -> bool:
-    """Internal helper to is run.
-
-    Args:
-        node (Any): IN: node. OUT: Consumed during execution.
-    Returns:
-        bool: OUT: Result of the operation."""
+    """Return whether ``node`` is a ``<w:r>`` element."""
     name = node.localName or node.tagName
     return name == "r" or name.endswith(":r")
 
 
 def _can_merge(run1, run2) -> bool:
-    """Internal helper to can merge.
-
-    Args:
-        run1 (Any): IN: run1. OUT: Consumed during execution.
-        run2 (Any): IN: run2. OUT: Consumed during execution.
-    Returns:
-        bool: OUT: Result of the operation."""
+    """Return whether ``run1`` and ``run2`` share an identical ``<w:rPr>`` block."""
     rpr1 = _get_child(run1, "rPr")
     rpr2 = _get_child(run2, "rPr")
 
@@ -260,13 +181,7 @@ def _can_merge(run1, run2) -> bool:
 
 
 def _merge_run_content(target, source):
-    """Internal helper to merge run content.
-
-    Args:
-        target (Any): IN: target. OUT: Consumed during execution.
-        source (Any): IN: source. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Move ``source``'s non-``rPr`` children into ``target`` in order."""
     for child in list(source.childNodes):
         if child.nodeType == child.ELEMENT_NODE:
             name = child.localName or child.tagName
@@ -275,12 +190,7 @@ def _merge_run_content(target, source):
 
 
 def _consolidate_text(run):
-    """Internal helper to consolidate text.
-
-    Args:
-        run (Any): IN: run. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Merge adjacent ``<w:t>`` children of ``run`` into a single text node."""
     t_elements = _get_children(run, "t")
 
     for i in range(len(t_elements) - 1, 0, -1):

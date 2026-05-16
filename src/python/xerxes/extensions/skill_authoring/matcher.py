@@ -32,11 +32,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SkillMatch:
-    """Result of matching a skill against a query.
+    """A skill paired with its cosine-similarity score against a query.
 
     Attributes:
-        skill (Skill): IN: Matched skill instance. OUT: Stored.
-        score (float): IN: Cosine similarity score. OUT: Stored.
+        skill: The matched skill.
+        score: Cosine similarity in [-1, 1].
     """
 
     skill: Skill
@@ -44,16 +44,7 @@ class SkillMatch:
 
 
 class SkillMatcher:
-    """Embedder-based skill recommender.
-
-    Args:
-        skill_registry (SkillRegistry | None): IN: Registry to enumerate.
-            OUT: Used by ``_all_skills``.
-        embedder (Embedder | None): IN: Embedding backend. OUT: Defaults to
-            the project default embedder.
-        min_score (float): IN: Minimum cosine similarity threshold. OUT:
-            Filters results in ``match``.
-    """
+    """Embedder-driven skill recommender."""
 
     def __init__(
         self,
@@ -61,28 +52,14 @@ class SkillMatcher:
         embedder: Embedder | None = None,
         min_score: float = 0.15,
     ) -> None:
-        """Initialize the instance.
+        """Initialize the matcher.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution.
-            min_score (float, optional): IN: min score. Defaults to 0.15. OUT: Consumed during execution."""
+            skill_registry: Registry whose skills are searched in ``match``.
+            embedder: Embedding backend; defaults to the project default.
+            min_score: Cosine similarity threshold; lower-scoring hits are dropped.
+        """
         self.registry = skill_registry
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution.
-            min_score (float, optional): IN: min score. Defaults to 0.15. OUT: Consumed during execution."""
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution.
-            min_score (float, optional): IN: min score. Defaults to 0.15. OUT: Consumed during execution."""
         self.embedder = embedder or get_default_embedder()
         self.min_score = min_score
         self._cache: dict[tuple[str, str], list[float]] = {}
@@ -93,16 +70,15 @@ class SkillMatcher:
         k: int = 5,
         skills: tp.Sequence[Skill] | None = None,
     ) -> list[SkillMatch]:
-        """Find the top-``k`` skills most similar to ``query``.
+        """Return the top-``k`` skills most similar to ``query``.
 
         Args:
-            query (str): IN: Free-text query. OUT: Embedded and compared.
-            k (int): IN: Maximum results. OUT: Limits the returned list.
-            skills (tp.Sequence[Skill] | None): IN: Optional candidate list.
-                OUT: Defaults to all registered skills.
+            query: Free-text query embedded for comparison.
+            k: Maximum number of matches to return.
+            skills: Candidate list; defaults to all registered skills.
 
         Returns:
-            list[SkillMatch]: OUT: Descending by similarity score.
+            Matches sorted by cosine similarity, descending.
         """
 
         if not query:
@@ -127,33 +103,18 @@ class SkillMatcher:
         return out[:k]
 
     def best(self, query: str) -> SkillMatch | None:
-        """Return the single best match for ``query``.
-
-        Args:
-            query (str): IN: Free-text query. OUT: Passed to ``match``.
-
-        Returns:
-            SkillMatch | None: OUT: Top result or ``None``.
-        """
+        """Return the single highest-scoring match for ``query``, or ``None``."""
 
         hits = self.match(query, k=1)
         return hits[0] if hits else None
 
     def invalidate(self) -> None:
-        """Clear the embedding cache.
-
-        Returns:
-            None: OUT: All cached embeddings are dropped.
-        """
+        """Drop every cached embedding."""
 
         self._cache.clear()
 
     def _all_skills(self) -> list[Skill]:
-        """Return all skills from the registry.
-
-        Returns:
-            list[Skill]: OUT: Empty list if no registry or on error.
-        """
+        """Return every skill from the configured registry."""
 
         if self.registry is None:
             return []
@@ -163,15 +124,7 @@ class SkillMatcher:
             return []
 
     def _embed_skill(self, skill: Skill) -> list[float] | None:
-        """Return the embedding vector for a skill, using the cache.
-
-        Args:
-            skill (Skill): IN: Skill to embed. OUT: Text is extracted and
-                passed to the embedder.
-
-        Returns:
-            list[float] | None: OUT: Embedding vector or ``None`` on failure.
-        """
+        """Return the cached or freshly computed embedding vector for ``skill``."""
 
         meta = skill.metadata
         key = (meta.name, getattr(meta, "version", ""))
@@ -190,14 +143,7 @@ class SkillMatcher:
 
     @staticmethod
     def _skill_text(skill: Skill) -> str:
-        """Concatenate skill metadata into a single text string for embedding.
-
-        Args:
-            skill (Skill): IN: Skill to summarise. OUT: Fields are extracted.
-
-        Returns:
-            str: OUT: Combined text.
-        """
+        """Build the text payload used to embed ``skill`` (name, tags, body excerpt)."""
 
         meta = skill.metadata
         parts = [meta.name, getattr(meta, "description", ""), " ".join(getattr(meta, "tags", []))]

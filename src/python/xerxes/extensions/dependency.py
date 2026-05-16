@@ -25,16 +25,11 @@ from dataclasses import dataclass, field
 
 
 def _parse_version_tuple(version: str, *, pad: bool = True) -> tuple[int, ...]:
-    """Split a dotted version string into integer segments.
+    """Split a dotted version string into a tuple of integer segments.
 
     Args:
-        version (str): IN: Version string such as ``"1.2.3"``. OUT: Parsed
-            into integer parts.
-        pad (bool): IN: Whether to pad to three segments. OUT: Determines if
-            shorter tuples are zero-extended.
-
-    Returns:
-        tuple[int, ...]: OUT: Integer tuple representing the version.
+        version: Version string such as ``"1.2.3"``.
+        pad: When True, zero-extend the result to at least three segments.
     """
 
     parts = []
@@ -50,21 +45,14 @@ def _parse_version_tuple(version: str, *, pad: bool = True) -> tuple[int, ...]:
 
 
 class VersionConstraint:
-    """Parse and evaluate version constraints like ``>=1.0``, ``~=1.2.3``.
-
-    Args:
-        constraint_str (str): IN: Raw constraint text (may contain commas).
-            OUT: Tokenised into operator/version tuples.
-    """
+    """Parse and evaluate version constraints like ``>=1.0`` or ``~=1.2.3``."""
 
     _OP_PATTERN = re.compile(r"^\s*(~=|==|!=|>=|<=|>|<)\s*(.+)\s*$")
 
     def __init__(self, constraint_str: str) -> None:
-        """Initialize the constraint parser.
+        """Tokenise ``constraint_str`` into ``(op, version, raw_parts)`` triples.
 
-        Args:
-            constraint_str (str): IN: Constraint expression. OUT: Parsed into
-                internal ``_constraints`` list.
+        Multiple constraints may be combined with commas.
         """
 
         self.raw = constraint_str.strip()
@@ -86,15 +74,7 @@ class VersionConstraint:
                 self._constraints.append(("==", _parse_version_tuple(part), len(raw_ver)))
 
     def satisfies(self, version: str) -> bool:
-        """Check whether ``version`` fulfills all stored constraints.
-
-        Args:
-            version (str): IN: Version string to test. OUT: Parsed and
-                compared against each stored constraint.
-
-        Returns:
-            bool: OUT: ``True`` only if every constraint passes.
-        """
+        """Return whether ``version`` satisfies every stored constraint."""
 
         if not self._constraints:
             return True
@@ -106,21 +86,10 @@ class VersionConstraint:
 
     @staticmethod
     def _check(op: str, ver: tuple[int, ...], target: tuple[int, ...], raw_parts: int = 3) -> bool:
-        """Compare a version tuple against a single constraint.
+        """Evaluate a single constraint of the form ``ver op target``.
 
-        Args:
-            op (str): IN: Operator string (``==``, ``!=``, ``>=``, etc.).
-                OUT: Selects the comparison logic.
-            ver (tuple[int, ...]): IN: Parsed version under test. OUT:
-                Compared to ``target``.
-            target (tuple[int, ...]): IN: Parsed constraint version. OUT:
-                Comparison baseline.
-            raw_parts (int): IN: Number of original version parts for
-                ``~=`` compatibility upper-bound logic. OUT: Used only when
-                ``op`` is ``~=``.
-
-        Returns:
-            bool: OUT: Result of the single constraint check.
+        ``raw_parts`` determines the upper bound for the ``~=`` compatible release
+        operator and is otherwise unused.
         """
 
         if op == "==":
@@ -148,11 +117,7 @@ class VersionConstraint:
         return False
 
     def __repr__(self) -> str:
-        """Return a debug representation.
-
-        Returns:
-            str: OUT: Formatted repr including the raw constraint text.
-        """
+        """Return ``VersionConstraint(<raw>)`` for debugging."""
 
         return f"VersionConstraint({self.raw!r})"
 
@@ -162,36 +127,21 @@ class DependencySpec:
     """Named dependency with an optional version constraint.
 
     Attributes:
-        name (str): IN: Dependency name. OUT: Used for lookups.
-        version_constraint (str | None): IN: Raw constraint text. OUT:
-            Converted to ``VersionConstraint`` via ``to_version_constraint``.
+        name: Dependency identifier.
+        version_constraint: Raw constraint text (e.g. ``">=1.0"``) or ``None``.
     """
 
     name: str
     version_constraint: str | None = None
 
     def to_version_constraint(self) -> VersionConstraint:
-        """Build a ``VersionConstraint`` from the stored string.
-
-        Returns:
-            VersionConstraint: OUT: Parsed constraint object.
-        """
+        """Return a ``VersionConstraint`` built from ``version_constraint``."""
 
         return VersionConstraint(self.version_constraint or "")
 
 
 def parse_dependency(dep_str: str) -> DependencySpec:
-    """Parse a dependency string into a ``DependencySpec``.
-
-    Supports ``name`` and ``name>=1.0`` forms.
-
-    Args:
-        dep_str (str): IN: Raw dependency string. OUT: Split into name and
-            constraint portions.
-
-    Returns:
-        DependencySpec: OUT: Populated specification instance.
-    """
+    """Parse ``name`` or ``name<op>version`` into a ``DependencySpec``."""
 
     dep_str = dep_str.strip()
     m = re.match(r"^([A-Za-z0-9_\-]+)(.*)", dep_str)
@@ -207,14 +157,10 @@ class ResolveResult:
     """Outcome of a dependency resolution pass.
 
     Attributes:
-        satisfied (bool): IN: Computed flag. OUT: ``True`` if no missing or
-            conflicting dependencies.
-        missing (list[str]): IN: Empty initially. OUT: Names of unresolved
-            requirements.
-        conflicts (list[str]): IN: Empty initially. OUT: Human-readable
-            version conflict messages.
-        resolution_order (list[str]): IN: Empty initially. OUT: Intended load
-            order (populated by topological sort).
+        satisfied: ``True`` when no requirements are missing or conflicting.
+        missing: Names of dependencies that could not be resolved.
+        conflicts: Human-readable version-conflict messages.
+        resolution_order: Intended load order, populated by topological sort.
     """
 
     satisfied: bool
@@ -224,20 +170,10 @@ class ResolveResult:
 
 
 class CircularDependencyError(Exception):
-    """Raised when a circular dependency is detected during topological sort.
-
-    Args:
-        cycle (list[str]): IN: Ordered list of nodes in the cycle. OUT:
-            Formatted into the exception message.
-    """
+    """Raised when a circular dependency is detected during topological sort."""
 
     def __init__(self, cycle: list[str]) -> None:
-        """Initialize with the detected cycle.
-
-        Args:
-            cycle (list[str]): IN: Node names forming the loop. OUT: Stored
-                and formatted into the message.
-        """
+        """Store ``cycle`` on the exception and embed it in the message."""
 
         self.cycle = cycle
         super().__init__(f"Circular dependency detected: {' -> '.join(cycle)}")
@@ -254,14 +190,8 @@ class DependencyResolver:
         """Check whether ``requirements`` are satisfied by ``available``.
 
         Args:
-            available (dict[str, str]): IN: Mapping of plugin name to version.
-                OUT: Looked up for each requirement.
-            requirements (list[DependencySpec]): IN: Desired dependencies.
-                OUT: Validated against ``available``.
-
-        Returns:
-            ResolveResult: OUT: Contains ``satisfied``, ``missing``, and
-            ``conflicts``.
+            available: Mapping from plugin name to installed version.
+            requirements: Desired dependency specifications.
         """
 
         missing: list[str] = []
@@ -288,18 +218,13 @@ class DependencyResolver:
         self,
         graph: dict[str, list[str]],
     ) -> list[str]:
-        """Return a topologically sorted list of nodes from ``graph``.
+        """Return nodes of ``graph`` in dependency-respecting order.
 
         Args:
-            graph (dict[str, list[str]]): IN: Mapping from node name to list
-                of dependency names. OUT: Traversed depth-first.
-
-        Returns:
-            list[str]: OUT: Nodes in dependency-respecting order.
+            graph: Mapping from node name to its dependency list.
 
         Raises:
-            CircularDependencyError: OUT: If a cycle is encountered during
-                traversal.
+            CircularDependencyError: A cycle was encountered during traversal.
         """
 
         state: dict[str, int] = {node: 0 for node in graph}
@@ -307,16 +232,7 @@ class DependencyResolver:
         path: list[str] = []
 
         def visit(node: str) -> None:
-            """Recursive DFS visitor for a single node.
-
-            Args:
-                node (str): IN: Node to visit. OUT: Marks state and recurses
-                    into its dependencies.
-
-            Raises:
-                CircularDependencyError: OUT: If ``node`` is already on the
-                    current traversal path.
-            """
+            """DFS visitor that records traversal state and detects cycles."""
 
             if state.get(node) == 2:
                 return

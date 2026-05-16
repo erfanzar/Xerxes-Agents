@@ -11,20 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Messages module for Xerxes.
+"""Typed Xerxes message and content-chunk models with OpenAI interop.
 
-Exports:
-    - ChunkTypes
-    - BaseContentChunk
-    - ImageChunk
-    - ImageURL
-    - ImageURLChunk
-    - TextChunk
-    - ContentChunk
-    - Roles
-    - BaseMessage
-    - UserMessage
-    - ... and 10 more."""
+Mirrors the OpenAI chat schema (text / image / image-URL content chunks
+discriminated by ``ChunkTypes``; system / user / assistant / tool messages
+discriminated by ``Roles``) but expressed as Pydantic models with strict
+validation and round-tripping helpers. :class:`MessagesHistory` is the
+container used by the Cortex orchestration layer and can render an instruction
+prompt for models that accept a single text input.
+"""
 
 import re
 import textwrap

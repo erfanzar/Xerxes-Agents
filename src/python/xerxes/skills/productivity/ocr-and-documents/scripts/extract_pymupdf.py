@@ -11,43 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Extract pymupdf module for Xerxes.
+"""Quick-and-dirty PDF extraction using PyMuPDF.
 
-Exports:
-    - extract_text
-    - extract_markdown
-    - extract_tables
-    - extract_images
-    - show_metadata"""
+CLI sub-commands print text, markdown, tables, images, or metadata for the
+provided PDF ``path``.
+"""
 
 import json
 import sys
 
 
 def extract_text(path, pages=None):
-    """Extract text.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print extracted text from ``path`` for ``pages`` (or all pages)."""
     import pymupdf
-
-    """Extract text.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Extract text.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     doc = pymupdf.open(path)
     page_range = range(len(doc)) if pages is None else pages
@@ -58,55 +34,16 @@ def extract_text(path, pages=None):
 
 
 def extract_markdown(path, pages=None):
-    """Extract markdown.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print a markdown rendering of ``path`` via ``pymupdf4llm.to_markdown``."""
     import pymupdf4llm
-
-    """Extract markdown.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Extract markdown.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        pages (Any, optional): IN: pages. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     md = pymupdf4llm.to_markdown(path, pages=pages)
     print(md)
 
 
 def extract_tables(path):
-    """Extract tables.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print every detected table in ``path`` formatted as GitHub-flavoured markdown."""
     import pymupdf
-
-    """Extract tables.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Extract tables.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     doc = pymupdf.open(path)
     for i, page in enumerate(doc):
@@ -118,29 +55,8 @@ def extract_tables(path):
 
 
 def extract_images(path, output_dir):
-    """Extract images.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any): IN: output dir. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Save every embedded image in ``path`` as a PNG under ``output_dir``."""
     from pathlib import Path
-
-    """Extract images.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any): IN: output dir. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Extract images.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any): IN: output dir. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     import pymupdf
 
@@ -160,26 +76,8 @@ def extract_images(path, output_dir):
 
 
 def show_metadata(path):
-    """Show metadata.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the document metadata for ``path`` as indented JSON."""
     import pymupdf
-
-    """Show metadata.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Show metadata.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
 
     doc = pymupdf.open(path)
     print(

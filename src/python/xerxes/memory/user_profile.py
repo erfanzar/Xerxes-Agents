@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""User profile module for Xerxes.
+"""Confidence-weighted user profile store with temporal decay.
 
-Exports:
-    - logger
-    - PROFILE_KEY_PREFIX
-    - ConfidentValue
-    - UserProfile
-    - UserProfileStore"""
+``UserProfile`` accumulates evidence about a user (domains, tone,
+expertise, preferences explicit/implicit, recurring goals, notes, and
+a small feedback ring buffer). Every learnt fact is wrapped in a
+``ConfidentValue`` so we can reinforce, demote, and exponentially decay
+beliefs based on age. ``UserProfileStore`` persists every profile
+behind any ``MemoryStorage`` backend keyed by ``PROFILE_KEY_PREFIX``."""
 
 from __future__ import annotations
 
@@ -36,13 +36,14 @@ PROFILE_KEY_PREFIX = "_profile_"
 
 @dataclass
 class ConfidentValue:
-    """Confident value.
+    """A profile fact paired with a confidence score and last-update marker.
 
     Attributes:
-        value (tp.Any): value.
-        confidence (float): confidence.
-        last_updated (datetime): last updated.
-        evidence_count (int): evidence count."""
+        value: The actual fact (string, number, dict — anything JSON-safe).
+        confidence: Belief strength in ``[0, 1]``.
+        last_updated: Wall-clock time of the last reinforcement/demotion;
+            used by ``UserProfileStore._decay_profile``.
+        evidence_count: Number of reinforcement events seen."""
 
     value: tp.Any
     confidence: float = 0.0
@@ -50,22 +51,14 @@ class ConfidentValue:
     evidence_count: int = 0
 
     def reinforce(self, weight: float = 1.0) -> None:
-        """Reinforce.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            weight (float, optional): IN: weight. Defaults to 1.0. OUT: Consumed during execution."""
+        """Increase confidence (clamped to 1.0) and bump the evidence counter."""
 
         self.confidence = min(1.0, self.confidence + weight)
         self.evidence_count += 1
         self.last_updated = datetime.now()
 
     def demote(self, weight: float = 0.5) -> None:
-        """Demote.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            weight (float, optional): IN: weight. Defaults to 0.5. OUT: Consumed during execution."""
+        """Decrease confidence (clamped at 0.0) and refresh ``last_updated``."""
 
         self.confidence = max(0.0, self.confidence - weight)
         self.last_updated = datetime.now()
@@ -73,19 +66,20 @@ class ConfidentValue:
 
 @dataclass
 class UserProfile:
-    """User profile.
+    """Long-lived per-user beliefs, preferences, and feedback history.
 
     Attributes:
-        user_id (str): user id.
-        expertise (dict[str, ConfidentValue]): expertise.
-        domains (list[str]): domains.
-        tone (ConfidentValue | None): tone.
-        recurring_goals (list[str]): recurring goals.
-        explicit_preferences (dict[str, ConfidentValue]): explicit preferences.
-        implicit_preferences (dict[str, ConfidentValue]): implicit preferences.
-        notes (list[str]): notes.
-        last_seen (datetime): last seen.
-        feedback_history (list[dict[str, tp.Any]]): feedback history."""
+        user_id: Stable identifier for the user.
+        expertise: ``topic -> ConfidentValue`` map describing skill level.
+        domains: Active domain tags (free-form labels).
+        tone: Preferred conversational tone as a ``ConfidentValue``.
+        recurring_goals: Recurring objectives the user has expressed.
+        explicit_preferences: Preferences the user stated directly.
+        implicit_preferences: Preferences inferred from behaviour.
+        notes: Free-form long-form notes about the user.
+        last_seen: Wall-clock time of the most recent interaction.
+        feedback_history: Bounded ring (≤256, trimmed to 128) of recent
+            feedback signal dicts."""
 
     user_id: str
     expertise: dict[str, ConfidentValue] = field(default_factory=dict)
@@ -99,14 +93,16 @@ class UserProfile:
     feedback_history: list[dict[str, tp.Any]] = field(default_factory=list)
 
     def render(self, *, max_lines: int = 12, min_confidence: float = 0.3) -> str:
-        """Render.
+        """Render the profile as a bulleted human-readable block.
+
+        Only confident-enough beliefs are surfaced (default
+        ``min_confidence=0.3``). Output is capped at ``max_lines`` to
+        keep prompt overhead bounded.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            max_lines (int, optional): IN: max lines. Defaults to 12. OUT: Consumed during execution.
-            min_confidence (float, optional): IN: min confidence. Defaults to 0.3. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            max_lines: Maximum number of bullet lines.
+            min_confidence: Minimum confidence required for a fact to
+                appear."""
 
         lines: list[str] = []
         if self.domains:
@@ -141,13 +137,15 @@ class UserProfile:
         target: str = "",
         delta: float = 1.0,
     ) -> None:
-        """Record feedback.
+        """Append a feedback event to the bounded history ring.
+
+        The ring trims to 128 entries once it grows past 256 to bound
+        memory growth without losing the last few dozen signals.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            signal (str): IN: signal. OUT: Consumed during execution.
-            target (str, optional): IN: target. Defaults to ''. OUT: Consumed during execution.
-            delta (float, optional): IN: delta. Defaults to 1.0. OUT: Consumed during execution."""
+            signal: Label describing the feedback (e.g. ``"positive"``).
+            target: Optional reference to the message or action.
+            delta: Magnitude of the feedback (sign indicates direction)."""
 
         self.feedback_history.append(
             {
@@ -161,12 +159,7 @@ class UserProfile:
             self.feedback_history = self.feedback_history[-128:]
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """To dict.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        """Serialise the profile to a JSON-safe dict for persistence."""
 
         return {
             "user_id": self.user_id,
@@ -183,13 +176,7 @@ class UserProfile:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> UserProfile:
-        """From dict.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, tp.Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            UserProfile: OUT: Result of the operation."""
+        """Reconstruct a profile from its ``to_dict`` form, parsing nested values back into ``ConfidentValue`` instances."""
 
         tone_data = data.get("tone")
         return cls(
@@ -207,12 +194,7 @@ class UserProfile:
 
 
 def _cv_to_dict(cv: ConfidentValue) -> dict[str, tp.Any]:
-    """Internal helper to cv to dict.
-
-    Args:
-        cv (ConfidentValue): IN: cv. OUT: Consumed during execution.
-    Returns:
-        dict[str, tp.Any]: OUT: Result of the operation."""
+    """Convert a ``ConfidentValue`` to a JSON-safe dict (ISO timestamp)."""
 
     return {
         "value": cv.value,
@@ -223,12 +205,7 @@ def _cv_to_dict(cv: ConfidentValue) -> dict[str, tp.Any]:
 
 
 def _cv_from_dict(d: dict[str, tp.Any]) -> ConfidentValue:
-    """Internal helper to cv from dict.
-
-    Args:
-        d (dict[str, tp.Any]): IN: d. OUT: Consumed during execution.
-    Returns:
-        ConfidentValue: OUT: Result of the operation."""
+    """Rebuild a ``ConfidentValue`` from its serialised dict form."""
 
     return ConfidentValue(
         value=d.get("value"),
@@ -239,12 +216,7 @@ def _cv_from_dict(d: dict[str, tp.Any]) -> ConfidentValue:
 
 
 def _decay_value(cv: ConfidentValue, *, now: datetime, half_life_days: float) -> None:
-    """Internal helper to decay value.
-
-    Args:
-        cv (ConfidentValue): IN: cv. OUT: Consumed during execution.
-        now (datetime): IN: now. OUT: Consumed during execution.
-        half_life_days (float): IN: half life days. OUT: Consumed during execution."""
+    """Apply exponential confidence decay in-place: ``c *= 0.5^(age/half_life)``."""
 
     age = max(0.0, (now - cv.last_updated).total_seconds() / 86400.0)
     factor = 0.5 ** (age / max(half_life_days, 0.001))
@@ -252,12 +224,7 @@ def _decay_value(cv: ConfidentValue, *, now: datetime, half_life_days: float) ->
 
 
 def _parse_dt(s: tp.Any) -> datetime:
-    """Internal helper to parse dt.
-
-    Args:
-        s (tp.Any): IN: s. OUT: Consumed during execution.
-    Returns:
-        datetime: OUT: Result of the operation."""
+    """Best-effort parse of an ISO timestamp; fall back to ``datetime.now()`` on failure."""
 
     if isinstance(s, datetime):
         return s
@@ -270,14 +237,15 @@ def _parse_dt(s: tp.Any) -> datetime:
 
 
 class UserProfileStore:
-    """User profile store."""
+    """Thread-safe registry of ``UserProfile`` objects with optional persistence.
+
+    Profiles are kept in an in-memory dict keyed by ``user_id`` and
+    mirrored to a backing ``MemoryStorage`` (under ``PROFILE_KEY_PREFIX``)
+    when one is supplied. Decay is a manual operation invoked via
+    ``decay_all``."""
 
     def __init__(self, storage: MemoryStorage | None = None) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage (MemoryStorage | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution."""
+        """Attach optional persistent storage and hydrate any existing profiles."""
 
         self.storage = storage
         self._profiles: dict[str, UserProfile] = {}
@@ -285,10 +253,7 @@ class UserProfileStore:
         self._hydrate()
 
     def _hydrate(self) -> None:
-        """Internal helper to hydrate.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Load every ``PROFILE_KEY_PREFIX``-prefixed row into the in-memory map."""
 
         if self.storage is None:
             return
@@ -308,25 +273,13 @@ class UserProfileStore:
                 logger.debug("Failed to hydrate profile %s", k, exc_info=True)
 
     def get(self, user_id: str) -> UserProfile | None:
-        """Get.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            UserProfile | None: OUT: Result of the operation."""
+        """Return the cached profile for ``user_id`` or ``None``."""
 
         with self._lock:
             return self._profiles.get(user_id)
 
     def get_or_create(self, user_id: str) -> UserProfile:
-        """Retrieve the or create.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            UserProfile: OUT: Result of the operation."""
+        """Return the cached profile, creating and persisting one on first call."""
 
         with self._lock:
             p = self._profiles.get(user_id)
@@ -337,11 +290,7 @@ class UserProfileStore:
             return p
 
     def save(self, profile: UserProfile) -> None:
-        """Save.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            profile (UserProfile): IN: profile. OUT: Consumed during execution."""
+        """Persist ``profile`` to storage (best-effort) and refresh its ``last_seen``."""
 
         profile.last_seen = datetime.now()
         with self._lock:
@@ -353,13 +302,7 @@ class UserProfileStore:
                     logger.warning("Failed to persist profile for %s", profile.user_id, exc_info=True)
 
     def delete(self, user_id: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Drop the user's cached profile and best-effort delete its storage row."""
 
         with self._lock:
             removed = self._profiles.pop(user_id, None)
@@ -371,25 +314,15 @@ class UserProfileStore:
             return removed is not None
 
     def all_user_ids(self) -> list[str]:
-        """All user ids.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return every cached ``user_id``."""
 
         with self._lock:
             return list(self._profiles.keys())
 
     def render_for(self, user_id: str, **kwargs: tp.Any) -> str:
-        """Render for.
+        """Render the user's profile to text; returns ``""`` if no profile exists.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            str: OUT: Result of the operation."""
+        Extra keyword arguments are forwarded to ``UserProfile.render``."""
 
         p = self.get(user_id)
         if p is None:
@@ -402,14 +335,18 @@ class UserProfileStore:
         half_life_days: float = 30.0,
         prune_threshold: float = 0.05,
     ) -> dict[str, int]:
-        """Decay all.
+        """Apply exponential confidence decay across every cached profile.
+
+        Beliefs whose confidence falls below ``prune_threshold`` after
+        decay are deleted. Profiles that lose any beliefs are
+        re-persisted.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            half_life_days (float, optional): IN: half life days. Defaults to 30.0. OUT: Consumed during execution.
-            prune_threshold (float, optional): IN: prune threshold. Defaults to 0.05. OUT: Consumed during execution.
+            half_life_days: Days after which a belief's confidence halves.
+            prune_threshold: Confidence floor below which beliefs are dropped.
+
         Returns:
-            dict[str, int]: OUT: Result of the operation."""
+            Mapping of ``user_id`` to the number of beliefs pruned."""
 
         from datetime import datetime as _dt
 
@@ -433,15 +370,10 @@ class UserProfileStore:
         half_life_days: float,
         prune_threshold: float,
     ) -> int:
-        """Internal helper to decay profile.
+        """Decay every ``ConfidentValue`` inside one profile and prune the weak ones.
 
-        Args:
-            profile (UserProfile): IN: profile. OUT: Consumed during execution.
-            now (datetime): IN: now. OUT: Consumed during execution.
-            half_life_days (float): IN: half life days. OUT: Consumed during execution.
-            prune_threshold (float): IN: prune threshold. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        Returns the number of beliefs that fell below ``prune_threshold``
+        and were removed."""
 
         pruned = 0
         if profile.tone is not None:
@@ -467,9 +399,6 @@ __all__ = [
 
 
 def _drop_dataclass_warning() -> dict[str, tp.Any]:
-    """Internal helper to drop dataclass warning.
-
-    Returns:
-        dict[str, tp.Any]: OUT: Result of the operation."""
+    """Touch ``asdict`` so the import isn't flagged as unused by linters."""
 
     return asdict(ConfidentValue(value="x"))

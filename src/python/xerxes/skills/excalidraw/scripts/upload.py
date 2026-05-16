@@ -11,13 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Upload module for Xerxes.
-
-Exports:
-    - UPLOAD_URL
-    - concat_buffers
-    - upload
-    - main"""
+"""Encrypt and upload an ``.excalidraw`` document to the Excalidraw collab server."""
 
 import base64
 import json
@@ -38,12 +32,7 @@ UPLOAD_URL = "https://json.excalidraw.com/api/v2/post/"
 
 
 def concat_buffers(*buffers: bytes) -> bytes:
-    """Concat buffers.
-
-    Args:
-        *buffers: IN: Additional positional arguments. OUT: Passed through to downstream calls.
-    Returns:
-        bytes: OUT: Result of the operation."""
+    """Join length-prefixed ``buffers`` into Excalidraw's binary upload format."""
 
     parts = [struct.pack(">I", 1)]
     for buf in buffers:
@@ -53,12 +42,7 @@ def concat_buffers(*buffers: bytes) -> bytes:
 
 
 def upload(excalidraw_json: str) -> str:
-    """Upload.
-
-    Args:
-        excalidraw_json (str): IN: excalidraw json. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Encrypt ``excalidraw_json``, upload it, and return the share URL."""
 
     file_metadata = json.dumps({}).encode("utf-8")
     data_bytes = excalidraw_json.encode("utf-8")
@@ -97,10 +81,7 @@ def upload(excalidraw_json: str) -> str:
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Read the Excalidraw file passed on the CLI and print the resulting share URL."""
     if len(sys.argv) < 2:
         print("Usage: python upload.py <path-to-file.excalidraw>")
         sys.exit(1)

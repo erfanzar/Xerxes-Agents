@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Entry point for running the Xerxes bridge server.
+"""Launch the bridge server when ``python -m xerxes.bridge`` is invoked.
 
-Executes :func:`~xerxes.bridge.server.main` when the package is run as a module.
+Delegates to :func:`xerxes.bridge.server.main`.
 """
 
 from .server import main

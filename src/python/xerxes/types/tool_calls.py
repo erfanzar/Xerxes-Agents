@@ -11,16 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tool calls module for Xerxes.
+"""Typed tool / function-call models compatible with the OpenAI schema.
 
-Exports:
-    - Function
-    - ToolTypes
-    - ToolChoice
-    - Tool
-    - FunctionCall
-    - ToolCall
-    - ToolType"""
+Provides :class:`Function` (a callable's name, description, and JSON-schema
+parameters), :class:`Tool` wrapping a function as an OpenAI-style tool,
+:class:`FunctionCall` (name + JSON-string arguments), and :class:`ToolCall`
+(id-bearing invocation). The :class:`ToolChoice` enum mirrors the
+``tool_choice`` API parameter.
+"""
 
 import json
 from enum import StrEnum

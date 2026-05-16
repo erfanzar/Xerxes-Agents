@@ -11,10 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Message format converters for the API server.
+"""Convert OpenAI-style chat messages into Xerxes internal types.
 
-This module converts between OpenAI-style chat messages and Xerxes internal
-message types.
+Used by both the standard and Cortex completion services to translate
+incoming requests before handing them to the agent runtime.
 """
 
 from xerxes.types import MessagesHistory
@@ -23,22 +23,15 @@ from xerxes.types.oai_protocols import ChatMessage
 
 
 class MessageConverter:
-    """Converts OpenAI protocol messages to Xerxes internal message types."""
+    """Namespace for OpenAI <-> Xerxes message translation helpers."""
 
     @staticmethod
     def convert_openai_to_xerxes(messages: list[ChatMessage]) -> MessagesHistory:
-        """Convert a list of OpenAI ChatMessages to a Xerxes MessagesHistory.
+        """Map OpenAI chat messages to a Xerxes :class:`MessagesHistory`.
 
-        Args:
-            messages (list[ChatMessage]): IN: OpenAI-format messages with roles
-                ``"system"``, ``"user"``, or ``"assistant"``. OUT: Mapped to Xerxes
-                message types.
-
-        Returns:
-            MessagesHistory: OUT: The converted message history.
-
-        Raises:
-            ValueError: If an unsupported message role is encountered.
+        Only the ``system``, ``user``, and ``assistant`` roles are
+        recognised; anything else raises ``ValueError``. Tool/function
+        messages are handled by the completion services, not here.
         """
         xerxes_messages: list[SystemMessage | UserMessage | AssistantMessage | ToolMessage] = []
 

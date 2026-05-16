@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""User prompt module for Xerxes.
+"""Coordinator for blocking ``ask_user`` calls during a turn.
 
-Exports:
-    - UserPromptManager"""
+Holds at most one in-flight :class:`PendingUserPrompt` and its awaiting
+future. The TUI polls :meth:`get_pending`, displays the prompt, then calls
+:meth:`answer` with the user's reply to resolve the awaiting coroutine.
+"""
 
 from __future__ import annotations
 
@@ -26,34 +28,28 @@ from .types import PendingUserPrompt, UserPromptOption
 
 
 class UserPromptManager:
-    """User prompt manager."""
+    """Tracks the single outstanding user-prompt request for a session.
+
+    The manager enforces "one question at a time" semantics: a second
+    :meth:`request` call while a prompt is still pending raises rather than
+    silently dropping the first prompt. The waiting future is resolved by
+    :meth:`answer`, which performs option matching and freeform validation
+    against the original :class:`PendingUserPrompt`.
+    """
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Start with no pending prompt and no awaiting future."""
 
         self._pending: PendingUserPrompt | None = None
         self._pending_future: asyncio.Future[dict[str, tp.Any]] | None = None
 
     def get_pending(self) -> dict[str, tp.Any] | None:
-        """Retrieve the pending.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any] | None: OUT: Result of the operation."""
+        """Return the wire dict for the pending prompt, or ``None`` if idle."""
 
         return self._pending.to_dict() if self._pending is not None else None
 
     def has_pending(self) -> bool:
-        """Check whether pending.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return ``True`` while a user prompt is awaiting an answer."""
 
         return self._pending is not None
 
@@ -65,16 +61,24 @@ class UserPromptManager:
         allow_freeform: bool = True,
         placeholder: str | None = None,
     ) -> dict[str, tp.Any]:
-        """Asynchronously Request.
+        """Queue a question and await the user's reply.
+
+        Blocks the calling tool coroutine until :meth:`answer` resolves the
+        underlying future. Both the pending state and the future are cleared
+        before returning, regardless of success or cancellation.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            question (str): IN: question. OUT: Consumed during execution.
-            options (list[str] | None, optional): IN: options. Defaults to None. OUT: Consumed during execution.
-            allow_freeform (bool, optional): IN: allow freeform. Defaults to True. OUT: Consumed during execution.
-            placeholder (str | None, optional): IN: placeholder. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            question: Text shown to the user (whitespace-stripped).
+            options: Optional list of choice strings; empty entries are
+                dropped and each non-empty entry becomes a
+                :class:`UserPromptOption`.
+            allow_freeform: Permit the user to type a custom answer in
+                addition to (or instead of) selecting an option.
+            placeholder: Optional placeholder for the input field.
+
+        Raises:
+            RuntimeError: If another prompt is already pending.
+        """
 
         if self._pending is not None:
             raise RuntimeError("Another user question is already pending")
@@ -100,13 +104,18 @@ class UserPromptManager:
             self._pending_future = None
 
     def answer(self, raw_input: str) -> dict[str, tp.Any]:
-        """Answer.
+        """Resolve the pending prompt with the user's reply.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            raw_input (str): IN: raw input. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Numeric input is interpreted as a 1-based option index; text input
+        is matched against option labels and values (case-insensitive). If
+        the prompt disallows freeform answers and no option matches, this
+        method raises ``ValueError`` and leaves the prompt pending so the
+        TUI can re-ask.
+
+        Raises:
+            ValueError: When the answer is empty or violates the prompt's
+                constraints.
+        """
 
         pending = self._require_pending()
         cleaned = raw_input.strip()
@@ -151,12 +160,7 @@ class UserPromptManager:
         return result
 
     def _require_pending(self) -> PendingUserPrompt:
-        """Internal helper to require pending.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            PendingUserPrompt: OUT: Result of the operation."""
+        """Return the pending prompt or raise if none is awaiting."""
 
         if self._pending is None:
             raise ValueError("No pending user question.")
@@ -164,12 +168,7 @@ class UserPromptManager:
 
     @staticmethod
     def _invalid_choice_message(pending: PendingUserPrompt) -> str:
-        """Internal helper to invalid choice message.
-
-        Args:
-            pending (PendingUserPrompt): IN: pending. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Format the human-readable error listing the valid choices."""
 
         labels = ", ".join(f"{index + 1}:{option.label}" for index, option in enumerate(pending.options))
         return f"Choose one of the listed options: {labels}"

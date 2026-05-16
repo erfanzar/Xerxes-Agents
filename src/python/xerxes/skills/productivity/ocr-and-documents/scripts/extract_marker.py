@@ -11,46 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Extract marker module for Xerxes.
-
-Exports:
-    - convert
-    - check_requirements"""
+"""High-fidelity PDF to markdown/JSON conversion using the ``marker-pdf`` package."""
 
 import os
 import sys
 
 
 def convert(path, output_dir=None, output_format="markdown", use_llm=False):
-    """Convert.
+    """Convert ``path`` to ``output_format`` using marker-pdf and print the result.
 
     Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
-        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
-        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+        path: PDF file to convert.
+        output_dir: Directory where embedded images are written, when present.
+        output_format: ``"markdown"`` (default) or ``"json"``.
+        use_llm: When True, enable marker's LLM post-processing.
+    """
     from marker.config.parser import ConfigParser
-
-    """Convert.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
-        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
-        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Convert.
-
-    Args:
-        path (Any): IN: path. OUT: Consumed during execution.
-        output_dir (Any, optional): IN: output dir. Defaults to None. OUT: Consumed during execution.
-        output_format (Any, optional): IN: output format. Defaults to 'markdown'. OUT: Consumed during execution.
-        use_llm (Any, optional): IN: use llm. Defaults to False. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
     from marker.converters.pdf import PdfConverter
     from marker.models import create_model_dict
 
@@ -91,21 +67,9 @@ def convert(path, output_dir=None, output_format="markdown", use_llm=False):
 
 
 def check_requirements():
-    """Check requirements.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Verify that at least 5 GB of free disk space is available for marker-pdf."""
 
     import shutil
-
-    """Check requirements.
-
-    Returns:
-        Any: OUT: Result of the operation."""
-    """Check requirements.
-
-    Returns:
-        Any: OUT: Result of the operation."""
 
     free_gb = shutil.disk_usage("/").free / (1024**3)
     if free_gb < 5:

@@ -11,14 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Types module for Xerxes.
+"""Plain-old-data records for the Model Context Protocol.
 
-Exports:
-    - MCPTransportType
-    - MCPServerConfig
-    - MCPTool
-    - MCPResource
-    - MCPPrompt"""
+These dataclasses mirror the JSON shapes the MCP spec defines: a server
+config tells the client how to launch (stdio) or reach (SSE / streamable
+HTTP) the server, while :class:`MCPTool`, :class:`MCPResource`, and
+:class:`MCPPrompt` carry the capabilities the client learns at connect
+time.
+"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,9 +26,10 @@ from typing import Any
 
 
 class MCPTransportType(Enum):
-    """Mcptransport type.
+    """MCP transport variants understood by :class:`xerxes.mcp.MCPClient`.
 
-    Inherits from: Enum
+    ``HTTP`` and ``WEBSOCKET`` are legacy aliases that map onto ``SSE`` and
+    ``STREAMABLE_HTTP`` respectively.
     """
 
     STDIO = "stdio"
@@ -41,19 +42,20 @@ class MCPTransportType(Enum):
 
 @dataclass
 class MCPServerConfig:
-    """Mcpserver config.
+    """Connection settings for one MCP server.
 
     Attributes:
-        name (str): name.
-        command (str | None): command.
-        args (list[str]): args.
-        env (dict[str, str]): env.
-        transport (MCPTransportType): transport.
-        url (str | None): url.
-        headers (dict[str, str]): headers.
-        enabled (bool): enabled.
-        timeout (float): timeout.
-        sse_read_timeout (float): sse read timeout."""
+        name: Logical name (used in the manager registry).
+        command: Executable for the stdio transport.
+        args: Extra command-line args for the stdio transport.
+        env: Environment overrides applied to the spawned process.
+        transport: Wire transport to use.
+        url: Endpoint URL for SSE / streamable HTTP transports.
+        headers: Extra HTTP headers for SSE / streamable HTTP.
+        enabled: When false, the manager skips this entry on load.
+        timeout: Connect / request timeout in seconds.
+        sse_read_timeout: SSE long-poll read timeout in seconds.
+    """
 
     name: str
     command: str | None = None
@@ -69,13 +71,14 @@ class MCPServerConfig:
 
 @dataclass
 class MCPTool:
-    """Mcptool.
+    """One callable exposed by an MCP server.
 
     Attributes:
-        name (str): name.
-        description (str): description.
-        input_schema (dict[str, Any]): input schema.
-        server_name (str): server name."""
+        name: Tool name as the server publishes it.
+        description: Human-readable description.
+        input_schema: JSON-Schema for ``call_tool`` arguments.
+        server_name: Owning server's :attr:`MCPServerConfig.name`.
+    """
 
     name: str
     description: str
@@ -85,14 +88,15 @@ class MCPTool:
 
 @dataclass
 class MCPResource:
-    """Mcpresource.
+    """One readable resource exposed by an MCP server.
 
     Attributes:
-        uri (str): uri.
-        name (str): name.
-        description (str): description.
-        mime_type (str | None): mime type.
-        server_name (str): server name."""
+        uri: Stable URI used to fetch the resource via ``read_resource``.
+        name: Display name.
+        description: Human-readable description.
+        mime_type: Optional MIME type if the server declares one.
+        server_name: Owning server's :attr:`MCPServerConfig.name`.
+    """
 
     uri: str
     name: str
@@ -103,13 +107,14 @@ class MCPResource:
 
 @dataclass
 class MCPPrompt:
-    """Mcpprompt.
+    """One templated prompt exposed by an MCP server.
 
     Attributes:
-        name (str): name.
-        description (str): description.
-        arguments (list[dict[str, Any]]): arguments.
-        server_name (str): server name."""
+        name: Prompt name as the server publishes it.
+        description: Human-readable description.
+        arguments: Schema fragments for each templated parameter.
+        server_name: Owning server's :attr:`MCPServerConfig.name`.
+    """
 
     name: str
     description: str

@@ -13,8 +13,12 @@
 # limitations under the License.
 """Channel registry and lifecycle management.
 
-Provides ``ChannelRegistry`` for collecting, starting, and stopping multiple
-channels, plus ``gather_inbound`` for starting several registries concurrently.
+``ChannelRegistry`` is the daemon-facing collection that owns a process's
+channels: it gives each channel a name, holds the inbound handler, and
+runs ``start_all``/``stop_all`` with best-effort error handling so a
+single misconfigured adapter cannot prevent the others from coming up.
+``gather_inbound`` is a thin coroutine helper for starting several
+registries concurrently.
 """
 
 from __future__ import annotations
@@ -31,73 +35,85 @@ InboundHandler = tp.Callable[[ChannelMessage], tp.Awaitable[None]]
 
 
 class ChannelRegistry:
-    """Holds a collection of named channels and manages their lifecycle."""
+    """Named collection of channels with start/stop lifecycle bookkeeping.
+
+    Tracks which channels have been started so ``start_all`` is idempotent
+    and ``stop_all`` only stops what is actually running. Failures during
+    start are logged but do not abort the rest of the batch — operators can
+    misconfigure one adapter without losing all messaging.
+    """
 
     def __init__(self) -> None:
-        """Initialize an empty registry."""
+        """Build an empty registry with no inbound handler set."""
         self._channels: dict[str, Channel] = {}
         self._handler: InboundHandler | None = None
         self._started: set[str] = set()
 
     def register(self, name: str, channel: Channel) -> None:
-        """Add a channel to the registry.
+        """Add or replace a channel under ``name``.
 
         Args:
-            name (str): IN: unique identifier for the channel.
-            channel (Channel): IN: channel instance to register.
+            name: Registry-level identifier. Conventionally matches
+                ``channel.name``, but the registry does not enforce it.
+            channel: Channel instance to register.
         """
         self._channels[name] = channel
 
     def unregister(self, name: str) -> None:
-        """Remove a channel from the registry.
+        """Remove a channel and forget its started state.
+
+        Does not stop the channel — callers must do that themselves before
+        unregistering if they want a clean shutdown.
 
         Args:
-            name (str): IN: identifier of the channel to remove.
+            name: Identifier passed to ``register``.
         """
         self._channels.pop(name, None)
         self._started.discard(name)
 
     def get(self, name: str) -> Channel | None:
-        """Retrieve a channel by name.
+        """Look up a channel by name.
 
         Args:
-            name (str): IN: channel identifier.
+            name: Identifier passed to ``register``.
 
         Returns:
-            Channel | None: OUT: the channel if registered.
+            The channel if registered, otherwise ``None``.
         """
         return self._channels.get(name)
 
     def all(self) -> dict[str, Channel]:
-        """Return all registered channels.
+        """Return a shallow copy of the ``name → channel`` mapping.
 
-        Returns:
-            dict[str, Channel]: OUT: shallow copy of the internal mapping.
+        Mutating the returned dict does not affect the registry.
         """
         return dict(self._channels)
 
     def names(self) -> list[str]:
-        """Return the names of all registered channels.
-
-        Returns:
-            list[str]: OUT: list of registered channel names.
-        """
+        """Return the registry's channel names in insertion order."""
         return list(self._channels.keys())
 
     def set_handler(self, handler: InboundHandler) -> None:
-        """Set the global inbound handler for all channels.
+        """Install the single inbound callback used by every channel.
+
+        Must be called before ``start_all`` — channels share one handler so
+        the registry can route all inbound traffic into a single agent
+        runtime regardless of source platform.
 
         Args:
-            handler (InboundHandler): IN: async callback invoked for each
-                inbound message.
+            handler: Async callable invoked for every inbound message.
         """
         self._handler = handler
 
     async def start_all(self) -> None:
-        """Start all registered channels that are not already running.
+        """Start every registered channel that is not already running.
+
+        Each ``Channel.start`` is awaited inside a try/except so one bad
+        adapter does not prevent the others from coming up; failures are
+        logged at WARNING with the traceback.
 
         Raises:
-            RuntimeError: If ``set_handler`` has not been called.
+            RuntimeError: ``set_handler`` was not called first.
         """
         if self._handler is None:
             raise RuntimeError("ChannelRegistry.set_handler must be called before start_all()")
@@ -112,7 +128,11 @@ class ChannelRegistry:
                 logger.warning("Failed to start channel %s", name, exc_info=True)
 
     async def stop_all(self) -> None:
-        """Stop all currently running channels."""
+        """Stop every currently running channel; swallow per-channel errors.
+
+        Channels whose ``stop`` raises are logged at DEBUG and still removed
+        from the started set so the registry remains consistent.
+        """
         for name in list(self._started):
             channel = self._channels.get(name)
             if channel is None:
@@ -125,14 +145,13 @@ class ChannelRegistry:
             self._started.discard(name)
 
     async def send(self, message: ChannelMessage) -> None:
-        """Send a message through its designated channel.
+        """Route an outbound message to the channel named by ``message.channel``.
 
         Args:
-            message (ChannelMessage): IN: message whose ``channel`` field
-                determines the target.
+            message: Outbound message; ``message.channel`` selects the target.
 
         Raises:
-            KeyError: If the target channel is not registered.
+            KeyError: No channel is registered under ``message.channel``.
         """
         chan = self._channels.get(message.channel)
         if chan is None:
@@ -140,15 +159,18 @@ class ChannelRegistry:
         await chan.send(message)
 
     def discover_entry_points(self, group: str = "xerxes.channels") -> list[str]:
-        """Discover and auto-register channels from package entry points.
+        """Auto-register channels declared via ``importlib.metadata`` entry points.
+
+        Each entry point must be a zero-arg factory returning a ``Channel``
+        instance. Factories that fail to import or return a non-``Channel``
+        are skipped with a logged warning so a single broken plugin cannot
+        crash startup.
 
         Args:
-            group (str): IN: entry-point group to scan. Defaults to
-                ``"xerxes.channels"``.
+            group: Entry-point group name. Defaults to ``"xerxes.channels"``.
 
         Returns:
-            list[str]: OUT: names of channels that were successfully loaded
-            and registered.
+            Names of channels that were loaded and registered successfully.
         """
         try:
             from importlib.metadata import entry_points
@@ -172,30 +194,20 @@ class ChannelRegistry:
 
 
 def gather_inbound(*registries: ChannelRegistry) -> tp.Awaitable[None]:
-    """Start all supplied registries concurrently.
+    """Start ``start_all`` on every registry concurrently.
 
     Args:
-        *registries (ChannelRegistry): IN: one or more registries to start.
+        *registries: One or more registries whose channels should come up
+            in parallel.
 
     Returns:
-        Awaitable[None]: OUT: coroutine that awaits ``start_all`` on every
-        registry.
+        A coroutine that resolves when every registry finishes its
+        ``start_all`` (including channels that failed to start individually).
     """
 
     async def _run():
-        """Asynchronously Internal helper to run.
-
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Run ``start_all`` on every registry concurrently via ``asyncio.gather``."""
         await asyncio.gather(*(r.start_all() for r in registries))
-        """Asynchronously Internal helper to run.
-
-        Returns:
-            Any: OUT: Result of the operation."""
-        """Asynchronously Internal helper to run.
-
-        Returns:
-            Any: OUT: Result of the operation."""
 
     return _run()
 

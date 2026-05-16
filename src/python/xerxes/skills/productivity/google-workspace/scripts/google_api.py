@@ -11,20 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Google api module for Xerxes.
+"""CLI bridge to Google Workspace APIs (Gmail, Calendar, Drive, People, Sheets, Docs).
 
-Exports:
-    - HERMES_HOME
-    - TOKEN_PATH
-    - CLIENT_SECRET_PATH
-    - SCOPES
-    - get_credentials
-    - build_service
-    - gmail_search
-    - gmail_get
-    - gmail_send
-    - gmail_reply
-    - ... and 12 more."""
+Sub-commands either shell out to the ``gws`` binary when available or fall back
+to the official ``google-api-python-client`` libraries. Output is always JSON
+suitable for downstream agent consumption.
+"""
 
 import argparse
 import base64
@@ -37,9 +29,9 @@ from datetime import UTC, datetime, timedelta
 from email.mime.text import MIMEText
 from pathlib import Path
 
-HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-TOKEN_PATH = HERMES_HOME / "google_token.json"
-CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+XERXES_HOME = Path(os.getenv("XERXES_HOME", Path.home() / ".xerxes"))
+TOKEN_PATH = XERXES_HOME / "google_token.json"
+CLIENT_SECRET_PATH = XERXES_HOME / "google_client_secret.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -54,10 +46,7 @@ SCOPES = [
 
 
 def _ensure_authenticated():
-    """Internal helper to ensure authenticated.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Exit with guidance when no Google token is stored on disk."""
     if not TOKEN_PATH.exists():
         print("Not authenticated. Run the setup script first:", file=sys.stderr)
         print(f"  python {Path(__file__).parent / 'setup.py'}", file=sys.stderr)
@@ -65,10 +54,7 @@ def _ensure_authenticated():
 
 
 def _stored_token_scopes() -> list[str]:
-    """Internal helper to stored token scopes.
-
-    Returns:
-        list[str]: OUT: Result of the operation."""
+    """Return the OAuth scopes recorded in the stored token, or the default list."""
     try:
         data = json.loads(TOKEN_PATH.read_text())
     except Exception:
@@ -80,10 +66,7 @@ def _stored_token_scopes() -> list[str]:
 
 
 def _gws_binary() -> str | None:
-    """Internal helper to gws binary.
-
-    Returns:
-        str | None: OUT: Result of the operation."""
+    """Return the path to ``gws`` honouring ``$HERMES_GWS_BIN``."""
     override = os.getenv("HERMES_GWS_BIN")
     if override:
         return override
@@ -91,24 +74,14 @@ def _gws_binary() -> str | None:
 
 
 def _gws_env() -> dict[str, str]:
-    """Internal helper to gws env.
-
-    Returns:
-        dict[str, str]: OUT: Result of the operation."""
+    """Return an environment dict pointing ``gws`` at the stored token file."""
     env = os.environ.copy()
     env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(TOKEN_PATH)
     return env
 
 
 def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None = None):
-    """Internal helper to run gws.
-
-    Args:
-        parts (list[str]): IN: parts. OUT: Consumed during execution.
-        params (dict | None, optional): IN: params. Defaults to None. OUT: Consumed during execution.
-        body (dict | None, optional): IN: body. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Invoke the ``gws`` CLI with ``parts`` and return its parsed JSON output."""
     binary = _gws_binary()
     if not binary:
         raise RuntimeError("gws not installed")
@@ -145,22 +118,12 @@ def _run_gws(parts: list[str], *, params: dict | None = None, body: dict | None 
 
 
 def _headers_dict(msg: dict) -> dict[str, str]:
-    """Internal helper to headers dict.
-
-    Args:
-        msg (dict): IN: msg. OUT: Consumed during execution.
-    Returns:
-        dict[str, str]: OUT: Result of the operation."""
+    """Flatten a Gmail payload's header list into a ``{name: value}`` dict."""
     return {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
 
 
 def _extract_message_body(msg: dict) -> str:
-    """Internal helper to extract message body.
-
-    Args:
-        msg (dict): IN: msg. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Return the decoded plain-text (preferred) or HTML body of a Gmail message."""
     body = ""
     payload = msg.get("payload", {})
     if payload.get("body", {}).get("data"):
@@ -179,12 +142,7 @@ def _extract_message_body(msg: dict) -> str:
 
 
 def _extract_doc_text(doc: dict) -> str:
-    """Internal helper to extract doc text.
-
-    Args:
-        doc (dict): IN: doc. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Concatenate every paragraph's text from a Google Docs API response."""
     text_parts = []
     for element in doc.get("body", {}).get("content", []):
         paragraph = element.get("paragraph", {})
@@ -196,12 +154,7 @@ def _extract_doc_text(doc: dict) -> str:
 
 
 def _datetime_with_timezone(value: str) -> str:
-    """Internal helper to datetime with timezone.
-
-    Args:
-        value (str): IN: value. OUT: Consumed during execution.
-    Returns:
-        str: OUT: Result of the operation."""
+    """Append a trailing ``Z`` when ``value`` is an ISO datetime missing a timezone."""
     if not value:
         return value
     if "T" not in value:
@@ -215,10 +168,7 @@ def _datetime_with_timezone(value: str) -> str:
 
 
 def get_credentials():
-    """Retrieve the credentials.
-
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Load OAuth credentials from disk, refreshing them when expired."""
 
     _ensure_authenticated()
 
@@ -236,25 +186,14 @@ def get_credentials():
 
 
 def build_service(api, version):
-    """Build service.
-
-    Args:
-        api (Any): IN: api. OUT: Consumed during execution.
-        version (Any): IN: version. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Return a discovery-built ``googleapiclient`` service for ``api`` ``version``."""
     from googleapiclient.discovery import build
 
     return build(api, version, credentials=get_credentials())
 
 
 def gmail_search(args):
-    """Gmail search.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """List Gmail messages matching ``args.query`` and print metadata as JSON."""
     if _gws_binary():
         results = _run_gws(
             ["gmail", "users", "messages", "list"],
@@ -325,12 +264,7 @@ def gmail_search(args):
 
 
 def gmail_get(args):
-    """Gmail get.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Fetch the full Gmail message ``args.message_id`` and print headers and body."""
     if _gws_binary():
         msg = _run_gws(
             ["gmail", "users", "messages", "get"],
@@ -368,12 +302,7 @@ def gmail_get(args):
 
 
 def gmail_send(args):
-    """Gmail send.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Send an email composed from ``args`` and print the resulting message ID."""
     if _gws_binary():
         message = MIMEText(args.body, "html" if args.html else "plain")
         message["to"] = args.to
@@ -416,12 +345,7 @@ def gmail_send(args):
 
 
 def gmail_reply(args):
-    """Gmail reply.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Reply to ``args.message_id`` preserving thread headers and subject prefix."""
     if _gws_binary():
         original = _run_gws(
             ["gmail", "users", "messages", "get"],
@@ -491,12 +415,7 @@ def gmail_reply(args):
 
 
 def gmail_labels(args):
-    """Gmail labels.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print all Gmail labels for the authenticated user."""
     if _gws_binary():
         results = _run_gws(["gmail", "users", "labels", "list"], params={"userId": "me"})
         labels = [
@@ -515,12 +434,7 @@ def gmail_labels(args):
 
 
 def gmail_modify(args):
-    """Gmail modify.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Add or remove Gmail labels on ``args.message_id``."""
     body = {}
     if args.add_labels:
         body["addLabelIds"] = args.add_labels.split(",")
@@ -542,12 +456,7 @@ def gmail_modify(args):
 
 
 def calendar_list(args):
-    """Calendar list.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """List upcoming calendar events between ``args.start`` and ``args.end``."""
     now = datetime.now(UTC)
     time_min = _datetime_with_timezone(args.start or now.isoformat())
     time_max = _datetime_with_timezone(args.end or (now + timedelta(days=7)).isoformat())
@@ -613,12 +522,7 @@ def calendar_list(args):
 
 
 def calendar_create(args):
-    """Calendar create.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Create a calendar event from ``args`` and print the resulting event ID."""
     event = {
         "summary": args.summary,
         "start": {"dateTime": args.start},
@@ -666,12 +570,7 @@ def calendar_create(args):
 
 
 def calendar_delete(args):
-    """Calendar delete.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Delete the calendar event identified by ``args.event_id``."""
     if _gws_binary():
         _run_gws(["calendar", "events", "delete"], params={"calendarId": args.calendar, "eventId": args.event_id})
         print(json.dumps({"status": "deleted", "eventId": args.event_id}))
@@ -683,12 +582,7 @@ def calendar_delete(args):
 
 
 def drive_search(args):
-    """Drive search.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Search Google Drive for files matching ``args.query``."""
     query = args.query if args.raw_query else f"fullText contains '{args.query}'"
     if _gws_binary():
         results = _run_gws(
@@ -717,12 +611,7 @@ def drive_search(args):
 
 
 def contacts_list(args):
-    """Contacts list.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """List the user's People API contacts with names, emails, and phones."""
     if _gws_binary():
         results = _run_gws(
             ["people", "people", "connections", "list"],
@@ -774,12 +663,7 @@ def contacts_list(args):
 
 
 def sheets_get(args):
-    """Sheets get.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Print the values of ``args.range`` from spreadsheet ``args.sheet_id``."""
     if _gws_binary():
         result = _run_gws(
             ["sheets", "spreadsheets", "values", "get"],
@@ -802,12 +686,7 @@ def sheets_get(args):
 
 
 def sheets_update(args):
-    """Sheets update.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Overwrite ``args.range`` with the JSON-encoded values in ``args.values``."""
     values = json.loads(args.values)
     body = {"values": values}
 
@@ -848,12 +727,7 @@ def sheets_update(args):
 
 
 def sheets_append(args):
-    """Sheets append.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Append rows from ``args.values`` to ``args.range`` on ``args.sheet_id``."""
     values = json.loads(args.values)
     body = {"values": values}
 
@@ -888,12 +762,7 @@ def sheets_append(args):
 
 
 def docs_get(args):
-    """Docs get.
-
-    Args:
-        args (Any): IN: args. OUT: Consumed during execution.
-    Returns:
-        Any: OUT: Result of the operation."""
+    """Fetch the Google Doc ``args.doc_id`` and print its title plus extracted text."""
     if _gws_binary():
         doc = _run_gws(["docs", "documents", "get"], params={"documentId": args.doc_id})
         result = {
@@ -915,11 +784,8 @@ def docs_get(args):
 
 
 def main():
-    """Main.
-
-    Returns:
-        Any: OUT: Result of the operation."""
-    parser = argparse.ArgumentParser(description="Google Workspace API for Hermes Agent")
+    """Parse CLI args and dispatch the requested Google Workspace sub-command."""
+    parser = argparse.ArgumentParser(description="Google Workspace API for Xerxes")
     sub = parser.add_subparsers(dest="service", required=True)
 
     gmail = sub.add_parser("gmail")

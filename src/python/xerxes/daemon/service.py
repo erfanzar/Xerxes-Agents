@@ -11,11 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""System service integration for the Xerxes daemon.
+"""Install, remove, and inspect the daemon as a system service.
 
-Provides ``install``, ``uninstall``, and ``status`` helpers that create
-launchd (macOS) or systemd (Linux) service definitions and manage their
-lifecycle.
+On macOS the helpers write a ``com.xerxes.daemon`` launchd plist into
+``~/Library/LaunchAgents``; on Linux they drop a user-level systemd unit into
+``~/.config/systemd/user``. Other platforms fall back to manual run
+instructions. The status helper uses the platform tools when available and
+otherwise reads the daemon's PID file.
 """
 
 from __future__ import annotations
@@ -28,20 +30,12 @@ from pathlib import Path
 
 
 def _python_path() -> str:
-    """Return the path of the current Python interpreter.
-
-    Returns:
-        str: OUT: ``sys.executable``.
-    """
+    """Return ``sys.executable`` — the interpreter the service should invoke."""
     return sys.executable
 
 
 def _daemon_command() -> str:
-    """Return the CLI command used to start the daemon.
-
-    Returns:
-        str: OUT: ``"{python} -m xerxes.daemon"``.
-    """
+    """Return ``"{python} -m xerxes.daemon"`` for use in service unit files."""
     return f"{_python_path()} -m xerxes.daemon"
 
 
@@ -96,18 +90,14 @@ WantedBy=default.target
 
 
 def install(project_dir: str = "", log_dir: str = "") -> str:
-    """Install and start the daemon as a system service.
-
-    On macOS creates a launchd plist; on Linux creates a systemd user unit.
+    """Install and start the daemon as a launchd or systemd user service.
 
     Args:
-        project_dir (str): IN: Working directory for the service. OUT:
-            Defaults to ``os.getcwd()`` and inserted into the service file.
-        log_dir (str): IN: Directory for stdout/stderr logs. OUT: Defaults to
-            the daemon logs subdirectory and created if missing.
+        project_dir: Working directory baked into the unit; defaults to ``cwd``.
+        log_dir: Directory for stdout/stderr; defaults to ``$XERXES_HOME/daemon/logs``.
 
     Returns:
-        str: OUT: Human-readable result message.
+        Human-readable status describing what was installed and started.
     """
 
     cwd = project_dir or os.getcwd()
@@ -147,11 +137,7 @@ def install(project_dir: str = "", log_dir: str = "") -> str:
 
 
 def uninstall() -> str:
-    """Stop and remove the daemon system service.
-
-    Returns:
-        str: OUT: Human-readable result message.
-    """
+    """Stop and remove the launchd plist or systemd unit installed by :func:`install`."""
 
     system = platform.system()
 
@@ -175,11 +161,7 @@ def uninstall() -> str:
 
 
 def status() -> str:
-    """Query whether the daemon service is currently running.
-
-    Returns:
-        str: OUT: Human-readable status description.
-    """
+    """Report whether the daemon is running via launchd/systemd, or by PID file."""
 
     system = platform.system()
 

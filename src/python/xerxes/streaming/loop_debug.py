@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Loop debug module for Xerxes.
+"""Debug-only sibling of :mod:`xerxes.streaming.loop`.
 
-Exports:
-    - logger
-    - MAX_TOOL_TURNS
-    - run
-    - arun"""
+A stripped-down copy of the production loop kept for diagnostic comparisons:
+no prompt caching, single ``<think>`` tag form, ``get_event_loop()`` instead
+of ``get_running_loop()``, no cancellation surface, and no exhaustion warning
+when ``MAX_TOOL_TURNS`` is reached. Useful for bisecting regressions caused by
+the production loop's additional features.
+"""
 
 from __future__ import annotations
 
@@ -53,14 +54,18 @@ from .permissions import (
 
 @dataclass
 class _ThinkingParser:
-    """Thinking parser.
+    """Single-tag-form thinking splitter used by the debug loop.
+
+    Only recognises ``<think>...</think>`` (no ``<thinking>`` variant).
+    See :class:`xerxes.streaming.loop._ThinkingParser` for the production form.
 
     Attributes:
-        _open_tag (str): open tag.
-        _close_tag (str): close tag.
-        _buffer (str): buffer.
-        _in_thinking (bool): in thinking.
-        _thinking_buf (str): thinking buf."""
+        _open_tag: Recognised opening tag.
+        _close_tag: Recognised closing tag.
+        _buffer: Unprocessed text carried across calls.
+        _in_thinking: Whether we are currently inside a thinking block.
+        _thinking_buf: Accumulated reasoning text awaiting emission.
+    """
 
     _open_tag: str = "<think>"
     _close_tag: str = "</think>"
@@ -69,13 +74,7 @@ class _ThinkingParser:
     _thinking_buf: str = ""
 
     def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
-        """Process.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            chunk_text (str): IN: chunk text. OUT: Consumed during execution.
-        Returns:
-            list[TextChunk | ThinkingChunk]: OUT: Result of the operation."""
+        """Feed a streamed fragment and emit any completed chunks."""
 
         events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
@@ -122,12 +121,7 @@ class _ThinkingParser:
 def _parse_thinking_tags(
     text: str,
 ) -> tuple[str, str]:
-    """Internal helper to parse thinking tags.
-
-    Args:
-        text (str): IN: text. OUT: Consumed during execution.
-    Returns:
-        tuple[str, str]: OUT: Result of the operation."""
+    """Split a complete blob into ``(visible, thinking)``; debug-loop variant."""
 
     thinking_pattern = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>", re.DOTALL)
     thinking_parts = thinking_pattern.findall(text)
@@ -181,20 +175,12 @@ def run(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> Generator[StreamEvent, None, None]:
-    """Run.
+    """Diagnostic copy of :func:`xerxes.streaming.loop.run` without caching.
 
-    Args:
-        user_message (str): IN: user message. OUT: Consumed during execution.
-        state (AgentState): IN: state. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
-        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
-        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
-        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
-        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        Generator[StreamEvent, None, None]: OUT: Result of the operation."""
+    Same semantics as the production loop but without prompt caching, the
+    ``<thinking>`` tag variant, max-turns warning, or cache-token accounting.
+    Useful for isolating issues introduced by those features.
+    """
 
     from xerxes.llms.registry import detect_provider, get_provider_config
 
@@ -375,20 +361,7 @@ async def arun(
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
 ) -> AsyncGenerator[StreamEvent, None]:
-    """Asynchronously Arun.
-
-    Args:
-        user_message (str): IN: user message. OUT: Consumed during execution.
-        state (AgentState): IN: state. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        system_prompt (str): IN: system prompt. OUT: Consumed during execution.
-        tool_executor (Callable[[str, dict[str, Any]], str] | None, optional): IN: tool executor. Defaults to None. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]] | None, optional): IN: tool schemas. Defaults to None. OUT: Consumed during execution.
-        depth (int, optional): IN: depth. Defaults to 0. OUT: Consumed during execution.
-        cancel_check (Callable[[], bool] | None, optional): IN: cancel check. Defaults to None. OUT: Consumed during execution.
-        runtime_features_state (Any, optional): IN: runtime features state. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        AsyncGenerator[StreamEvent, None]: OUT: Result of the operation."""
+    """Async wrapper around the debug :func:`run`; uses the legacy ``get_event_loop``."""
 
     loop = asyncio.get_event_loop()
 
@@ -405,7 +378,7 @@ async def arun(
     )
 
     class _Sentinel:
-        """Sentinel."""
+        """End-of-iterator marker returned by ``next(..., _sentinel)``."""
 
         pass
 
@@ -425,17 +398,7 @@ def _stream_llm(
     tool_schemas: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream llm.
-
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        provider_type (str): IN: provider type. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    """Dispatch to the correct debug-loop provider adapter."""
 
     from xerxes.llms.registry import PROVIDERS, bare_model, detect_provider
 
@@ -462,17 +425,7 @@ def _stream_anthropic(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream anthropic.
-
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    """Stream from Anthropic without prompt caching (debug-loop variant)."""
 
     try:
         import anthropic
@@ -571,17 +524,7 @@ def _stream_openai_compat(
     config: dict[str, Any],
     provider_name: str,
 ) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
-    """Internal helper to stream openai compat.
-
-    Args:
-        model (str): IN: model. OUT: Consumed during execution.
-        system (str): IN: system. OUT: Consumed during execution.
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution.
-        provider_name (str): IN: provider name. OUT: Consumed during execution.
-    Returns:
-        Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]: OUT: Result of the operation."""
+    """Stream from an OpenAI-compatible endpoint (debug-loop variant)."""
 
     try:
         from openai import BadRequestError, OpenAI
@@ -777,12 +720,7 @@ def _stream_openai_compat(
 
 
 def _tools_to_openai(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Internal helper to tools to openai.
-
-    Args:
-        tool_schemas (list[dict[str, Any]]): IN: tool schemas. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
+    """Convert neutral tool schemas to OpenAI ``{"type": "function"}`` form."""
 
     return [
         {

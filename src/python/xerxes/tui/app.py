@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Main TUI application orchestrator for Xerxes.
+"""Top-level TUI application orchestrator for Xerxes.
 
-This module defines :class:`XerxesTUI`, which wires together the bridge client,
-prompt toolkit UI, and event handlers to provide an interactive terminal
-interface for the Xerxes agent system.
-"""
+:class:`XerxesTUI` is the long-running asyncio object that owns the
+:class:`~xerxes.tui.engine.BridgeClient`, the :class:`PersistentPrompt`,
+the turn task, and the block/notification state. It maps inbound
+:mod:`xerxes.streaming.wire_events` onto prompt mutations and routes
+outbound user input back to the daemon."""
 
 from __future__ import annotations
 
@@ -43,16 +44,7 @@ from .prompt import PersistentPrompt
 
 
 def _git_branch(cwd: str | None = None) -> str:
-    """Return the current Git branch name, or empty string on failure.
-
-    Args:
-        cwd (str | None): IN: Working directory for the Git command. OUT: Passed
-            to ``subprocess.check_output`` as ``cwd``.
-
-    Returns:
-        str: OUT: Current branch name, or empty string if Git is unavailable or
-            the command fails.
-    """
+    """Return the active git branch under ``cwd`` (empty on any failure)."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -66,15 +58,7 @@ def _git_branch(cwd: str | None = None) -> str:
 
 
 def _shorten_home(path: str) -> str:
-    """Replace the user's home directory with ``~`` in a path.
-
-    Args:
-        path (str): IN: Absolute path. OUT: Shortened if it starts with the home
-            directory.
-
-    Returns:
-        str: OUT: Path with home replaced by ``~``, or the original path.
-    """
+    """Collapse ``$HOME`` prefix in ``path`` to ``~`` for compact display."""
     home = os.path.expanduser("~")
     if path == home:
         return "~"
@@ -95,16 +79,11 @@ _LOGO_WIDTH = 48
 
 
 def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
-    """Build an ASCII welcome banner with the Xerxes logo and session info.
+    """Return a multi-line ANSI banner with the Xerxes logo + session metadata.
 
-    Args:
-        model (str): IN: Model identifier. OUT: Displayed in the banner.
-        session_id (str): IN: Session identifier. OUT: Displayed in the banner.
-        cwd (str): IN: Current working directory. OUT: Shortened and displayed.
-
-    Returns:
-        str: OUT: Multi-line boxed banner string with ANSI styling.
-    """
+    Mutated in place once the daemon reports the real session id via the
+    ``InitDone`` event — :class:`XerxesTUI` stores ``_banner_index`` to
+    rewrite the slot rather than appending a second banner."""
 
     blue = "\x1b[34m"
     bold = "\x1b[1m"
@@ -123,12 +102,7 @@ def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
     ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
     def visible_len(s: str) -> int:
-        """Visible len.
-
-        Args:
-            s (str): IN: s. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Return the printable-character length of ``s`` (ANSI escapes stripped)."""
         return len(ansi_re.sub("", s))
 
     gap = "  "
@@ -150,10 +124,12 @@ def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
 
 
 class XerxesTUI:
-    """Interactive terminal UI for the Xerxes agent system.
+    """Asyncio-driven full-screen TUI for the Xerxes agent system.
 
-    Manages the bridge subprocess, prompt toolkit UI, event processing,
-    and turn lifecycle.
+    Owns the :class:`BridgeClient`, the :class:`PersistentPrompt`, the
+    turn-runner task, and the in-memory block state (content,
+    thinking, tool calls, notifications, approval / question panels).
+    Use as an async context manager: ``async with XerxesTUI(...) as tui``.
     """
 
     def __init__(
@@ -165,18 +141,18 @@ class XerxesTUI:
         python_executable: str | None = None,
         resume_session_id: str = "",
     ) -> None:
-        """Initialize the TUI with configuration parameters.
+        """Stash configuration; no daemon contact happens until :meth:`run`.
 
         Args:
-            model (str): IN: Default model identifier. OUT: Stored for initialization.
-            base_url (str): IN: Provider base URL. OUT: Stored for initialization.
-            api_key (str): IN: API key. OUT: Stored for initialization.
-            permission_mode (str): IN: Permission mode such as ``"auto"``. OUT:
-                Stored for initialization.
-            python_executable (str | None): IN: Python executable for spawning the
-                bridge. OUT: Stored for spawning.
-            resume_session_id (str): IN: Session ID to resume. OUT: Stored for
-                initialization.
+            model: Default model id forwarded to ``initialize``.
+            base_url: Provider base URL forwarded to ``initialize``.
+            api_key: Provider API key forwarded to ``initialize``.
+            permission_mode: Initial permission mode (``"auto"`` /
+                ``"manual"`` / ``"accept-all"``).
+            python_executable: Interpreter the bridge uses when it needs
+                to launch the daemon.
+            resume_session_id: When non-empty, the daemon rehydrates
+                this session instead of starting a fresh one.
         """
         self._model = model
         self._base_url = base_url
@@ -219,16 +195,15 @@ class XerxesTUI:
         self._turn_task: asyncio.Task[None] | None = None
         self._plan_mode = False
         self._activity_mode = "code"
+        self._user_activity_mode: str | None = None
 
     async def run(self) -> XerxesTUI:
-        """Start the TUI, bridge client, and event loops.
+        """Spawn the bridge, build the prompt, paint the banner, and start loops.
 
-        Spawns the bridge, initializes the prompt, displays the welcome banner,
-        and begins consuming events and user input.
-
-        Returns:
-            XerxesTUI: OUT: Self for chaining or context management.
-        """
+        Concurrently kicks off the event consumer, the prompt UI, and
+        the input processor; installs SIGINT/SIGTERM handlers that map
+        to a turn cancellation. Returns ``self`` so callers can write
+        ``await tui.run()`` and continue chaining."""
         self._running = True
 
         self._client = BridgeClient(python_executable=self._python_executable)
@@ -284,11 +259,7 @@ class XerxesTUI:
         return self
 
     async def _run_prompt(self) -> None:
-        """Run the prompt UI and input processing concurrently.
-
-        Waits for either the prompt application or input processor to finish,
-        then cancels the remaining task.
-        """
+        """Run the prompt application and input pump until either finishes."""
         if self._prompt is None or self._client is None:
             return
 
@@ -314,11 +285,11 @@ class XerxesTUI:
             self._running = False
 
     async def _process_prompt_input(self) -> None:
-        """Consume user input from the prompt queue and dispatch it.
+        """Pump prompt input forever and route each submission appropriately.
 
-        Handles interrupt commands, question answers, slash commands, and
-        normal turn starts.
-        """
+        Routing precedence: interrupt sentinel → plan-toggle sentinel →
+        pending approval panel → pending question panel → in-flight turn
+        steer/cancel/btw → slash command → new turn start."""
         if self._prompt is None or self._client is None:
             return
 
@@ -332,7 +303,7 @@ class XerxesTUI:
                 continue
 
             if raw_input == self._prompt.PLAN_TOGGLE_SENTINEL:
-                await self._toggle_plan_mode()
+                await self._cycle_interaction_mode()
                 continue
 
             if self._approval_panel is not None:
@@ -384,10 +355,7 @@ class XerxesTUI:
             self._start_turn(raw_input)
 
     async def _event_consumer(self) -> None:
-        """Consume wire events from the bridge and dispatch them to handlers.
-
-        Runs continuously while the bridge is active.
-        """
+        """Forever loop pulling :class:`WireEvent` instances into :meth:`_handle_event`."""
         if self._client is None:
             return
 
@@ -400,12 +368,7 @@ class XerxesTUI:
             pass
 
     def _handle_event(self, event: Any) -> None:
-        """Route a single wire event to its specific handler.
-
-        Args:
-            event (Any): IN: Wire event object from the bridge. OUT: Inspected
-                for type and dispatched to the appropriate handler.
-        """
+        """Dispatch ``event`` to the matching ``_on_*`` handler based on its class."""
         from ..streaming.wire_events import (
             ApprovalRequest,
             CompactionBegin,
@@ -468,10 +431,7 @@ class XerxesTUI:
                 pass
 
     def _on_turn_begin(self) -> None:
-        """Handle the start of a new turn.
-
-        Creates new content and thinking blocks and clears active tool state.
-        """
+        """Allocate fresh content/thinking blocks and flip the prompt to running."""
         if self._prompt:
             self._prompt.set_running(True)
 
@@ -486,10 +446,7 @@ class XerxesTUI:
         self._turn_done_event.clear()
 
     def _on_turn_end(self) -> None:
-        """Handle the end of a turn.
-
-        Finalizes blocks, commits streaming content, and signals completion.
-        """
+        """Finalize blocks, commit streamed text, dismiss panels, signal done."""
         if self._active_content:
             self._active_content.finalize()
         if self._active_thinking:
@@ -506,20 +463,12 @@ class XerxesTUI:
         self._turn_done_event.set()
 
     def _on_step_begin(self, n: int) -> None:
-        """Handle the beginning of a step within a turn.
-
-        Args:
-            n (int): IN: Step number. OUT: Currently triggers streaming commit.
-        """
+        """Commit accumulated streaming text on each new step (``n`` is informational)."""
         if self._prompt:
             self._prompt.commit_streaming()
 
     def _on_text_chunk(self, text: str) -> None:
-        """Handle an incoming text content chunk.
-
-        Args:
-            text (str): IN: Text fragment. OUT: Appended to the active content block.
-        """
+        """Append a streaming text fragment to the active content block + prompt."""
         if self._active_content:
             self._active_content.append(text)
         if self._prompt:
@@ -527,11 +476,7 @@ class XerxesTUI:
             self._prompt.append_streaming(text)
 
     def _on_think_chunk(self, think: str) -> None:
-        """Handle an incoming thinking trace chunk.
-
-        Args:
-            think (str): IN: Thinking fragment. OUT: Appended to the active thinking block.
-        """
+        """Append a streaming reasoning fragment to the thinking pane."""
         if self._active_thinking:
             self._active_thinking.append(think)
         if self._prompt:
@@ -539,13 +484,7 @@ class XerxesTUI:
             self._prompt.append_thinking(think)
 
     def _on_tool_call(self, tool_call_id: str, name: str, arguments: str | None) -> None:
-        """Handle a tool call event.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Used as block key.
-            name (str): IN: Tool name. OUT: Stored in the tool block.
-            arguments (str | None): IN: Raw tool arguments JSON. OUT: Stored in the tool block.
-        """
+        """Open a new :class:`_ToolCallBlock` and wire it into the live status area."""
         if self._prompt:
             self._prompt.commit_streaming()
         self._set_activity_mode(self._infer_activity_mode(name, arguments))
@@ -563,25 +502,15 @@ class XerxesTUI:
             self._prompt.set_active_tool(tool_call_id, block.compose)
 
     def _on_tool_call_part(self, arguments_part: str) -> None:
-        """Handle a fragment of tool call arguments.
-
-        Args:
-            arguments_part (str): IN: Partial JSON arguments. OUT: Appended to the
-                active tool block.
-        """
+        """Append a streamed JSON fragment to the active tool call block."""
         if self._active_tool:
             self._active_tool.append_args_part(arguments_part)
 
     def _on_tool_result(self, tool_call_id: str, return_value: str, duration_ms: float = 0.0) -> None:
-        """Handle a tool result event.
+        """Close the matching tool block, render its result, and commit it to history.
 
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Used to look up the
-                matching tool block.
-            return_value (str): IN: Tool result string. OUT: Stored in the tool block.
-            duration_ms (float): IN: Tool execution duration. OUT: Displayed in
-                the completed tool block.
-        """
+        Sub-agent / spawn tools intentionally hide their raw return value;
+        the visible block just shows status + duration."""
         block = self._tool_blocks.get(tool_call_id)
         if block:
             display_value = "" if block.name in {"AgentTool", "TaskCreateTool", "SpawnAgents"} else return_value
@@ -591,12 +520,7 @@ class XerxesTUI:
                 self._prompt.set_spinner_label("Thinking")
 
     def _on_subagent_event(self, event: Any) -> None:
-        """Handle a nested subagent event associated with a parent tool call.
-
-        Args:
-            event (Any): IN: Subagent event wrapping a tool call or result. OUT:
-                Dispatched to the matching parent tool block.
-        """
+        """Attach a nested subagent ToolCall/ToolResult onto its parent block."""
         from ..streaming.wire_events import SubagentEvent
 
         if not isinstance(event, SubagentEvent):
@@ -629,12 +553,7 @@ class XerxesTUI:
             )
 
     def _on_approval_request(self, event: Any) -> None:
-        """Handle an approval request event by displaying a panel and awaiting input.
-
-        Args:
-            event (Any): IN: Approval request event with id, tool_call_id, action,
-                and description. OUT: Used to construct the approval panel.
-        """
+        """Show an :class:`ApprovalRequestPanel` for ``event`` and stash request ids."""
 
         panel = ApprovalRequestPanel(
             request_id=event.id,
@@ -650,16 +569,11 @@ class XerxesTUI:
         return
 
     def _resolve_approval_input(self, text: str) -> str | None:
-        """Resolve prompt input against the pending approval panel.
+        """Map a raw input line onto an approval verdict.
 
-        Args:
-            text (str): IN: Raw user input or approval sentinel. OUT: Converted
-                to a bridge approval response.
-
-        Returns:
-            str | None: OUT: ``"approve"``, ``"approve_for_session"``,
-                ``"reject"``, or ``None`` if the panel should keep waiting.
-        """
+        Returns ``None`` when the input only moves the cursor (and the
+        panel should keep waiting). Returns one of ``"approve"``,
+        ``"approve_for_session"``, or ``"reject"`` once decided."""
         panel = self._approval_panel
         if panel is None or self._prompt is None:
             return None
@@ -681,15 +595,10 @@ class XerxesTUI:
         return None
 
     def _wait_for_approval_response(self, panel: ApprovalRequestPanel) -> str:
-        """Block synchronously for an approval response from the user.
+        """Synchronous stdin fallback used when the prompt loop is unavailable.
 
-        Args:
-            panel (ApprovalRequestPanel): IN: Panel being displayed. OUT: Ignored
-                except for context; the response is read from stdin.
-
-        Returns:
-            str: OUT: One of ``"approve"``, ``"approve_for_session"``, or ``"reject"``.
-        """
+        Currently retained for headless test paths. Blocks until the
+        user types ``a``, ``r``, or hits Enter."""
         print("\nOptions: ENTER=approve, A=approve_all, R=reject")
         try:
             line = input("> ").strip().lower()
@@ -702,20 +611,10 @@ class XerxesTUI:
             return "reject"
 
     def _on_question_request(self, event: Any) -> None:
-        """Handle a question request event by constructing a question panel.
-
-        Args:
-            event (Any): IN: Question request event with id and questions list.
-                OUT: Used to build and display a :class:`QuestionRequestPanel`.
-        """
+        """Build and surface a :class:`QuestionRequestPanel` from ``event``."""
 
         def _opt_label(o: Any) -> str:
-            """Internal helper to opt label.
-
-            Args:
-                o (Any): IN: o. OUT: Consumed during execution.
-            Returns:
-                str: OUT: Result of the operation."""
+            """Return the best display label for an option, regardless of source shape."""
             if isinstance(o, str):
                 return o
             if isinstance(o, dict):
@@ -723,14 +622,7 @@ class XerxesTUI:
             return getattr(o, "label", None) or str(o)
 
         def _qfield(q: Any, name: str, default: Any = "") -> Any:
-            """Internal helper to qfield.
-
-            Args:
-                q (Any): IN: q. OUT: Consumed during execution.
-                name (str): IN: name. OUT: Consumed during execution.
-                default (Any, optional): IN: default. Defaults to ''. OUT: Consumed during execution.
-            Returns:
-                Any: OUT: Result of the operation."""
+            """Read ``q.name`` whether ``q`` is a dict-like or attribute-like object."""
             if isinstance(q, dict):
                 return q.get(name, default)
             return getattr(q, name, default)
@@ -751,15 +643,11 @@ class XerxesTUI:
             self._prompt.set_active_question(panel)
 
     def _resolve_question_input(self, text: str) -> dict[str, str] | None:
-        """Resolve user input against the pending question panel.
+        """Advance the question panel with ``text`` and return collected answers when done.
 
-        Args:
-            text (str): IN: Raw user input. OUT: Parsed as an option index or free text.
-
-        Returns:
-            dict[str, str] | None: OUT: Answers dictionary if complete, ``None`` if
-                more input is needed, or empty dict on cancel.
-        """
+        Numeric input picks an option by 1-based index; any other text
+        is captured as a free-form answer. ``/cancel`` / ``/abort``
+        return an empty dict to short-circuit the conversation."""
         panel = self._pending_question_panel
         if panel is None:
             return None
@@ -790,15 +678,7 @@ class XerxesTUI:
         return None
 
     def _wait_for_question_answers(self, panel: QuestionRequestPanel) -> dict[str, str]:
-        """Block synchronously until all questions in the panel are answered.
-
-        Args:
-            panel (QuestionRequestPanel): IN: Panel with questions. OUT: Modified
-                as the user answers each question.
-
-        Returns:
-            dict[str, str]: OUT: Mapping from question ID to answer string.
-        """
+        """Synchronous stdin fallback for question panels used in headless mode."""
 
         while not panel.is_complete:
             from .console import print_markdown
@@ -820,18 +700,12 @@ class XerxesTUI:
         return panel._answers
 
     def _on_notification(self, event: Any) -> None:
-        """Handle a notification event.
+        """Render an inbound notification, choosing transient vs persistent display.
 
-        Notifications with ``category == "subagent_stream"`` are treated as
-        transient live updates: the body replaces a per-task preview line that
-        sits above the input bar (next to the spinner) and is cleared when the
-        sub-agent finishes. Empty bodies signal "clear this preview". All other
-        notifications are appended to the prompt history as before.
-
-        Args:
-            event (Any): IN: Notification event with id, category, severity, title,
-                body, and payload. OUT: Used to build and display a notification block.
-        """
+        ``category == "subagent_stream"`` is treated as a transient live
+        update: the body replaces a per-task preview line beside the
+        spinner (and an empty body clears it). All other notifications
+        are committed to the prompt history as :class:`_NotificationBlock`s."""
         if event.category == "subagent_stream":
             payload = getattr(event, "payload", {}) or {}
             task_id = str(payload.get("task_id") or event.id)
@@ -857,23 +731,20 @@ class XerxesTUI:
             self._prompt.append_line(block.compose())
 
     def _on_init_done(self, event: Any) -> None:
-        """Handle the initialization-done event from the bridge.
+        """Apply daemon-confirmed session metadata to the prompt and welcome banner.
 
-        Updates session metadata, context, skills, and the welcome banner.
-
-        Args:
-            event (Any): IN: InitDone event with session_id, model, cwd, branch,
-                context_limit, and skills. OUT: Used to update prompt state.
-        """
+        Rewrites the placeholder banner in place once the real
+        ``session_id`` is known so the user sees one definitive banner."""
         if self._prompt is None:
             return
-        self._session_id = event.session_id or ""
-        self._prompt.set_session(
-            agent_name=event.agent_name,
-            model=event.model,
-            cwd=event.cwd,
-            branch=event.git_branch,
-        )
+        if event.session_id or event.model or event.cwd or event.agent_name:
+            self._session_id = event.session_id or self._session_id
+            self._prompt.set_session(
+                agent_name=event.agent_name or "default",
+                model=event.model or self._model,
+                cwd=event.cwd or self._banner_cwd,
+                branch=event.git_branch,
+            )
         if event.context_limit:
             self._prompt.set_context(0, event.context_limit)
 
@@ -893,43 +764,32 @@ class XerxesTUI:
                 self._prompt._invalidate()
 
     def _on_status_update(self, event: Any) -> None:
-        """Handle a context status update event.
-
-        Args:
-            event (Any): IN: StatusUpdate event with context_tokens and max_context.
-                OUT: Used to update the footer context display.
-        """
+        """Apply a daemon status push (context tokens, plan/research mode) to the footer."""
         if self._prompt is None:
             return
         self._prompt.set_context(event.context_tokens, event.max_context)
         self._plan_mode = bool(getattr(event, "plan_mode", self._plan_mode))
+        mode = str(getattr(event, "mode", "") or "")
+        if mode and mode != "code" and not self._plan_mode:
+            self._activity_mode = "researcher" if mode == "research" else mode
         self._sync_prompt_mode()
 
     def _on_compaction_begin(self) -> None:
-        """Handle the start of a context compaction event."""
+        """Announce the start of a context compaction pass in the prompt history."""
         if self._prompt:
             self._prompt.append_line("[dim]Compacting context...[/dim]")
 
     def _on_compaction_end(self) -> None:
-        """Handle the end of a context compaction event."""
+        """Announce the end of a context compaction pass."""
         if self._prompt:
             self._prompt.append_line("[dim]Context compaction done.[/dim]")
 
     async def _handle_submit(self, text: str) -> None:
-        """Handle a normal text submission from the prompt.
-
-        Args:
-            text (str): IN: Submitted user text. OUT: Starts a new turn.
-        """
+        """prompt_toolkit submit callback: forward ``text`` into :meth:`_start_turn`."""
         self._start_turn(text)
 
     def _start_turn(self, text: str) -> None:
-        """Queue or start a turn with the given user input.
-
-        Args:
-            text (str): IN: User input text. OUT: Displayed and either queued or
-                used to start a new turn task.
-        """
+        """Display ``text`` and either queue it or kick off a new turn task."""
         if self._prompt:
             self._prompt.append_line(f"✨ {text}")
 
@@ -939,31 +799,33 @@ class XerxesTUI:
                 self._prompt.set_queue_count(len(self._queued_inputs))
             return
         self._turn_task = asyncio.create_task(self._run_turns(text))
+        self._turn_task.add_done_callback(self._on_turn_task_done)
         self._tasks.append(self._turn_task)
 
     async def _run_turns(self, text: str) -> None:
-        """Run sequential turns, processing queued inputs after each.
+        """Drive turns serially, draining the queued inputs FIFO after each one.
 
-        Args:
-            text (str): IN: Initial user input. OUT: Starts the first turn; subsequent
-                inputs are drained from the queue.
-        """
+        Each turn waits up to 900 s on ``_turn_done_event``; a timeout
+        triggers a cancel + visible error so the TUI never wedges."""
         if self._client is None:
             return
 
         current: str | None = text
         while current is not None:
-            if self._prompt:
-                self._prompt.set_running(True)
-                self._prompt.set_queue_count(len(self._queued_inputs))
-
-            turn_plan_mode = self._plan_mode
-            if not turn_plan_mode:
-                self._set_activity_mode("code")
-            self._turn_done_event.clear()
-            await self._client.query(current, plan_mode=turn_plan_mode)
-
             try:
+                if self._prompt:
+                    self._prompt.set_running(True)
+                    self._prompt.set_queue_count(len(self._queued_inputs))
+
+                turn_plan_mode = self._plan_mode
+                if not turn_plan_mode and self._user_activity_mode is None:
+                    self._set_activity_mode("code")
+                self._turn_done_event.clear()
+                await self._client.query(
+                    current,
+                    plan_mode=turn_plan_mode,
+                    mode=self._current_interaction_mode(),
+                )
                 await asyncio.wait_for(self._turn_done_event.wait(), timeout=900)
             except TimeoutError:
                 await self._client.cancel()
@@ -974,6 +836,15 @@ class XerxesTUI:
                     self._prompt.clear_active_approval()
                     self._prompt.set_running(False)
                     self._prompt.append_line("\x1b[31mTurn timed out after 900s.\x1b[0m")
+            except Exception as exc:
+                self._approval_panel = None
+                self._current_request_id = None
+                self._pending_approval_request_id = None
+                if self._prompt:
+                    self._prompt.clear_active_approval()
+                    self._prompt.set_running(False)
+                    self._prompt.append_line(f"\x1b[31mTurn failed: {exc}\x1b[0m")
+                break
 
             if turn_plan_mode and self._plan_mode:
                 await self._set_plan_mode(False, notify=True)
@@ -988,13 +859,19 @@ class XerxesTUI:
         if self._prompt:
             self._prompt.set_queue_count(0)
 
-    async def _handle_running_input(self, text: str) -> None:
-        """Handle user input while a turn is actively running.
+    def _on_turn_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Done-callback: surface unexpected turn-task failures in the prompt history."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            if self._prompt:
+                self._prompt.set_running(False)
+                self._prompt.append_line(f"\x1b[31mTurn task failed: {exc}\x1b[0m")
 
-        Args:
-            text (str): IN: User input text. OUT: Interpreted as an interrupt,
-                steer command, or queued input.
-        """
+    async def _handle_running_input(self, text: str) -> None:
+        """Route input that arrived while a turn is in flight (interrupt/steer/queue)."""
         if self._client is None:
             return
 
@@ -1019,12 +896,7 @@ class XerxesTUI:
                 self._prompt.set_queue_count(len(self._queued_inputs))
 
     async def _handle_slash(self, text: str) -> None:
-        """Handle a slash command from the user.
-
-        Args:
-            text (str): IN: Full slash command string. OUT: Parsed and dispatched
-                to the bridge or handled locally.
-        """
+        """Dispatch a slash command, either locally or via the daemon ``slash`` RPC."""
         if self._client is None:
             return
 
@@ -1052,37 +924,60 @@ class XerxesTUI:
             )
 
     async def _toggle_plan_mode(self) -> None:
-        """Toggle plan mode for subsequent turns."""
+        """Flip ``_plan_mode`` and inform the daemon."""
         await self._set_plan_mode(not self._plan_mode)
 
-    async def _set_plan_mode(self, enabled: bool, *, notify: bool = True) -> None:
-        """Set plan mode and synchronize the bridge runtime config.
+    def _current_interaction_mode(self) -> str:
+        """Return ``"plan"`` when plan mode is on; otherwise the activity mode."""
+        if self._plan_mode:
+            return "plan"
+        return self._activity_mode or "code"
+
+    async def _cycle_interaction_mode(self) -> None:
+        """Shift+Tab cycle: code → plan → researcher → code."""
+        if self._plan_mode:
+            await self._set_plan_mode(False, notify=False, mode="researcher")
+            self._set_activity_mode("researcher", user_selected=True)
+            return
+
+        if self._activity_mode == "researcher":
+            self._set_activity_mode("code", user_selected=True)
+            return
+
+        await self._set_plan_mode(True, notify=False)
+
+    async def _set_plan_mode(self, enabled: bool, *, notify: bool = True, mode: str | None = None) -> None:
+        """Persist plan-mode state and sync it to the daemon.
 
         Args:
-            enabled (bool): IN: Desired plan mode state. OUT: Reflected in the
-                prompt UI and sent to the bridge.
-            notify (bool): IN: Whether to append a visible mode-change line.
-                OUT: Controls prompt history noise.
+            enabled: Desired plan-mode flag; clears any sticky user
+                activity mode when turning on.
+            notify: Kept for API compatibility. Mode changes are surfaced
+                in the footer instead of appended to prompt history.
+            mode: Optional backend mode override sent with the RPC
+                (defaults to :meth:`_current_interaction_mode`).
         """
+        _ = notify
         self._plan_mode = enabled
+        if enabled:
+            self._user_activity_mode = None
         if self._prompt:
             self._sync_prompt_mode()
-            if notify:
-                self._prompt.append_line(
-                    "\x1b[36mPlan mode ON\x1b[0m" if enabled else "\x1b[2mCode mode ON\x1b[0m"
-                )
         if self._client:
             await self._client._send_jsonrpc(
                 method="set_plan_mode",
-                params={"enabled": self._plan_mode},
+                params={"enabled": self._plan_mode, "mode": mode or self._current_interaction_mode()},
             )
 
-    def _set_activity_mode(self, mode: str) -> None:
-        """Update inferred non-plan activity mode.
+    def _set_activity_mode(self, mode: str, *, user_selected: bool = False) -> None:
+        """Update the inferred non-plan activity mode shown in the footer.
 
         Args:
-            mode (str): IN: Inferred mode label. OUT: Displayed in the footer
-                when plan mode is inactive.
+            mode: Inferred mode label (``"code"`` / ``"researcher"`` /
+                an agent type for subagent tools). Aliases such as
+                ``"research"`` → ``"researcher"`` are normalized here.
+            user_selected: When ``True``, sticks across turns; otherwise
+                a new turn may reset back to ``"code"``.
         """
         normalized = (mode or "code").strip().lower()
         aliases = {
@@ -1093,10 +988,12 @@ class XerxesTUI:
             "plan": "planner",
         }
         self._activity_mode = aliases.get(normalized, normalized)
+        if user_selected:
+            self._user_activity_mode = None if self._activity_mode == "code" else self._activity_mode
         self._sync_prompt_mode()
 
     def _sync_prompt_mode(self) -> None:
-        """Synchronize plan/activity mode state into the prompt renderers."""
+        """Push plan / activity state down to the status and footer renderers."""
         if not self._prompt:
             return
         self._prompt.set_plan_mode(self._plan_mode)
@@ -1104,7 +1001,11 @@ class XerxesTUI:
 
     @staticmethod
     def _infer_activity_mode(tool_name: str, arguments: str | None = None) -> str:
-        """Infer a user-visible mode from a tool or sub-agent call."""
+        """Map a tool name + arguments to a user-visible activity label.
+
+        Subagent-launch tools surface the requested subagent type;
+        read-only tools (``ReadFile``, ``GrepTool``, ...) map to
+        ``"researcher"``; write/exec tools map to ``"code"``."""
         if tool_name in {"AgentTool", "TaskCreateTool"}:
             try:
                 args = json.loads(arguments or "{}")
@@ -1151,17 +1052,16 @@ class XerxesTUI:
         return "code"
 
     def _handle_signal(self, sig: int) -> None:
-        """Handle OS signals by shutting down the running turn.
-
-        Args:
-            sig (int): IN: Signal number (e.g., ``signal.SIGINT``). OUT: Triggers
-                cancellation of the current turn.
-        """
+        """OS signal handler: schedule an interrupt of the active turn."""
         if self._running:
             self._pending_cancel_task = asyncio.create_task(self._interrupt_current_turn())
 
     async def _interrupt_current_turn(self, *, cancel_all: bool = True) -> None:
-        """Cancel the active turn and clear local running UI immediately."""
+        """Cancel the active turn, clear panel state, and respawn the bridge.
+
+        Restart-after-interrupt is necessary because long provider
+        streams can wedge inside the daemon; tearing the connection
+        forces them to abort cleanly."""
         if self._client:
             if cancel_all:
                 await self._client.cancel_all()
@@ -1188,7 +1088,7 @@ class XerxesTUI:
         await self._restart_bridge_after_interrupt()
 
     async def _restart_bridge_after_interrupt(self) -> None:
-        """Restart the bridge subprocess so blocked provider streams are aborted."""
+        """Replace ``_client`` with a fresh :class:`BridgeClient` and re-initialize it."""
         old_client = self._client
         if old_client is not None:
             await asyncio.to_thread(old_client.close)
@@ -1206,10 +1106,7 @@ class XerxesTUI:
         )
 
     async def wait_until_done(self) -> None:
-        """Wait for all background tasks to complete.
-
-        Cancels any remaining tasks after the prompt task finishes.
-        """
+        """Block until the prompt task exits, then cancel the rest of ``_tasks``."""
         if self._prompt_task is None:
             try:
                 await asyncio.gather(*self._tasks)
@@ -1229,19 +1126,11 @@ class XerxesTUI:
             await asyncio.gather(*others, return_exceptions=True)
 
     async def __aenter__(self) -> XerxesTUI:
-        """Enter the async runtime context, starting the TUI.
-
-        Returns:
-            XerxesTUI: OUT: Self after :meth:`run` completes.
-        """
+        """Async context entry: delegate to :meth:`run`."""
         return await self.run()
 
     async def __aexit__(self, *args: Any) -> None:
-        """Exit the async runtime context, shutting down cleanly.
-
-        Cancels tasks, shuts down the bridge, and prints a resume hint if a
-        session ID was assigned.
-        """
+        """Async context exit: cancel tasks, shut down the bridge, print resume hint."""
         self._running = False
         for task in self._tasks:
             task.cancel()

@@ -412,7 +412,12 @@ class AgentTool(AgentBaseFn):
             name=name,
         )
 
-        if wait and task.status not in ("failed",):
+        # Skip the wait on any terminal status — "failed", "completed", and
+        # "cancelled" are all already settled, so blocking on mgr.wait would
+        # either return immediately (best case) or hang on a stale handle.
+        # Previously the tuple held only ("failed",), which meant we still
+        # blocked on already-completed tasks.
+        if wait and task.status not in ("failed", "completed", "cancelled"):
             mgr.wait(task.id, timeout=_subagent_wait_timeout(timeout))
 
         if task.status == "completed" and task.result is not None:
@@ -865,6 +870,63 @@ class ExitPlanModeTool(AgentBaseFn):
             Confirmation message.
         """
         return "Exited plan mode. Resuming normal execution."
+
+
+class SetInteractionModeTool(AgentBaseFn):
+    """Switch the active interaction mode for future turns.
+
+    Use this when the task should move between code, research, and plan modes.
+    """
+
+    @staticmethod
+    def static_call(
+        mode: str,
+        reason: str = "",
+        **context_variables,
+    ) -> str:
+        """Switch interaction mode.
+
+        Args:
+            mode: Target mode. One of ``code``, ``researcher``/``research``, or
+                ``plan``/``planner``.
+            reason: Short reason for the switch.
+            **context_variables: Additional context passed through to downstream calls.
+
+        Returns:
+            Confirmation message with the normalized target mode.
+        """
+        from ..runtime.config_context import emit_event, get_config, set_config
+
+        aliases = {
+            "": "code",
+            "coding": "code",
+            "coder": "code",
+            "code": "code",
+            "research": "researcher",
+            "researcher": "researcher",
+            "plan": "plan",
+            "planner": "plan",
+        }
+        normalized = aliases.get((mode or "").strip().lower())
+        if normalized is None:
+            return "Error: mode must be one of code, researcher, or plan."
+
+        config = get_config()
+        config["mode"] = normalized
+        config["plan_mode"] = normalized == "plan"
+        set_config(config)
+
+        emit_event(
+            "interaction_mode_changed",
+            {
+                "mode": normalized,
+                "plan_mode": normalized == "plan",
+                "reason": reason,
+                "source": "model",
+            },
+        )
+        note = f" Reason: {reason}" if reason else ""
+        return f"Interaction mode switched to {normalized}.{note}"
 
 
 class EnterWorktreeTool(AgentBaseFn):
@@ -1585,6 +1647,7 @@ __all__ = [
     "RemoteTriggerTool",
     "ScheduleCronTool",
     "SendMessageTool",
+    "SetInteractionModeTool",
     "SkillTool",
     "TaskCreateTool",
     "TaskGetTool",

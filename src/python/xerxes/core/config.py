@@ -11,10 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Xerxes configuration models and loaders.
+"""Pydantic-modeled configuration for the legacy core stack.
 
-Defines Pydantic models for all configurable subsystems and helpers to load
-configuration from files (YAML/JSON), environment variables, or defaults.
+Defines :class:`XerxesConfig` and its nested blocks (executor, memory,
+security, LLM, logging, observability) plus loaders that read from YAML or
+JSON files (:meth:`XerxesConfig.from_file`), expand ``XERXES_*`` environment
+variables (:meth:`XerxesConfig.from_env`), and persist back to disk. A
+process-wide :func:`get_config`/:func:`set_config` singleton lets older
+subsystems read the active config without explicit wiring; modern code paths
+use the runtime config context owned by ``xerxes.runtime.config_context``.
 """
 
 import json
@@ -35,7 +40,7 @@ except ImportError:
 
 
 class LogLevel(StrEnum):
-    """Supported logging levels."""
+    """Standard Python logging-module levels exposed as a string enum."""
 
     DEBUG = "DEBUG"
     INFO = "INFO"
@@ -45,7 +50,7 @@ class LogLevel(StrEnum):
 
 
 class EnvironmentType(StrEnum):
-    """Deployment environment categories."""
+    """Logical deployment environment used to gate feature flags."""
 
     DEVELOPMENT = "development"
     TESTING = "testing"
@@ -54,7 +59,7 @@ class EnvironmentType(StrEnum):
 
 
 class LLMProvider(StrEnum):
-    """Supported LLM provider identifiers."""
+    """LLM providers known to the legacy core config layer."""
 
     OPENAI = "openai"
     GEMINI = "gemini"
@@ -65,7 +70,7 @@ class LLMProvider(StrEnum):
 
 
 class ExecutorConfig(BaseModel):
-    """Configuration for the function execution subsystem."""
+    """Limits and feature toggles for the function-execution subsystem."""
 
     default_timeout: float = Field(default=30.0, ge=1.0, le=600.0)
     max_retries: int = Field(default=3, ge=0, le=10)
@@ -77,7 +82,7 @@ class ExecutorConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for the memory subsystem."""
+    """Sizing and persistence knobs for the four-tier memory subsystem."""
 
     max_short_term: int = Field(default=10, ge=1, le=1000)
     max_working: int = Field(default=5, ge=1, le=100)
@@ -91,7 +96,7 @@ class MemoryConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    """Configuration for security and rate-limiting policies."""
+    """Input/output guardrails, allow/block lists, and rate-limit knobs."""
 
     enable_input_validation: bool = True
     enable_output_sanitization: bool = True
@@ -108,7 +113,7 @@ class SecurityConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """Configuration for LLM client interactions."""
+    """Provider-agnostic LLM client settings (provider, model, sampling, timeouts)."""
 
     provider: LLMProvider = LLMProvider.OPENAI
     model: str = "gpt-4"
@@ -129,15 +134,7 @@ class LLMConfig(BaseModel):
 
     @field_validator("api_key")
     def validate_api_key(cls, v, info):
-        """Load API key from environment if not explicitly provided.
-
-        Args:
-            v (str | None): IN: explicit API key value.
-            info: Pydantic validation info.
-
-        Returns:
-            str | None: OUT: resolved API key.
-        """
+        """Fall back to the env var named by ``api_key_env_var`` when ``v`` is None."""
         if v is None:
             env_var = info.data.get("api_key_env_var", "OPENAI_API_KEY")
             v = os.getenv(env_var)
@@ -145,7 +142,7 @@ class LLMConfig(BaseModel):
 
 
 class LoggingConfig(BaseModel):
-    """Configuration for application logging."""
+    """Logging destinations, format, and rotation policy."""
 
     level: LogLevel = LogLevel.INFO
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -158,7 +155,7 @@ class LoggingConfig(BaseModel):
 
 
 class ObservabilityConfig(BaseModel):
-    """Configuration for observability features (tracing, metrics, profiling)."""
+    """Tracing, metrics, and profiling endpoints + per-feature toggles."""
 
     enable_tracing: bool = False
     enable_metrics: bool = True
@@ -173,7 +170,7 @@ class ObservabilityConfig(BaseModel):
 
 
 class XerxesConfig(BaseModel):
-    """Top-level Xerxes configuration model."""
+    """Composite root model bundling every subsystem config plus feature flags."""
 
     environment: EnvironmentType = EnvironmentType.DEVELOPMENT
     debug: bool = False
@@ -199,18 +196,12 @@ class XerxesConfig(BaseModel):
 
     @classmethod
     def from_file(cls, path: str | Path) -> "XerxesConfig":
-        """Load configuration from a YAML or JSON file.
-
-        Args:
-            path (str | Path): IN: path to the configuration file.
-
-        Returns:
-            XerxesConfig: OUT: populated configuration instance.
+        """Build a config from a YAML or JSON file.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
-            ImportError: If YAML is required but not installed.
-            ValueError: If the file format is unsupported.
+            FileNotFoundError: When ``path`` doesn't exist.
+            ImportError: When the file is YAML but PyYAML isn't installed.
+            ValueError: For unsupported file extensions.
         """
         path = Path(path)
         if not path.exists():
@@ -230,15 +221,7 @@ class XerxesConfig(BaseModel):
 
     @classmethod
     def from_env(cls, prefix: str = "XERXES_") -> "XerxesConfig":
-        """Build configuration from environment variables.
-
-        Args:
-            prefix (str): IN: environment variable prefix.
-                Defaults to ``"XERXES_"``.
-
-        Returns:
-            XerxesConfig: OUT: configuration populated from matching env vars.
-        """
+        """Materialise a config from ``prefix``-keyed env vars (underscore-nested dot paths)."""
         config_dict: dict[str, Any] = {}
 
         for key, value in os.environ.items():
@@ -261,14 +244,10 @@ class XerxesConfig(BaseModel):
         return cls(**config_dict)
 
     def to_file(self, path: str | Path) -> None:
-        """Save the current configuration to a file.
+        """Persist the config to ``path`` (``.yaml``/``.yml``/``.json``).
 
-        Args:
-            path (str | Path): IN: target file path. Supports ``.yaml``,
-                ``.yml``, and ``.json``.
-
-        Raises:
-            ValueError: If the file extension is unsupported.
+        Falls back to JSON if PyYAML is missing while a YAML extension was
+        requested; raises ``ValueError`` for unknown extensions.
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,27 +267,12 @@ class XerxesConfig(BaseModel):
                 raise ValueError(f"Unsupported configuration file format: {path.suffix}")
 
     def merge(self, other: "XerxesConfig") -> "XerxesConfig":
-        """Deep-merge another configuration into this one.
-
-        Args:
-            other (XerxesConfig): IN: configuration to merge on top.
-
-        Returns:
-            XerxesConfig: OUT: new instance with merged values.
-        """
+        """Return a new config whose values come from ``other`` overlaid on ``self``."""
         self_dict = self.model_dump()
         other_dict = other.model_dump()
 
         def deep_merge(dict1: dict, dict2: dict) -> dict:
-            """Recursively merge dict2 into dict1.
-
-            Args:
-                dict1 (dict): IN: base dictionary.
-                dict2 (dict): IN: dictionary to overlay.
-
-            Returns:
-                dict: OUT: merged dictionary.
-            """
+            """Recursive dict-overlay used by :meth:`merge`."""
             result = dict1.copy()
             for key, value in dict2.items():
                 if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -325,12 +289,7 @@ _config: XerxesConfig | None = None
 
 
 def get_config() -> XerxesConfig:
-    """Return the global configuration singleton.
-
-    Returns:
-        XerxesConfig: OUT: current global config, instantiating defaults if
-        none has been set.
-    """
+    """Return the process-wide config, lazily building defaults on first call."""
     global _config
     if _config is None:
         _config = XerxesConfig()
@@ -338,24 +297,16 @@ def get_config() -> XerxesConfig:
 
 
 def set_config(config: XerxesConfig) -> None:
-    """Set the global configuration singleton.
-
-    Args:
-        config (XerxesConfig): IN: configuration instance to store globally.
-    """
+    """Replace the process-wide config singleton with ``config``."""
     global _config
     _config = config
 
 
 def load_config(path: str | Path | None = None) -> XerxesConfig:
-    """Load configuration from a file, env var, or environment defaults.
+    """Load a config and publish it as the global singleton.
 
-    Args:
-        path (str | Path | None): IN: explicit config file path. If omitted,
-            checks ``XERXES_CONFIG_FILE`` and then standard search paths.
-
-    Returns:
-        XerxesConfig: OUT: loaded configuration, stored as the global singleton.
+    Resolution order: explicit ``path``; ``XERXES_CONFIG_FILE``; the standard
+    cwd/home search paths; falling back to :meth:`XerxesConfig.from_env`.
     """
     if path:
         config = XerxesConfig.from_file(path)

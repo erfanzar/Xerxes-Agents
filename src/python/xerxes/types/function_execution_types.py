@@ -11,20 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Function execution types module for Xerxes.
+"""Enums and event dataclasses describing agent function-execution flow.
 
-Exports:
-    - FunctionCallStrategy
-    - AgentSwitchTrigger
-    - ExecutionStatus
-    - CompactionStrategy
-    - RequestFunctionCall
-    - AgentCapability
-    - ExecutionResult
-    - SwitchContext
-    - ToolCallStreamChunk
-    - StreamChunk
-    - ... and 9 more."""
+Defines the strategy enums (:class:`FunctionCallStrategy`,
+:class:`AgentSwitchTrigger`, :class:`CompactionStrategy`,
+:class:`ExecutionStatus`), the in-flight call record
+(:class:`RequestFunctionCall`), capability advertisement
+(:class:`AgentCapability`), and the stream of events emitted by the legacy
+multi-agent function-execution pipeline (chunks, detection signals,
+function-execution start/complete markers, agent switches, completion, and
+the reinvoke control signal).
+"""
 
 from __future__ import annotations
 
@@ -105,7 +102,7 @@ class CompactionStrategy(Enum):
         PRIORITY_BASED: Retain high-priority messages and compress others.
         SMART: Use a model-selected strategy per situation.
         TRUNCATE: Drop the oldest messages outright.
-        HERMES: Use Hermes-specific compaction heuristics.
+        ADVANCED: Multi-stage prune-then-summarise pipeline.
     """
 
     SUMMARIZE = "summarize"
@@ -113,7 +110,7 @@ class CompactionStrategy(Enum):
     PRIORITY_BASED = "priority_based"
     SMART = "smart"
     TRUNCATE = "truncate"
-    HERMES = "hermes"
+    ADVANCED = "advanced"
 
 
 @dataclass

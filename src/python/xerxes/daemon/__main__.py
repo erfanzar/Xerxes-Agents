@@ -11,10 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Entry point for the Xerxes daemon module.
+"""Launch the daemon when ``python -m xerxes.daemon`` is invoked.
 
-Launches the daemon server when the package is executed directly
-(e.g. ``python -m xerxes.daemon``).
+Delegates to :func:`xerxes.daemon.server.main`.
 """
 
 from .server import main

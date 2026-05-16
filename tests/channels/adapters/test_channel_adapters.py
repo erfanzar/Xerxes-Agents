@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Smoke + integration tests for every Hermes channel adapter."""
+"""Smoke + integration tests for every channel adapter."""
 
 from __future__ import annotations
 
@@ -139,6 +139,82 @@ class TestSlack:
         c = SlackChannel("xoxb-tok", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="slack", room_id="C")))
         assert http.calls[0]["headers"]["Authorization"] == "Bearer xoxb-tok"
+
+    def test_signing_secret_rejects_unsigned(self):
+        c = SlackChannel("xoxb-tok", signing_secret="abc")
+        rx = _start(c)
+        body = json.dumps(
+            {"event": {"type": "message", "user": "U", "channel": "C", "ts": "1.0", "text": "hi"}}
+        ).encode()
+        _post(c, {}, body)
+        assert rx == []
+
+    def test_signing_secret_rejects_invalid_signature(self):
+        c = SlackChannel("xoxb-tok", signing_secret="abc")
+        rx = _start(c)
+        body = json.dumps(
+            {"event": {"type": "message", "user": "U", "channel": "C", "ts": "1.0", "text": "hi"}}
+        ).encode()
+        _post(
+            c,
+            {"x-slack-signature": "v0=deadbeef", "x-slack-request-timestamp": "1700000000"},
+            body,
+        )
+        assert rx == []
+
+    def test_signing_secret_accepts_valid_signature(self):
+        import hashlib
+        import hmac
+        import time
+
+        from xerxes.channels.adapters.slack import _verify_slack_signature
+
+        secret = "abc"
+        ts = str(int(time.time()))
+        body = json.dumps(
+            {"event": {"type": "message", "user": "U", "channel": "C", "ts": "1.0", "text": "hi"}}
+        ).encode()
+        basestring = b"v0:" + ts.encode() + b":" + body
+        digest = hmac.new(secret.encode(), basestring, hashlib.sha256).hexdigest()
+        headers = {"x-slack-signature": f"v0={digest}", "x-slack-request-timestamp": ts}
+        assert _verify_slack_signature(secret, headers, body) is True
+
+        c = SlackChannel("xoxb-tok", signing_secret=secret)
+        rx = _start(c)
+        _post(c, headers, body)
+        assert rx and rx[0].text == "hi"
+
+    def test_signing_secret_rejects_stale_timestamp(self):
+        import hashlib
+        import hmac
+
+        from xerxes.channels.adapters.slack import _verify_slack_signature
+
+        secret = "abc"
+        ts = "1000000000"  # year 2001 — way outside the 5-min window
+        body = b'{"event":{"type":"message","user":"U","channel":"C","ts":"1.0","text":"hi"}}'
+        basestring = b"v0:" + ts.encode() + b":" + body
+        digest = hmac.new(secret.encode(), basestring, hashlib.sha256).hexdigest()
+        headers = {"x-slack-signature": f"v0={digest}", "x-slack-request-timestamp": ts}
+        assert _verify_slack_signature(secret, headers, body) is False
+
+    def test_subtype_skipped(self):
+        c = SlackChannel("xoxb-tok")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "user": "U",
+                    "channel": "C",
+                    "ts": "1.0",
+                    "text": "edited",
+                }
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx == []
 
 
 class TestEmail:

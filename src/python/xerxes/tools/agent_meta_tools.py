@@ -11,20 +11,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Agent meta tools module for Xerxes.
+"""Meta-tools for orchestrating other agents and the skill subsystem.
 
-Exports:
-    - logger
-    - LLMCallable
-    - configure_mixture_of_agents
-    - get_moa_config
-    - mixture_of_agents
-    - session_search
-    - set_session_searcher
-    - get_session_searcher
-    - set_skill_registry
-    - get_skill_registry
-    - ... and 3 more."""
+Provides three families of agent-facing tools:
+
+* :class:`mixture_of_agents` — fan a prompt out to several configured LLM
+  callables, collect every answer, optionally majority-vote, and optionally
+  ask a synthesizer to combine them. Members are registered via
+  :func:`configure_mixture_of_agents`.
+* :class:`session_search` — query historical session transcripts through a
+  pluggable searcher installed with :func:`set_session_searcher`.
+* :class:`skills_list` / :class:`skill_view` / :class:`skill_manage` — list,
+  read, and CRUD :class:`SkillRegistry` entries on disk. Listing falls back to
+  semantic matching via :class:`SkillMatcher` when a free-text query is given.
+
+All shared state is guarded by module-level locks so the tools are safe to
+invoke from concurrent agent turns.
+"""
 
 from __future__ import annotations
 
@@ -44,12 +47,16 @@ LLMCallable = tp.Callable[[str], str]
 
 @dataclass
 class _MoAState:
-    """Mo astate.
+    """Configuration snapshot for :class:`mixture_of_agents`.
 
     Attributes:
-        members (dict[str, LLMCallable]): members.
-        synthesizer (LLMCallable | None): synthesizer.
-        voting (bool): voting."""
+        members: Mapping of member name to LLM callable taking the prompt
+            string and returning a textual answer.
+        synthesizer: Optional combiner that receives the joined per-member
+            answers and produces a final summary.
+        voting: When True the tool tallies normalized answers and reports
+            the most common one alongside the raw responses.
+    """
 
     members: dict[str, LLMCallable]
     synthesizer: LLMCallable | None
@@ -66,12 +73,16 @@ def configure_mixture_of_agents(
     synthesizer: LLMCallable | None = None,
     voting: bool = False,
 ) -> None:
-    """Configure mixture of agents.
+    """Replace the mixture-of-agents configuration atomically.
 
     Args:
-        members (dict[str, LLMCallable] | None, optional): IN: members. Defaults to None. OUT: Consumed during execution.
-        synthesizer (LLMCallable | None, optional): IN: synthesizer. Defaults to None. OUT: Consumed during execution.
-        voting (bool, optional): IN: voting. Defaults to False. OUT: Consumed during execution."""
+        members: Mapping of human-readable member name to a callable that
+            takes the prompt and returns its textual answer. ``None`` clears
+            the roster.
+        synthesizer: Optional callable used to merge member answers; when
+            absent the tool returns the raw answers only.
+        voting: Enable majority voting on normalized member outputs.
+    """
 
     global _state
     with _state_lock:
@@ -83,20 +94,14 @@ def configure_mixture_of_agents(
 
 
 def get_moa_config() -> _MoAState:
-    """Retrieve the moa config.
-
-    Returns:
-        _MoAState: OUT: Result of the operation."""
+    """Return the current :class:`_MoAState` snapshot under the state lock."""
 
     with _state_lock:
         return _state
 
 
 class mixture_of_agents(AgentBaseFn):
-    """Mixture of agents.
-
-    Inherits from: AgentBaseFn
-    """
+    """Fan a prompt out to multiple LLM members and aggregate the answers."""
 
     @staticmethod
     def static_call(
@@ -105,15 +110,22 @@ class mixture_of_agents(AgentBaseFn):
         synthesise: bool = True,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Run ``prompt`` through configured members and combine the responses.
 
         Args:
-            prompt (str): IN: prompt. OUT: Consumed during execution.
-            members (list[str] | None, optional): IN: members. Defaults to None. OUT: Consumed during execution.
-            synthesise (bool, optional): IN: synthesise. Defaults to True. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            prompt: User-facing question forwarded to every selected member.
+            members: Subset of configured member names to invoke. ``None``
+                runs every registered member.
+            synthesise: When True and a synthesizer is configured, ask it to
+                merge member answers into a single ``final`` response.
+
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            Dictionary with ``members`` (the names invoked), ``answers``
+            (member-name to text), and optionally ``voted`` (when voting is
+            enabled) and ``final`` (when synthesis succeeds) or
+            ``final_error`` if synthesis raised. When no members are
+            configured the dictionary contains an ``error`` field.
+        """
 
         cfg = get_moa_config()
         if not cfg.members:
@@ -147,10 +159,7 @@ class mixture_of_agents(AgentBaseFn):
 
 
 class session_search(AgentBaseFn):
-    """Session search.
-
-    Inherits from: AgentBaseFn
-    """
+    """Search prior session transcripts via the registered searcher."""
 
     @staticmethod
     def static_call(
@@ -160,16 +169,22 @@ class session_search(AgentBaseFn):
         session_id: str | None = None,
         **context_variables: tp.Any,
     ):
-        """Static call.
+        """Query historical sessions for matching transcript fragments.
 
         Args:
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 5. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            session_id (str | None, optional): IN: session id. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            query: Free-text search expression handed verbatim to the
+                searcher (typically full-text or hybrid vector search).
+            limit: Maximum number of hits to return.
+            agent_id: Optional filter restricting results to a single agent
+                identifier.
+            session_id: Optional filter restricting results to a single
+                session identifier.
+
         Returns:
-            Any: OUT: Result of the operation."""
+            Whatever the installed searcher returns (typically a dict with a
+            ``hits`` list). When no searcher is configured an ``error`` dict
+            with an empty ``hits`` list is returned instead.
+        """
 
         searcher = get_session_searcher()
         if searcher is None:
@@ -187,10 +202,12 @@ _session_searcher: tp.Any | None = None
 
 
 def set_session_searcher(searcher: tp.Any | None) -> None:
-    """Set the session searcher.
+    """Install (or clear) the callable used by :class:`session_search`.
 
     Args:
-        searcher (tp.Any | None): IN: searcher. OUT: Consumed during execution."""
+        searcher: Callable accepting ``query``, ``limit``, ``agent_id`` and
+            ``session_id`` keyword arguments. Pass ``None`` to detach.
+    """
 
     global _session_searcher
     with _session_searcher_lock:
@@ -198,10 +215,7 @@ def set_session_searcher(searcher: tp.Any | None) -> None:
 
 
 def get_session_searcher() -> tp.Any | None:
-    """Retrieve the session searcher.
-
-    Returns:
-        tp.Any | None: OUT: Result of the operation."""
+    """Return the currently installed session searcher, or ``None``."""
 
     with _session_searcher_lock:
         return _session_searcher
@@ -214,10 +228,12 @@ _matcher_lock = threading.Lock()
 
 
 def set_skill_registry(registry: SkillRegistry | None) -> None:
-    """Set the skill registry.
+    """Install (or clear) the :class:`SkillRegistry` used by the skill tools.
 
-    Args:
-        registry (SkillRegistry | None): IN: registry. OUT: Consumed during execution."""
+    The cached :class:`SkillMatcher` is bound to the registry at first use;
+    callers that need the matcher rebuilt should drop the module-level
+    ``_skill_matcher`` themselves.
+    """
 
     global _skill_registry
     with _skill_registry_lock:
@@ -225,20 +241,14 @@ def set_skill_registry(registry: SkillRegistry | None) -> None:
 
 
 def get_skill_registry() -> SkillRegistry | None:
-    """Retrieve the skill registry.
-
-    Returns:
-        SkillRegistry | None: OUT: Result of the operation."""
+    """Return the currently installed skill registry, or ``None``."""
 
     with _skill_registry_lock:
         return _skill_registry
 
 
 def _get_skill_matcher() -> SkillMatcher:
-    """Internal helper to get skill matcher.
-
-    Returns:
-        SkillMatcher: OUT: Result of the operation."""
+    """Return the lazily-constructed :class:`SkillMatcher` bound to the registry."""
 
     global _skill_matcher
     if _skill_matcher is None:
@@ -251,20 +261,24 @@ def _get_skill_matcher() -> SkillMatcher:
 
 
 class skills_list(AgentBaseFn):
-    """Skills list.
-
-    Inherits from: AgentBaseFn
-    """
+    """List registered skills, optionally filtered by a semantic query."""
 
     @staticmethod
     def static_call(search: str | None = None, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Return skill metadata for every registered skill.
 
         Args:
-            search (str | None, optional): IN: search. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            search: Optional free-text query. When provided, results are
+                ranked by :class:`SkillMatcher` (top 20) and each entry
+                carries a ``score`` field; otherwise every registered skill
+                is returned in registry order.
+
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            Dict with ``count`` and ``skills`` (each entry has ``name``,
+            ``version``, ``description``, ``tags``, and ``score`` when a
+            search query was used). When no registry is configured an
+            ``error`` field is returned and ``skills`` is empty.
+        """
 
         reg = get_skill_registry()
         if reg is None:
@@ -300,20 +314,23 @@ class skills_list(AgentBaseFn):
 
 
 class skill_view(AgentBaseFn):
-    """Skill view.
-
-    Inherits from: AgentBaseFn
-    """
+    """Return a single skill's metadata and instructions."""
 
     @staticmethod
     def static_call(name: str, **context_variables: tp.Any) -> dict[str, tp.Any]:
-        """Static call.
+        """Fetch a skill by name, falling back to semantic match on miss.
 
         Args:
-            name (str): IN: name. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            name: Exact skill name. If no exact match exists the registry
+                is queried via :class:`SkillMatcher`; the top hit is
+                returned with ``_matched_query`` set to the original input.
+
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            Dict with ``name``, ``version``, ``description``, ``tags``,
+            ``instructions``, ``source_path``, and (when matched fuzzily)
+            ``_matched_query``. When no registry is configured or the skill
+            cannot be located, an ``error`` key is returned.
+        """
 
         reg = get_skill_registry()
         if reg is None:
@@ -346,10 +363,7 @@ class skill_view(AgentBaseFn):
 
 
 class skill_manage(AgentBaseFn):
-    """Skill manage.
-
-    Inherits from: AgentBaseFn
-    """
+    """Create, update, or delete a skill on disk and refresh the registry."""
 
     @staticmethod
     def static_call(
@@ -362,19 +376,29 @@ class skill_manage(AgentBaseFn):
         skills_dir: str | None = None,
         **context_variables: tp.Any,
     ) -> dict[str, tp.Any]:
-        """Static call.
+        """Write or remove a SKILL.md bundle and refresh the active registry.
 
         Args:
-            action (str): IN: action. OUT: Consumed during execution.
-            name (str): IN: name. OUT: Consumed during execution.
-            instructions (str, optional): IN: instructions. Defaults to ''. OUT: Consumed during execution.
-            description (str, optional): IN: description. Defaults to ''. OUT: Consumed during execution.
-            version (str, optional): IN: version. Defaults to '0.1.0'. OUT: Consumed during execution.
-            tags (list[str] | None, optional): IN: tags. Defaults to None. OUT: Consumed during execution.
-            skills_dir (str | None, optional): IN: skills dir. Defaults to None. OUT: Consumed during execution.
-            **context_variables: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
+            action: One of ``create``, ``update``, or ``delete``. The first
+                two write a ``SKILL.md`` with YAML front-matter; ``delete``
+                removes the file and evicts the entry from the registry.
+            name: Skill identifier; used as both the front-matter ``name``
+                and the parent directory.
+            instructions: Markdown body written verbatim after the
+                front-matter; required for ``create``/``update``.
+            description: Short human-readable description for the
+                front-matter.
+            version: Semantic version string written to the front-matter
+                (defaults to ``0.1.0``).
+            tags: Optional list of tags written into the front-matter array.
+            skills_dir: Directory used to host the skill bundle. Defaults
+                to ``$XERXES_DIR/skills`` (via :func:`xerxes_subdir`) or
+                ``~/.xerxes/skills`` when paths utilities are unavailable.
+
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            Dict reporting ``ok`` plus ``name``, ``path``/``deleted``,
+            ``action``, or an ``error`` describing why the operation failed.
+        """
 
         from pathlib import Path
 

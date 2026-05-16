@@ -11,10 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Filesystem path helpers for Xerxes.
+"""Resolve the Xerxes home directory and subpaths consistently.
 
-Provides ``xerxes_home()`` and ``xerxes_subdir()`` for resolving the project's
-home directory (default ``~/.xerxes``, overridable via ``XERXES_HOME``).
+Every persisted resource — sessions, profiles, skills, daemon sockets, agent
+workspaces — lives under :func:`xerxes_home`. The default is ``~/.xerxes``;
+setting the ``XERXES_HOME`` environment variable redirects everything to an
+explicit location (useful for tests and sandboxes). All callers should route
+their paths through :func:`xerxes_subdir` rather than rebuilding the prefix
+by hand.
 """
 
 from __future__ import annotations
@@ -27,14 +31,7 @@ _DEFAULT_DIR_NAME = ".xerxes"
 
 
 def xerxes_home() -> Path:
-    """Return the Xerxes home directory path.
-
-    Uses ``XERXES_HOME`` environment variable when set, otherwise
-    ``~/.xerxes``.
-
-    Returns:
-        Path: OUT: resolved home directory.
-    """
+    """Return the Xerxes home directory (``$XERXES_HOME`` or ``~/.xerxes``)."""
     override = os.environ.get(XERXES_HOME_ENV, "").strip()
     if override:
         return Path(override).expanduser()
@@ -42,12 +39,5 @@ def xerxes_home() -> Path:
 
 
 def xerxes_subdir(*parts: str) -> Path:
-    """Return a subpath inside the Xerxes home directory.
-
-    Args:
-        *parts (str): IN: path components to join.
-
-    Returns:
-        Path: OUT: resolved subpath.
-    """
+    """Join ``parts`` under :func:`xerxes_home` without creating the directory."""
     return xerxes_home().joinpath(*parts)

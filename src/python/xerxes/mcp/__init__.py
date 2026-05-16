@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Model Context Protocol client and types.
+
+Re-exports :class:`MCPClient` (one connection to an MCP server),
+:class:`MCPManager` (a registry of clients), and the protocol record types
+(:class:`MCPTool`, :class:`MCPResource`, :class:`MCPServerConfig`). The
+companion modules :mod:`xerxes.mcp.server`, :mod:`xerxes.mcp.oauth`,
+:mod:`xerxes.mcp.reconnect`, and :mod:`xerxes.mcp.osv` cover the server-side
+facade, OAuth flows, reconnect policy, and dependency vulnerability gating.
+"""
 
 from .client import MCPClient
 from .manager import MCPManager

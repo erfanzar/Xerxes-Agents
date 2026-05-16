@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Context module for Xerxes.
+"""Composable system-prompt prefix builder.
 
-Exports:
-    - RuntimeInfo
-    - PromptContext
-    - PromptContextBuilder"""
+Captures the runtime, workspace, sandbox, skill, tool, guardrail, memory, and
+user-profile context used by every Xerxes session and renders it as a single
+deterministic system-prompt prefix. :class:`PromptContextBuilder` is the
+public entry point; :class:`PromptContext` is the bag of rendered sections;
+:class:`RuntimeInfo` is the per-session environment snapshot. Each section is
+gated by the active :class:`PromptProfileConfig` so the same builder serves
+``FULL``, ``COMPACT``, ``MINIMAL``, and ``NONE`` prompt profiles.
+"""
 
 from __future__ import annotations
 
@@ -37,16 +41,17 @@ if tp.TYPE_CHECKING:
 
 @dataclass
 class RuntimeInfo:
-    """Runtime info.
+    """Snapshot of host metadata embedded in the prompt prefix.
 
     Attributes:
-        timestamp (str): timestamp.
-        timezone (str): timezone.
-        platform (str): platform.
-        python_version (str): python version.
-        xerxes_version (str): xerxes version.
-        working_directory (str): working directory.
-        workspace_name (str): workspace name."""
+        timestamp: ISO-8601 local time at capture.
+        timezone: Local timezone name (or ``"local"`` when unknown).
+        platform: ``"<system> <release>"`` (e.g. ``"Darwin 25.4.0"``).
+        python_version: Interpreter version string.
+        xerxes_version: Installed ``xerxes-agent`` version.
+        working_directory: Absolute path of the workspace root.
+        workspace_name: Basename of ``working_directory`` used as project label.
+    """
 
     timestamp: str = ""
     timezone: str = ""
@@ -58,13 +63,12 @@ class RuntimeInfo:
 
     @classmethod
     def capture(cls, workspace_root: str | None = None) -> RuntimeInfo:
-        """Capture.
+        """Snapshot the running environment.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            workspace_root (str | None, optional): IN: workspace root. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            RuntimeInfo: OUT: Result of the operation."""
+            workspace_root: Path to treat as the workspace root; falls back to
+                :func:`os.getcwd` when ``None``.
+        """
 
         from xerxes import __version__
 
@@ -83,21 +87,26 @@ class RuntimeInfo:
 
 @dataclass
 class PromptContext:
-    """Prompt context.
+    """Container of rendered prompt-prefix sections.
+
+    Each attribute is a self-contained Markdown-ish string the builder
+    emitted for the active profile; sections suppressed by the profile or
+    missing inputs come through as ``""``.
 
     Attributes:
-        runtime_section (str): runtime section.
-        workspace_section (str): workspace section.
-        datetime_section (str): datetime section.
-        reasoning_section (str): reasoning section.
-        sandbox_section (str): sandbox section.
-        skills_section (str): skills section.
-        enabled_skills_section (str): enabled skills section.
-        tools_section (str): tools section.
-        guardrails_section (str): guardrails section.
-        bootstrap_section (str): bootstrap section.
-        memory_section (str): memory section.
-        user_profile_section (str): user profile section."""
+        runtime_section: Platform/python/xerxes version banner.
+        workspace_section: Workspace root and project name.
+        datetime_section: Local time and timezone.
+        reasoning_section: Profile-aware response-style guidance.
+        sandbox_section: Active sandbox mode and per-tool overrides.
+        skills_section: Index of available skills.
+        enabled_skills_section: Full instructions for enabled skills.
+        tools_section: Bullet list of tool names available this run.
+        guardrails_section: Active guardrail identifiers.
+        bootstrap_section: Project/bootstrap notes from hooks.
+        memory_section: Relevant memory snippets returned by the provider.
+        user_profile_section: User profile blurb from the provider.
+    """
 
     runtime_section: str = ""
     workspace_section: str = ""
@@ -116,12 +125,7 @@ class PromptContext:
 def _resolve_profile_config(
     profile: PromptProfile | PromptProfileConfig | str | None,
 ) -> PromptProfileConfig:
-    """Internal helper to resolve profile config.
-
-    Args:
-        profile (PromptProfile | PromptProfileConfig | str | None): IN: profile. OUT: Consumed during execution.
-    Returns:
-        PromptProfileConfig: OUT: Result of the operation."""
+    """Normalise ``profile`` (enum/string/config/``None``) to a :class:`PromptProfileConfig`."""
 
     if profile is None:
         return get_profile_config(PromptProfile.FULL)
@@ -133,7 +137,7 @@ def _resolve_profile_config(
 
 
 class PromptContextBuilder:
-    """Prompt context builder."""
+    """Renders the system-prompt prefix from registries, hooks, and providers."""
 
     def __init__(
         self,
@@ -147,21 +151,22 @@ class PromptContextBuilder:
         memory_provider: tp.Callable[[str | None, int], list[str]] | None = None,
         user_profile_provider: tp.Callable[[str | None], str] | None = None,
     ):
-        """Initialize the instance.
+        """Wire the builder against the live runtime dependencies.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            skill_registry (SkillRegistry | None, optional): IN: skill registry. Defaults to None. OUT: Consumed during execution.
-            plugin_registry (PluginRegistry | None, optional): IN: plugin registry. Defaults to None. OUT: Consumed during execution.
-            hook_runner (HookRunner | None, optional): IN: hook runner. Defaults to None. OUT: Consumed during execution.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-            profile (PromptProfile | PromptProfileConfig | None, optional): IN: profile. Defaults to None. OUT: Consumed during execution.
-            workspace_root (str | None, optional): IN: workspace root. Defaults to None. OUT: Consumed during execution.
-            memory_provider (tp.Callable[[str | None, int], list[str]] | None, optional): IN: memory provider. Defaults to None. OUT: Consumed during execution.
-            user_profile_provider (tp.Callable[[str | None], str] | None, optional): IN: user profile provider. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+            skill_registry: Source for the skills index and skill instructions.
+            plugin_registry: Reserved for future plugin-provided context.
+            hook_runner: Used to invoke the ``bootstrap_files`` hook.
+            sandbox_config: Default sandbox config when no per-agent override
+                is supplied at build time.
+            guardrails: Default guardrail list when no override is provided.
+            profile: Default prompt profile for :meth:`build` calls.
+            workspace_root: Path treated as the project root.
+            memory_provider: ``(agent_id, k) -> list[str]`` returning the
+                top-``k`` memory snippets to inject.
+            user_profile_provider: ``(agent_id) -> str`` returning a user
+                profile blurb for the prompt.
+        """
 
         self.skill_registry = skill_registry
         self.plugin_registry = plugin_registry
@@ -179,16 +184,11 @@ class PromptContextBuilder:
         tool_names: list[str] | None = None,
         profile: PromptProfile | PromptProfileConfig | str | None = None,
     ) -> PromptContext:
-        """Build.
+        """Build a :class:`PromptContext` using only the builder's defaults.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            profile (PromptProfile | PromptProfileConfig | str | None, optional): IN: profile. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            PromptContext: OUT: Result of the operation."""
-
+        Thin wrapper around :meth:`build_with_overrides` that omits every
+        per-agent override.
+        """
         return self.build_with_overrides(agent_id=agent_id, tool_names=tool_names, profile=profile)
 
     def build_with_overrides(
@@ -200,18 +200,12 @@ class PromptContextBuilder:
         enabled_skills: list[Skill] | None = None,
         profile: PromptProfile | PromptProfileConfig | str | None = None,
     ) -> PromptContext:
-        """Build with overrides.
+        """Build a :class:`PromptContext` with explicit per-agent overrides.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-            enabled_skills (list[Skill] | None, optional): IN: enabled skills. Defaults to None. OUT: Consumed during execution.
-            profile (PromptProfile | PromptProfileConfig | str | None, optional): IN: profile. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            PromptContext: OUT: Result of the operation."""
+        Each ``override`` argument falls back to the builder's default when
+        ``None``. Section inclusion is governed by the resolved
+        :class:`PromptProfileConfig` — disabled sections come back as ``""``.
+        """
 
         pcfg = _resolve_profile_config(profile) if profile is not None else self.default_profile_config
         runtime_info = RuntimeInfo.capture(self.workspace_root)
@@ -243,18 +237,7 @@ class PromptContextBuilder:
         guardrails: list[str] | None = None,
         enabled_skills: list[Skill] | None = None,
     ) -> str:
-        """Build compact prefix.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-            enabled_skills (list[Skill] | None, optional): IN: enabled skills. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the prompt prefix under the :attr:`PromptProfile.COMPACT` profile."""
         return self.assemble_system_prompt_prefix(
             agent_id=agent_id,
             tool_names=tool_names,
@@ -272,18 +255,7 @@ class PromptContextBuilder:
         guardrails: list[str] | None = None,
         enabled_skills: list[Skill] | None = None,
     ) -> str:
-        """Build minimal prefix.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-            enabled_skills (list[Skill] | None, optional): IN: enabled skills. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the prompt prefix under the :attr:`PromptProfile.MINIMAL` profile."""
         return self.assemble_system_prompt_prefix(
             agent_id=agent_id,
             tool_names=tool_names,
@@ -294,24 +266,11 @@ class PromptContextBuilder:
         )
 
     def build_none_prefix(self) -> str:
-        """Build none prefix.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the bare identity-only prefix used by the ``NONE`` profile."""
         return self.assemble_system_prompt_prefix(profile=PromptProfile.NONE)
 
     def _build_runtime(self, info: RuntimeInfo) -> str:
-        """Internal helper to build runtime.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            info (RuntimeInfo): IN: info. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the ``[Runtime Context]`` section."""
         return (
             f"[Runtime Context]\n"
             f"  Platform: {info.platform}\n"
@@ -320,35 +279,15 @@ class PromptContextBuilder:
         )
 
     def _build_workspace(self, info: RuntimeInfo) -> str:
-        """Internal helper to build workspace.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            info (RuntimeInfo): IN: info. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the ``[Workspace]`` section with the project root and name."""
         return f"[Workspace]\n  Directory: {info.working_directory}\n  Project: {info.workspace_name}\n"
 
     def _build_datetime(self, info: RuntimeInfo) -> str:
-        """Internal helper to build datetime.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            info (RuntimeInfo): IN: info. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
-
+        """Render the ``[Current Date & Time]`` section."""
         return f"[Current Date & Time]\n  Local time: {info.timestamp}\n  Time zone: {info.timezone}\n"
 
     def _build_reasoning(self, pcfg: PromptProfileConfig | None = None) -> str:
-        """Internal helper to build reasoning.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pcfg (PromptProfileConfig | None, optional): IN: pcfg. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Response Guidance]`` section reflecting the active profile."""
 
         profile_name = pcfg.profile.value if pcfg is not None else PromptProfile.FULL.value
         return (
@@ -358,13 +297,7 @@ class PromptContextBuilder:
         )
 
     def _build_sandbox(self, sandbox_config: SandboxConfig | None = None) -> str:
-        """Internal helper to build sandbox.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Sandbox]`` section from the active sandbox config."""
 
         config = sandbox_config or self.sandbox_config
         if not config:
@@ -381,13 +314,7 @@ class PromptContextBuilder:
         )
 
     def _build_skills(self, pcfg: PromptProfileConfig | None = None) -> str:
-        """Internal helper to build skills.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pcfg (PromptProfileConfig | None, optional): IN: pcfg. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Skills]`` index from :attr:`skill_registry`."""
 
         if not self.skill_registry:
             return ""
@@ -399,14 +326,7 @@ class PromptContextBuilder:
         enabled_skills: list[Skill] | None = None,
         profile_config: PromptProfileConfig | None = None,
     ) -> str:
-        """Internal helper to build enabled skills.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            enabled_skills (list[Skill] | None, optional): IN: enabled skills. Defaults to None. OUT: Consumed during execution.
-            profile_config (PromptProfileConfig | None, optional): IN: profile config. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render full instructions for ``enabled_skills``, truncating per profile."""
 
         if not enabled_skills:
             return ""
@@ -428,14 +348,7 @@ class PromptContextBuilder:
         tool_names: list[str] | None = None,
         pcfg: PromptProfileConfig | None = None,
     ) -> str:
-        """Internal helper to build tools.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            pcfg (PromptProfileConfig | None, optional): IN: pcfg. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Available Tools]`` bullet list, capped by profile."""
 
         if not tool_names:
             return ""
@@ -453,13 +366,7 @@ class PromptContextBuilder:
         return "[Available Tools]\n" + "\n".join(lines) + "\n"
 
     def _build_guardrails(self, guardrails: list[str] | None = None) -> str:
-        """Internal helper to build guardrails.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Guardrails]`` section from the active guardrail list."""
 
         active_guardrails = self.guardrails if guardrails is None else guardrails
         if not active_guardrails:
@@ -474,14 +381,7 @@ class PromptContextBuilder:
         agent_id: str | None,
         pcfg: PromptProfileConfig,
     ) -> str:
-        """Internal helper to build memory section.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-            pcfg (PromptProfileConfig): IN: pcfg. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Relevant Memories]`` section using :attr:`memory_provider`."""
 
         if self.memory_provider is None:
             return ""
@@ -502,13 +402,7 @@ class PromptContextBuilder:
         return "\n".join(lines) + "\n" if len(lines) > 1 else ""
 
     def _build_user_profile_section(self, agent_id: str | None) -> str:
-        """Internal helper to build user profile section.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None): IN: agent id. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[User Profile]`` section using :attr:`user_profile_provider`."""
 
         if self.user_profile_provider is None:
             return ""
@@ -521,13 +415,7 @@ class PromptContextBuilder:
         return f"[User Profile]\n{text.strip()}\n"
 
     def _build_bootstrap(self, agent_id: str | None = None) -> str:
-        """Internal helper to build bootstrap.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Collect bootstrap text from the ``bootstrap_files`` hook chain."""
 
         if not self.hook_runner or not self.hook_runner.has_hooks("bootstrap_files"):
             return ""
@@ -551,18 +439,13 @@ class PromptContextBuilder:
         enabled_skills: list[Skill] | None = None,
         profile: PromptProfile | PromptProfileConfig | str | None = None,
     ) -> str:
-        """Assemble system prompt prefix.
+        """Render the full system-prompt prefix string for the active profile.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            tool_names (list[str] | None, optional): IN: tool names. Defaults to None. OUT: Consumed during execution.
-            sandbox_config (SandboxConfig | None, optional): IN: sandbox config. Defaults to None. OUT: Consumed during execution.
-            guardrails (list[str] | None, optional): IN: guardrails. Defaults to None. OUT: Consumed during execution.
-            enabled_skills (list[Skill] | None, optional): IN: enabled skills. Defaults to None. OUT: Consumed during execution.
-            profile (PromptProfile | PromptProfileConfig | str | None, optional): IN: profile. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        Builds a :class:`PromptContext` then concatenates identity, tooling,
+        safety, skill, workspace, sandbox, runtime, execution-policy, and
+        output-style blocks. Returns a single short identity line when the
+        ``NONE`` profile is selected.
+        """
 
         resolved_profile = _resolve_profile_config(profile) if profile is not None else self.default_profile_config
         if resolved_profile.profile == PromptProfile.NONE:
@@ -592,13 +475,7 @@ class PromptContextBuilder:
         return "\n\n".join(part for part in parts if part)
 
     def _build_identity_block(self, profile: PromptProfileConfig) -> str:
-        """Internal helper to build identity block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            profile (PromptProfileConfig): IN: profile. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Identity]`` block; sub-agents get a delegated variant."""
 
         if profile.profile == PromptProfile.FULL:
             lines = [
@@ -617,13 +494,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_tooling_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build tooling block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Tooling]`` block, including per-tool selection guidance."""
 
         tools_section = ctx.tools_section.rstrip() if ctx.tools_section else "[Available Tools]\n  - none"
         tools_section_lower = tools_section.lower()
@@ -683,13 +554,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_safety_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build safety block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Safety]`` block, merging guardrails and core safety rules."""
 
         lines = ["[Safety]", "Safety guidance:"]
         if ctx.guardrails_section:
@@ -707,13 +572,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_skill_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build skill block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the combined ``[Skills & Instructions]`` block."""
 
         if not ctx.skills_section and not ctx.enabled_skills_section:
             return ""
@@ -733,13 +592,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_workspace_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build workspace block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Workspace Context]`` block including bootstrap notes."""
 
         if not ctx.workspace_section and not ctx.bootstrap_section:
             return ""
@@ -758,13 +611,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_sandbox_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build sandbox block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Sandbox Runtime]`` block with the active sandbox rules."""
 
         if not ctx.sandbox_section:
             return ""
@@ -779,13 +626,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_runtime_block(self, ctx: PromptContext) -> str:
-        """Internal helper to build runtime block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            ctx (PromptContext): IN: ctx. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Runtime]`` block (runtime + datetime + reasoning sections)."""
 
         if not ctx.runtime_section and not ctx.datetime_section and not ctx.reasoning_section:
             return ""
@@ -799,13 +640,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_execution_policy_block(self, profile: PromptProfileConfig) -> str:
-        """Internal helper to build execution policy block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            profile (PromptProfileConfig): IN: profile. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Execution Policy]`` block, profile-aware."""
 
         if profile.profile == PromptProfile.FULL:
             lines = [
@@ -832,13 +667,7 @@ class PromptContextBuilder:
         return "\n".join(lines)
 
     def _build_output_style_block(self, profile: PromptProfileConfig) -> str:
-        """Internal helper to build output style block.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            profile (PromptProfileConfig): IN: profile. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render the ``[Output Style]`` block (only emitted for the FULL profile)."""
 
         if profile.profile != PromptProfile.FULL:
             return ""

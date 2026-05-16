@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Base module for Xerxes.
+"""Shared :class:`LLMConfig` and :class:`BaseLLM` interface.
 
-Exports:
-    - LLMConfig
-    - BaseLLM"""
+Every provider adapter implements this interface so the rest of
+Xerxes can stream completions, parse tool calls, and manage the
+underlying client lifecycle without caring which vendor backs the
+model. Sampling defaults live on :class:`LLMConfig`; per-call
+overrides pass through ``generate_completion`` kwargs.
+"""
 
 from __future__ import annotations
 
@@ -173,15 +176,13 @@ class BaseLLM(ABC):
         response: Any,
         agent: Any | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """Yield structured chunks from a streaming completion response.
+        """Translate a provider stream into normalised chunk dicts.
 
-        Args:
-            response: The raw streaming response from the provider.
-            agent: Optional agent context for the stream.
-
-        Yields:
-            Dictionaries containing "content", "buffered_content",
-            "function_calls", "tool_calls", "is_final", and other fields.
+        Each yielded dict carries at minimum ``content`` (the new text
+        delta), ``buffered_content`` (text-so-far), ``function_calls``
+        / ``tool_calls`` (typed tool call lists when present), and
+        ``is_final`` (``True`` on the terminating chunk). Provider
+        adapters may attach extra keys (e.g. ``usage``, ``thinking``).
         """
         pass
 
@@ -191,16 +192,7 @@ class BaseLLM(ABC):
         response: Any,
         agent: Any | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield structured chunks from a streaming completion response asynchronously.
-
-        Args:
-            response: The raw async streaming response from the provider.
-            agent: Optional agent context for the stream.
-
-        Yields:
-            Dictionaries containing "content", "buffered_content",
-            "function_calls", "tool_calls", "is_final", and other fields.
-        """
+        """Async variant of :meth:`stream_completion` with the same chunk shape."""
         pass
 
     def parse_tool_calls(self, raw_data: Any) -> list[dict[str, Any]]:
@@ -239,11 +231,11 @@ class BaseLLM(ABC):
             raise ValueError("top_p must be between 0 and 1")
 
     async def __aenter__(self):
-        """Enter the async context manager, returning self."""
+        """Return ``self`` so ``async with`` blocks bind the client."""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Exit the async context manager, closing the client."""
+        """Close the underlying HTTP client on context exit."""
         await self.close()
 
     @abstractmethod
@@ -315,6 +307,6 @@ class BaseLLM(ABC):
         }
 
     def __repr__(self) -> str:
-        """Return a human-readable representation of the LLM client."""
+        """Return ``Provider(model='...', temperature=N)``."""
         info = self.get_model_info()
         return f"{info['provider']}(model='{info['model']}', temperature={info['temperature']})"

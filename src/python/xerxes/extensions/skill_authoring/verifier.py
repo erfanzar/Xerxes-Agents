@@ -31,17 +31,12 @@ class VerificationStep:
     """A single assertion in a skill verification recipe.
 
     Attributes:
-        kind (str): IN: Step type (``call_count``, ``sequence_position``,
-            ``args_subset``, etc.). OUT: Determines evaluation logic.
-        tool_name (str): IN: Target tool. OUT: Used for sequence and args
-            checks.
-        position (int | None): IN: Expected index in the event list. OUT:
-            Used for positional checks.
-        args_required (dict[str, tp.Any]): IN: Required argument keys/values.
-            OUT: Checked during ``args_subset`` evaluation.
-        expected_count (int | None): IN: Expected number of successful calls.
-            OUT: Checked during ``call_count`` evaluation.
-        message (str): IN: Human-readable description. OUT: Stored.
+        kind: Step type (e.g. ``call_count``, ``sequence_position``, ``args_subset``).
+        tool_name: Target tool for sequence and args checks.
+        position: Expected index in the observed event list, when applicable.
+        args_required: Argument keys (and optional values) that must be present.
+        expected_count: Expected number of successful calls for ``call_count`` checks.
+        message: Human-readable description for logs and reports.
     """
 
     kind: str
@@ -57,12 +52,9 @@ class VerificationResult:
     """Outcome of verifying a candidate against a recipe.
 
     Attributes:
-        passed (bool): IN: Overall result. OUT: ``True`` if ``failed_steps``
-            is empty.
-        passed_steps (list[int]): IN: Empty initially. OUT: Indices of steps
-            that passed.
-        failed_steps (list[tuple[int, str]]): IN: Empty initially. OUT:
-            Indices and reasons for steps that failed.
+        passed: True when every step passed.
+        passed_steps: Indices of steps that passed.
+        failed_steps: ``(index, reason)`` pairs for steps that failed.
     """
 
     passed: bool
@@ -74,15 +66,7 @@ class SkillVerifier:
     """Generate and evaluate skill verification recipes."""
 
     def generate(self, candidate: SkillCandidate) -> list[VerificationStep]:
-        """Build a verification recipe from a successful tool sequence.
-
-        Args:
-            candidate (SkillCandidate): IN: Observed turn data. OUT: Successful
-                events are turned into steps.
-
-        Returns:
-            list[VerificationStep]: OUT: Recipe steps.
-        """
+        """Build a recipe from ``candidate.successful_events``."""
 
         steps: list[VerificationStep] = []
         successful = candidate.successful_events
@@ -119,17 +103,7 @@ class SkillVerifier:
         steps: list[VerificationStep],
         candidate: SkillCandidate,
     ) -> VerificationResult:
-        """Evaluate whether ``candidate`` satisfies every recipe step.
-
-        Args:
-            steps (list[VerificationStep]): IN: Recipe to evaluate. OUT:
-                Iterated and passed to ``_evaluate``.
-            candidate (SkillCandidate): IN: Observed turn to validate. OUT:
-                Successful events are extracted.
-
-        Returns:
-            VerificationResult: OUT: Aggregated pass/fail result.
-        """
+        """Evaluate every ``step`` against ``candidate.successful_events``."""
 
         observed = candidate.successful_events
         passed: list[int] = []
@@ -147,18 +121,7 @@ class SkillVerifier:
         step: VerificationStep,
         observed: list[ToolCallEvent],
     ) -> tuple[bool, str]:
-        """Check a single verification step against observed events.
-
-        Args:
-            step (VerificationStep): IN: Step to evaluate. OUT: ``kind``
-                selects the logic branch.
-            observed (list[ToolCallEvent]): IN: Successful events from the
-                candidate. OUT: Compared against the step.
-
-        Returns:
-            tuple[bool, str]: OUT: ``(True, "")`` on pass, or
-            ``(False, reason)`` on failure.
-        """
+        """Return ``(True, "")`` if ``step`` passes against ``observed``, else ``(False, reason)``."""
 
         if step.kind == "call_count":
             if step.expected_count is not None and len(observed) != step.expected_count:

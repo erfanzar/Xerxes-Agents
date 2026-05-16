@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Base module for Xerxes.
+"""Core memory primitives shared by every tier.
 
-Exports:
-    - MemoryItem
-    - Memory"""
+Defines ``MemoryItem`` — the unit of recall persisted across tiers —
+and ``Memory``, the abstract base class implemented by short-term,
+long-term, entity, contextual, and user-scoped memory stores."""
 
 from abc import ABC, abstractmethod
 from collections.abc import MutableSequence
@@ -27,22 +27,26 @@ from uuid import uuid4
 
 @dataclass
 class MemoryItem:
-    """Memory item.
+    """A single recallable record stored in any memory tier.
 
     Attributes:
-        content (str): content.
-        memory_type (str): memory type.
-        timestamp (datetime): timestamp.
-        metadata (dict[str, Any]): metadata.
-        agent_id (str | None): agent id.
-        task_id (str | None): task id.
-        conversation_id (str | None): conversation id.
-        user_id (str | None): user id.
-        relevance_score (float): relevance score.
-        access_count (int): access count.
-        last_accessed (datetime | None): last accessed.
-        embedding (list[float] | None): embedding.
-        memory_id (str): memory id."""
+        content: Free-form text payload (the recallable substance).
+        memory_type: Tier or category label (e.g. ``"short_term"``,
+            ``"long_term"``, ``"entity"``, ``"turn"``).
+        timestamp: Wall-clock creation time.
+        metadata: Arbitrary structured annotations (importance, tags,
+            source, context, etc.).
+        agent_id: Identifier of the agent that produced the memory.
+        task_id: Optional task identifier tying the item to work-in-flight.
+        conversation_id: Identifier of the conversation it belongs to.
+        user_id: Identifier of the user the memory belongs to.
+        relevance_score: Mutable score set by retrievers/searchers; not
+            persisted semantics, just last-computed relevance.
+        access_count: How many times the item has been retrieved; used
+            for promotion and recency-aware eviction.
+        last_accessed: Wall-clock time of the most recent retrieval.
+        embedding: Optional cached dense vector for semantic search.
+        memory_id: Stable UUID assigned on creation."""
 
     content: str
     memory_type: str = "general"
@@ -59,12 +63,10 @@ class MemoryItem:
     memory_id: str = field(default_factory=lambda: str(uuid4()))
 
     def to_dict(self) -> dict[str, Any]:
-        """To dict.
+        """Serialise the item to a JSON-safe dict for persistence.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        Timestamps are emitted as ISO 8601 strings. The embedding is
+        intentionally omitted — embeddings live in vector storage."""
 
         return {
             "memory_id": self.memory_id,
@@ -83,13 +85,10 @@ class MemoryItem:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemoryItem":
-        """From dict.
+        """Reconstruct an item from its ``to_dict`` form.
 
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            data (dict[str, Any]): IN: data. OUT: Consumed during execution.
-        Returns:
-            'MemoryItem': OUT: Result of the operation."""
+        Parses ISO timestamp fields back into ``datetime`` objects.
+        Unknown fields are passed through to the dataclass constructor."""
 
         data = data.copy()
         if "timestamp" in data and isinstance(data["timestamp"], str):
@@ -100,10 +99,14 @@ class MemoryItem:
 
 
 class Memory(ABC):
-    """Memory.
+    """Abstract memory tier with a shared in-memory item buffer.
 
-    Inherits from: ABC
-    """
+    Concrete subclasses (``ShortTermMemory``, ``LongTermMemory``,
+    ``EntityMemory``, ``ContextualMemory``) implement ``save``,
+    ``search``, ``retrieve``, ``update``, ``delete``, and ``clear``.
+    They share ``_items`` (the ordered buffer) and ``_index`` (memory_id
+    lookup table) so the base class can implement context formatting
+    and statistics."""
 
     def __init__(
         self,
@@ -111,13 +114,14 @@ class Memory(ABC):
         max_items: int | None = None,
         enable_embeddings: bool = False,
     ) -> None:
-        """Initialize the instance.
+        """Initialise common tier state.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
-            max_items (int | None, optional): IN: max items. Defaults to None. OUT: Consumed during execution.
-            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to False. OUT: Consumed during execution."""
+            storage: Optional backing store (``MemoryStorage`` subclass)
+                used by subclasses for durable persistence.
+            max_items: Soft cap on stored items; ``None`` means unbounded.
+            enable_embeddings: Whether the tier should compute/store
+                embeddings for semantic search."""
 
         self.storage = storage
         self.max_items = max_items
@@ -127,30 +131,26 @@ class Memory(ABC):
 
     @abstractmethod
     def save(self, content: str, metadata: dict[str, Any] | None = None, **kwargs) -> MemoryItem:
-        """Save.
+        """Persist a new memory item and return it.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            MemoryItem: OUT: Result of the operation."""
+            content: The text payload to remember.
+            metadata: Optional structured annotations to attach.
+            **kwargs: Tier-specific keyword arguments (agent_id,
+                user_id, importance, etc.)."""
 
         pass
 
     @abstractmethod
     def search(self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, **kwargs) -> list[MemoryItem]:
-        """Search.
+        """Search the tier for items matching ``query``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+            query: Free-form search string.
+            limit: Maximum number of results.
+            filters: Field-level filters applied before scoring.
+            **kwargs: Tier-specific options (e.g. ``use_semantic``,
+                ``min_relevance``, ``entity_filter``)."""
 
         pass
 
@@ -161,62 +161,44 @@ class Memory(ABC):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve.
+        """Fetch one item by id or a filtered list.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+        When ``memory_id`` is given, returns that item or ``None``.
+        Otherwise returns up to ``limit`` items matching ``filters``."""
 
         pass
 
     @abstractmethod
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update.
+        """Apply field-level updates to an existing item.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str): IN: memory id. OUT: Consumed during execution.
-            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Returns True when the item exists and was updated, False
+        otherwise."""
 
         pass
 
     @abstractmethod
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete.
+        """Delete a specific item or every item matching ``filters``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        Returns the number of items removed."""
 
         pass
 
     @abstractmethod
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Drop every item from this tier (including durable storage)."""
 
         pass
 
     def get_context(self, limit: int = 10, format_type: str = "text") -> str:
-        """Retrieve the context.
+        """Render the most recent ``limit`` items as a context block.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            format_type (str, optional): IN: format type. Defaults to 'text'. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            limit: Number of trailing items to include.
+            format_type: ``"text"`` (default, agent-tagged lines),
+                ``"markdown"`` (timestamped bullet list), or ``"json"``
+                (pretty-printed array of ``to_dict`` outputs)."""
 
         items = self._items[-limit:] if len(self._items) > limit else self._items
 
@@ -241,12 +223,7 @@ class Memory(ABC):
             return "\n".join(lines)
 
     def get_statistics(self) -> dict[str, Any]:
-        """Retrieve the statistics.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Summarise tier contents — counts per type, unique agents/users/conversations."""
 
         stats: dict[str, Any] = {
             "total_items": len(self._items),
@@ -275,21 +252,11 @@ class Memory(ABC):
         return stats
 
     def __len__(self) -> int:
-        """Dunder method for len.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Return the number of items currently held in the tier."""
 
         return len(self._items)
 
     def __repr__(self) -> str:
-        """Dunder method for repr.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return a debug repr including item count and capacity."""
 
         return f"{self.__class__.__name__}(items={len(self._items)}, max={self.max_items})"

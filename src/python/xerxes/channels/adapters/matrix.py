@@ -13,7 +13,9 @@
 # limitations under the License.
 """Matrix channel adapter.
 
-Connects to a Matrix homeserver for sending and receiving room messages.
+Talks to a Matrix homeserver using client-server API v3: parses inbound
+room events and sends ``m.text`` messages via PUT with a per-call
+transaction id (millisecond epoch) so retries are idempotent.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class MatrixChannel(WebhookChannel):
-    """Channel implementation for Matrix."""
+    """Matrix client-server API v3 adapter."""
 
     name = "matrix"
 
@@ -37,15 +39,14 @@ class MatrixChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Matrix channel.
+        """Build the channel.
 
         Args:
-            homeserver_url (str): IN: base URL of the Matrix homeserver.
-                OUT: stored with trailing slash removed.
-            access_token (str): IN: Matrix access token for the bot user.
-                OUT: stored for authorizing API requests.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            homeserver_url: Base URL of the homeserver; trailing ``/`` is
+                stripped.
+            access_token: Access token of the bot user.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.homeserver_url = homeserver_url.rstrip("/")
@@ -53,15 +54,18 @@ class MatrixChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Matrix webhook payload into ``ChannelMessage``.
+        """Translate a Matrix webhook payload into ``ChannelMessage`` instances.
+
+        Only ``m.room.message`` events are surfaced — joins, redactions,
+        receipts, etc. are ignored. Accepts either a payload with a top-level
+        ``events`` list or a single bare event.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages. Only
-            ``m.room.message`` events are processed.
+            Parsed ``m.room.message`` events as ``ChannelMessage``.
         """
         data = parse_json_body(body)
         events = data.get("events") or [data]
@@ -83,11 +87,14 @@ class MatrixChannel(WebhookChannel):
         return out
 
     async def _send_outbound(self, message):
-        """Send a text message to a Matrix room.
+        """Send one ``m.text`` event to ``message.room_id``.
+
+        Uses a unique transaction id so a retried PUT idempotently lands
+        the same event (Matrix requires per-call transaction ids).
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` is the
-                target room and ``text`` the message body.
+            message: Outbound message. ``room_id`` is the target room and
+                ``text`` the body.
         """
         txn = f"xerxes-{int(time.time() * 1000)}"
         url = f"{self.homeserver_url}/_matrix/client/v3/rooms/{message.room_id}/send/m.room.message/{txn}"

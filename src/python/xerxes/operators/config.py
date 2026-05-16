@@ -11,10 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Config module for Xerxes.
+"""Runtime configuration and tool registries for the operator subsystem.
 
-Exports:
-    - OperatorRuntimeConfig"""
+Provides the canonical tool-name sets that distinguish *safe* helpers from
+*high-power* operator capabilities (shell exec, patch application, subagent
+spawning, browser control) plus :class:`OperatorRuntimeConfig`, the
+session-scoped dataclass that controls which operator features are wired
+into the streaming runtime.
+"""
 
 from __future__ import annotations
 
@@ -58,19 +62,33 @@ ALL_OPERATOR_TOOLS: frozenset[str] = SAFE_OPERATOR_TOOLS | HIGH_POWER_OPERATOR_T
 
 @dataclass
 class OperatorRuntimeConfig:
-    """Operator runtime config.
+    """Session-scoped knobs that govern operator behaviour.
+
+    A single instance is owned by the daemon-side session and forwarded to
+    every operator manager during initialisation. Values flow into PTY
+    bookkeeping, browser provider construction, and subagent defaults.
 
     Attributes:
-        enabled (bool): enabled.
-        power_tools_enabled (bool): power tools enabled.
-        browser_headless (bool): browser headless.
-        browser_screenshot_dir (str | None): browser screenshot dir.
-        shell_default_workdir (str | None): shell default workdir.
-        shell_default_yield_ms (int): shell default yield ms.
-        shell_default_max_output_chars (int): shell default max output chars.
-        subagent_default_profile (PromptProfile | str): subagent default profile.
-        subagent_default_timeout_ms (int): subagent default timeout ms.
-        allowed_tool_names (set[str]): allowed tool names."""
+        enabled: Master switch — when ``False`` the operator subsystem stays
+            dormant and only the bare conversational tools are registered.
+        power_tools_enabled: Permit destructive / privileged tools such as
+            ``exec_command``, ``apply_patch`` and ``spawn_agent``.
+        browser_headless: Run the browser provider without a visible window.
+        browser_screenshot_dir: Directory for browser screenshots; ``None``
+            falls back to the provider default.
+        shell_default_workdir: Default working directory injected into new
+            PTY sessions when the caller omits one.
+        shell_default_yield_ms: Default soft deadline (ms) used by
+            ``exec_command`` before yielding partial output.
+        shell_default_max_output_chars: Default cap on captured shell output
+            per yield to avoid flooding the wire.
+        subagent_default_profile: Prompt profile applied to spawned
+            subagents that don't request a specific profile.
+        subagent_default_timeout_ms: Default timeout (ms) before a spawned
+            subagent is considered unresponsive.
+        allowed_tool_names: Effective allow-list of operator tools. The
+            streaming runtime intersects this with the requested tool set.
+    """
 
     enabled: bool = False
     power_tools_enabled: bool = True

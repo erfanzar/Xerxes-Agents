@@ -1,28 +1,35 @@
 # Xerxes
 
+> A multi-agent orchestration framework for building, running, and serving LLM-powered agents.
+
+```text
+ ██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗
+ ╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝
+  ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗
+  ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║
+ ██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║
+ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝
+```
+
 A coding agent that runs in your terminal. Pure-Python runtime with a `prompt_toolkit` TUI.
 
 ```text
- ██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗  ┌────────────────────────────┐
- ╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝  │ >_ Xerxes (v0.2.0)         │
-  ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗  ├────────────────────────────┤
-  ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║  │ model:  claude-opus-4-7    │
- ██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║  │ dir:    ~/Projects/myapp   │
- ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝  └────────────────────────────┘
+› xerxes
 
+╭────────────────────────────────────────────────────────╮
+│ Xerxes (v0.2.0)                                       │
+├────────────────────────────────────────────────────────┤
+│ model:  claude-opus-4-7                               │
+│ dir:    ~/Projects/myapp                               │
+│ session: a1b2c3d4                                     │
+╰────────────────────────────────────────────────────────╯
 
 › explain this codebase
 
 This is a Python web application using FastAPI...
 
 ✓ ReadFile README.md ✓
-  └ # MyApp - A REST API for...
-
 ✓ ExecuteShell find src -name "*.py" | head -20 ✓
-  └ src/main.py
-    src/routes/users.py
-    src/models/user.py
-    … +17 lines
 ```
 
 ## Install
@@ -82,7 +89,7 @@ Profile 'my-server' saved and activated. Model: llama3-8b
 
 Profiles are saved in `~/.xerxes/profiles.json` (override with `XERXES_HOME`) and persist across sessions. You can have multiple profiles and switch between them with `/provider`.
 
-### CLI flags
+### CLI Flags
 
 ```bash
 # Use a specific provider directly (skips profile)
@@ -96,6 +103,9 @@ xerxes --python python3.12
 
 # Auto-approve all tool calls
 xerxes --permission-mode accept-all
+
+# Resume a session
+xerxes -r a1b2c3d4
 ```
 
 ## Architecture
@@ -104,50 +114,63 @@ xerxes --permission-mode accept-all
 ┌─────────────────────────────────────────────────────┐
 │                Xerxes (single Python process)       │
 ├─────────────────────┬───────────────────────────────┤
-│   TUI layer         │   Runtime layer               │
-│   (prompt_toolkit)  │                               │
+│   TUI layer        │   Runtime layer               │
+│   (prompt_toolkit) │                               │
 │                     │                               │
 │ • Inline viewport   │ • Event-driven agent loop     │
 │ • Markdown render   │ • Tool execution + sandbox    │
 │ • Input handling    │ • LLM streaming               │
-│ • Slash commands    │ • Provider registry           │
+│ • Slash commands    │ • Provider registry            │
 │ • Permission prompts│ • Profile management          │
-│ • Skill registry    │ • YAML agent specs (Kimi-style)│
+│ • Skill registry    │ • YAML agent specs            │
 └─────────────────────┴───────────────────────────────┘
 ```
 
 Everything runs in one process — no JS, no subprocess bridge. The agent loop streams events that the TUI renders inline.
 
+## Features Overview
+
+| Capability | Details |
+|-----------|---------|
+| **LLM Providers** | OpenAI, Anthropic, Gemini, DeepSeek, Qwen, Kimi, Zhipu, MiniMax, Ollama, LM Studio |
+| **Tools** | 150+ built-in tools across 18 modules |
+| **Memory** | Short-term, long-term, entity, user memory with vector embeddings |
+| **Skills** | 60+ skill bundles (markdown instruction sets) |
+| **Multi-Agent** | Cortex orchestration with 5 process types |
+| **Channels** | 14 chat platform adapters |
+| **Security** | Sandboxed execution, policy engine, audit logging |
+| **Interfaces** | CLI TUI, FastAPI server, WebSocket daemon, Python SDK |
+
 ## Slash Commands
 
-| Command         | Description                                            |
-| --------------- | ------------------------------------------------------ |
-| `/help`         | Show all commands                                      |
-| `/provider`     | Setup or switch provider profile                       |
-| `/model NAME`   | Switch model                                           |
-| `/sampling`     | View/set sampling params (temperature, top_p, etc.)    |
-| `/compact`      | Summarize conversation using LLM to free context       |
-| `/plan`         | Enter plan mode (read-only research before acting)     |
-| `/agents`       | List / select YAML-defined sub-agents                  |
-| `/skills`       | List available skills                                  |
-| `/skill NAME`   | Invoke a skill by name                                 |
-| `/skill-create` | Create a new skill from current session                |
-| `/tools`        | List available tools                                   |
-| `/cost`         | Show token usage and cost                              |
-| `/context`      | Show session info                                      |
-| `/clear`        | Clear conversation                                     |
-| `/history`      | Show / search conversation history                     |
-| `/config`       | Inspect or edit runtime config                         |
-| `/permissions`  | View/set permission mode                               |
-| `/yolo`         | Toggle accept-all permission mode                      |
-| `/thinking`     | Toggle thinking display                                |
-| `/verbose`      | Toggle verbose event logging                           |
-| `/debug`        | Toggle debug output                                    |
-| `/btw`          | Inject side-channel context without breaking the turn  |
-| `/steer`        | Course-correct the agent mid-stream                    |
-| `/cancel`       | Cancel the in-flight tool call                         |
-| `/cancel-all`   | Cancel all queued tool calls (double-Esc shortcut)     |
-| `/exit`         | Exit                                                   |
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/provider` | Setup or switch provider profile |
+| `/model NAME` | Switch model |
+| `/sampling` | View/set sampling params (temperature, top_p, etc.) |
+| `/compact` | Summarize conversation using LLM to free context |
+| `/plan` | Enter plan mode (read-only research before acting) |
+| `/agents` | List / select YAML-defined sub-agents |
+| `/skills` | List available skills |
+| `/skill NAME` | Invoke a skill by name |
+| `/skill-create` | Create a new skill from current session |
+| `/tools` | List available tools |
+| `/cost` | Show token usage and cost |
+| `/context` | Show session info |
+| `/clear` | Clear conversation |
+| `/history` | Show / search conversation history |
+| `/config` | Inspect or edit runtime config |
+| `/permissions` | View/set permission mode |
+| `/yolo` | Toggle accept-all permission mode |
+| `/thinking` | Toggle thinking display |
+| `/verbose` | Toggle verbose event logging |
+| `/debug` | Toggle debug output |
+| `/btw` | Inject side-channel context without breaking the turn |
+| `/steer` | Course-correct the agent mid-stream |
+| `/cancel` | Cancel the in-flight tool call |
+| `/cancel-all` | Cancel all queued tool calls (double-Esc shortcut) |
+| `/exit` | Exit |
 
 ### Sampling
 
@@ -163,46 +186,48 @@ Everything runs in one process — no JS, no subprocess bridge. The agent loop s
 
 Xerxes works with any OpenAI-compatible API. Built-in provider detection for:
 
-| Provider              | Models                             | Env Variable        |
-| --------------------- | ---------------------------------- | ------------------- |
-| OpenAI                | gpt-4o, o3, o1                     | `OPENAI_API_KEY`    |
-| Anthropic             | claude-opus-4-7, claude-sonnet-4-6 | `ANTHROPIC_API_KEY` |
-| Google                | gemini-2.5-pro, gemini-2.0-flash   | `GEMINI_API_KEY`    |
-| DeepSeek              | deepseek-chat, deepseek-reasoner   | `DEEPSEEK_API_KEY`  |
-| Qwen                  | qwen-max, qwq-32b                  | `DASHSCOPE_API_KEY` |
-| MiniMax               | minimax-text-01                    | `MINIMAX_API_KEY`   |
-| Ollama                | llama3, mistral, phi4              | (local, no key)     |
-| LM Studio             | any loaded model                   | (local, no key)     |
-| Any OpenAI-compatible | custom                             | via `--base-url`    |
+| Provider | Models | Env Variable |
+|----------|--------|--------------|
+| OpenAI | gpt-4o, o3, o1 | `OPENAI_API_KEY` |
+| Anthropic | claude-opus-4-7, claude-sonnet-4-6 | `ANTHROPIC_API_KEY` |
+| Google | gemini-2.5-pro, gemini-2.0-flash | `GEMINI_API_KEY` |
+| DeepSeek | deepseek-chat, deepseek-reasoner | `DEEPSEEK_API_KEY` |
+| Qwen | qwen-max, qwq-32b | `DASHSCOPE_API_KEY` |
+| Kimi | moonshot-v1-128k, kimi-latest | `MOONSHOT_API_KEY` |
+| Zhipu | glm-4-plus, glm-4 | `ZHIPU_API_KEY` |
+| MiniMax | minimax-text-01 | `MINIMAX_API_KEY` |
+| Ollama | llama3, mistral, phi4 | (local, no key) |
+| LM Studio | any loaded model | (local, no key) |
+| Any OpenAI-compatible | custom | via `--base-url` |
 
 ## Tools
 
-130+ built-in tools the agent can use, grouped by capability domain:
+150+ built-in tools the agent can use, grouped by capability domain:
 
-| Category        | Tools                                                                                                                                              |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **File system** | ReadFile, WriteFile, AppendFile, FileEditTool, GlobTool, GrepTool, ListDir, TempFileManager                                                        |
-| **Execution**   | ExecuteShell, PythonExecution, ProcessManager                                                                                                      |
-| **Web**         | DuckDuckGoSearch, GoogleSearch, WebScraper, APIClient, RSSReader, URLAnalyzer                                                                      |
-| **Browser**     | Playwright-driven page navigation, DOM inspection, screenshotting                                                                                  |
-| **Data**        | JSONProcessor, CSVProcessor, TextProcessor, DateTimeProcessor                                                                                      |
-| **Math**        | Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter                                                                |
-| **AI/ML**       | TextEmbedding, SimilaritySearch, Classifier, Summarizer, NERTagger                                                                                 |
-| **Notebook**    | Jupyter live-kernel cell exec, notebook read/edit                                                                                                  |
-| **LSP**         | Language-server-driven definitions, references, diagnostics                                                                                        |
-| **Agent**       | SpawnAgents, TaskCreate, TaskList, TaskGet, TaskOutput, SendMessage, AgentTool                                                                     |
-| **Workflow**    | Plan/ExitPlan, TodoWrite, AskUserQuestion                                                                                                          |
-| **Memory**      | save_memory, search_memory, delete_memory, get_memory_statistics, consolidate_agent_memories                                                       |
-| **MCP**         | ListMcpResourcesTool, ReadMcpResourceTool                                                                                                          |
-| **Remote**      | RemoteTrigger, PushNotification, webhook subscription                                                                                              |
-| **Media**       | image / audio / video helpers                                                                                                                      |
-| **System**      | Home Assistant, system info, env inspection                                                                                                        |
-| **Meta**        | session_search, skill_view, skills_list, skill_manage, configure_mixture_of_agents                                                                 |
-| **RL**          | rl_list_environments, rl_select_environment, rl_start_training, rl_stop_training, rl_check_status, rl_get_results, rl_list_runs, rl_test_inference |
+| Category | Tools |
+|----------|-------|
+| **File system** | ReadFile, WriteFile, AppendFile, FileEditTool, GlobTool, GrepTool, ListDir, TempFileManager |
+| **Execution** | ExecuteShell, PythonExecution, ProcessManager |
+| **Web** | DuckDuckGoSearch, GoogleSearch, WebScraper, APIClient, RSSReader, URLAnalyzer |
+| **Browser** | Playwright-driven page navigation, DOM inspection, screenshotting |
+| **Data** | JSONProcessor, CSVProcessor, TextProcessor, DateTimeProcessor |
+| **Math** | Calculator, StatisticalAnalyzer, MathematicalFunctions, NumberTheory, UnitConverter |
+| **AI/ML** | TextEmbedding, SimilaritySearch, Classifier, Summarizer, NERTagger |
+| **Notebook** | Jupyter live-kernel cell exec, notebook read/edit |
+| **LSP** | Language-server-driven definitions, references, diagnostics |
+| **Agent** | SpawnAgents, TaskCreate, TaskList, TaskGet, SendMessage, AgentTool |
+| **Workflow** | Plan/ExitPlan, TodoWrite, AskUserQuestion |
+| **Memory** | save_memory, search_memory, delete_memory, consolidate_agent_memories |
+| **MCP** | ListMcpResourcesTool, ReadMcpResourceTool |
+| **Remote** | RemoteTrigger, PushNotification, webhook subscription |
+| **Media** | image / audio / video helpers |
+| **System** | Home Assistant, system info, env inspection |
+| **Meta** | session_search, skill_view, skills_list, configure_mixture_of_agents |
+| **RL** | rl_list_environments, rl_start_training, rl_check_status, rl_get_results |
 
 Run `/tools` in the TUI for the full live list.
 
-### Permission modes
+### Permission Modes
 
 - **auto** (default) — read-only tools auto-approved, write/execute tools prompt for permission
 - **accept-all** — approve everything (use with trusted models)
@@ -210,19 +235,19 @@ Run `/tools` in the TUI for the full live list.
 
 ## Skills
 
-Skills are markdown instruction sets the agent loads into context when invoked via `/skill NAME`. Xerxes ships ~50 skill bundles covering software development, research, GitHub, productivity, ML/AI training, media, and more.
+Skills are markdown instruction sets the agent loads into context when invoked via `/skill NAME`. Xerxes ships 60+ skill bundles covering software development, research, GitHub, productivity, ML/AI training, media, and more.
 
-| Category            | Skills                                                                                                                                                                                    |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Software Dev**    | plan, test-driven-development, systematic-debugging, subagent-driven-development, requesting-code-review, writing-plans                                                                   |
-| **Research**        | arxiv, blogwatcher, dspy, llm-wiki, polymarket, research-paper-writing, autoresearch (debug / fix / learn / plan / predict / scenario / security / ship)                                  |
-| **GitHub**          | codebase-inspection, github-auth, github-code-review, github-issues, github-pr-workflow, github-repo-management                                                                           |
-| **ML / Training**   | axolotl, grpo-rl-training, peft-fine-tuning, pytorch-fsdp, fine-tuning-with-trl, unsloth, evaluating-llms-harness, weights-and-biases, huggingface-hub, modal-serverless-gpu              |
-| **Inference**       | vllm, sglang, tgi, llamacpp, mlx                                                                                                                                                          |
-| **Productivity**    | notion, google-workspace, linear, nano-pdf, ocr-and-documents, powerpoint                                                                                                                 |
-| **Creative / Media**| ascii-art, ascii-video, excalidraw, architecture-diagram, manim-video, p5js, popular-web-designs, songwriting-and-ai-music                                                                |
-| **Cloud**           | aws, gcp, modal, runpod                                                                                                                                                                   |
-| **Other**           | deepscan, obsidian, youtube-content, gif-search, jupyter-live-kernel, webhook-subscriptions, pokemon-player, minecraft-modpack-server                                                     |
+| Category | Skills |
+|----------|--------|
+| **Software Dev** | plan, test-driven-development, systematic-debugging, subagent-driven-development, requesting-code-review, writing-plans |
+| **Research** | arxiv, blogwatcher, dspy, llm-wiki, polymarket, research-paper-writing, autoresearch (debug/fix/learn/plan/predict/scenario/security/ship) |
+| **GitHub** | codebase-inspection, github-auth, github-code-review, github-issues, github-pr-workflow, github-repo-management |
+| **ML / Training** | axolotl, grpo-rl-training, peft-fine-tuning, pytorch-fsdp, fine-tuning-with-trl, unsloth, evaluating-llms-harness, weights-and-biases, huggingface-hub, modal-serverless-gpu |
+| **Inference** | vllm, sglang, tgi, llamacpp, mlx |
+| **Productivity** | notion, google-workspace, linear, nano-pdf, ocr-and-documents, powerpoint |
+| **Creative / Media** | ascii-art, ascii-video, excalidraw, architecture-diagram, manim-video, p5js, popular-web-designs, songwriting-and-ai-music |
+| **Cloud** | aws, gcp, modal, runpod |
+| **Other** | deepscan, obsidian, youtube-content, gif-search, jupyter-live-kernel, webhook-subscriptions, pokemon-player, minecraft-modpack-server |
 
 Create your own with `/skill-create`.
 
@@ -241,20 +266,105 @@ system_prompt_file: system.md
 
 `agentspec.py` deep-merges the parent and child, so child specs override only the fields they need. Sub-agents are spawned via the `SpawnAgents` tool or selected interactively with `/agents`. Curated tool sets keep each sub-agent focused.
 
-## Keyboard Shortcuts
+## Memory Architecture
 
-| Key       | Action                     |
-| --------- | -------------------------- |
-| Enter     | Submit query               |
-| Up/Down   | Input history              |
-| Ctrl+C    | Cancel streaming / quit    |
-| Esc Esc   | Cancel-all (queued tools)  |
-| Ctrl+W    | Delete word                |
-| Ctrl+U    | Clear line                 |
-| Ctrl+A/E  | Home / End                 |
-| Esc       | Cancel provider setup      |
-| Tab       | Autocomplete slash command |
-| y/n       | Approve/deny permission    |
+Xerxes implements a four-tier memory system:
+
+| Type | Purpose | Storage |
+|------|---------|---------|
+| **ShortTermMemory** | Bounded deque of recent interactions | In-memory |
+| **LongTermMemory** | Persistent, searchable history | SQLite |
+| **EntityMemory** | Graph-based entity relationships | SQLite |
+| **UserMemory** | Per-user preferences and context | SQLite |
+
+Features:
+- SQLite-backed vector storage with hybrid retrieval (cosine + BM25 + recency)
+- Multiple embedder options: SentenceTransformer, OpenAI, Ollama
+- ContextualMemory with intelligent promotion threshold
+- Automatic memory consolidation
+
+## Cortex — Multi-Agent Orchestration
+
+```python
+from xerxes import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
+
+llm = create_llm("openai", api_key="sk-...")
+
+researcher = CortexAgent(
+    role="Researcher",
+    goal="Find information",
+    llm=llm
+)
+writer = CortexAgent(
+    role="Writer",
+    goal="Write reports",
+    llm=llm
+)
+
+cortex = Cortex(
+    agents=[researcher, writer],
+    tasks=[
+        CortexTask(description="Research AI agents", agent=researcher),
+        CortexTask(description="Write a report", agent=writer),
+    ],
+    process=ProcessType.SEQUENTIAL,
+)
+
+result = cortex.kickoff()
+```
+
+### Process Types
+
+| ProcessType | Description |
+|-------------|-------------|
+| `SEQUENTIAL` | Tasks run one after another, context passed forward |
+| `PARALLEL` | Tasks run concurrently with ThreadPoolExecutor |
+| `HIERARCHICAL` | Manager agent delegates to worker agents with review |
+| `CONSENSUS` | All agents contribute, lead synthesizes |
+| `PLANNED` | LLM planner builds a DAG, executes in order |
+
+`DynamicCortex` and `CortexPlanner` add runtime task generation and explicit execution planning.
+
+## Channels — Multi-Platform Integration
+
+Xerxes ships adapters for 14 chat platforms:
+
+```
+┌─────────┐ ┌──────────┐ ┌─────────┐ ┌────────┐ ┌─────────┐
+│  Slack  │ │ Telegram │ │Discord  │ │ Email  │ │ Matrix  │
+└─────────┘ └──────────┘ └─────────┘ └────────┘ └─────────┘
+┌──────────┐ ┌──────────┐ ┌────────┐ ┌────────┐ ┌──────────┐
+│ WhatsApp │ │  Signal  │ │ Feishu  │ │ DingTalk│ │ WeCom   │
+└──────────┘ └──────────┘ └────────┘ └────────┘ └──────────┘
+┌────────────┐ ┌────────────┐ ┌────────────┐
+│ Home Assistant│ │ Mattermost │ │ BlueBubbles │
+└────────────┘ └────────────┘ └────────────┘
+```
+
+All channels use a unified `ChannelMessage` model with `IdentityResolver` for cross-platform identity management.
+
+## Security & Sandboxing
+
+Xerxes implements defense-in-depth:
+
+- **Sandbox isolation**: Docker or subprocess backends for untrusted tool execution
+- **Pickle escape prevention**: JSON for child→parent IPC (never pickle.loads from child)
+- **Policy engine**: Per-agent policy overrides and tool allowlisting
+- **Audit logging**: JSONL and OpenTelemetry exporters for compliance
+- **Prompt scanner**: Security scanning for skill files
+
+## API Server
+
+An OpenAI-compatible FastAPI server fronts both the standard agent loop and the Cortex orchestrator:
+
+```python
+from xerxes.api_server import XerxesAPIServer
+
+server = XerxesAPIServer()
+server.run(host="0.0.0.0", port=8000)
+# POST /v1/chat/completions
+# GET  /v1/models
+```
 
 ## Python SDK
 
@@ -283,41 +393,18 @@ for event in run_agent_loop(
             print(f"[done] {r[:80]}")
 ```
 
-### Cortex — Multi-Agent Orchestration
+### Event Types
 
 ```python
-from xerxes import Cortex, CortexAgent, CortexTask, ProcessType, create_llm
-
-llm = create_llm("openai", api_key="sk-...")
-
-researcher = CortexAgent(role="Researcher", goal="Find information", llm=llm)
-writer = CortexAgent(role="Writer", goal="Write reports", llm=llm)
-
-cortex = Cortex(
-    agents=[researcher, writer],
-    tasks=[
-        CortexTask(description="Research AI agents", agent=researcher),
-        CortexTask(description="Write a report", agent=writer),
-    ],
-    process=ProcessType.SEQUENTIAL,
+from xerxes.streaming.events import (
+    TextChunk,        # LLM text output
+    ThinkingChunk,    # Model reasoning (think tags)
+    ToolStart,        # Tool execution begins
+    ToolEnd,          # Tool execution completes
+    PermissionRequest, # User approval needed
+    TurnDone,         # Turn complete
+    Error,            # Something went wrong
 )
-
-result = cortex.kickoff()
-```
-
-`DynamicCortex` and `CortexPlanner` add runtime task generation and explicit execution planning on top of the static `Cortex` form.
-
-### API Server
-
-An OpenAI-compatible FastAPI server fronts both the standard agent loop and the Cortex orchestrator:
-
-```python
-from xerxes.api_server import XerxesAPIServer
-
-server = XerxesAPIServer()
-server.run(host="0.0.0.0", port=8000)
-# POST /v1/chat/completions
-# GET  /v1/models
 ```
 
 ## Examples
@@ -335,23 +422,34 @@ See [examples/](examples/):
 ```text
 src/python/xerxes/
 ├── __main__.py              # CLI entry point
+├── xerxes.py                # Core Xerxes class
 ├── tui/                     # prompt_toolkit TUI (app, engine, prompt, console, blocks)
-├── bridge/                  # Provider profiles + FastAPI completion server
-├── streaming/               # Event-driven agent loop
-├── tools/                   # 130+ agent tools
-├── llms/                    # LLM provider registry
-├── runtime/                 # Bootstrap, config, execution
-├── context/                 # Token counting, compaction
+├── bridge/                  # Provider profiles + JSON-RPC bridge server
+├── streaming/               # Event-driven agent loop (events, loop, messages)
+├── tools/                   # 150+ agent tools (18 modules)
+├── llms/                    # LLM provider registry + implementations
+├── cortex/                  # Multi-agent orchestration
+│   ├── agents/              # CortexAgent, UniversalAgent
+│   ├── core/                # Enums, templates, utilities
+│   └── orchestration/       # Cortex, DynamicCortex, CortexPlanner
+├── memory/                  # Memory backends (short/long/entity/user/contextual)
+├── runtime/                 # Bootstrap, config, execution, session, profiles
+├── context/                 # Token counting, compaction strategies
 ├── agents/                  # YAML agent specs + subagent manager
-│   └── default/             # Built-in agent.yaml, coder.yaml, planner.yaml, researcher.yaml
-├── cortex/                  # Multi-agent orchestration (agents/, core/, orchestration/)
-├── skills/                  # ~50 skill bundles
-├── memory/                  # Memory backends
-├── security/                # Sandbox, policies
+│   └── default/             # Built-in agent.yaml, coder.yaml, planner.yaml
+├── extensions/              # Plugins, hooks, skills system
+├── security/                # Sandbox, policies, prompt scanner
+├── audit/                   # Audit events, collectors, OTEL exporter
 ├── session/                 # Session persistence (~/.xerxes/sessions)
 ├── api_server/              # OpenAI-compatible FastAPI server
-└── mcp/                     # Model Context Protocol integration
-tests/                       # pytest suite
+├── daemon/                  # WebSocket + Unix socket daemon
+├── channels/                # 14 chat platform adapters
+│   └── adapters/            # Slack, Telegram, Discord, Email, Matrix, etc.
+├── operators/               # Operator tools (browser, pty, plans, state)
+├── mcp/                     # Model Context Protocol integration
+├── logging/                 # Structured logging
+└── types/                   # Type definitions
+tests/                       # pytest suite (1501 tests)
 ```
 
 ## Development
@@ -382,3 +480,15 @@ black src/python/xerxes/ tests/
 ## Author
 
 **Erfan Zare Chavoshi** ([@erfanzar](https://github.com/erfanzar))
+
+## Citation
+
+```bibtex
+@software{xerxes2026,
+  author = {Erfan Zare Chavoshi},
+  title = {Xerxes: Multi-Agent Orchestration Framework},
+  url = {https://github.com/erfanzar/Xerxes-Agents},
+  year = {2026},
+  license = {Apache-2.0}
+}
+```

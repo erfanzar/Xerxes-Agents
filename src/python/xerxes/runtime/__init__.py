@@ -11,7 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Runtime subsystem entry point for Xerxes.
+
+Re-exports the core runtime primitives that wire together the streaming loop,
+tool execution registry, transcript and history logs, cost tracking, prompt
+profiles, and the session/bootstrap orchestration. Callers in ``tui/``,
+``daemon/``, and ``bridge/`` import from this package to start a session,
+build a query engine, or assemble a tool pool without depending on individual
+submodules.
+"""
 
 from ..operators.config import OperatorRuntimeConfig
 from .bootstrap import BootstrapResult, BootstrapStage, bootstrap

@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Xerxes daemon package.
+"""Long-running background runtime for Xerxes.
 
-Provides a background agent server with WebSocket and Unix socket channels,
-configurable task runners, and system service integration.
+The daemon hosts the agent runtime, session and workspace state, and
+incoming control surfaces — a Unix-socket JSON-RPC channel for local TUIs,
+a WebSocket gateway for remote clients, and configurable messaging-channel
+adapters (Telegram, Slack, etc.). The package also ships ``service.py``
+helpers that install the daemon as a launchd or systemd user service.
 """

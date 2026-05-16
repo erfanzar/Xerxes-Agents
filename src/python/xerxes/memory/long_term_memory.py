@@ -11,10 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Long term memory module for Xerxes.
+"""Persistent long-term memory tier with semantic and lexical search.
 
-Exports:
-    - LongTermMemory"""
+``LongTermMemory`` writes to ``SQLiteStorage`` (optionally wrapped in
+``RAGStorage`` for embeddings) and provides relevance/recency/importance
+blended scoring. It enforces a soft item cap via aged-out and low-value
+cleanup, and supports consolidation (similar-item merging + a textual
+summary)."""
 
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,10 +27,7 @@ from .storage import RAGStorage, SQLiteStorage
 
 
 class LongTermMemory(Memory):
-    """Long term memory.
-
-    Inherits from: Memory
-    """
+    """Durable memory tier scored by relevance, recency, and importance."""
 
     def __init__(
         self,
@@ -37,15 +37,17 @@ class LongTermMemory(Memory):
         max_items: int = 10000,
         retention_days: int = 365,
     ) -> None:
-        """Initialize the instance.
+        """Construct the tier and hydrate previously persisted items.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution.
-            enable_embeddings (bool, optional): IN: enable embeddings. Defaults to True. OUT: Consumed during execution.
-            db_path (str | None, optional): IN: db path. Defaults to None. OUT: Consumed during execution.
-            max_items (int, optional): IN: max items. Defaults to 10000. OUT: Consumed during execution.
-            retention_days (int, optional): IN: retention days. Defaults to 365. OUT: Consumed during execution."""
+            storage: Pre-built ``MemoryStorage``; when ``None``, a new
+                ``SQLiteStorage`` (optionally wrapped in ``RAGStorage``)
+                is created.
+            enable_embeddings: When True, wrap the default storage in
+                ``RAGStorage`` so semantic search is available.
+            db_path: SQLite path override; ignored if ``storage`` given.
+            max_items: Soft cap that triggers cleanup on save.
+            retention_days: Age threshold for the cleanup heuristic."""
 
         if storage is None:
             if db_path:
@@ -60,10 +62,7 @@ class LongTermMemory(Memory):
         self._load_from_storage()
 
     def _load_from_storage(self) -> None:
-        """Internal helper to load from storage.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Replay every ``ltm_*`` row from storage back into the in-memory index."""
 
         if not self.storage:
             return
@@ -85,19 +84,17 @@ class LongTermMemory(Memory):
         importance: float = 0.5,
         **kwargs,
     ) -> MemoryItem:
-        """Save.
+        """Persist a new long-term item, triggering cleanup when at capacity.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-            user_id (str | None, optional): IN: user id. Defaults to None. OUT: Consumed during execution.
-            conversation_id (str | None, optional): IN: conversation id. Defaults to None. OUT: Consumed during execution.
-            importance (float, optional): IN: importance. Defaults to 0.5. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            MemoryItem: OUT: Result of the operation."""
+            content: Text payload to remember.
+            metadata: Annotations; receives ``importance`` plus any
+                extra ``**kwargs``.
+            agent_id: Producing agent identifier.
+            user_id: Owning user identifier.
+            conversation_id: Originating conversation identifier.
+            importance: Float in ``[0, 1]`` used for scoring + eviction.
+            **kwargs: Folded into ``metadata`` as freeform annotations."""
 
         metadata = metadata or {}
         metadata["importance"] = importance
@@ -126,17 +123,20 @@ class LongTermMemory(Memory):
     def search(
         self, query: str, limit: int = 10, filters: dict[str, Any] | None = None, use_semantic: bool = True, **kwargs
     ) -> list[MemoryItem]:
-        """Search.
+        """Search the tier, preferring embedding-based recall when available.
+
+        With ``use_semantic`` and a ``RAGStorage`` backend, query is
+        embedded and similarity-ranked. Otherwise items are scored as
+        ``0.5*relevance + 0.3*recency + 0.2*importance`` and sorted.
+        Both paths bump ``access_count`` and ``last_accessed`` on each
+        returned item.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            use_semantic (bool, optional): IN: use semantic. Defaults to True. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list[MemoryItem]: OUT: Result of the operation."""
+            query: Free-form search string.
+            limit: Maximum results to return.
+            filters: Field-level filters applied after scoring.
+            use_semantic: Enable vector search when storage supports it.
+            **kwargs: Accepted for protocol compatibility; unused."""
 
         if use_semantic and isinstance(self.storage, RAGStorage):
             results = self.storage.search_similar(query, limit=limit * 2)
@@ -189,15 +189,7 @@ class LongTermMemory(Memory):
         filters: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> MemoryItem | list[MemoryItem] | None:
-        """Retrieve.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-        Returns:
-            MemoryItem | list[MemoryItem] | None: OUT: Result of the operation."""
+        """Fetch by id (incrementing access counters) or scan for matching items."""
 
         if memory_id:
             item = self._index.get(memory_id)
@@ -224,14 +216,7 @@ class LongTermMemory(Memory):
         return results
 
     def update(self, memory_id: str, updates: dict[str, Any]) -> bool:
-        """Update.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str): IN: memory id. OUT: Consumed during execution.
-            updates (dict[str, Any]): IN: updates. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Apply field updates and re-persist the item to storage."""
 
         if memory_id not in self._index:
             return False
@@ -247,14 +232,10 @@ class LongTermMemory(Memory):
         return True
 
     def delete(self, memory_id: str | None = None, filters: dict[str, Any] | None = None) -> int:
-        """Delete.
+        """Delete a single item by id or every item matching ``filters``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            memory_id (str | None, optional): IN: memory id. Defaults to None. OUT: Consumed during execution.
-            filters (dict[str, Any] | None, optional): IN: filters. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            int: OUT: Result of the operation."""
+        Returns the number of items removed (from both the in-memory
+        index and the durable backing store)."""
 
         count = 0
 
@@ -282,10 +263,7 @@ class LongTermMemory(Memory):
         return count
 
     def clear(self) -> None:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Delete every ``ltm_*`` entry from storage and wipe the in-memory index."""
 
         if self.storage:
             for key in self.storage.list_keys("ltm_"):
@@ -295,10 +273,11 @@ class LongTermMemory(Memory):
         self._index.clear()
 
     def _cleanup_old_memories(self) -> None:
-        """Internal helper to cleanup old memories.
+        """Evict aged-out and low-value items to make room under ``max_items``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        Items older than ``retention_days`` or with low importance and
+        few accesses are removed first. If that yields too few removals,
+        the bottom 20% by composite score is dropped."""
 
         cutoff_date = datetime.now() - timedelta(days=self.retention_days)
         to_remove = []
@@ -328,14 +307,11 @@ class LongTermMemory(Memory):
                 self.storage.delete(f"ltm_{item.memory_id}")
 
     def _matches_filters(self, item: MemoryItem, filters: dict[str, Any]) -> bool:
-        """Internal helper to matches filters.
+        """Return True when ``item`` matches every key in ``filters``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            item (MemoryItem): IN: item. OUT: Consumed during execution.
-            filters (dict[str, Any]): IN: filters. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Filter values can be plain values (equality test) or callables
+        (predicate). Metadata fields are searched when no matching
+        attribute exists on the item itself."""
 
         for key, value in filters.items():
             if hasattr(item, key):
@@ -353,14 +329,7 @@ class LongTermMemory(Memory):
         return True
 
     def _calculate_relevance(self, content: str, query: str) -> float:
-        """Internal helper to calculate relevance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            content (str): IN: content. OUT: Consumed during execution.
-            query (str): IN: query. OUT: Consumed during execution.
-        Returns:
-            float: OUT: Result of the operation."""
+        """Simple lexical relevance: substring match scores 1.0, else token overlap ratio."""
 
         content_lower = content.lower()
         if query in content_lower:
@@ -374,14 +343,17 @@ class LongTermMemory(Memory):
         return 0.0
 
     def consolidate(self, merge_similar: bool = True, similarity_threshold: float = 0.8) -> str:
-        """Consolidate.
+        """Optionally merge near-duplicate items and produce a grouped summary.
+
+        Items are grouped by ``conversation_id`` (falling back to
+        ``agent_id`` then ``"general"``), sorted by importance and
+        recency, and the top five per group are summarised.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            merge_similar (bool, optional): IN: merge similar. Defaults to True. OUT: Consumed during execution.
-            similarity_threshold (float, optional): IN: similarity threshold. Defaults to 0.8. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+            merge_similar: When True, run ``_merge_similar_memories``
+                first.
+            similarity_threshold: Token-overlap ratio above which two
+                items are merged."""
 
         if not self._items:
             return "No long-term memories available."
@@ -410,13 +382,11 @@ class LongTermMemory(Memory):
         return "\n".join(summary)
 
     def _merge_similar_memories(self, threshold: float = 0.8):
-        """Internal helper to merge similar memories.
+        """Collapse pairs of items whose token-overlap exceeds ``threshold``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            threshold (float, optional): IN: threshold. Defaults to 0.8. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
+        The shorter item is discarded; the longer keeps the union of
+        access counts and the maximum importance score. Run during
+        ``consolidate``."""
 
         if len(self._items) < 2:
             return

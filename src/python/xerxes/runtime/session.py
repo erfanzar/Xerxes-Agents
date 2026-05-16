@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Session module for Xerxes.
+"""Long-lived session record that survives one user prompt across a turn.
 
-Exports:
-    - RuntimeContext
-    - RuntimeSession"""
+:class:`RuntimeContext` snapshots the environment at session start (cwd,
+Python version, platform, git branch, model, provider). :class:`RuntimeSession`
+glues together the transcript, history log, cost tracker, raw streaming
+events, and per-tool execution records. Sessions can be persisted as JSON via
+:meth:`RuntimeSession.save` and reloaded with :meth:`RuntimeSession.load`,
+powering ``/sessions``, replay, and audit features.
+"""
 
 from __future__ import annotations
 
@@ -35,16 +39,17 @@ from .transcript import TranscriptStore
 
 @dataclass
 class RuntimeContext:
-    """Runtime context.
+    """Environment snapshot captured when a session starts.
 
     Attributes:
-        cwd (str): cwd.
-        python_version (str): python version.
-        platform_name (str): platform name.
-        git_branch (str): git branch.
-        model (str): model.
-        provider (str): provider.
-        timestamp (str): timestamp."""
+        cwd: Working directory at capture time.
+        python_version: Interpreter version as ``major.minor.micro``.
+        platform_name: ``platform.platform()`` string.
+        git_branch: Git branch in ``cwd`` (or ``""`` when not a repo).
+        model: LLM identifier the session was opened against.
+        provider: Provider name resolved from ``model`` (e.g. ``"openai"``).
+        timestamp: ISO-8601 timestamp captured at construction.
+    """
 
     cwd: str = ""
     python_version: str = ""
@@ -56,14 +61,12 @@ class RuntimeContext:
 
     @classmethod
     def capture(cls, model: str = "", provider: str = "") -> RuntimeContext:
-        """Capture.
+        """Snapshot the current cwd, Python, platform, and git branch.
 
         Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-            provider (str, optional): IN: provider. Defaults to ''. OUT: Consumed during execution.
-        Returns:
-            RuntimeContext: OUT: Result of the operation."""
+            model: Model identifier to embed on the snapshot.
+            provider: Provider name to embed on the snapshot.
+        """
 
         import subprocess
 
@@ -89,18 +92,19 @@ class RuntimeContext:
 
 @dataclass
 class RuntimeSession:
-    """Runtime session.
+    """All persistent state belonging to one Xerxes session.
 
     Attributes:
-        session_id (str): session id.
-        prompt (str): prompt.
-        context (RuntimeContext): context.
-        transcript (TranscriptStore): transcript.
-        history (HistoryLog): history.
-        cost_tracker (CostTracker): cost tracker.
-        stream_events (list[dict[str, Any]]): stream events.
-        tool_executions (list[dict[str, Any]]): tool executions.
-        metadata (dict[str, Any]): metadata."""
+        session_id: Stable hex identifier (random uuid4 by default).
+        prompt: Initiating user prompt; may be ``""`` for interactive sessions.
+        context: Captured :class:`RuntimeContext`.
+        transcript: Conversation transcript shared with the query engine.
+        history: Compact :class:`HistoryLog` of turns/tool calls.
+        cost_tracker: Per-session :class:`CostTracker`.
+        stream_events: Raw streaming events captured for replay.
+        tool_executions: Per-tool-call records with timing and permission flag.
+        metadata: Free-form key/value bag for caller use.
+    """
 
     session_id: str = field(default_factory=lambda: uuid4().hex)
     prompt: str = ""
@@ -119,15 +123,7 @@ class RuntimeSession:
         prompt: str = "",
         **metadata: Any,
     ) -> RuntimeSession:
-        """Create.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            model (str, optional): IN: model. Defaults to ''. OUT: Consumed during execution.
-            prompt (str, optional): IN: prompt. Defaults to ''. OUT: Consumed during execution.
-            **metadata: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            RuntimeSession: OUT: Result of the operation."""
+        """Build a new session whose context is freshly captured."""
 
         from xerxes.llms.registry import detect_provider
 
@@ -146,15 +142,11 @@ class RuntimeSession:
         duration_ms: float = 0.0,
         permitted: bool = True,
     ) -> None:
-        """Record tool execution.
+        """Append a tool-execution record and mirror it into the history log.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            inputs (Any, optional): IN: inputs. Defaults to None. OUT: Consumed during execution.
-            result (str, optional): IN: result. Defaults to ''. OUT: Consumed during execution.
-            duration_ms (float, optional): IN: duration ms. Defaults to 0.0. OUT: Consumed during execution.
-            permitted (bool, optional): IN: permitted. Defaults to True. OUT: Consumed during execution."""
+        ``result`` is truncated to 500 chars for the structured record and to
+        100 chars for the history entry to keep persisted payloads small.
+        """
 
         self.tool_executions.append(
             {
@@ -169,12 +161,7 @@ class RuntimeSession:
         self.history.add_tool_call(tool_name, str(result)[:100], duration_ms)
 
     def record_stream_event(self, event_type: str, **data: Any) -> None:
-        """Record stream event.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            event_type (str): IN: event type. OUT: Consumed during execution.
-            **data: IN: Additional keyword arguments. OUT: Passed through to downstream calls."""
+        """Append a typed streaming-loop event with a wall-clock timestamp."""
 
         self.stream_events.append(
             {
@@ -185,24 +172,13 @@ class RuntimeSession:
         )
 
     def record_turn(self, model: str, in_tokens: int, out_tokens: int) -> None:
-        """Record turn.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model (str): IN: model. OUT: Consumed during execution.
-            in_tokens (int): IN: in tokens. OUT: Consumed during execution.
-            out_tokens (int): IN: out tokens. OUT: Consumed during execution."""
+        """Record one completed turn into both cost tracker and history."""
 
         self.cost_tracker.record_turn(model, in_tokens, out_tokens)
         self.history.add_turn(model, in_tokens, out_tokens)
 
     def as_markdown(self) -> str:
-        """As markdown.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render a Markdown overview of the session for ``/sessions`` and replay."""
 
         lines = [
             "# Runtime Session",
@@ -244,13 +220,12 @@ class RuntimeSession:
         return "\n".join(lines)
 
     def save(self, directory: str | Path = ".xerxes_sessions") -> Path:
-        """Save.
+        """Persist the session as ``<directory>/<session_id>.json``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            directory (str | Path, optional): IN: directory. Defaults to '.xerxes_sessions'. OUT: Consumed during execution.
-        Returns:
-            Path: OUT: Result of the operation."""
+        Truncates ``stream_events`` to the first 100 entries to keep file
+        sizes manageable. Returns the path written. Marks the transcript as
+        flushed.
+        """
 
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
@@ -282,13 +257,7 @@ class RuntimeSession:
 
     @classmethod
     def load(cls, path: str | Path) -> RuntimeSession:
-        """Load.
-
-        Args:
-            cls: IN: The class. OUT: Used for class-level operations.
-            path (str | Path): IN: path. OUT: Consumed during execution.
-        Returns:
-            RuntimeSession: OUT: Result of the operation."""
+        """Rehydrate a session previously written by :meth:`save`."""
 
         data = json.loads(Path(path).read_text())
         ctx_data = data.get("context", {})

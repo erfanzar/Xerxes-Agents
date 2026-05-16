@@ -75,7 +75,7 @@ class TestApiMode:
                         {
                             "title": "Xerxes docs",
                             "link": "https://example.com/xerxes",
-                            "snippet": "Hermes parity",
+                            "snippet": "Agent runtime documentation",
                             "displayLink": "example.com",
                         },
                     ],
@@ -122,11 +122,11 @@ _FAKE_HTML = """
 <html><body>
 <div class="g">
   <a href="https://github.com/erfanzar/Xerxes"><h3>Xerxes on GitHub</h3></a>
-  <div class="VwiC3b">An autonomous AI agent runtime by erfanzar with Hermes-parity tools.</div>
+  <div class="VwiC3b">An autonomous AI agent runtime by erfanzar.</div>
 </div>
 <div class="g">
-  <a href="https://hermes.example/news"><h3>Hermes news index</h3></a>
-  <div class="VwiC3b">Latest headlines from the Hermes example domain.</div>
+  <a href="https://news.example/index"><h3>News index</h3></a>
+  <div class="VwiC3b">Latest headlines from the example news domain.</div>
 </div>
 <div class="g">
   <a href="https://www.google.com/policies"><h3>Should be filtered</h3></a>
@@ -145,7 +145,7 @@ class TestScrapeMode:
         assert out["engine"] == "google_scrape"
         urls = {r["url"] for r in out["results"]}
         assert "https://github.com/erfanzar/Xerxes" in urls
-        assert "https://hermes.example/news" in urls
+        assert "https://news.example/index" in urls
         assert all("google.com" not in u for u in urls)
 
     def test_scrape_sends_browser_user_agent(self):

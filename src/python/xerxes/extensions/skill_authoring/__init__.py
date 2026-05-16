@@ -14,7 +14,7 @@
 """Public exports for the skill authoring subsystem.
 
 Provides components for auto-drafting, improving, verifying, and managing the
-lifecycle of Hermes-style agent skills from observed tool sequences.
+lifecycle of agent skills synthesised from observed tool sequences.
 """
 
 from .drafter import SkillDrafter, render_skill_template

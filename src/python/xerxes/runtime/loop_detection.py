@@ -11,15 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Loop detection module for Xerxes.
+"""Detect repetitive tool-call patterns that suggest the agent is stuck.
 
-Exports:
-    - logger
-    - LoopSeverity
-    - LoopDetectionConfig
-    - LoopEvent
-    - LoopDetector
-    - ToolLoopError"""
+:class:`LoopDetector` records every tool invocation a turn makes and watches
+for three failure modes:
+
+    * Same tool + arguments called many times in a row (``same_call``).
+    * Two tools alternating like ping-pong (``pingpong``).
+    * The turn-wide tool-call ceiling being reached (``max_calls``).
+
+Each detection produces a :class:`LoopEvent` that registered listeners (and
+:class:`RuntimeFeaturesState`'s audit hook) can react to. :class:`ToolLoopError`
+is provided for callers that want to abort the turn instead of logging.
+"""
 
 from __future__ import annotations
 
@@ -33,9 +37,12 @@ logger = logging.getLogger(__name__)
 
 
 class LoopSeverity(Enum):
-    """Loop severity.
+    """Severity level reported by :class:`LoopDetector`.
 
-    Inherits from: Enum
+    Attributes:
+        OK: No loop pattern detected.
+        WARNING: Pattern emerging; surface to the user but keep running.
+        CRITICAL: Pattern entrenched; the caller should abort the turn.
     """
 
     OK = "ok"
@@ -45,15 +52,17 @@ class LoopSeverity(Enum):
 
 @dataclass
 class LoopDetectionConfig:
-    """Loop detection config.
+    """Thresholds tuning :class:`LoopDetector` behaviour.
 
     Attributes:
-        same_call_warning (int): same call warning.
-        same_call_critical (int): same call critical.
-        pingpong_warning (int): pingpong warning.
-        pingpong_critical (int): pingpong critical.
-        max_tool_calls_per_turn (int): max tool calls per turn.
-        enabled (bool): enabled."""
+        same_call_warning: Consecutive identical calls before WARNING.
+        same_call_critical: Consecutive identical calls before CRITICAL.
+        pingpong_warning: Alternations between two tools before WARNING.
+        pingpong_critical: Alternations between two tools before CRITICAL.
+        max_tool_calls_per_turn: Hard ceiling on total tool calls per turn;
+            crossing it always emits CRITICAL.
+        enabled: Master switch; when ``False`` every call returns ``OK``.
+    """
 
     same_call_warning: int = 3
     same_call_critical: int = 5
@@ -65,14 +74,16 @@ class LoopDetectionConfig:
 
 @dataclass
 class LoopEvent:
-    """Loop event.
+    """One emit from :class:`LoopDetector`, OK or otherwise.
 
     Attributes:
-        severity (LoopSeverity): severity.
-        pattern (str): pattern.
-        tool_name (str): tool name.
-        details (str): details.
-        call_count (int): call count."""
+        severity: Resulting :class:`LoopSeverity`.
+        pattern: Identifier of the matched pattern (``"same_call"``,
+            ``"pingpong"``, ``"max_calls"``, ``"none"``).
+        tool_name: Most relevant tool name for the event.
+        details: Human-readable explanation suitable for logs / audit.
+        call_count: Number of repetitions that triggered the event.
+    """
 
     severity: LoopSeverity
     pattern: str
@@ -83,69 +94,46 @@ class LoopEvent:
 
 @dataclass
 class _CallRecord:
-    """Call record.
+    """Internal record of one tool invocation.
 
     Attributes:
-        tool_name (str): tool name.
-        args_hash (str): args hash."""
+        tool_name: Name of the tool.
+        args_hash: Stable hash of the call's arguments.
+    """
 
     tool_name: str
     args_hash: str
 
 
 class LoopDetector:
-    """Loop detector."""
+    """Tracks per-turn tool calls and flags suspicious repetition patterns."""
 
     def __init__(self, config: LoopDetectionConfig | None = None):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (LoopDetectionConfig | None, optional): IN: config. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-
+        """Create a detector tuned by ``config`` (default thresholds when ``None``)."""
         self.config = config or LoopDetectionConfig()
         self._history: list[_CallRecord] = []
         self._listeners: list = []
 
     @property
     def call_count(self) -> int:
-        """Return Call count.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
-
+        """Number of calls recorded since the last :meth:`reset`."""
         return len(self._history)
 
     def add_listener(self, callback) -> None:
-        """Add listener.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            callback (Any): IN: callback. OUT: Consumed during execution."""
-
+        """Register ``callback`` to receive every non-OK :class:`LoopEvent`."""
         self._listeners.append(callback)
 
     def reset(self) -> None:
-        """Reset.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
-
+        """Drop the recorded call history (typically called at turn start)."""
         self._history.clear()
 
     def record_call(self, tool_name: str, arguments: dict | str | None = None) -> LoopEvent:
-        """Record call.
+        """Append a new call and evaluate every loop pattern.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            tool_name (str): IN: tool name. OUT: Consumed during execution.
-            arguments (dict | str | None, optional): IN: arguments. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            LoopEvent: OUT: Result of the operation."""
+        The returned event is always non-``None``; its ``severity`` is ``OK``
+        when nothing suspicious was found. Non-OK events are also dispatched
+        to every registered listener via :meth:`_emit`.
+        """
 
         if not self.config.enabled:
             return LoopEvent(severity=LoopSeverity.OK, pattern="disabled", tool_name=tool_name, details="")
@@ -178,13 +166,7 @@ class LoopDetector:
         return LoopEvent(severity=LoopSeverity.OK, pattern="none", tool_name=tool_name, details="")
 
     def _check_same_call(self, current: _CallRecord) -> LoopEvent:
-        """Internal helper to check same call.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            current (_CallRecord): IN: current. OUT: Consumed during execution.
-        Returns:
-            LoopEvent: OUT: Result of the operation."""
+        """Count consecutive identical calls and emit warning/critical if needed."""
 
         count = 0
         for rec in reversed(self._history):
@@ -212,12 +194,7 @@ class LoopDetector:
         return LoopEvent(severity=LoopSeverity.OK, pattern="same_call", tool_name=current.tool_name, details="")
 
     def _check_pingpong(self) -> LoopEvent:
-        """Internal helper to check pingpong.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            LoopEvent: OUT: Result of the operation."""
+        """Detect two-tool ping-pong alternation in the recent call tail."""
 
         if len(self._history) < 4:
             return LoopEvent(severity=LoopSeverity.OK, pattern="pingpong", tool_name="", details="")
@@ -252,11 +229,7 @@ class LoopDetector:
         return LoopEvent(severity=LoopSeverity.OK, pattern="pingpong", tool_name="", details="")
 
     def _emit(self, event: LoopEvent) -> None:
-        """Internal helper to emit.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            event (LoopEvent): IN: event. OUT: Consumed during execution."""
+        """Log ``event`` and fan it out to every registered listener."""
 
         logger.log(
             logging.WARNING if event.severity == LoopSeverity.WARNING else logging.ERROR,
@@ -273,12 +246,7 @@ class LoopDetector:
 
     @staticmethod
     def _hash_args(arguments: dict | str | None) -> str:
-        """Internal helper to hash args.
-
-        Args:
-            arguments (dict | str | None): IN: arguments. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Return a stable MD5 hash of ``arguments`` for equality comparisons."""
 
         if arguments is None:
             return "empty"
@@ -290,17 +258,9 @@ class LoopDetector:
 
 
 class ToolLoopError(Exception):
-    """Tool loop error.
-
-    Inherits from: Exception
-    """
+    """Raised when callers want to abort a turn because of a critical loop event."""
 
     def __init__(self, event: LoopEvent) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            event (LoopEvent): IN: event. OUT: Consumed during execution."""
-
+        """Wrap ``event`` and synthesise a descriptive exception message."""
         self.event = event
         super().__init__(f"Tool loop detected ({event.pattern}): {event.details}")

@@ -13,7 +13,11 @@
 # limitations under the License.
 """Twilio SMS channel adapter.
 
-Sends and receives SMS messages via the Twilio API.
+Parses Twilio's ``application/x-www-form-urlencoded`` inbound webhook and
+sends outbound SMS via the REST ``Messages.json`` endpoint authenticated
+with HTTP Basic. Twilio request validation (``X-Twilio-Signature``) is
+not enforced here — front the webhook with a verifier when running on
+the public Internet.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class TwilioSMSChannel(WebhookChannel):
-    """Channel implementation for Twilio SMS."""
+    """Twilio SMS adapter."""
 
     name = "sms"
 
@@ -38,17 +42,16 @@ class TwilioSMSChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Twilio SMS channel.
+        """Build the channel.
 
         Args:
-            account_sid (str): IN: Twilio account SID.
-                OUT: stored for API authentication.
-            auth_token (str): IN: Twilio auth token.
-                OUT: stored for API authentication.
-            from_number (str): IN: sender phone number.
-                OUT: used as the ``From`` field on outbound messages.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            account_sid: Twilio account SID. Combined with ``auth_token``
+                for HTTP Basic auth on outbound calls.
+            auth_token: Twilio auth token.
+            from_number: Twilio-owned sender number (E.164) used as the
+                ``From`` field on outbound messages.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.account_sid = account_sid
@@ -57,14 +60,19 @@ class TwilioSMSChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Twilio webhook payload into ``ChannelMessage``.
+        """Decode Twilio's form-encoded webhook into ``ChannelMessage``.
+
+        Twilio sends ``application/x-www-form-urlencoded`` rather than
+        JSON, so we use ``urllib.parse.parse_qsl`` instead of the JSON
+        helper. Malformed bodies and empty payloads return an empty list
+        so the dispatcher keeps quiet rather than logging an error.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: application/x-www-form-urlencoded body.
+            headers: HTTP headers (unused).
+            body: Form-encoded request body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or empty for unparseable input.
         """
         try:
             params = dict(urllib.parse.parse_qsl(body.decode("utf-8", errors="ignore")))
@@ -85,11 +93,11 @@ class TwilioSMSChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send an SMS via the Twilio API.
+        """Send one SMS via ``POST .../Messages.json`` with HTTP Basic auth.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` or
-                ``channel_user_id`` is the recipient, and ``text`` the body.
+            message: Outbound message. ``room_id`` or ``channel_user_id``
+                becomes ``To`` (E.164 phone number); ``text`` is ``Body``.
         """
         url = f"https://api.twilio.com/2010-04-01/Accounts/{self.account_sid}/Messages.json"
         body = {"From": self.from_number, "To": message.room_id or message.channel_user_id, "Body": message.text}

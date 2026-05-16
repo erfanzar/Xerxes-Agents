@@ -11,13 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Retrieval module for Xerxes.
+"""Hybrid retriever that blends semantic, BM25, and recency signals.
 
-Exports:
-    - logger
-    - RetrievalWeights
-    - RetrievalResult
-    - HybridRetriever"""
+``HybridRetriever`` is the cross-tier reranker used to score
+``MemoryItem`` candidates. It combines a dense embedding similarity
+(via any ``Embedder``), a from-scratch BM25-lite over the candidate
+set, and an exponential recency decay, weighted by ``RetrievalWeights``."""
 
 from __future__ import annotations
 
@@ -35,24 +34,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RetrievalWeights:
-    """Retrieval weights.
+    """Weights for the three retrieval signals.
 
     Attributes:
-        semantic (float): semantic.
-        bm25 (float): bm25.
-        recency (float): recency."""
+        semantic: Weight applied to embedding cosine similarity.
+        bm25: Weight applied to the normalised BM25 score.
+        recency: Weight applied to the exponential recency decay."""
 
     semantic: float = 0.55
     bm25: float = 0.30
     recency: float = 0.15
 
     def normalised(self) -> RetrievalWeights:
-        """Normalised.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            RetrievalWeights: OUT: Result of the operation."""
+        """Return a copy whose weights sum to 1.0 (defaults restored if all zero)."""
 
         total = self.semantic + self.bm25 + self.recency
         if total == 0.0:
@@ -62,14 +56,14 @@ class RetrievalWeights:
 
 @dataclass
 class RetrievalResult:
-    """Retrieval result.
+    """Scored retrieval candidate.
 
     Attributes:
-        item (MemoryItem): item.
-        score (float): score.
-        semantic_score (float): semantic score.
-        bm25_score (float): bm25 score.
-        recency_score (float): recency score."""
+        item: The candidate ``MemoryItem``.
+        score: Final blended score after applying weights.
+        semantic_score: Cosine similarity component in ``[0, 1]``.
+        bm25_score: BM25 score normalised against the batch maximum.
+        recency_score: Exponential recency factor in ``(0, 1]``."""
 
     item: MemoryItem
     score: float
@@ -79,7 +73,10 @@ class RetrievalResult:
 
 
 class HybridRetriever:
-    """Hybrid retriever."""
+    """Cross-tier reranker over a pre-fetched ``MemoryItem`` candidate set.
+
+    The retriever does not own any storage; callers gather candidates
+    from one or more tiers and pass them to ``rank`` for scoring."""
 
     def __init__(
         self,
@@ -89,15 +86,17 @@ class HybridRetriever:
         bm25_k1: float = 1.5,
         bm25_b: float = 0.75,
     ) -> None:
-        """Initialize the instance.
+        """Configure embedder, weights, and BM25/recency tuning constants.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            embedder (Embedder | None, optional): IN: embedder. Defaults to None. OUT: Consumed during execution.
-            weights (RetrievalWeights | None, optional): IN: weights. Defaults to None. OUT: Consumed during execution.
-            recency_half_life_days (float, optional): IN: recency half life days. Defaults to 14.0. OUT: Consumed during execution.
-            bm25_k1 (float, optional): IN: bm25 k1. Defaults to 1.5. OUT: Consumed during execution.
-            bm25_b (float, optional): IN: bm25 b. Defaults to 0.75. OUT: Consumed during execution."""
+            embedder: Embedder used for semantic similarity; defaults
+                to the process-wide ``get_default_embedder``.
+            weights: Signal weights; defaults to ``RetrievalWeights``
+                and is normalised on construction.
+            recency_half_life_days: Days at which recency contribution
+                halves.
+            bm25_k1: BM25 term-saturation parameter.
+            bm25_b: BM25 length-normalisation parameter."""
 
         self.embedder = embedder or get_default_embedder()
         self.weights = (weights or RetrievalWeights()).normalised()
@@ -112,16 +111,18 @@ class HybridRetriever:
         k: int = 10,
         now: datetime | None = None,
     ) -> list[RetrievalResult]:
-        """Rank.
+        """Score ``items`` against ``query`` and return the top ``k``.
+
+        For each item the retriever computes embedding similarity
+        (using either the item's cached ``embedding`` or a freshly
+        computed one), BM25-lite over the batch, and recency decay.
+        The weighted sum is the final ``score``.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            items (tp.Sequence[MemoryItem]): IN: items. OUT: Consumed during execution.
-            k (int, optional): IN: k. Defaults to 10. OUT: Consumed during execution.
-            now (datetime | None, optional): IN: now. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[RetrievalResult]: OUT: Result of the operation."""
+            query: Search string.
+            items: Pre-fetched candidate set.
+            k: Maximum number of results.
+            now: Reference time for recency; defaults to ``datetime.now()``."""
 
         if not items:
             return []
@@ -160,27 +161,13 @@ class HybridRetriever:
         return results[:k]
 
     def _recency(self, timestamp: datetime, now: datetime) -> float:
-        """Internal helper to recency.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            timestamp (datetime): IN: timestamp. OUT: Consumed during execution.
-            now (datetime): IN: now. OUT: Consumed during execution.
-        Returns:
-            float: OUT: Result of the operation."""
+        """Return ``2^(-age_days / half_life)`` for an exponential decay in ``(0, 1]``."""
 
         age_days = max(0.0, (now - timestamp).total_seconds() / 86400.0)
         return float(2.0 ** (-age_days / max(self.recency_half_life_days, 0.001)))
 
     def _bm25_lite(self, query: str, items: tp.Sequence[MemoryItem]) -> list[float]:
-        """Internal helper to bm25 lite.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            items (tp.Sequence[MemoryItem]): IN: items. OUT: Consumed during execution.
-        Returns:
-            list[float]: OUT: Result of the operation."""
+        """Compute a BM25 score per item using only the supplied batch as the corpus."""
 
         q_terms = self._tokenize(query)
         if not q_terms:
@@ -211,12 +198,7 @@ class HybridRetriever:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """Internal helper to tokenize.
-
-        Args:
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Lowercase and strip non-alphanumeric characters from each whitespace-split token."""
 
         out: list[str] = []
         for raw in text.lower().split():

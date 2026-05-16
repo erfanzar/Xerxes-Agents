@@ -11,7 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Dynamic task and cortex builders for ad-hoc multi-agent execution."""
+"""Dynamic task and cortex builders for prompt-driven multi-agent runs.
+
+Provides :class:`DynamicTaskBuilder` (static helpers that turn prompts into
+:class:`CortexTask` objects), :class:`DynamicCortex` (a :class:`Cortex`
+subclass that can decompose, route and execute prompts at runtime), and
+:func:`create_dynamic_cortex` (a no-tasks factory).
+"""
 
 import threading
 from collections.abc import Callable
@@ -40,29 +46,7 @@ class DynamicTaskBuilder:
         tools: list | None = None,
         **task_kwargs,
     ) -> CortexTask:
-        """Create a single ``CortexTask`` from a natural language prompt.
-
-        Args:
-            prompt (str): The task description.
-                IN: Becomes the ``description`` field of the created task.
-                OUT: Directly assigned to ``CortexTask.description``.
-            agent (CortexAgent | None): The agent to assign.
-                IN: Optional agent responsible for execution.
-                OUT: Set as the task's ``agent``.
-            expected_output (str): Description of the desired result.
-                IN: Sets expectations for the task output.
-                OUT: Assigned to ``CortexTask.expected_output``.
-            tools (list | None): Additional tools for this task.
-                IN: Optional list of ``CortexTool`` or callable objects.
-                OUT: Assigned to ``CortexTask.tools``.
-            **task_kwargs: Arbitrary keyword arguments.
-                IN: Forwarded to the ``CortexTask`` constructor.
-                OUT: Allows customization of any ``CortexTask`` field.
-
-        Returns:
-            CortexTask: A ready-to-execute task instance.
-                OUT: Configured with the provided prompt, agent, and options.
-        """
+        """Build one :class:`CortexTask` from a free-form prompt string."""
 
         return CortexTask(
             description=prompt, expected_output=expected_output, agent=agent, tools=tools or [], **task_kwargs
@@ -72,22 +56,11 @@ class DynamicTaskBuilder:
     def chain_prompts(
         prompts: list[str], agents: list[CortexAgent] | None = None, use_context: bool = True
     ) -> list[CortexTask]:
-        """Create a sequential list of tasks from a list of prompts.
+        """Build an ordered task chain from ``prompts``.
 
-        Args:
-            prompts (list[str]): The prompts to turn into tasks.
-                IN: Each string becomes a ``CortexTask.description``.
-                OUT: Tasks are created in the same order as the input list.
-            agents (list | None): Agents to assign cyclically.
-                IN: Agent ``i`` is assigned to prompt ``i % len(agents)``.
-                OUT: Each task gets a rotating agent from this list.
-            use_context (bool): Whether each task receives the prior task as context.
-                IN: If ``True``, ``task.context`` is set to ``[previous_task]``.
-                OUT: Enables sequential information flow.
-
-        Returns:
-            list[CortexTask]: Ordered list of tasks forming a chain.
-                OUT: Ready for sequential execution.
+        Agents (if given) are assigned round-robin. With ``use_context``
+        each task receives the prior task as its context source so outputs
+        flow forward when run sequentially.
         """
 
         tasks: list[CortexTask] = []
@@ -132,51 +105,10 @@ class DynamicCortex(Cortex):
         enable_xerxes_memory: bool = False,
         cortex_name: str = "CorTex",
     ):
-        """Initialize a ``DynamicCortex``.
+        """Forward every argument to :class:`Cortex` and start with no task creator.
 
-        Args:
-            agents (list[CortexAgent]): Agents available for task execution.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Registered and wired into the Xerxes instance.
-            tasks (list[CortexTask]): Initial task list.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: May be replaced by dynamic task creation methods.
-            llm (BaseLLM): The language model backend.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Configures the underlying Xerxes LLM.
-            process (ProcessType): The default execution process type.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Determines how tasks are orchestrated.
-            manager_agent (CortexAgent | None): Manager agent for hierarchical mode.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Used when ``process`` is ``ProcessType.HIERARCHICAL``.
-            memory_type (MemoryType): Default memory type.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Configures the memory store.
-            verbose (bool): Whether to enable verbose logging.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Controls log verbosity.
-            max_iterations (int): Maximum execution iterations.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Limits agent execution loops.
-            model (str): Default model identifier.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Assigned to agents without an explicit model.
-            memory (CortexMemory | None): Pre-configured memory instance.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Shared across agents and tasks.
-            memory_config (MemoryConfig | None): TypedDict memory configuration.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Used to construct a ``CortexMemory`` if *memory* is ``None``.
-            reinvoke_after_function (bool): Whether to reinvoke the agent after tool calls.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Controls agent execution behavior.
-            enable_xerxes_memory (bool): Whether to enable Xerxes-level memory.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Configures the Xerxes instance memory.
-            cortex_name (str): Display name for this cortex.
-                IN: Passed to the base ``Cortex`` constructor.
-                OUT: Used in log messages.
+        ``self.task_creator`` is allocated lazily on the first prompt-based
+        method call so the dynamic cortex stays cheap until used.
         """
 
         super().__init__(
@@ -205,30 +137,11 @@ class DynamicCortex(Cortex):
         stream: bool = False,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> TaskCreationPlan | tuple[TaskCreationPlan, list[CortexTask]]:
-        """Decompose a prompt into tasks and optionally assign them to agents.
+        """Decompose ``prompt`` into tasks and optionally bind them to agents.
 
-        Args:
-            prompt (str): The high-level objective.
-                IN: Passed to ``TaskCreator`` for decomposition.
-                OUT: Drives the creation of ``TaskDefinition`` objects.
-            background (str | None): Additional context for task creation.
-                IN: Passed to ``TaskCreator``.
-                OUT: Guides the decomposition strategy.
-            auto_assign (bool): Whether to map tasks to available agents.
-                IN: Passed to ``TaskCreator`` as ``auto_assign_agents``.
-                OUT: Controls whether ``CortexTask`` objects are produced.
-            stream (bool): Whether to stream the creation response.
-                IN: Passed to ``TaskCreator``.
-                OUT: Enables real-time observation.
-            stream_callback (Callable | None): Callback for streamed chunks.
-                IN: Passed to ``TaskCreator``.
-                OUT: Invoked during streaming creation.
-
-        Returns:
-            TaskCreationPlan | tuple[TaskCreationPlan, list[CortexTask]]: The
-                raw plan, or a tuple with executable tasks when auto-assignment
-                succeeds. OUT: If a tuple is returned, ``self.tasks`` is updated
-                with the new ``CortexTask`` list.
+        When ``auto_assign`` is ``True`` and the task creator returns
+        executable :class:`CortexTask` objects, :attr:`tasks` is replaced
+        with the new list before returning.
         """
 
         if not self.task_creator:
@@ -259,31 +172,10 @@ class DynamicCortex(Cortex):
         stream: bool = False,
         stream_callback: Callable[[Any], None] | None = None,
     ) -> Any:
-        """Create tasks from a prompt and immediately execute them.
+        """Run :meth:`create_tasks_from_prompt` then :meth:`kickoff` end-to-end.
 
-        Args:
-            prompt (str): The objective to decompose and execute.
-                IN: Passed to ``create_tasks_from_prompt``.
-                OUT: Drives both task creation and execution.
-            inputs (dict | None): Template variables for interpolation.
-                IN: Passed to ``kickoff`` for input substitution.
-                OUT: Applied to agents and tasks before execution.
-            background (str | None): Background context for task creation.
-                IN: Passed to ``create_tasks_from_prompt``.
-                OUT: Guides decomposition.
-            process (ProcessType | None): Temporary process type override.
-                IN: If provided, temporarily replaces ``self.process``.
-                OUT: Restored after execution.
-            stream (bool): Whether to stream execution output.
-                IN: Passed to ``kickoff``.
-                OUT: Determines if execution is streamed.
-            stream_callback (Callable | None): Callback for streamed chunks.
-                IN: Passed to ``kickoff`` when streaming.
-                OUT: Invoked during streamed execution.
-
-        Returns:
-            Any: The execution result from ``kickoff``.
-                OUT: ``CortexOutput`` or streaming tuple depending on *stream*.
+        ``process`` temporarily overrides :attr:`process` for the duration
+        of this call and is restored on exit (even on failure).
         """
 
         creation_result = self.create_tasks_from_prompt(
@@ -320,33 +212,13 @@ class DynamicCortex(Cortex):
         stream_callback: Callable[[Any], None] | None = None,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> str | tuple[StreamerBuffer, threading.Thread]:
-        """Execute a single prompt against a specific agent.
+        """Run one prompt directly through a chosen (or default) agent.
 
-        Args:
-            prompt (str): The task description.
-                IN: Executed directly by the target agent.
-                OUT: Becomes the task description.
-            agent (CortexAgent | str | None): The agent to use.
-                IN: If a string, matched against agent roles; if ``None``,
-                the first agent in ``self.agents`` is used.
-                OUT: Becomes the executor of the prompt.
-            stream (bool): Whether to stream the response.
-                IN: Enables threaded streaming execution.
-                OUT: Determines the return type and execution path.
-            stream_callback (Callable | None): Callback for streamed chunks.
-                IN: Invoked for each chunk during streaming.
-                OUT: Forwarded to the agent's streaming methods.
-            streamer_buffer (StreamerBuffer | None): Optional pre-existing buffer.
-                IN: Used for streaming if provided; otherwise a new one is created.
-                OUT: Receives and yields chunks during execution.
-
-        Returns:
-            str | tuple[StreamerBuffer, threading.Thread]: The result string, or
-                a streaming tuple when *stream* is ``True``.
-                OUT: Direct agent output or buffered stream handles.
+        ``agent`` may be the role name, a :class:`CortexAgent`, or ``None``
+        (in which case ``agents[0]`` is used).
 
         Raises:
-            ValueError: If no matching agent is found.
+            ValueError: When ``agent`` is a role name with no match.
         """
 
         target_agent = None
@@ -372,12 +244,7 @@ class DynamicCortex(Cortex):
                 streamer_buffer = StreamerBuffer()
 
             def execute_with_stream() -> None:
-                """Run the agent in streaming mode and store the result.
-
-                Args:
-                    None: Closure over *prompt*, *target_agent*, *stream_callback*,
-                    and *streamer_buffer*.
-                """
+                """Drive ``target_agent`` and stash the final text on ``result_holder``."""
                 try:
                     if stream_callback:
                         _stream_result = target_agent.execute_stream(task_description=prompt, callback=stream_callback)
@@ -416,31 +283,16 @@ class DynamicCortex(Cortex):
         stream_callback: Callable[[Any], None] | None = None,
         streamer_buffer: StreamerBuffer | None = None,
     ) -> dict[str, str] | str | tuple[StreamerBuffer, threading.Thread]:
-        """Execute multiple prompts, mapping each to an agent.
+        """Execute multiple prompts in one Cortex run.
 
-        Args:
-            prompts (list[str] | dict[str, str]): Prompts to execute.
-                IN: If a dict, keys are agent role names; if a list, prompts are
-                chained sequentially.
-                OUT: Converted into ``CortexTask`` objects and assigned to agents.
-            process (ProcessType | None): Temporary process type override.
-                IN: If provided, temporarily replaces ``self.process``.
-                OUT: Restored after kickoff.
-            stream (bool): Whether to stream the execution.
-                IN: Passed to ``kickoff``.
-                OUT: Determines if a streaming tuple is returned.
-            stream_callback (Callable | None): Callback for streamed chunks.
-                IN: Passed to ``kickoff`` when streaming.
-                OUT: Invoked during streamed execution.
-            streamer_buffer (StreamerBuffer | None): Optional pre-existing buffer.
-                IN: Used for streaming if provided.
-                OUT: Forwarded to ``kickoff``.
+        ``prompts`` may be a ``{role: prompt}`` dict (each prompt routed to
+        the named agent) or a list (chained through
+        :meth:`DynamicTaskBuilder.chain_prompts`). The return shape mirrors
+        the input: a ``{role: output}`` dict, a single raw output string,
+        or a streaming tuple when ``stream`` is ``True``.
 
-        Returns:
-            dict[str, str] | str | tuple[StreamerBuffer, threading.Thread]:
-                A mapping of role to output for dict inputs; the raw output for
-                list inputs; or a streaming tuple when *stream* is ``True``.
-                OUT: Derived from ``CortexOutput.task_outputs``.
+        Raises:
+            ValueError: When a dict key references an unknown agent role.
         """
 
         if isinstance(prompts, dict):
@@ -500,25 +352,10 @@ class DynamicCortex(Cortex):
 def create_dynamic_cortex(
     agents: list[CortexAgent], llm: BaseLLM, process: ProcessType = ProcessType.SEQUENTIAL, **cortex_kwargs
 ) -> DynamicCortex:
-    """Factory function to create a ``DynamicCortex`` with no initial tasks.
+    """Build a :class:`DynamicCortex` with no initial tasks.
 
-    Args:
-        agents (list[CortexAgent]): Agents available for execution.
-            IN: Passed to ``DynamicCortex``.
-            OUT: Registered in the new cortex instance.
-        llm (BaseLLM): The language model backend.
-            IN: Passed to ``DynamicCortex``.
-            OUT: Configures the underlying Xerxes instance.
-        process (ProcessType): The default execution process.
-            IN: Passed to ``DynamicCortex``.
-            OUT: Determines task orchestration strategy.
-        **cortex_kwargs: Additional keyword arguments.
-            IN: Forwarded to ``DynamicCortex.__init__``.
-            OUT: Allows customization of memory, manager, verbosity, etc.
-
-    Returns:
-        DynamicCortex: A ready-to-use dynamic cortex with an empty task list.
-            OUT: Tasks can be added dynamically via creation methods.
+    Tasks are added later via :meth:`DynamicCortex.create_tasks_from_prompt`,
+    :meth:`execute_prompt` or :meth:`execute_prompts`.
     """
 
     return DynamicCortex(agents=agents, tasks=[], llm=llm, process=process, **cortex_kwargs)

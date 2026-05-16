@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""User memory module for Xerxes.
+"""Per-user memory facade combining contextual + entity memory and preferences.
 
-Exports:
-    - UserMemory"""
+``UserMemory`` lazily creates one ``ContextualMemory`` and one
+``EntityMemory`` per user id and tracks a small preferences dict for
+each. It is the entry point used by the daemon's user-aware code
+paths; the contextual tiers underneath are independent across users."""
 
 from typing import Any
 
@@ -23,14 +25,14 @@ from .entity_memory import EntityMemory
 
 
 class UserMemory:
-    """User memory."""
+    """Manage isolated memory + entity stores keyed by user identifier."""
 
     def __init__(self, storage: Any | None = None) -> None:
-        """Initialize the instance.
+        """Wire up storage and hydrate cached user preferences.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage (Any | None, optional): IN: storage. Defaults to None. OUT: Consumed during execution."""
+            storage: Optional ``MemoryStorage`` shared across every
+                user's contextual and entity tiers."""
 
         self.storage = storage
         self.user_memories: dict[str, ContextualMemory] = {}
@@ -39,22 +41,13 @@ class UserMemory:
         self._load_users()
 
     def _load_users(self) -> None:
-        """Internal helper to load users.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Restore the persisted ``_user_preferences`` blob into memory."""
 
         if self.storage and self.storage.exists("_user_preferences"):
             self.user_preferences = self.storage.load("_user_preferences") or {}
 
     def get_or_create_user_memory(self, user_id: str) -> ContextualMemory:
-        """Retrieve the or create user memory.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            ContextualMemory: OUT: Result of the operation."""
+        """Return the user's contextual memory, creating it (with entity store + default prefs) on first call."""
 
         if user_id not in self.user_memories:
             self.user_memories[user_id] = ContextualMemory(long_term_storage=self.storage)
@@ -65,16 +58,13 @@ class UserMemory:
         return self.user_memories[user_id]
 
     def save_memory(self, user_id: str, content: str, metadata: dict[str, Any] | None = None, **kwargs):
-        """Save memory.
+        """Save ``content`` into both the user's contextual and entity tiers.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-            content (str): IN: content. OUT: Consumed during execution.
-            metadata (dict[str, Any] | None, optional): IN: metadata. Defaults to None. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+            user_id: Owning user identifier.
+            content: Text payload.
+            metadata: Annotations; ``user_id`` is set automatically.
+            **kwargs: Forwarded to both underlying ``save`` calls."""
 
         memory = self.get_or_create_user_memory(user_id)
         metadata = metadata or {}
@@ -89,28 +79,13 @@ class UserMemory:
         return item
 
     def search_user_memory(self, user_id: str, query: str, limit: int = 10, **kwargs) -> list:
-        """Search for user memory.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            list: OUT: Result of the operation."""
+        """Search the user's contextual memory only (not entities)."""
 
         memory = self.get_or_create_user_memory(user_id)
         return memory.search(query=query, limit=limit, **kwargs)
 
     def get_user_context(self, user_id: str) -> str:
-        """Retrieve the user context.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Render a multi-section context block (preferences + summary + known entities)."""
 
         memory = self.get_or_create_user_memory(user_id)
         entity_mem = self.user_entities.get(user_id)
@@ -130,12 +105,7 @@ class UserMemory:
         return "\n\n".join(context_parts)
 
     def update_user_preferences(self, user_id: str, preferences: dict[str, Any]) -> None:
-        """Update user preferences.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-            preferences (dict[str, Any]): IN: preferences. OUT: Consumed during execution."""
+        """Merge ``preferences`` into the user's stored preferences dict and persist."""
 
         if user_id not in self.user_preferences:
             self.user_preferences[user_id] = self._get_default_preferences()
@@ -144,24 +114,12 @@ class UserMemory:
         self._save_preferences()
 
     def get_user_preferences(self, user_id: str) -> dict[str, Any]:
-        """Retrieve the user preferences.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Return the user's preferences, falling back to the default template."""
 
         return self.user_preferences.get(user_id, self._get_default_preferences())
 
     def get_user_statistics(self, user_id: str) -> dict[str, Any]:
-        """Retrieve the user statistics.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Return a statistics dict (memory counts, entity counts, preferences)."""
 
         stats = {
             "user_id": user_id,
@@ -184,11 +142,7 @@ class UserMemory:
         return stats
 
     def clear_user_memory(self, user_id: str) -> None:
-        """Clear user memory.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            user_id (str): IN: user id. OUT: Consumed during execution."""
+        """Drop every tier and the preferences row for ``user_id``."""
 
         if user_id in self.user_memories:
             self.user_memories[user_id].clear()
@@ -203,12 +157,7 @@ class UserMemory:
             self._save_preferences()
 
     def _get_default_preferences(self) -> dict[str, Any]:
-        """Internal helper to get default preferences.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, Any]: OUT: Result of the operation."""
+        """Return the canonical preference template for a freshly-seen user."""
 
         return {
             "response_style": "balanced",
@@ -221,10 +170,7 @@ class UserMemory:
         }
 
     def _save_preferences(self) -> None:
-        """Internal helper to save preferences.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Persist the in-memory ``user_preferences`` map to storage."""
 
         if self.storage:
             self.storage.save("_user_preferences", self.user_preferences)

@@ -11,10 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Public exports for the Xerxes core package.
+"""Foundational utilities shared by every Xerxes subsystem.
 
-Re-exports configuration, error types, utilities, prompt templates,
-multimodal helpers, and streaming buffers via lazy attribute resolution.
+This package gathers the cross-cutting primitives the rest of the codebase
+imports: filesystem path helpers (``paths``), the Pydantic-based config
+model (``config``), the exception hierarchy (``errors``), the
+``XerxesBase`` strict model + tool-schema reflection (``utils``), the
+thread-safe streaming response buffer (``streamer_buffer``), multimodal
+image helpers (``multimodal``), and the registry decorators used to wire
+modules into the agent kernel (``basics``). Names are exposed via a lazy
+``__getattr__`` so importing :mod:`xerxes.core` itself stays cheap.
 """
 
 import importlib as _importlib
@@ -83,16 +89,9 @@ _SUBMODULE_MAP = {
 
 
 def __getattr__(name: str) -> object:
-    """Lazy-load core objects from their respective submodules.
+    """Resolve an exported name to its owning submodule on first access.
 
-    Args:
-        name (str): Attribute name being requested.
-
-    Returns:
-        The requested object from the appropriate submodule.
-
-    Raises:
-        AttributeError: If the name is not a known export.
+    Raises ``AttributeError`` for names outside :data:`_SUBMODULE_MAP`.
     """
     if name in _SUBMODULE_MAP:
         module = _importlib.import_module(_SUBMODULE_MAP[name], __package__)

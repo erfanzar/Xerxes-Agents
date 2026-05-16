@@ -11,11 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Pty module for Xerxes.
+"""PTY-backed shell sessions for the operator subsystem.
 
-Exports:
-    - PTYSession
-    - PTYSessionManager"""
+Hosts a long-lived collection of pseudo-terminal subprocesses keyed by
+session id so the model can drive interactive shells, REPLs and TUI
+commands across multiple tool calls. The manager owns the master fd and
+the :class:`subprocess.Popen` handle for each session and exposes
+non-blocking, bounded reads that yield after a soft deadline so the
+streaming runtime stays responsive.
+"""
 
 from __future__ import annotations
 
@@ -32,14 +36,16 @@ from dataclasses import dataclass
 
 @dataclass
 class PTYSession:
-    """Ptysession.
+    """Live PTY-backed shell tracked by :class:`PTYSessionManager`.
 
     Attributes:
-        session_id (str): session id.
-        process (subprocess.Popen[str]): process.
-        master_fd (int): master fd.
-        command (str): command.
-        workdir (str): workdir."""
+        session_id: Stable identifier the model uses to address the session.
+        process: The :class:`subprocess.Popen` running the shell command.
+        master_fd: Master side of the pseudo-terminal — owned by the manager
+            and closed when the session is torn down.
+        command: Original command string the session was started with.
+        workdir: Absolute working directory the shell was launched in.
+    """
 
     session_id: str
     process: subprocess.Popen[str]
@@ -49,13 +55,16 @@ class PTYSession:
 
 
 class PTYSessionManager:
-    """Ptysession manager."""
+    """Lifecycle manager for a session's PTY-backed shells.
+
+    Tracks every live :class:`PTYSession` keyed by session id, owns the
+    master fds and ensures they're closed on teardown. All reads are
+    non-blocking with a configurable soft deadline; output is capped per
+    call to avoid flooding the wire.
+    """
 
     def __init__(self) -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Start with no active sessions."""
 
         self._sessions: dict[str, PTYSession] = {}
 
@@ -69,18 +78,20 @@ class PTYSessionManager:
         yield_time_ms: int = 1000,
         max_output_chars: int = 4000,
     ) -> dict[str, tp.Any]:
-        """Create session.
+        """Spawn a new PTY-backed shell session and return its first output.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            cmd (str): IN: cmd. OUT: Consumed during execution.
-            workdir (str | None, optional): IN: workdir. Defaults to None. OUT: Consumed during execution.
-            env (dict[str, str] | None, optional): IN: env. Defaults to None. OUT: Consumed during execution.
-            login (bool, optional): IN: login. Defaults to True. OUT: Consumed during execution.
-            yield_time_ms (int, optional): IN: yield time ms. Defaults to 1000. OUT: Consumed during execution.
-            max_output_chars (int, optional): IN: max output chars. Defaults to 4000. OUT: Consumed during execution.
+            cmd: Shell command line executed via ``$SHELL -c``.
+            workdir: Working directory; falls back to ``os.getcwd()``.
+            env: Extra environment variables merged over ``os.environ``.
+            login: Append ``-l`` when the shell is bash or zsh.
+            yield_time_ms: Soft deadline before returning partial output.
+            max_output_chars: Hard cap on the bytes captured for this call.
+
         Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            A wire dict with the new ``session_id``, captured ``stdout``,
+            and the process ``running`` / ``exit_code`` flags.
+        """
 
         resolved_workdir = os.path.abspath(workdir or os.getcwd())
         master_fd, slave_fd = pty.openpty()
@@ -133,18 +144,23 @@ class PTYSessionManager:
         yield_time_ms: int = 1000,
         max_output_chars: int = 4000,
     ) -> dict[str, tp.Any]:
-        """Write.
+        """Drive an existing PTY session and return any new output.
+
+        The operations are applied in order: optional ``SIGINT`` to the
+        process group, then write ``chars``, then optionally close stdin by
+        sending the EOT control byte (``0x04``). Finally a bounded read
+        collects whatever the shell produced.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-            chars (str, optional): IN: chars. Defaults to ''. OUT: Consumed during execution.
-            close_stdin (bool, optional): IN: close stdin. Defaults to False. OUT: Consumed during execution.
-            interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
-            yield_time_ms (int, optional): IN: yield time ms. Defaults to 1000. OUT: Consumed during execution.
-            max_output_chars (int, optional): IN: max output chars. Defaults to 4000. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+            session_id: Target session previously created by
+                :meth:`create_session`.
+            chars: Text to feed into the PTY (no implicit newline).
+            close_stdin: If ``True``, send EOT after writing ``chars``.
+            interrupt: If ``True``, send ``SIGINT`` to the process group
+                before writing.
+            yield_time_ms: Soft deadline for the follow-up read.
+            max_output_chars: Hard cap on captured output for this call.
+        """
 
         session = self._require_session(session_id)
         if interrupt and session.process.poll() is None:
@@ -165,13 +181,11 @@ class PTYSessionManager:
         }
 
     def close(self, session_id: str) -> dict[str, tp.Any]:
-        """Close.
+        """Terminate a PTY session and release its resources.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Sends ``SIGTERM`` (escalating to ``SIGKILL`` after 2s), closes the
+        master fd, and removes the entry from the manager's table.
+        """
 
         session = self._require_session(session_id)
         if session.process.poll() is None:
@@ -188,12 +202,7 @@ class PTYSessionManager:
         return {"session_id": session_id, "closed": True, "exit_code": session.process.poll()}
 
     def list_sessions(self) -> list[dict[str, tp.Any]]:
-        """List sessions.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[dict[str, tp.Any]]: OUT: Result of the operation."""
+        """Return a wire-safe snapshot of every active PTY session."""
 
         return [
             {
@@ -207,15 +216,7 @@ class PTYSessionManager:
         ]
 
     def _read_output(self, session_id: str, *, yield_time_ms: int, max_output_chars: int) -> str:
-        """Internal helper to read output.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-            yield_time_ms (int): IN: yield time ms. OUT: Consumed during execution.
-            max_output_chars (int): IN: max output chars. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Bounded non-blocking drain of the session's master fd."""
 
         session = self._require_session(session_id)
         deadline = time.time() + max(yield_time_ms, 0) / 1000
@@ -242,13 +243,7 @@ class PTYSessionManager:
         return "".join(chunks)
 
     def _require_session(self, session_id: str) -> PTYSession:
-        """Internal helper to require session.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            session_id (str): IN: session id. OUT: Consumed during execution.
-        Returns:
-            PTYSession: OUT: Result of the operation."""
+        """Return the tracked session or raise ``ValueError`` if unknown."""
 
         if session_id not in self._sessions:
             raise ValueError(f"PTY session not found: {session_id}")

@@ -77,17 +77,16 @@ class ProfileAgent:
         llm_summariser: tp.Callable[[str, UserProfile], str] | None = None,
         ner_extractor: tp.Callable[[str], dict[str, list[str]]] | None = None,
     ) -> None:
-        """Initialize the profile agent.
+        """Wire the agent to a profile store and optional NER/LLM helpers.
 
         Args:
-            store (UserProfileStore): IN: Persistent store for user profiles. OUT:
-                Used for reading and saving profiles.
-            llm_summariser (Callable[[str, UserProfile], str] | None): IN: Optional
-                callback to summarize a turn into a profile note. OUT: Called during
-                updates when both prompt and response are present.
-            ner_extractor (Callable[[str], dict[str, list[str]]] | None): IN:
-                Optional NER extractor. OUT: Defaults to :func:`_default_ner` if
-                not provided.
+            store: Profile persistence layer; reads on update, writes once
+                per call.
+            llm_summariser: Optional ``(text, profile) -> note`` callback
+                invoked per turn when both sides of the conversation are
+                non-empty. Exceptions are swallowed.
+            ner_extractor: Entity extraction hook; defaults to
+                :func:`_default_ner` (best-effort, never raises).
         """
         self.store = store
         self.llm_summariser = llm_summariser
@@ -101,19 +100,20 @@ class ProfileAgent:
         agent_response: str = "",
         signals: tp.Iterable[str] = (),
     ) -> ProfileUpdate:
-        """Update a user profile based on a single interaction turn.
+        """Fold one interaction turn into the profile and persist.
+
+        Updates ``last_seen``, adds inferred domains, reinforces/demotes the
+        tone :class:`ConfidentValue`, captures explicit preference phrases,
+        records ``signals`` as feedback, and (when configured) appends an
+        LLM-generated note capped at 50 entries.
 
         Args:
-            user_id (str): IN: User identifier. OUT: Used to fetch/create the profile.
-            user_prompt (str): IN: Text from the user. OUT: Analyzed for domains,
-                tone, and preferences.
-            agent_response (str): IN: Text from the agent. OUT: Passed to the LLM
-                summarizer along with the user prompt.
-            signals (Iterable[str]): IN: Feedback signals (e.g., ``"correction"``).
-                OUT: Recorded as feedback and may affect tone confidence.
-
-        Returns:
-            ProfileUpdate: OUT: Summary of changes made to the profile.
+            user_id: Identifier of the profile to update.
+            user_prompt: Most recent user text.
+            agent_response: Most recent agent text (paired with the prompt
+                for the LLM summariser).
+            signals: Feedback markers such as ``"correction"`` or
+                ``"retry"`` that may demote tone confidence.
         """
         profile = self.store.get_or_create(user_id)
         profile.last_seen = datetime.now()
@@ -171,14 +171,7 @@ class ProfileAgent:
         )
 
     def _infer_domains(self, text: str) -> list[str]:
-        """Infer technology domains from text via keyword matching.
-
-        Args:
-            text (str): IN: Text to analyze. OUT: Lowercased and scanned for keywords.
-
-        Returns:
-            list[str]: OUT: Matched domain names.
-        """
+        """Return domain names whose keyword list matches ``text`` (case-insensitive)."""
         text_lower = text.lower()
         out: list[str] = []
         for domain, keywords in _TECH_DOMAINS:
@@ -187,16 +180,7 @@ class ProfileAgent:
         return out
 
     def _infer_tone(self, text: str) -> str:
-        """Infer the user's tone from message characteristics.
-
-        Args:
-            text (str): IN: User message text. OUT: Analyzed for length and
-                punctuation density.
-
-        Returns:
-            str: OUT: One of ``"terse"``, ``"casual"``, ``"verbose"``, or
-                ``"balanced"``.
-        """
+        """Classify ``text`` as ``terse``, ``casual``, ``verbose`` or ``balanced``."""
         n_words = len(text.split())
         if n_words == 0:
             return ""
@@ -210,14 +194,7 @@ class ProfileAgent:
         return "balanced"
 
     def _extract_preference_phrases(self, text: str) -> list[str]:
-        """Extract explicit preference phrases from text using regex.
-
-        Args:
-            text (str): IN: Text to search. OUT: Scanned against preference patterns.
-
-        Returns:
-            list[str]: OUT: Matched preference phrases.
-        """
+        """Pull explicit ``I prefer / please / never`` phrases out of ``text``."""
         out: list[str] = []
         for pat in _PREFERENCE_PHRASES:
             for m in pat.finditer(text):
@@ -228,16 +205,7 @@ class ProfileAgent:
 
 
 def _default_ner(text: str) -> dict[str, list[str]]:
-    """Default NER fallback using the EntityExtractor tool.
-
-    Args:
-        text (str): IN: Text to extract entities from. OUT: Passed to the static
-            tool call.
-
-    Returns:
-        dict[str, list[str]]: OUT: Extracted entities by category, or an empty
-            dict on failure.
-    """
+    """Best-effort NER via :class:`EntityExtractor`; returns ``{}`` on failure."""
     try:
         from ..tools.ai_tools import EntityExtractor
 

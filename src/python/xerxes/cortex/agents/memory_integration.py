@@ -53,30 +53,22 @@ class CortexMemory:
         short_term_capacity: int = 50,
         long_term_capacity: int = 5000,
     ):
-        """Initialize the Cortex memory subsystem.
+        """Build the four-tier memory stack for a Cortex run.
+
+        Persistence is gated by the ``WRITE_MEMORY=1`` environment variable
+        so tests and ephemeral runs never accidentally hit disk. When
+        persistence is disabled the long-term, entity, and user memories
+        still work — they just live in-memory.
 
         Args:
-            enable_short_term (bool): Whether to enable short-term memory.
-                IN: Controls creation of the recent-memory buffer.
-                OUT: Determines if ``self.short_term`` is instantiated.
-            enable_long_term (bool): Whether to enable long-term memory.
-                IN: Controls creation of the durable memory store.
-                OUT: Determines if ``self.long_term`` is instantiated.
-            enable_entity (bool): Whether to enable entity memory.
-                IN: Controls creation of the entity tracker.
-                OUT: Determines if ``self.entity_memory`` is instantiated.
-            enable_user (bool): Whether to enable user memory.
-                IN: Controls creation of the user-specific memory store.
-                OUT: Determines if ``self.user_memory`` is instantiated.
-            persistence_path (str | None): Path to an SQLite database for persistence.
-                IN: Only used when ``WRITE_MEMORY`` env var is ``"1"``.
-                OUT: Passed to ``SQLiteStorage`` when persistence is enabled.
-            short_term_capacity (int): Maximum items in short-term memory.
-                IN: Capacity limit for the recent-memory buffer.
-                OUT: Passed to ``ShortTermMemory``.
-            long_term_capacity (int): Maximum items in long-term memory.
-                IN: Capacity limit for the durable memory store.
-                OUT: Passed to ``LongTermMemory``.
+            enable_short_term: Allocate the recent-context buffer.
+            enable_long_term: Allocate the durable knowledge store.
+            enable_entity: Allocate the entity tracker.
+            enable_user: Allocate per-user memory.
+            persistence_path: SQLite database path used when persistence
+                is enabled via ``WRITE_MEMORY``.
+            short_term_capacity: Items kept in the short-term buffer.
+            long_term_capacity: Hard cap on long-term store size.
         """
 
         import os
@@ -99,25 +91,17 @@ class CortexMemory:
         additional_context: str | None = None,
         max_items: int = 10,
     ) -> str:
-        """Assemble a context string for a given task from all memory layers.
+        """Assemble a context string from every active memory layer.
+
+        Pulls in (in order): supplied background, recent short-term items,
+        agent-filtered long-term hits, extracted entities with their
+        frequencies, and the top results from the contextual search.
 
         Args:
-            task_description (str): The current task to find relevant context for.
-                IN: Used as a search query across memory subsystems.
-                OUT: Drives retrieval of related memories and entities.
-            agent_role (str | None): The role of the agent executing the task.
-                IN: Filters long-term memory by ``agent_id``.
-                OUT: Applied as a filter to improve relevance.
-            additional_context (str | None): Extra background to prepend.
-                IN: Arbitrary contextual information from the caller.
-                OUT: Included verbatim at the top of the assembled context.
-            max_items (int): Maximum number of contextual memory items.
-                IN: Limits the number of comprehensive search results.
-                OUT: Passed to ``self.contextual.search``.
-
-        Returns:
-            str: A formatted context string assembled from all memory sources.
-                OUT: Empty string if no relevant context is found.
+            task_description: Used as the search query and entity source.
+            agent_role: Used to filter long-term retrieval by ``agent_id``.
+            additional_context: Optional preamble shown verbatim.
+            max_items: Cap on the contextual memory search.
         """
 
         context_parts = []
@@ -167,25 +151,17 @@ class CortexMemory:
         importance: float = 0.5,
         task_metadata: dict[str, Any] | None = None,
     ):
-        """Persist the result of a completed task into memory.
+        """Persist a completed task result across the memory tiers.
+
+        Always writes to short-term, entity and contextual memory; long-term
+        storage is only used when ``importance >= 0.7``.
 
         Args:
-            task_description (str): The original task description.
-                IN: Stored as metadata to link the result to its task.
-                OUT: Truncated and saved in memory metadata.
-            result (str): The output produced by the agent.
-                IN: The content to store in memory.
-                OUT: Saved to short-term, long-term (if important), entity, and
-                contextual memory layers.
-            agent_role (str): The role of the agent that completed the task.
-                IN: Used to tag the memory entry.
-                OUT: Stored in metadata for filtered retrieval.
-            importance (float): Importance score from 0 to 1.
-                IN: Determines whether the result is promoted to long-term memory.
-                OUT: Compared against ``0.7`` to decide long-term storage.
-            task_metadata (dict | None): Additional metadata to attach.
-                IN: Optional caller-supplied metadata.
-                OUT: Merged with internal metadata before storage.
+            task_description: Original task statement (stored truncated).
+            result: Agent output to persist.
+            agent_role: Tagged onto every memory entry for later filtering.
+            importance: Score in ``[0, 1]`` gating long-term promotion.
+            task_metadata: Extra metadata merged into the entry.
         """
 
         metadata = task_metadata or {}
@@ -208,21 +184,10 @@ class CortexMemory:
         self.contextual.save(content=result, metadata=metadata, importance=importance, agent_id=agent_role)
 
     def save_agent_interaction(self, agent_role: str, action: str, content: str, importance: float = 0.3):
-        """Record an agent interaction in memory.
+        """Log a one-line agent interaction (action + content).
 
-        Args:
-            agent_role (str): The role of the agent performing the action.
-                IN: Identifies which agent produced the interaction.
-                OUT: Stored as metadata for retrieval.
-            action (str): A short action label.
-                IN: Describes what the agent did (e.g., ``"execute_task"``).
-                OUT: Included in the stored content and metadata.
-            content (str): The interaction content.
-                IN: The text to persist in memory.
-                OUT: Saved to short-term and optionally long-term memory.
-            importance (float): Importance score from 0 to 1.
-                IN: Determines long-term persistence; threshold is ``0.6``.
-                OUT: Compared to decide whether to save to long-term memory.
+        Always writes to short-term memory; promotes to long-term when
+        ``importance >= 0.6``.
         """
 
         interaction = f"[{agent_role}] {action}: {content}"
@@ -234,21 +199,10 @@ class CortexMemory:
             self.long_term.save(content=interaction, agent_id=agent_role, importance=importance)
 
     def save_cortex_decision(self, decision: str, context: str, outcome: str | None = None, importance: float = 0.7):
-        """Record a high-level Cortex orchestration decision.
+        """Record an orchestration-level decision under ``cortex_manager``.
 
-        Args:
-            decision (str): A description of the decision made.
-                IN: Summarizes the orchestration choice.
-                OUT: Stored as the primary content of the memory entry.
-            context (str): The context in which the decision was made.
-                IN: Background information surrounding the decision.
-                OUT: Appended to the stored content.
-            outcome (str | None): The result of the decision.
-                IN: Optional outcome summary.
-                OUT: Appended to the stored content when provided.
-            importance (float): Importance score from 0 to 1.
-                IN: Default is ``0.7`` to ensure durable storage.
-                OUT: Passed to long-term and contextual memory.
+        Writes to both long-term and contextual memory so the decision is
+        searchable across future runs.
         """
 
         content = f"Decision: {decision}\nContext: {context}"
@@ -263,19 +217,10 @@ class CortexMemory:
         self.contextual.save(content=content, metadata=metadata, importance=importance)
 
     def get_agent_history(self, agent_role: str, limit: int = 20) -> list[str]:
-        """Retrieve the interaction history for a specific agent.
+        """Return up to ``limit`` content strings filtered to ``agent_role``.
 
-        Args:
-            agent_role (str): The agent role to look up.
-                IN: Filter value for memory queries.
-                OUT: Applied to short-term and long-term retrieval.
-            limit (int): Maximum number of history entries to return.
-                IN: Caps the total number of results across memory layers.
-                OUT: Split between short-term and long-term retrieval.
-
-        Returns:
-            list[str]: A list of content strings from the agent's history.
-                OUT: Truncated to *limit* entries.
+        Short-term entries are returned first; the remainder of the budget
+        is filled from long-term memory.
         """
 
         history = []
@@ -294,17 +239,7 @@ class CortexMemory:
         return history[:limit]
 
     def get_user_context(self, user_id: str) -> str:
-        """Fetch stored context for a specific user.
-
-        Args:
-            user_id (str): The identifier of the user.
-                IN: Passed to ``UserMemory`` for lookup.
-                OUT: Used to retrieve user-specific context.
-
-        Returns:
-            str: The user's context string, or an empty string if not found.
-                OUT: Direct result from ``UserMemory.get_user_context``.
-        """
+        """Return ``UserMemory`` context for ``user_id`` or ``""`` if absent."""
 
         if self.user_memory:
             return self.user_memory.get_user_context(user_id)
@@ -329,12 +264,7 @@ class CortexMemory:
             self.contextual.clear()
 
     def get_summary(self) -> str:
-        """Produce a human-readable summary of memory state.
-
-        Returns:
-            str: A summary string combining short-term, long-term, and entity
-                statistics. OUT: Empty string if no memory layers are active.
-        """
+        """Return a human-readable summary across every active memory tier."""
 
         parts = []
 

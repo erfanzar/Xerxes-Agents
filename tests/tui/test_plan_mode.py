@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import pytest
-
-from xerxes.tui.app import XerxesTUI
-from xerxes.tui.prompt import PersistentPrompt
 from xerxes.streaming.wire_events import StatusUpdate
+from xerxes.tui.app import XerxesTUI
+from xerxes.tui.prompt import FooterRenderer, PersistentPrompt, StatusRenderer
 
 
 class _ClientStub:
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict]] = []
         self.steered: list[str] = []
-        self.queries: list[tuple[str, bool]] = []
+        self.queries: list[tuple[str, bool, str]] = []
         self.tui: XerxesTUI | None = None
 
     async def _send_jsonrpc(self, method: str, params: dict, req_id: str | None = None) -> None:
@@ -20,8 +19,8 @@ class _ClientStub:
     async def steer(self, content: str) -> None:
         self.steered.append(content)
 
-    async def query(self, user_input: str, plan_mode: bool = False) -> None:
-        self.queries.append((user_input, plan_mode))
+    async def query(self, user_input: str, plan_mode: bool = False, mode: str = "code") -> None:
+        self.queries.append((user_input, plan_mode, mode))
         if self.tui is not None:
             self.tui._turn_done_event.set()
 
@@ -57,19 +56,32 @@ class _PromptStub:
 
 
 @pytest.mark.asyncio
-async def test_shift_tab_plan_toggle_updates_ui_and_bridge() -> None:
+async def test_shift_tab_cycles_code_plan_research_modes() -> None:
     tui = XerxesTUI()
     client = _ClientStub()
     prompt = _PromptStub()
     tui._client = client  # type: ignore[assignment]
     tui._prompt = prompt  # type: ignore[assignment]
 
-    await tui._toggle_plan_mode()
+    await tui._cycle_interaction_mode()
 
     assert tui._plan_mode is True
     assert prompt.plan_mode is True
-    assert client.sent == [("set_plan_mode", {"enabled": True})]
-    assert "Plan mode ON" in prompt.lines[-1]
+    assert client.sent == [("set_plan_mode", {"enabled": True, "mode": "plan"})]
+    assert prompt.lines == []
+
+    await tui._cycle_interaction_mode()
+
+    assert tui._plan_mode is False
+    assert prompt.plan_mode is False
+    assert prompt.activity_mode == "researcher"
+    assert client.sent[-1] == ("set_plan_mode", {"enabled": False, "mode": "researcher"})
+
+    await tui._cycle_interaction_mode()
+
+    assert tui._plan_mode is False
+    assert prompt.plan_mode is False
+    assert prompt.activity_mode == "code"
 
 
 @pytest.mark.asyncio
@@ -84,7 +96,7 @@ async def test_slash_plan_uses_same_plan_mode_state_path() -> None:
 
     assert tui._plan_mode is True
     assert prompt.plan_mode is True
-    assert ("set_plan_mode", {"enabled": True}) in client.sent
+    assert ("set_plan_mode", {"enabled": True, "mode": "plan"}) in client.sent
     assert client.steered == ["/plan inspect auth"]
 
 
@@ -112,12 +124,30 @@ async def test_plan_mode_turn_auto_returns_to_code_mode() -> None:
 
     await tui._run_turns("write a plan")
 
-    assert client.queries == [("write a plan", True)]
+    assert client.queries == [("write a plan", True, "plan")]
     assert tui._plan_mode is False
     assert prompt.plan_mode is False
     assert prompt.activity_mode == "code"
-    assert ("set_plan_mode", {"enabled": False}) in client.sent
-    assert "Code mode ON" in prompt.lines[-1]
+    assert ("set_plan_mode", {"enabled": False, "mode": "code"}) in client.sent
+    assert prompt.lines == []
+
+
+@pytest.mark.asyncio
+async def test_user_selected_research_mode_survives_turn_start() -> None:
+    tui = XerxesTUI()
+    client = _ClientStub()
+    prompt = _PromptStub()
+    client.tui = tui
+    tui._client = client  # type: ignore[assignment]
+    tui._prompt = prompt  # type: ignore[assignment]
+
+    await tui._cycle_interaction_mode()
+    await tui._cycle_interaction_mode()
+    await tui._run_turns("research this")
+
+    assert client.queries == [("research this", False, "researcher")]
+    assert tui._plan_mode is False
+    assert prompt.activity_mode == "researcher"
 
 
 def test_activity_mode_infers_researcher_and_coder_from_tools() -> None:
@@ -156,3 +186,87 @@ def test_status_update_keeps_non_plan_activity_mode() -> None:
 
     assert tui._plan_mode is False
     assert prompt.activity_mode == "researcher"
+
+
+def test_plan_mode_colors_footer_and_input_separator_purple() -> None:
+    footer = FooterRenderer()
+    footer.set_plan_mode(True)
+
+    footer_markup = footer._markup()
+    assert "\x1b[35m" in footer_markup
+    assert "mode: plan" in footer_markup
+
+    status = StatusRenderer()
+    status.set_plan_mode(True)
+
+    status_markup = status._markup()
+    assert "\x1b[35m" in status_markup
+    assert "input · plan" in status_markup
+
+
+def test_research_mode_colors_footer_and_input_separator_cyan() -> None:
+    footer = FooterRenderer()
+    footer.set_activity_mode("researcher")
+
+    footer_markup = footer._markup()
+    assert "\x1b[36m" in footer_markup
+    assert "mode: researcher" in footer_markup
+
+    status = StatusRenderer()
+    status.set_activity_mode("researcher")
+
+    status_markup = status._markup()
+    assert "\x1b[36m" in status_markup
+    assert "input · research" in status_markup
+
+
+def test_status_renderer_trims_thinking_preview_to_last_non_empty_lines() -> None:
+    status = StatusRenderer()
+
+    status.append_thinking("\n\nfirst\n\nsecond\nthird\nfourth\nfifth\n")
+
+    markup = status._markup()
+    assert "\n\n✻" not in markup
+    assert "first" not in markup
+    assert "second\nthird\nfourth\nfifth" in markup
+
+
+def test_status_renderer_trims_blank_edges_from_committed_lines() -> None:
+    status = StatusRenderer()
+
+    status.append_line("\n\nhello\n\n")
+
+    markup = status._markup()
+    assert "\n\nhello" not in markup
+    assert "hello\n" in markup
+
+
+def test_status_renderer_shows_last_five_subagent_previews() -> None:
+    status = StatusRenderer()
+
+    for idx in range(8):
+        status.set_subagent_preview(f"task-{idx}", f"agent-{idx}", f"Tool{idx}")
+
+    markup = status._markup()
+    for idx in range(3):
+        assert f"agent-{idx}" not in markup
+    for idx in range(3, 8):
+        assert f"agent-{idx}" in markup
+
+
+def test_status_cursor_uses_current_render_metrics_for_dynamic_content() -> None:
+    prompt = PersistentPrompt()
+    calls = 0
+
+    def render_tool() -> str:
+        nonlocal calls
+        calls += 1
+        return "first\nsecond" if calls == 1 else "first"
+
+    prompt._status.set_active_tool("dynamic", render_tool)
+
+    content = prompt._status_control.create_content(width=80, height=None)
+
+    assert content.cursor_position is not None
+    assert content.cursor_position.y < content.line_count
+    assert calls == 1

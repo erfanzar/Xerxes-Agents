@@ -35,16 +35,12 @@ class ImprovementResult:
     """Outcome of a skill improvement attempt.
 
     Attributes:
-        improved (bool): IN: Success flag. OUT: ``True`` if the file was
-            updated.
-        old_version (str): IN: Previous version. OUT: Extracted from existing
-            file.
-        new_version (str): IN: Bumped version. OUT: Computed by
-            ``_bump_patch``.
-        backup_path (Path | None): IN: Path to backup. OUT: Set if a backup
-            was created.
-        skill_path (Path | None): IN: Updated file path. OUT: Set on success.
-        reason (str): IN: Empty on success. OUT: Error description on failure.
+        improved: True when the on-disk file was updated.
+        old_version: Version read from the existing ``SKILL.md``.
+        new_version: Patch-bumped version written to disk.
+        backup_path: Path of the created backup, if any.
+        skill_path: Path of the updated skill file on success.
+        reason: Empty on success; failure description otherwise.
     """
 
     improved: bool
@@ -56,15 +52,7 @@ class ImprovementResult:
 
 
 def _bump_patch(version: str) -> str:
-    """Increment the patch component of a semver string.
-
-    Args:
-        version (str): IN: Semver-like string. OUT: Parsed and incremented.
-
-    Returns:
-        str: OUT: New version string (defaults to ``"0.1.1"`` if parsing
-        fails).
-    """
+    """Increment the patch component of a semver string; fall back to ``"0.1.1"``."""
 
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)", version.strip())
     if not m:
@@ -83,18 +71,15 @@ class SkillImprover:
         *,
         max_age_attempts: int = 5,
     ) -> ImprovementResult:
-        """Update an existing ``SKILL.md`` from a new candidate.
+        """Rewrite an existing ``SKILL.md`` using a newer ``candidate``.
 
         Args:
-            skill_path (str | Path): IN: Path to the existing file. OUT: Read
-                and overwritten.
-            candidate (SkillCandidate): IN: New observed sequence. OUT: Passed
-                to ``render_skill_template``.
-            max_age_attempts (int): IN: Max backups to retain. OUT: Passed to
-                ``_make_backup``.
+            skill_path: Path to the existing skill file.
+            candidate: Observed tool sequence that will replace the body.
+            max_age_attempts: Maximum number of dated backups to retain.
 
         Returns:
-            ImprovementResult: OUT: Detailed result of the operation.
+            ``ImprovementResult`` describing the operation outcome.
         """
 
         path = Path(skill_path).expanduser()
@@ -135,14 +120,7 @@ class SkillImprover:
 
     @staticmethod
     def _extract_version(text: str) -> str | None:
-        """Parse the ``version`` field from YAML frontmatter.
-
-        Args:
-            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
-
-        Returns:
-            str | None: OUT: Version string or ``None``.
-        """
+        """Return the ``version`` field from YAML frontmatter, or ``None``."""
 
         for line in text.splitlines():
             if line.strip().startswith("version:"):
@@ -151,14 +129,7 @@ class SkillImprover:
 
     @staticmethod
     def _extract_name(text: str) -> str | None:
-        """Parse the ``name`` field from YAML frontmatter.
-
-        Args:
-            text (str): IN: SKILL.md content. OUT: Searched line-by-line.
-
-        Returns:
-            str | None: OUT: Name string or ``None``.
-        """
+        """Return the ``name`` field from YAML frontmatter, or ``None``."""
 
         for line in text.splitlines():
             if line.strip().startswith("name:"):
@@ -167,18 +138,7 @@ class SkillImprover:
 
     @staticmethod
     def _make_backup(path: Path, old_version: str, max_keep: int) -> Path:
-        """Create a versioned backup and prune old ones.
-
-        Args:
-            path (Path): IN: File to back up. OUT: Copied.
-            old_version (str): IN: Version for the backup filename. OUT: Used
-                in suffix.
-            max_keep (int): IN: Maximum backups to retain. OUT: Older backups
-                are deleted.
-
-        Returns:
-            Path: OUT: Path to the newly created backup file.
-        """
+        """Copy ``path`` to a ``.<old_version>.bak`` sibling and prune older backups."""
 
         backup = path.with_name(f"{path.name}.{old_version}.bak")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")

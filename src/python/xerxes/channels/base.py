@@ -14,7 +14,10 @@
 """Base channel abstraction.
 
 Defines the ``Channel`` ABC and the ``InboundHandler`` callable type that
-all concrete channel implementations must satisfy.
+every concrete channel must satisfy. The registry, webhook dispatcher,
+and Telegram gateway all interact with channels through this interface,
+so adapters never see daemon internals and the daemon never sees
+platform SDKs.
 """
 
 from __future__ import annotations
@@ -28,33 +31,41 @@ InboundHandler = Callable[[ChannelMessage], Awaitable[None]]
 
 
 class Channel(ABC):
-    """Abstract base class for all messaging channels.
+    """Abstract base for every messaging channel.
 
-    A channel is responsible for starting/stopping its transport layer and
-    for sending outbound messages. Inbound messages are delivered via the
-    ``on_inbound`` callback supplied to ``start``.
+    A channel owns its transport layer: it starts/stops connections, sends
+    outbound messages, and pushes inbound traffic into the agent runtime via
+    the ``on_inbound`` callback supplied to ``start``. The class attribute
+    ``name`` is the stable identifier used by ``ChannelMessage.channel`` and
+    by registries; subclasses set it to ``"slack"``, ``"telegram"``, etc.
     """
 
     name: str = ""
 
     @abstractmethod
     async def start(self, on_inbound: InboundHandler) -> None:
-        """Start the channel and register the inbound handler.
+        """Open the transport and register the inbound handler.
 
         Args:
-            on_inbound (InboundHandler): IN: async callback invoked for each
-                inbound ``ChannelMessage``. OUT: stored and called by the
-                channel transport.
+            on_inbound: Async callback invoked once per inbound
+                ``ChannelMessage``. Implementations must store it and call it
+                for every parsed inbound update.
         """
 
     @abstractmethod
     async def stop(self) -> None:
-        """Stop the channel and release any transport resources."""
+        """Close the transport and release any underlying resources.
+
+        After ``stop`` the channel should reject further inbound traffic
+        (or simply drop it) until ``start`` is called again.
+        """
 
     @abstractmethod
     async def send(self, message: ChannelMessage) -> None:
-        """Send an outbound message.
+        """Transmit one outbound message through the platform.
 
         Args:
-            message (ChannelMessage): IN: message to transmit.
+            message: The message to deliver. The channel decides which fields
+                map to the platform's recipient, threading, and attachment
+                semantics.
         """

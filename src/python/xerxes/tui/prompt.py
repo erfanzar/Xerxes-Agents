@@ -11,12 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prompt toolkit-based terminal UI components for Xerxes.
+"""prompt_toolkit-based prompt application for the Xerxes TUI.
 
-This module defines the interactive prompt application using
-``prompt_toolkit``, including slash-command completion, status/footer
-renderers, and the :class:`PersistentPrompt` orchestrator.
-"""
+Holds the :class:`PersistentPrompt` orchestrator (input buffer +
+multi-region full-screen layout), the :class:`StatusRenderer` /
+:class:`FooterRenderer` markup generators, and :class:`SlashCompleter`
+which surfaces both built-in slash commands and dynamically-registered
+skills. All key bindings live here as well."""
 
 from __future__ import annotations
 
@@ -43,6 +44,19 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _mode_style(plan_mode: bool, activity_mode: str) -> str:
+    """Return the ANSI escape that tints prompt chrome for the current mode.
+
+    Plan mode renders magenta; researcher mode renders cyan; everything
+    else falls back to the dim default."""
+    if plan_mode:
+        return "\x1b[35m"
+    if (activity_mode or "").lower() == "researcher":
+        return "\x1b[36m"
+    return "\x1b[2m"
+
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/help", "Show available commands"),
@@ -75,43 +89,22 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 
 
 class SlashCompleter(Completer):
-    """Completer for slash commands and registered skills.
-
-    Provides tab-completion for entries in :data:`SLASH_COMMANDS` and any
-    dynamically registered skill names.
-    """
+    """Completer for slash commands and registered skills."""
 
     def __init__(self, commands: list[tuple[str, str]] = SLASH_COMMANDS) -> None:
-        """Initialize the completer.
-
-        Args:
-            commands (list[tuple[str, str]]): IN: List of ``(command, description)``
-                tuples. OUT: Stored for completion matching.
-        """
+        """Seed the completer with built-in ``(name, description)`` pairs."""
         self._commands = commands
         self._skills: list[str] = []
 
     def set_skills(self, skills: list[str]) -> None:
-        """Update the list of skill names used for completion.
-
-        Args:
-            skills (list[str]): IN: Skill names. OUT: Deduplicated and sorted
-                internally.
-        """
+        """Replace the dynamic skill list (deduplicated, sorted)."""
         self._skills = sorted(set(skills))
 
     def get_completions(self, document: Document, complete_event: CompleteEvent):
-        """Yield completions matching the current document text.
+        """Yield matching slash commands and skills for the input under the cursor.
 
-        Args:
-            document (Document): IN: Current prompt_toolkit document. OUT: Used
-                to extract text before the cursor for prefix matching.
-            complete_event (CompleteEvent): IN: Completion trigger event. OUT:
-                Ignored in this implementation.
-
-        Yields:
-            Completion: OUT: Matching slash commands or skills.
-        """
+        Only fires when the text starts with ``/`` and contains no space —
+        post-space we let the underlying command parser handle args."""
         text = document.text_before_cursor
 
         if not text.startswith("/"):
@@ -143,20 +136,25 @@ class SlashCompleter(Completer):
 
 
 class StatusRenderer:
-    """Renders the main scrolling status area above the input line.
+    """Builds the scrolling status markup shown above the input line.
 
-    Accumulates content lines, streaming text, thinking text, active tools,
-    and spinner state into a single markup string.
+    Owns the committed content history, in-flight streaming/thinking
+    buffers, active tool render callbacks, subagent previews, spinner
+    state, and the bottom separator that doubles as a mode indicator.
+    Calling the instance returns ``ANSI(markup)`` for prompt_toolkit.
     """
 
     SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+    THINKING_PREVIEW_LINES = 4
+    SUBAGENT_PREVIEW_LINES = 5
 
     def __init__(self) -> None:
-        """Initialize the status renderer with empty state."""
+        """Build an empty renderer with the spinner parked and no panels active."""
         self._content_lines: list[str] = []
         self._running = False
         self._queue_count = 0
         self._plan_mode = False
+        self._activity_mode = "code"
         self._token_info = ""
         self._cost_info = ""
 
@@ -173,14 +171,11 @@ class StatusRenderer:
         self._spinner_frame: int = 0
         self._spinner_started_at: float = 0.0
         self._spinner_label: str = "Working"
+        self._last_render_line_count: int = 1
+        self._last_render_last_line_width: int = 0
 
     def set_running(self, running: bool) -> None:
-        """Update the running state and reset spinner timing.
-
-        Args:
-            running (bool): IN: Whether a turn is currently running. OUT: Updates
-                internal state and resets spinner timing when transitioning to running.
-        """
+        """Flip the running indicator; rearms the spinner clock on each off→on edge."""
         import time
 
         was_running = self._running
@@ -190,132 +185,110 @@ class StatusRenderer:
             self._spinner_frame = 0
 
     def reset_spinner_timer(self) -> None:
-        """Restart the spinner elapsed counter from zero.
+        """Restart the spinner elapsed clock at 0.
 
-        Called whenever a new tool call begins or the active label changes so
-        the spinner shows the current step's runtime, not the whole turn's.
-        """
+        Call when a new tool starts or the spinner label flips so the
+        timer reflects the current step, not the turn."""
         import time
 
         self._spinner_started_at = time.monotonic()
 
     def set_spinner_label(self, label: str) -> None:
-        """Set the descriptive label shown next to the spinner.
-
-        Args:
-            label (str): IN: Spinner label text. OUT: Stored internally.
-        """
+        """Update the spinner caption; restarts the elapsed clock if it changed."""
         new_label = label or "Working"
         if new_label != self._spinner_label:
             self.reset_spinner_timer()
         self._spinner_label = new_label
 
     def set_queue_count(self, count: int) -> None:
-        """Set the number of queued user inputs.
-
-        Args:
-            count (int): IN: Queue count. OUT: Clamped to non-negative and stored.
-        """
+        """Update the queued-inputs badge (clamped at 0)."""
         self._queue_count = max(0, count)
 
     def set_plan_mode(self, plan_mode: bool) -> None:
-        """Toggle plan mode display.
-
-        Args:
-            plan_mode (bool): IN: Whether plan mode is active. OUT: Stored internally.
-        """
+        """Record whether plan mode is currently active."""
         self._plan_mode = plan_mode
 
-    def set_stats(self, tokens: str = "", cost: str = "") -> None:
-        """Set token and cost statistics strings.
+    def set_activity_mode(self, mode: str) -> None:
+        """Record the activity label shown in the bottom rule when plan mode is off."""
+        self._activity_mode = mode or "code"
 
-        Args:
-            tokens (str): IN: Token count info. OUT: Stored internally.
-            cost (str): IN: Cost info. OUT: Stored internally.
-        """
+    def set_stats(self, tokens: str = "", cost: str = "") -> None:
+        """Store optional token / cost strings (currently informational only)."""
         self._token_info = tokens
         self._cost_info = cost
 
     def append_line(self, line: str) -> None:
-        """Append a line to the content history.
-
-        Args:
-            line (str): IN: Line to append. OUT: Added to content lines.
-        """
+        """Commit ``line`` to history after stripping leading/trailing blank edges."""
+        line = self._strip_blank_edges(line)
+        if not line:
+            return
         self._content_lines.append(line)
 
     def clear_content(self) -> None:
-        """Clear all accumulated content lines."""
+        """Drop every committed history line."""
         self._content_lines.clear()
 
     def set_active_panel(self, text: str) -> None:
-        """Set the active panel text (e.g., question panel).
-
-        Args:
-            text (str): IN: Panel markup text. OUT: Stored internally.
-        """
+        """Pin ``text`` as the active modal panel (approval / question)."""
         self._active_panel = text or ""
 
     def clear_active_panel(self) -> None:
-        """Clear the active panel text."""
+        """Remove the pinned modal panel."""
         self._active_panel = ""
 
     def append_streaming(self, text: str) -> None:
-        """Append text to the live streaming buffer.
-
-        Args:
-            text (str): IN: Streaming chunk. OUT: Added to the streaming buffer.
-        """
+        """Append ``text`` to the in-flight assistant response buffer."""
         self._streaming_text += text
 
     def commit_streaming(self) -> None:
-        """Move the streaming buffer into committed content lines."""
-        if self._streaming_text:
-            self._content_lines.append(self._streaming_text)
-            self._streaming_text = ""
+        """Move the streaming buffer onto the committed history and clear it."""
+        text = self._strip_blank_edges(self._streaming_text)
+        self._streaming_text = ""
+        if text:
+            self._content_lines.append(text)
 
     def clear_streaming(self) -> None:
-        """Discard the streaming buffer without committing."""
+        """Discard the streaming buffer without committing it."""
         self._streaming_text = ""
 
     def append_thinking(self, text: str) -> None:
-        """Append text to the live thinking buffer.
-
-        Args:
-            text (str): IN: Thinking chunk. OUT: Added to the thinking buffer.
-        """
+        """Append ``text`` to the rolling thinking preview (last ``N`` lines only)."""
         self._thinking_text += text
+        self._thinking_text = self._tail_lines(self._thinking_text, self.THINKING_PREVIEW_LINES)
 
     def clear_thinking(self) -> None:
-        """Clear the thinking buffer."""
+        """Discard the thinking preview."""
         self._thinking_text = ""
 
-    def set_active_tool(self, tool_call_id: str, render_fn: Callable[[], str]) -> None:
-        """Register a render function for an active tool call.
+    @staticmethod
+    def _tail_lines(text: str, limit: int) -> str:
+        """Return only the last ``limit`` non-empty logical lines of ``text``."""
+        if limit <= 0 or not text:
+            return ""
+        text = StatusRenderer._strip_blank_edges(text)
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if len(lines) <= limit:
+            return "\n".join(lines)
+        return "\n".join(lines[-limit:])
 
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Used as the key
-                in the active tools mapping.
-            render_fn (Callable[[], str]): IN: Callable returning the tool display
-                string. OUT: Stored for rendering on each status update.
-        """
+    @staticmethod
+    def _strip_blank_edges(text: str) -> str:
+        """Trim empty lines around a rendered block without touching its body."""
+        if not text:
+            return ""
+        return re.sub(r"(?:\n[ \t]*)+\Z", "", re.sub(r"\A(?:[ \t]*\n)+", "", text))
+
+    def set_active_tool(self, tool_call_id: str, render_fn: Callable[[], str]) -> None:
+        """Register an ongoing tool call; ``render_fn`` is called every redraw."""
         self._active_tools[tool_call_id] = render_fn
 
     def pop_active_tool(self, tool_call_id: str) -> str:
-        """Remove and render an active tool call.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Looked up and
-                removed from the active tools mapping.
-
-        Returns:
-            str: OUT: Rendered tool text, or empty string if not found.
-        """
+        """Remove a tool render and return its final markup (``""`` if unknown)."""
         render = self._active_tools.pop(tool_call_id, None)
         return render() if render is not None else ""
 
     def clear_active_tools(self) -> None:
-        """Remove all active tool render functions."""
+        """Drop every active tool renderer."""
         self._active_tools.clear()
 
     def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
@@ -329,6 +302,7 @@ class StatusRenderer:
         """
         if not task_id:
             return
+        self._subagent_previews.pop(task_id, None)
         self._subagent_previews[task_id] = f"{label}: {text}" if text else label
 
     def clear_subagent_preview(self, task_id: str) -> None:
@@ -344,11 +318,7 @@ class StatusRenderer:
         self._subagent_previews.clear()
 
     def _terminal_columns(self) -> int:
-        """Return the current terminal column count.
-
-        Returns:
-            int: OUT: Terminal columns, defaulting to 80 if unavailable.
-        """
+        """Return the active prompt_toolkit output columns (default 80)."""
         columns = 80
         try:
             from prompt_toolkit.application.current import get_app
@@ -359,11 +329,7 @@ class StatusRenderer:
         return columns
 
     def _terminal_rows(self) -> int:
-        """Return the current terminal row count.
-
-        Returns:
-            int: OUT: Terminal rows, defaulting to 24 if unavailable.
-        """
+        """Return the active prompt_toolkit output rows (default 24)."""
         try:
             from prompt_toolkit.application.current import get_app
 
@@ -372,12 +338,13 @@ class StatusRenderer:
             return 24
 
     def _markup(self) -> str:
-        """Build the full status markup string.
+        """Compose the full ANSI markup string consumed by ``ANSI(...)``.
 
-        Returns:
-            str: OUT: Concatenated markup of content, thinking, tools, streaming,
-                panels, spinner, and border.
-        """
+        Order: committed history → thinking preview → active tool blocks
+        → subagent previews → streaming text → modal panel → spinner row
+        → mode-aware separator. Side effect: caches the line count and
+        last-line width so :meth:`_status_cursor_position` can position
+        the cursor accurately."""
         parts: list[str] = []
 
         budget = max(20, self._terminal_rows() * 2)
@@ -402,7 +369,7 @@ class StatusRenderer:
 
         if self._subagent_previews:
             spin_frame = self.SPINNER_FRAMES[self._spinner_frame % len(self.SPINNER_FRAMES)]
-            for preview in self._subagent_previews.values():
+            for preview in list(self._subagent_previews.values())[-self.SUBAGENT_PREVIEW_LINES :]:
                 parts.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m\n")
 
         if self._streaming_text:
@@ -433,21 +400,25 @@ class StatusRenderer:
         title_parts = ["input"]
         if self._plan_mode:
             title_parts.append("plan")
+        elif self._activity_mode == "researcher":
+            title_parts.append("research")
         if self._queue_count:
             title_parts.append(f"{self._queue_count} queued")
         title = f" {' · '.join(title_parts)} "
         dash = "╌" if self._plan_mode else "─"
         border = f"{dash}{dash}{title}{dash * max(0, columns - len(title) - 2)}"
-        parts.append(f"\x1b[2m{border}\x1b[0m\n")
+        border_style = _mode_style(self._plan_mode, self._activity_mode)
+        parts.append(f"{border_style}{border}\x1b[0m\n")
 
-        return "".join(parts)
+        markup = "".join(parts)
+        plain = _ANSI_RE.sub("", markup)
+        lines = plain.split("\n") if plain else [""]
+        self._last_render_line_count = max(1, len(lines))
+        self._last_render_last_line_width = len(lines[-1]) if lines else 0
+        return markup
 
     def line_count(self) -> int:
-        """Count the number of visible lines in the current markup.
-
-        Returns:
-            int: OUT: Line count after stripping ANSI codes.
-        """
+        """Count the printable lines in the current markup (ANSI stripped)."""
         markup = self._markup()
         if not markup:
             return 0
@@ -455,19 +426,19 @@ class StatusRenderer:
         return plain.count("\n") + (0 if plain.endswith("\n") else 1)
 
     def __call__(self) -> AnyFormattedText:
-        """Return the status markup as formatted text.
-
-        Returns:
-            AnyFormattedText: OUT: ANSI-formatted status text for prompt_toolkit.
-        """
+        """Return ``ANSI(self._markup())`` so this object plugs into prompt_toolkit."""
         return ANSI(self._markup())
 
 
 class FooterRenderer:
-    """Renders the footer bar with session, model, and context info."""
+    """Builds the two-line footer (rule + status row) below the input.
+
+    Tracks session metadata (agent, model, cwd, branch), context
+    utilization, and the currently active mode. Calling the instance
+    returns ANSI markup for prompt_toolkit."""
 
     def __init__(self) -> None:
-        """Initialize the footer with default values."""
+        """Set neutral defaults; no terminal access happens here."""
         self._agent_name = "agent"
         self._model = ""
         self._cwd = ""
@@ -480,24 +451,13 @@ class FooterRenderer:
         self._tip = "shift-tab: mode  ctrl-j: newline"
 
     def line_count(self) -> int:
-        """Count the visible lines in the footer markup.
-
-        Returns:
-            int: OUT: Number of visible footer lines.
-        """
+        """Return the visible footer line count (ANSI stripped, min 1)."""
         markup = self._markup()
         plain = _ANSI_RE.sub("", markup)
         return max(1, plain.count("\n"))
 
     def set_session(self, agent_name: str, model: str, cwd: str, branch: str) -> None:
-        """Update session metadata displayed in the footer.
-
-        Args:
-            agent_name (str): IN: Agent name. OUT: Stored if non-empty.
-            model (str): IN: Model identifier. OUT: Stored if non-empty.
-            cwd (str): IN: Current working directory. OUT: Stored shortened if non-empty.
-            branch (str): IN: Git branch name. OUT: Stored if non-empty.
-        """
+        """Update session metadata; empty strings are ignored so callers can do partial updates."""
         if agent_name:
             self._agent_name = agent_name
         if model:
@@ -508,47 +468,24 @@ class FooterRenderer:
             self._branch = branch
 
     def set_running(self, running: bool) -> None:
-        """Update the running indicator in the footer.
-
-        Args:
-            running (bool): IN: Whether a turn is running. OUT: Stored internally.
-        """
+        """Flip the activity dot (●/○) shown beside the model name."""
         self._running = running
 
     def set_plan_mode(self, plan_mode: bool) -> None:
-        """Update the active interaction mode shown in the footer.
-
-        Args:
-            plan_mode (bool): IN: Whether plan mode is active. OUT: Stored for
-                footer rendering.
-        """
+        """Record plan mode for use by :meth:`_markup`."""
         self._plan_mode = plan_mode
 
     def set_activity_mode(self, mode: str) -> None:
-        """Update the non-plan activity mode shown in the footer.
-
-        Args:
-            mode (str): IN: Mode label such as ``"code"`` or ``"researcher"``.
-                OUT: Stored for rendering when plan mode is inactive.
-        """
+        """Record the non-plan activity label (``"code"`` / ``"researcher"`` / ...)."""
         self._activity_mode = mode or "code"
 
     def set_context(self, used: int, max_: int) -> None:
-        """Update context usage numbers in the footer.
-
-        Args:
-            used (int): IN: Used context tokens. OUT: Clamped to non-negative.
-            max_ (int): IN: Maximum context tokens. OUT: Clamped to non-negative.
-        """
+        """Record used / max context tokens (clamped at 0)."""
         self._context_used = max(0, used)
         self._context_max = max(0, max_)
 
     def _terminal_columns(self) -> int:
-        """Return the current terminal column count.
-
-        Returns:
-            int: OUT: Terminal columns, defaulting to 80 if unavailable.
-        """
+        """Return the live prompt_toolkit columns (default 80)."""
         try:
             from prompt_toolkit.application.current import get_app
 
@@ -558,14 +495,7 @@ class FooterRenderer:
 
     @staticmethod
     def _format_tokens(n: int) -> str:
-        """Format a token count with k/M suffixes.
-
-        Args:
-            n (int): IN: Raw token count. OUT: Formatted to a human-readable string.
-
-        Returns:
-            str: OUT: Formatted token count.
-        """
+        """Compact-format ``n`` with ``k`` / ``M`` suffixes for footer display."""
         if n >= 1_000_000:
             return f"{n / 1_000_000:.1f}M"
         if n >= 1_000:
@@ -574,27 +504,17 @@ class FooterRenderer:
 
     @staticmethod
     def _truncate_path(path: str, budget: int) -> str:
-        """Truncate a path to fit within a character budget.
-
-        Args:
-            path (str): IN: Full path string. OUT: Truncated with a leading ellipsis
-                if it exceeds the budget.
-            budget (int): IN: Maximum character length. OUT: Used to calculate
-                truncation.
-
-        Returns:
-            str: OUT: Truncated path string.
-        """
+        """Trim ``path`` to ``budget`` chars from the right, prefixed with ``…``."""
         if len(path) <= budget:
             return path
         return "…" + path[-(budget - 1) :]
 
     def _markup(self) -> str:
-        """Build the footer markup string.
+        """Build the two-line footer markup (separator rule + status row).
 
-        Returns:
-            str: OUT: Formatted footer with agent, model, cwd, branch, and context.
-        """
+        Lays out left segments (agent/cwd/branch/mode/tip) against a
+        right-aligned context badge, wrapping to a second line only
+        when both halves don't fit on one row."""
         spinner = "●" if self._running else "○"
         model = self._model or "—"
         agent = f"agent ({model} {spinner})"
@@ -625,37 +545,26 @@ class FooterRenderer:
         plain_left = _ANSI_RE.sub("", left)
         plain_right = _ANSI_RE.sub("", ctx_text)
 
-        rule = "\x1b[2m" + ("─" * columns) + "\x1b[0m"
+        style = _mode_style(self._plan_mode, self._activity_mode)
+        rule = style + ("─" * columns) + "\x1b[0m"
 
         if len(plain_left) + len(plain_right) + 2 <= columns:
             gap = max(1, columns - len(plain_left) - len(plain_right))
-            row = f"\x1b[2m{left}{' ' * gap}{ctx_text}\x1b[0m"
+            row = f"{style}{left}{' ' * gap}{ctx_text}\x1b[0m"
             return rule + "\n" + row + "\n"
 
         right_pad = max(0, columns - len(plain_right))
-        line1 = f"\x1b[2m{left}\x1b[0m"
-        line2 = f"{' ' * right_pad}\x1b[2m{ctx_text}\x1b[0m"
+        line1 = f"{style}{left}\x1b[0m"
+        line2 = f"{' ' * right_pad}{style}{ctx_text}\x1b[0m"
         return rule + "\n" + line1 + "\n" + line2 + "\n"
 
     def __call__(self) -> AnyFormattedText:
-        """Return the footer markup as formatted text.
-
-        Returns:
-            AnyFormattedText: OUT: ANSI-formatted footer text for prompt_toolkit.
-        """
+        """Return ``ANSI(self._markup())`` for prompt_toolkit consumption."""
         return ANSI(self._markup())
 
 
 def _shorten_home(path: str) -> str:
-    """Replace the user's home directory prefix with ``~``.
-
-    Args:
-        path (str): IN: Absolute or relative path. OUT: Shortened if it starts
-            with the home directory.
-
-    Returns:
-        str: OUT: Path with home directory replaced by ``~``.
-    """
+    """Collapse ``$HOME`` prefix in ``path`` to ``~``."""
     import os
 
     home = os.path.expanduser("~")
@@ -667,26 +576,23 @@ def _shorten_home(path: str) -> str:
 
 
 class PersistentPrompt:
-    """Persistent terminal prompt built on ``prompt_toolkit``.
+    """Full-screen prompt_toolkit application that drives the Xerxes input loop.
 
-    Manages the full-screen layout including the scrolling status area,
-    input buffer with slash-command completion, footer, key bindings, and
-    an input queue for consuming submitted text.
-    """
+    The layout has three regions: a scrolling :class:`StatusRenderer`
+    area on top, a one-line input buffer with slash + skill completion
+    in the middle, and a :class:`FooterRenderer` at the bottom.
+
+    Submitted text is enqueued on :attr:`input_queue`; the consuming
+    coroutine (typically :meth:`XerxesTUI._process_prompt_input`) pulls
+    it back out. ``on_submit`` / ``on_slash`` are reserved for future
+    callback-driven embedders and are not invoked by the default path."""
 
     def __init__(
         self,
         on_slash: Callable[[str], Coroutine[Any, Any, None]] | None = None,
         on_submit: Callable[[str], Coroutine[Any, Any, None]] | None = None,
     ) -> None:
-        """Initialize the prompt application and layout.
-
-        Args:
-            on_slash (Callable[[str], Coroutine[Any, Any, None]] | None): IN:
-                Async callback invoked for slash commands. OUT: Stored internally.
-            on_submit (Callable[[str], Coroutine[Any, Any, None]] | None): IN:
-                Async callback invoked on normal text submission. OUT: Stored internally.
-        """
+        """Construct renderers, the input buffer, the layout, and key bindings."""
         self._status = StatusRenderer()
         self._footer = FooterRenderer()
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
@@ -766,34 +672,19 @@ class PersistentPrompt:
         self._app: Application[None] | None = None
 
     def _status_cursor_position(self) -> Point:
-        """Compute the cursor position within the status control.
-
-        Returns:
-            Point: OUT: Cursor coordinates for prompt_toolkit.
-        """
-        plain = _ANSI_RE.sub("", self._status._markup())
-        lines = plain.split("\n")
-        last = max(0, len(lines) - 1)
+        """Position the (hidden) status cursor for prompt_toolkit scroll math."""
+        last = max(0, self._status._last_render_line_count - 1)
         if self._scroll_y is None or self._scroll_y >= last:
-            return Point(x=len(lines[-1]) if lines else 0, y=last)
+            return Point(x=self._status._last_render_last_line_width, y=last)
         y = max(0, self._scroll_y)
         return Point(x=0, y=y)
 
     def _status_total_lines(self) -> int:
-        """Return the total number of lines in the status markup.
-
-        Returns:
-            int: OUT: Total visible lines.
-        """
+        """Total printable lines currently rendered in the status area."""
         return max(0, len(_ANSI_RE.sub("", self._status._markup()).split("\n")) - 1)
 
     def _scroll_by(self, delta: int) -> None:
-        """Scroll the status view by a delta.
-
-        Args:
-            delta (int): IN: Number of lines to scroll (negative for up). OUT:
-                Applied to the scroll offset.
-        """
+        """Adjust the scroll offset by ``delta`` lines; ``None`` means tracking bottom."""
         total = self._status_total_lines()
         current = self._scroll_y if self._scroll_y is not None else total
         new = current + delta
@@ -804,15 +695,7 @@ class PersistentPrompt:
         self._invalidate()
 
     def _on_status_mouse(self, mouse_event: MouseEvent) -> Any:
-        """Handle mouse scroll events on the status area.
-
-        Args:
-            mouse_event (MouseEvent): IN: Mouse event from prompt_toolkit. OUT:
-                Used to determine scroll direction.
-
-        Returns:
-            Any: OUT: ``None`` if handled, or ``NotImplemented`` otherwise.
-        """
+        """Translate wheel-up / wheel-down events into status-area scrolling."""
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self._scroll_by(-1)
             return None
@@ -822,17 +705,7 @@ class PersistentPrompt:
         return NotImplemented
 
     def _input_prefix(self, line_number: int, wrap_count: int) -> AnyFormattedText:
-        """Return the input prompt prefix character.
-
-        Args:
-            line_number (int): IN: Line number in the buffer. OUT: Used to show
-                the prefix only on the first line.
-            wrap_count (int): IN: Wrap count for wrapped lines. OUT: Used to show
-                the prefix only on unwrapped first lines.
-
-        Returns:
-            AnyFormattedText: OUT: ANSI-formatted prompt prefix, or empty string.
-        """
+        """Render the ``›`` input glyph; colored green when idle, dim while running."""  # noqa: RUF002
         if line_number == 0 and wrap_count == 0:
             color = "2" if self._running else "1;32"
             return ANSI(f"\x1b[{color}m›\x1b[0m ")  # noqa: RUF001
@@ -843,104 +716,81 @@ class PersistentPrompt:
     PLAN_TOGGLE_SENTINEL = "\x00__toggle_plan_mode__\x00"
 
     def set_active_approval(self, panel: Any) -> None:
-        """Display an approval panel in the status area.
-
-        Args:
-            panel (Any): IN: Approval panel object with a ``compose`` method. OUT:
-                Rendered and set as the active panel.
-        """
+        """Pin ``panel`` as the active approval modal and invalidate the screen."""
         self._active_approval = panel
         self._status.set_active_panel(panel.compose() if panel else "")
         self._invalidate()
 
     def clear_active_approval(self) -> None:
-        """Remove the active approval panel from the status area."""
+        """Dismiss the active approval panel."""
         self._active_approval = None
         self._status.clear_active_panel()
         self._invalidate()
 
     def refresh_active_approval(self) -> None:
-        """Re-render the active approval panel."""
+        """Re-render the active approval panel after a cursor move."""
         if self._active_approval is not None:
             self._status.set_active_panel(self._active_approval.compose())
             self._invalidate()
 
     def set_active_question(self, panel: Any) -> None:
-        """Display a question panel in the status area.
-
-        Args:
-            panel (Any): IN: Question panel object with a ``compose`` method. OUT:
-                Rendered and set as the active panel.
-        """
+        """Pin ``panel`` as the active question modal and invalidate the screen."""
         self._active_question = panel
         self._status.set_active_panel(panel.compose() if panel else "")
         self._invalidate()
 
     def clear_active_question(self) -> None:
-        """Remove the active question panel from the status area."""
+        """Dismiss the active question panel."""
         self._active_question = None
         self._status.clear_active_panel()
         self._invalidate()
 
     def refresh_active_question(self) -> None:
-        """Re-render the active question panel."""
+        """Re-render the active question panel after a cursor move."""
         if self._active_question is not None:
             self._status.set_active_panel(self._active_question.compose())
             self._invalidate()
 
     def _build_key_bindings(self) -> KeyBindings:
-        """Build and return the key bindings for the prompt application.
+        """Wire every Xerxes-specific keybinding into one :class:`KeyBindings` registry.
 
-        Returns:
-            KeyBindings: OUT: Configured key bindings for scrolling, completion,
-                submission, and exit handling.
-        """
+        Covers scroll (PageUp/PageDown/Ctrl+Home/Ctrl+End), history vs
+        completion vs panel navigation overloads for arrows, completion
+        cycling on Tab, Shift+Tab as the plan-mode toggle sentinel,
+        Enter as submit-with-panel-fallback, and Ctrl+C / Ctrl+D as a
+        two-step exit with mid-turn interrupt support."""
         kb = KeyBindings()
 
         def _queue_interrupt() -> None:
+            """Enqueue the ``/interrupt`` sentinel so the input pump cancels the turn."""
             self._input_queue.put_nowait("/interrupt")
             self._exit_armed = False
 
         @kb.add(Keys.PageUp, eager=True)
         def _pgup(event: KeyPressEvent) -> None:
-            """Internal helper to pgup.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """PageUp: scroll the status area up by ten lines."""
             self._scroll_by(-10)
 
         @kb.add(Keys.PageDown, eager=True)
         def _pgdown(event: KeyPressEvent) -> None:
-            """Internal helper to pgdown.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """PageDown: scroll the status area down by ten lines."""
             self._scroll_by(10)
 
         @kb.add(Keys.ControlEnd, eager=True)
         def _to_bottom(event: KeyPressEvent) -> None:
-            """Internal helper to to bottom.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Ctrl+End: jump back to follow-the-tail mode."""
             self._scroll_y = None
             self._invalidate()
 
         @kb.add(Keys.ControlHome, eager=True)
         def _to_top(event: KeyPressEvent) -> None:
-            """Internal helper to to top.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Ctrl+Home: jump to the top of the rendered history."""
             self._scroll_y = 0
             self._invalidate()
 
         @kb.add(Keys.Up)
         def _up(event: KeyPressEvent) -> None:
-            """Internal helper to up.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Up arrow: route through completion menu, modal panel, then history."""
             buffer = event.app.current_buffer
 
             if buffer.complete_state is not None:
@@ -959,10 +809,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.Down)
         def _down(event: KeyPressEvent) -> None:
-            """Internal helper to down.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Down arrow: route through completion menu, modal panel, then history."""
             buffer = event.app.current_buffer
             if buffer.complete_state is not None:
                 buffer.complete_next()
@@ -979,10 +826,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.Tab)
         def _tab(event: KeyPressEvent) -> None:
-            """Internal helper to tab.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Tab: start completion or cycle to the next completion."""
             buffer = event.app.current_buffer
             if buffer.complete_state is not None:
                 buffer.complete_next()
@@ -991,7 +835,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.BackTab, eager=True)
         def _shift_tab(event: KeyPressEvent) -> None:
-            """Toggle plan mode without submitting the current input."""
+            """Shift+Tab: enqueue the plan-mode toggle sentinel without submitting input."""
             buffer = event.app.current_buffer
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
@@ -999,10 +843,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.Enter)
         def _enter(event: KeyPressEvent) -> None:
-            """Internal helper to enter.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Enter: apply pending completion, otherwise submit or select panel option."""
             buffer = event.app.current_buffer
 
             if buffer.complete_state is not None and buffer.complete_state.current_completion is not None:
@@ -1019,10 +860,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.Escape, eager=True)
         def _esc(event: KeyPressEvent) -> None:
-            """Internal helper to esc.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Esc: cancel an in-flight turn, otherwise close any open completion menu."""
             if self._running:
                 _queue_interrupt()
                 return
@@ -1032,10 +870,7 @@ class PersistentPrompt:
 
         @kb.add(Keys.ControlC, eager=True)
         def _ctrl_c(event: KeyPressEvent) -> None:
-            """Internal helper to ctrl c.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Ctrl+C: interrupt the running turn, clear input, then arm a confirmation exit."""
             buffer = event.app.current_buffer
 
             if self._running:
@@ -1056,15 +891,12 @@ class PersistentPrompt:
 
         @kb.add("c-c", eager=True)
         def _ctrl_c_alias(event: KeyPressEvent) -> None:
-            """Handle terminals that report Ctrl+C as c-c."""
+            """Mirror of the Ctrl+C handler for terminals that report it as ``c-c``."""
             _ctrl_c(event)
 
         @kb.add(Keys.ControlD)
         def _ctrl_d(event: KeyPressEvent) -> None:
-            """Internal helper to ctrl d.
-
-            Args:
-                event (KeyPressEvent): IN: event. OUT: Consumed during execution."""
+            """Ctrl+D on an empty buffer exits; otherwise it's swallowed."""
             buffer = event.app.current_buffer
             if buffer.text:
                 return
@@ -1073,15 +905,10 @@ class PersistentPrompt:
         return kb
 
     def _accept_handler(self, buffer: Buffer) -> bool:
-        """Handle accepted (submitted) input from the buffer.
+        """Submit handler: normalize text, push onto :attr:`input_queue`, clear buffer.
 
-        Args:
-            buffer (Buffer): IN: prompt_toolkit buffer containing the input. OUT:
-                Text is read, normalized, and enqueued.
-
-        Returns:
-            bool: OUT: Always ``False`` to prevent default buffer behavior.
-        """
+        Returns ``False`` so prompt_toolkit doesn't append the entry to
+        the buffer's own history (we manage that explicitly)."""
         text = buffer.text.strip()
         if not text:
             return False
@@ -1099,29 +926,16 @@ class PersistentPrompt:
 
     @property
     def input_queue(self) -> asyncio.Queue[str]:
-        """Return the input queue for consuming submitted text.
-
-        Returns:
-            asyncio.Queue[str]: OUT: Queue of submitted strings.
-        """
+        """Queue from which the consuming task pulls submitted input strings."""
         return self._input_queue
 
     @property
     def is_running(self) -> bool:
-        """Return whether a turn is currently running.
-
-        Returns:
-            bool: OUT: Current running state.
-        """
+        """``True`` while a turn is actively streaming."""
         return self._running
 
     def set_running(self, running: bool) -> None:
-        """Update the running state and propagate to renderers.
-
-        Args:
-            running (bool): IN: New running state. OUT: Propagated to status and
-                footer renderers.
-        """
+        """Update the running flag and cascade it to the status / footer renderers."""
         self._running = running
         self._status.set_running(running)
         self._footer.set_running(running)
@@ -1130,113 +944,68 @@ class PersistentPrompt:
         self._invalidate()
 
     def set_spinner_label(self, label: str) -> None:
-        """Update the spinner label in the status renderer.
-
-        Args:
-            label (str): IN: New spinner label. OUT: Passed to status renderer.
-        """
+        """Forward ``label`` to the status renderer (caption beside the spinner)."""
         self._status.set_spinner_label(label)
         self._invalidate()
 
     def reset_spinner_timer(self) -> None:
-        """Reset the spinner elapsed counter to zero."""
+        """Restart the spinner elapsed-time counter at zero."""
         self._status.reset_spinner_timer()
         self._invalidate()
 
     def set_stats(self, tokens: str = "", cost: str = "") -> None:
-        """Update token and cost statistics.
-
-        Args:
-            tokens (str): IN: Token info string. OUT: Passed to status renderer.
-            cost (str): IN: Cost info string. OUT: Passed to status renderer.
-        """
+        """Forward token / cost strings to the status renderer."""
         self._status.set_stats(tokens, cost)
         self._invalidate()
 
     def set_session(self, *, agent_name: str = "", model: str = "", cwd: str = "", branch: str = "") -> None:
-        """Update session metadata in the footer.
-
-        Args:
-            agent_name (str): IN: Agent name. OUT: Passed to footer renderer.
-            model (str): IN: Model identifier. OUT: Passed to footer renderer.
-            cwd (str): IN: Working directory. OUT: Passed to footer renderer.
-            branch (str): IN: Git branch. OUT: Passed to footer renderer.
-        """
+        """Forward partial session metadata updates to the footer."""
         self._footer.set_session(agent_name, model, cwd, branch)
         self._invalidate()
 
     def set_skills(self, skills: list[str]) -> None:
-        """Update the skill list used for slash-command completion.
-
-        Args:
-            skills (list[str]): IN: Skill names. OUT: Passed to the completer.
-        """
+        """Replace the slash-command skill list so completions stay in sync."""
         self._completer.set_skills(skills)
 
     def set_context(self, used: int, max_: int) -> None:
-        """Update context usage in the footer.
-
-        Args:
-            used (int): IN: Used tokens. OUT: Passed to footer renderer.
-            max_ (int): IN: Max tokens. OUT: Passed to footer renderer.
-        """
+        """Update the footer's context-usage gauge."""
         self._footer.set_context(used, max_)
         self._invalidate()
 
     def set_queue_count(self, count: int) -> None:
-        """Update the queued input count in the status renderer.
-
-        Args:
-            count (int): IN: Queue count. OUT: Passed to status renderer.
-        """
+        """Update the queued-input badge in the status area."""
         self._status.set_queue_count(count)
         self._invalidate()
 
     def set_plan_mode(self, plan_mode: bool) -> None:
-        """Update plan mode display state.
-
-        Args:
-            plan_mode (bool): IN: Whether plan mode is active. OUT: Passed to
-                status renderer.
-        """
+        """Apply plan-mode tinting to both the status and footer."""
         self._status.set_plan_mode(plan_mode)
         self._footer.set_plan_mode(plan_mode)
         self._invalidate()
 
     def set_activity_mode(self, mode: str) -> None:
-        """Update the footer activity mode shown when plan mode is inactive.
-
-        Args:
-            mode (str): IN: Mode label. OUT: Passed to footer renderer.
-        """
+        """Apply the non-plan activity label to both status and footer."""
+        self._status.set_activity_mode(mode)
         self._footer.set_activity_mode(mode)
         self._invalidate()
 
     def append_line(self, line: str) -> None:
-        """Append a line to the status content.
-
-        Args:
-            line (str): IN: Line to append. OUT: Passed to status renderer.
-        """
+        """Append ``line`` to the committed status history."""
         self._status.append_line(line)
         self._invalidate()
 
     def clear_content(self) -> None:
-        """Clear all status content lines."""
+        """Wipe the committed status history."""
         self._status.clear_content()
         self._invalidate()
 
     def append_streaming(self, text: str) -> None:
-        """Append text to the streaming buffer.
-
-        Args:
-            text (str): IN: Streaming chunk. OUT: Passed to status renderer.
-        """
+        """Append ``text`` to the live streaming buffer."""
         self._status.append_streaming(text)
         self._invalidate()
 
     def commit_streaming(self) -> None:
-        """Commit the streaming buffer to content lines, rendering Markdown."""
+        """Render the streaming buffer through Markdown and move it onto history."""
         text = self._status._streaming_text
         self._status.clear_streaming()
         if text:
@@ -1250,87 +1019,62 @@ class PersistentPrompt:
         self._invalidate()
 
     def clear_streaming(self) -> None:
-        """Discard the streaming buffer without committing."""
+        """Discard the streaming buffer without committing it to history."""
         self._status.clear_streaming()
         self._invalidate()
 
     def append_thinking(self, text: str) -> None:
-        """Append text to the thinking buffer.
-
-        Args:
-            text (str): IN: Thinking chunk. OUT: Passed to status renderer.
-        """
+        """Append ``text`` to the rolling thinking preview."""
         self._status.append_thinking(text)
         self._invalidate()
 
     def clear_thinking(self) -> None:
-        """Clear the thinking buffer."""
+        """Discard the thinking preview."""
         self._status.clear_thinking()
         self._invalidate()
 
     def set_active_tool(self, tool_call_id: str, render_fn: Callable[[], str]) -> None:
-        """Register an active tool render function.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Passed to status renderer.
-            render_fn (Callable[[], str]): IN: Render callable. OUT: Passed to status renderer.
-        """
+        """Register ``render_fn`` so the status area can re-paint the tool live."""
         self._status.set_active_tool(tool_call_id, render_fn)
         self._invalidate()
 
     def commit_active_tool(self, tool_call_id: str, final_text: str) -> None:
-        """Finalize an active tool and append its rendered text.
-
-        Args:
-            tool_call_id (str): IN: Tool call identifier. OUT: Passed to status renderer.
-            final_text (str): IN: Final rendered text. OUT: Appended to content lines.
-        """
+        """Remove the live tool render and append its final ``final_text`` to history."""
         self._status.pop_active_tool(tool_call_id)
         if final_text:
             self._status.append_line(final_text)
         self._invalidate()
 
     def clear_active_tools(self) -> None:
-        """Remove all active tool renderers from the live status area."""
+        """Drop every live-tool renderer."""
         self._status.clear_active_tools()
         self._invalidate()
 
     def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
-        """Set or update a transient sub-agent preview line.
-
-        Args:
-            task_id (str): IN: Sub-agent task identifier.
-            label (str): IN: Display label.
-            text (str): IN: Latest preview text (replaces, doesn't append).
-        """
+        """Replace the live preview line for ``task_id`` (never appended)."""
         self._status.set_subagent_preview(task_id, label, text)
         self._invalidate()
 
     def clear_subagent_preview(self, task_id: str) -> None:
-        """Remove a sub-agent preview line once the task ends.
-
-        Args:
-            task_id (str): IN: Sub-agent task identifier.
-        """
+        """Drop the preview line for ``task_id``."""
         self._status.clear_subagent_preview(task_id)
         self._invalidate()
 
     def clear_subagent_previews(self) -> None:
-        """Remove all transient sub-agent preview lines."""
+        """Drop every subagent preview line."""
         self._status.clear_subagent_previews()
         self._invalidate()
 
     def _invalidate(self) -> None:
-        """Trigger a redraw of the prompt application if running."""
+        """Request a redraw of the prompt application (no-op if not running)."""
         if self._app:
             self._app.invalidate()
 
     async def run(self) -> Application[None]:
-        """Run the prompt application asynchronously.
+        """Run the prompt_toolkit application until it exits; returns it for inspection.
 
-        Returns:
-            Application[None]: OUT: The running prompt_toolkit application instance.
-        """
+        Set ``XERXES_MOUSE=1`` to enable mouse support (off by default
+        so it doesn't fight the host terminal's text-selection)."""
         self._app = Application(
             self._layout,
             key_bindings=self._kb,
@@ -1343,29 +1087,21 @@ class PersistentPrompt:
         return self._app
 
     def stop(self) -> None:
-        """Stop the running prompt application."""
+        """Ask the running application to exit; no-op when not running."""
         if self._app and self._app.is_running:
             self._app.exit()
 
     async def __aenter__(self) -> PersistentPrompt:
-        """Enter the async runtime context.
-
-        Returns:
-            PersistentPrompt: OUT: Self.
-        """
+        """Async context entry — returns ``self``; does not start the application."""
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        """Exit the async runtime context, stopping the application."""
+        """Async context exit — calls :meth:`stop`."""
         self.stop()
 
     def push_modal(
         self,
         panel: Any,
     ) -> None:
-        """Placeholder for modal panel support.
-
-        Args:
-            panel (Any): IN: Panel object. OUT: Currently unused.
-        """
+        """Placeholder kept for forward-compat with a generic modal stack API."""
         pass

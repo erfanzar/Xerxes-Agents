@@ -11,7 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes."""
+"""Operator subsystem — session-attached managers and high-power tools.
+
+Re-exports the public surface of the operator package:
+
+* :class:`OperatorState` and :class:`OperatorRuntimeConfig` — the session
+  integration point.
+* Manager classes (:class:`PTYSessionManager`, :class:`BrowserManager`,
+  :class:`SpawnedAgentManager`, :class:`UserPromptManager`) — direct access
+  for callers that want to bypass the tool layer.
+* Value objects exchanged on the wire (:class:`ImageInspectionResult`,
+  :class:`PendingUserPrompt`, :class:`OperatorPlanState`, ...).
+* Tool name registries (:data:`SAFE_OPERATOR_TOOLS`,
+  :data:`HIGH_POWER_OPERATOR_TOOLS`, :data:`ALL_OPERATOR_TOOLS`).
+"""
 
 from .browser import BrowserManager, BrowserPageState
 from .config import (

@@ -55,27 +55,11 @@ class UniversalAgent(CortexAgent):
         max_tokens: int = 4096,
         additional_tools: list[Any] | None = None,
     ):
-        """Initialize a ``UniversalAgent`` with a built-in tool set.
+        """Build a Universal Task Executor with the default tool catalogue.
 
-        Args:
-            llm: The language model instance to use.
-                IN: Passed to the base ``CortexAgent`` constructor.
-                OUT: Configures the agent's LLM backend.
-            verbose (bool): Whether to enable verbose logging.
-                IN: Passed to the base constructor.
-                OUT: Controls log output during agent execution.
-            allow_delegation (bool): Whether the agent may delegate tasks.
-                IN: Passed to the base constructor.
-                OUT: Enables or disables delegation behavior.
-            temperature (float): Sampling temperature for the LLM.
-                IN: Passed to the base constructor.
-                OUT: Affects response randomness.
-            max_tokens (int): Maximum tokens per LLM response.
-                IN: Passed to the base constructor.
-                OUT: Limits the length of generated responses.
-            additional_tools (list | None): Extra tools to append to the default set.
-                IN: Optional list of callables or ``CortexTool`` instances.
-                OUT: Merged with the built-in tool set.
+        All standard :class:`CortexAgent` constructor knobs are forwarded;
+        additional tools, when supplied, are appended after the built-in
+        ones.
         """
 
         tools = self._build_tool_set(additional_tools)
@@ -112,17 +96,7 @@ class UniversalAgent(CortexAgent):
         self.capabilities = cast(list[AgentCapability], self._define_capabilities())
 
     def _build_tool_set(self, additional_tools: list[Any] | None = None) -> list[Any]:
-        """Construct the default tool set for the universal agent.
-
-        Args:
-            additional_tools (list | None): Extra tools to include.
-                IN: Optional callables or ``CortexTool`` instances to append.
-                OUT: Added to the end of the default tool list.
-
-        Returns:
-            list[Any]: The complete list of tools available to the agent.
-                OUT: Contains built-in tools plus any *additional_tools*.
-        """
+        """Return the built-in tool list plus any caller-supplied tools."""
 
         tools = [
             GoogleSearch,
@@ -206,12 +180,7 @@ class UniversalAgent(CortexAgent):
         return tools
 
     def _define_capabilities(self) -> list[str]:
-        """Return the list of capability strings for the universal agent.
-
-        Returns:
-            list[str]: Human-readable capability descriptions.
-                OUT: Used for introspection and agent selection.
-        """
+        """Return the human-readable capability list for introspection."""
 
         return [
             "Web research and information gathering",
@@ -226,12 +195,7 @@ class UniversalAgent(CortexAgent):
         ]
 
     def describe_capabilities(self) -> str:
-        """Produce a formatted description of the agent's capabilities.
-
-        Returns:
-            str: A human-readable summary of capabilities and tool count.
-                OUT: Suitable for display or logging.
-        """
+        """Return a printable capability summary and tool count."""
 
         cap_list = "\n".join([f"• {cap}" for cap in self.capabilities])
         return f"""Universal Agent Capabilities:
@@ -256,21 +220,11 @@ class UniversalTaskCreator:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ):
-        """Initialize the task creator.
+        """Construct a :class:`TaskCreator` paired with a :class:`UniversalAgent`.
 
-        Args:
-            llm: The language model instance.
-                IN: Passed to ``TaskCreator`` and ``UniversalAgent``.
-                OUT: Configures the LLM backend for task creation.
-            verbose (bool): Whether to enable verbose logging.
-                IN: Passed to internal components.
-                OUT: Controls log output.
-            temperature (float): Sampling temperature.
-                IN: Passed to ``UniversalAgent``.
-                OUT: Affects LLM response randomness.
-            max_tokens (int): Maximum tokens per response.
-                IN: Passed to ``UniversalAgent``.
-                OUT: Limits generated response length.
+        The same ``llm`` instance backs both — the task creator uses it for
+        decomposition and the universal agent uses it as the fallback
+        executor when no specialised agent matches.
         """
 
         from ..orchestration.task_creator import TaskCreator
@@ -298,24 +252,15 @@ class UniversalTaskCreator:
         background: str | None = None,
         specialized_agents: list[CortexAgent] | None = None,
     ) -> tuple:
-        """Create tasks from a prompt and assign them to agents.
+        """Decompose ``prompt`` into tasks and route each one to an agent.
 
-        Args:
-            prompt (str): The high-level objective to decompose.
-                IN: Passed to ``TaskCreator`` for task breakdown.
-                OUT: Drives the creation of ``TaskDefinition`` objects.
-            background (str | None): Additional context for task creation.
-                IN: Optional background passed to ``TaskCreator``.
-                OUT: Guides the decomposition strategy.
-            specialized_agents (list | None): Agents with specific roles.
-                IN: If provided, tasks are preferentially matched to these agents
-                by role name similarity.
-                OUT: Appended to the universal agent for task assignment.
+        Tasks whose suggested role substring-matches a specialised agent are
+        bound to that agent; the rest fall back to the universal agent.
 
         Returns:
-            tuple: Either ``(TaskCreationPlan, list[CortexTask])`` when
-                specialized agents are provided, or the raw result from
-                ``TaskCreator``. OUT: Contains the plan and executable tasks.
+            ``(TaskCreationPlan, list[CortexTask])`` when specialised
+            agents are present so the caller can run the tasks directly;
+            otherwise the raw :class:`TaskCreator` result.
         """
 
         all_agents = []

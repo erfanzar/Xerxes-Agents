@@ -4,7 +4,6 @@ description: "AI voiceover with typed text visuals"
 version: 0.1.0
 tags: [ReadFile, GrepTool, ExecuteShell]
 required_tools: [ReadFile, GrepTool, ExecuteShell]
-author: hermes-skill-authoring
 ---
 # When to use
 

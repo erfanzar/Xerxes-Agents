@@ -11,15 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Storage module for Xerxes.
+"""Pluggable key/value backends used by the memory tiers.
 
-Exports:
-    - logger
-    - MemoryStorage
-    - SimpleStorage
-    - FileStorage
-    - SQLiteStorage
-    - RAGStorage"""
+Defines the ``MemoryStorage`` ABC and four concrete implementations:
+``SimpleStorage`` (in-process dict), ``FileStorage`` (pickle files
+under a directory), ``SQLiteStorage`` (SQLite with a ``WRITE_MEMORY``
+env guard), and ``RAGStorage`` (decorator that adds embedding-based
+semantic search on top of any other backend)."""
 
 import hashlib
 import json
@@ -36,80 +34,47 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryStorage(ABC):
-    """Memory storage.
+    """Abstract key/value backend for memory persistence.
 
-    Inherits from: ABC
-    """
+    All concrete tiers (``ShortTermMemory``, ``LongTermMemory``,
+    ``EntityMemory``, ``UserProfileStore``) interact only through this
+    interface, so the storage layer can be swapped without touching
+    memory logic. Semantic search is opt-in via
+    ``supports_semantic_search``/``semantic_search``."""
 
     @abstractmethod
     def save(self, key: str, data: Any) -> bool:
-        """Save.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Persist ``data`` under ``key``; return True on success."""
 
         pass
 
     @abstractmethod
     def load(self, key: str) -> Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Any | None: OUT: Result of the operation."""
+        """Return the data stored at ``key``, or ``None`` if absent."""
 
         pass
 
     @abstractmethod
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Delete the row at ``key``; return True if a row was removed."""
 
         pass
 
     @abstractmethod
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when ``key`` has stored data."""
 
         pass
 
     @abstractmethod
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return every key, optionally filtered by substring ``pattern``."""
 
         pass
 
     @abstractmethod
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Wipe every row; return the number of rows removed."""
 
         pass
 
@@ -119,77 +84,40 @@ class MemoryStorage(ABC):
         limit: int = 10,
         threshold: float = 0.0,
     ) -> list[tuple[str, float, Any]]:
-        """Semantic search.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            threshold (float, optional): IN: threshold. Defaults to 0.0. OUT: Consumed during execution.
-        Returns:
-            list[tuple[str, float, Any]]: OUT: Result of the operation."""
+        """Return ``(key, similarity, data)`` triples; default is a no-op stub."""
 
         return []
 
     def supports_semantic_search(self) -> bool:
-        """Supports semantic search.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when ``semantic_search`` does meaningful work (default False)."""
 
         return False
 
 
 class SimpleStorage(MemoryStorage):
-    """Simple storage.
+    """Ephemeral in-process backend backed by a plain dict.
 
-    Inherits from: MemoryStorage
-    """
+    Used in tests and as the default backend for ``RAGStorage`` when no
+    durable store is supplied."""
 
     def __init__(self):
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Initialise the in-memory dict."""
 
         self._data: dict[str, Any] = {}
 
     def save(self, key: str, data: Any) -> bool:
-        """Save.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Store ``data`` under ``key`` in the dict."""
 
         self._data[key] = data
         return True
 
     def load(self, key: str) -> Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Any | None: OUT: Result of the operation."""
+        """Return the dict entry for ``key`` or ``None``."""
 
         return self._data.get(key)
 
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Pop ``key`` from the dict, returning True iff it existed."""
 
         if key in self._data:
             del self._data[key]
@@ -197,24 +125,12 @@ class SimpleStorage(MemoryStorage):
         return False
 
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when ``key`` is a member of the dict."""
 
         return key in self._data
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return dict keys, optionally filtered by substring."""
 
         keys = list(self._data.keys())
         if pattern:
@@ -222,12 +138,7 @@ class SimpleStorage(MemoryStorage):
         return keys
 
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Empty the dict and return how many rows were dropped."""
 
         count = len(self._data)
         self._data.clear()
@@ -235,17 +146,14 @@ class SimpleStorage(MemoryStorage):
 
 
 class FileStorage(MemoryStorage):
-    """File storage.
+    """Disk-backed pickle store with an MD5-hashed filename index.
 
-    Inherits from: MemoryStorage
-    """
+    Each row is pickled to ``<storage_dir>/<md5>.pkl`` and the
+    key-to-filename map is kept in ``_index.json`` for fast lookup
+    and listing."""
 
     def __init__(self, storage_dir: str = ".xerxes_memory") -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            storage_dir (str, optional): IN: storage dir. Defaults to '.xerxes_memory'. OUT: Consumed during execution."""
+        """Ensure ``storage_dir`` exists and load the on-disk key index."""
 
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
@@ -253,12 +161,7 @@ class FileStorage(MemoryStorage):
         self._index = self._load_index()
 
     def _load_index(self) -> dict[str, str]:
-        """Internal helper to load index.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, str]: OUT: Result of the operation."""
+        """Load the JSON key->filename index from disk, or return empty."""
 
         if self._index_file.exists():
             with open(self._index_file, "r") as f:
@@ -266,35 +169,19 @@ class FileStorage(MemoryStorage):
         return {}
 
     def _save_index(self) -> None:
-        """Internal helper to save index.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Write the in-memory key->filename index back to disk."""
 
         with open(self._index_file, "w") as f:
             json.dump(self._index, f)
 
     def _get_file_path(self, key: str) -> Path:
-        """Internal helper to get file path.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Path: OUT: Result of the operation."""
+        """Return the deterministic pickle path for ``key`` (MD5-named)."""
 
         key_hash = hashlib.md5(key.encode()).hexdigest()
         return self.storage_dir / f"{key_hash}.pkl"
 
     def save(self, key: str, data: Any) -> bool:
-        """Save.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Pickle ``data`` to disk and update the index; swallow IO errors."""
 
         try:
             file_path = self._get_file_path(key)
@@ -307,13 +194,7 @@ class FileStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Any | None: OUT: Result of the operation."""
+        """Unpickle the row stored at ``key`` or return ``None``."""
 
         if key not in self._index:
             return None
@@ -324,13 +205,7 @@ class FileStorage(MemoryStorage):
         return None
 
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Unlink the pickle file for ``key`` and remove it from the index."""
 
         if key not in self._index:
             return False
@@ -342,24 +217,12 @@ class FileStorage(MemoryStorage):
         return True
 
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when ``key`` is present in the index."""
 
         return key in self._index
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return index keys, optionally filtered by substring."""
 
         keys = list(self._index.keys())
         if pattern:
@@ -367,12 +230,7 @@ class FileStorage(MemoryStorage):
         return keys
 
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Delete every row tracked by the index and return the count."""
 
         count = 0
         for key in list(self._index.keys()):
@@ -382,17 +240,15 @@ class FileStorage(MemoryStorage):
 
 
 class SQLiteStorage(MemoryStorage):
-    """Sqlite storage.
+    """SQLite-backed store gated by the ``WRITE_MEMORY`` env flag.
 
-    Inherits from: MemoryStorage
-    """
+    When ``WRITE_MEMORY=1`` is set the store writes pickled blobs to a
+    SQLite file at ``db_path``; otherwise it transparently degrades to
+    an in-process dict so the rest of the memory subsystem keeps
+    functioning during read-only sessions and tests."""
 
     def __init__(self, db_path: str = ".xerxes_memory/memory.db") -> None:
-        """Initialize the instance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            db_path (str, optional): IN: db path. Defaults to '.xerxes_memory/memory.db'. OUT: Consumed during execution."""
+        """Open (or fake) the database depending on ``WRITE_MEMORY``."""
 
         import os
 
@@ -406,10 +262,7 @@ class SQLiteStorage(MemoryStorage):
             self._memory_storage: dict[str, Any] = {}
 
     def _init_db(self) -> None:
-        """Internal helper to init db.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Create the ``memory`` table and ``created_at`` index if missing."""
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -430,14 +283,7 @@ class SQLiteStorage(MemoryStorage):
             conn.commit()
 
     def save(self, key: str, data: Any) -> bool:
-        """Save.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Insert-or-replace the row; route to the dict fallback when not write-enabled."""
 
         if not self.write_enabled:
             self._memory_storage[key] = data
@@ -460,13 +306,7 @@ class SQLiteStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Any | None: OUT: Result of the operation."""
+        """Unpickle the row at ``key``; return ``None`` if absent."""
 
         if not self.write_enabled:
             return self._memory_storage.get(key)
@@ -479,13 +319,7 @@ class SQLiteStorage(MemoryStorage):
         return None
 
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Delete the row; return True iff one was removed."""
 
         if not self.write_enabled:
             if key in self._memory_storage:
@@ -499,13 +333,7 @@ class SQLiteStorage(MemoryStorage):
             return cursor.rowcount > 0
 
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Return True when a row exists for ``key``."""
 
         if not self.write_enabled:
             return key in self._memory_storage
@@ -515,13 +343,7 @@ class SQLiteStorage(MemoryStorage):
             return cursor.fetchone() is not None
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return keys (newest first), optionally filtered by substring."""
 
         if not self.write_enabled:
             keys = list(self._memory_storage.keys())
@@ -539,12 +361,7 @@ class SQLiteStorage(MemoryStorage):
             return [row[0] for row in cursor.fetchall()]
 
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Truncate the table and return the row count that was removed."""
 
         if not self.write_enabled:
             count = len(self._memory_storage)
@@ -560,10 +377,13 @@ class SQLiteStorage(MemoryStorage):
 
 
 class RAGStorage(MemoryStorage):
-    """Ragstorage.
+    """Decorator backend that augments any ``MemoryStorage`` with embeddings + similarity search.
 
-    Inherits from: MemoryStorage
-    """
+    On every write, an embedding of the saved text/dict is computed
+    and persisted alongside the data (under the ``EMBEDDING_KEY_PREFIX``
+    namespace) so that semantic search survives across processes.
+    Falls back through sentence-transformers → OpenAI → a hashed TF-IDF
+    approximation depending on what is available."""
 
     EMBEDDING_KEY_PREFIX = "_emb_"
 
@@ -574,14 +394,16 @@ class RAGStorage(MemoryStorage):
         embedding_api_key: str | None = None,
         embedder: tp.Any = None,
     ) -> None:
-        """Initialize the instance.
+        """Wrap ``backend`` and pick an embedding strategy.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            backend (MemoryStorage | None, optional): IN: backend. Defaults to None. OUT: Consumed during execution.
-            embedding_model (str | None, optional): IN: embedding model. Defaults to None. OUT: Consumed during execution.
-            embedding_api_key (str | None, optional): IN: embedding api key. Defaults to None. OUT: Consumed during execution.
-            embedder (tp.Any, optional): IN: embedder. Defaults to None. OUT: Consumed during execution."""
+            backend: Underlying key/value store; defaults to
+                ``SimpleStorage`` when ``None``.
+            embedding_model: Identifier hint (``"tfidf"``,
+                ``"text-embedding-..."``, or a sentence-transformers
+                model name).
+            embedding_api_key: Optional API key override for OpenAI.
+            embedder: Pre-built embedder object (takes precedence)."""
 
         self.backend = backend or SimpleStorage()
         self.embeddings: dict[str, list[float]] = {}
@@ -595,13 +417,7 @@ class RAGStorage(MemoryStorage):
         self._restore_embeddings()
 
     def _resolve_embedding_type(self, model: str | None) -> str:
-        """Internal helper to resolve embedding type.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            model (str | None): IN: model. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Pick the active embedding type (tfidf / openai / sentence_transformers)."""
 
         if model == "tfidf":
             return "tfidf"
@@ -630,13 +446,7 @@ class RAGStorage(MemoryStorage):
         return "tfidf"
 
     def _compute_embedding(self, text: str) -> list[float]:
-        """Internal helper to compute embedding.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[float]: OUT: Result of the operation."""
+        """Dispatch to the configured embedding strategy with graceful fallback to TF-IDF."""
 
         if self._embedder is not None and hasattr(self._embedder, "embed"):
             try:
@@ -653,13 +463,7 @@ class RAGStorage(MemoryStorage):
             return self._compute_tfidf_embedding(text)
 
     def _compute_tfidf_embedding(self, text: str) -> list[float]:
-        """Internal helper to compute tfidf embedding.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[float]: OUT: Result of the operation."""
+        """Cheap hashing-based TF-IDF stand-in (256-d L2-normalised)."""
 
         words = text.lower().split()
         if not words:
@@ -683,13 +487,7 @@ class RAGStorage(MemoryStorage):
         return vec
 
     def _compute_sentence_transformer_embedding(self, text: str) -> list[float]:
-        """Internal helper to compute sentence transformer embedding.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[float]: OUT: Result of the operation."""
+        """Load (lazily) and call a sentence-transformers model."""
 
         if self._embedder is None:
             from sentence_transformers import SentenceTransformer
@@ -701,13 +499,7 @@ class RAGStorage(MemoryStorage):
         return embedding.tolist()
 
     def _compute_openai_embedding(self, text: str) -> list[float]:
-        """Internal helper to compute openai embedding.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            text (str): IN: text. OUT: Consumed during execution.
-        Returns:
-            list[float]: OUT: Result of the operation."""
+        """Call the OpenAI embeddings API; fall back to TF-IDF on any failure."""
 
         import os
 
@@ -729,14 +521,7 @@ class RAGStorage(MemoryStorage):
             return self._compute_tfidf_embedding(text)
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
-        """Internal helper to cosine similarity.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            vec1 (list[float]): IN: vec1. OUT: Consumed during execution.
-            vec2 (list[float]): IN: vec2. OUT: Consumed during execution.
-        Returns:
-            float: OUT: Result of the operation."""
+        """Compute cosine similarity; returns 0 when either vector has zero norm."""
 
         dot = sum(a * b for a, b in zip(vec1, vec2, strict=False))
         norm1 = sum(a * a for a in vec1) ** 0.5
@@ -746,14 +531,10 @@ class RAGStorage(MemoryStorage):
         return dot / (norm1 * norm2)
 
     def save(self, key: str, data: Any) -> bool:
-        """Save.
+        """Persist ``data`` and an embedding alongside it under a parallel key.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-            data (Any): IN: data. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        Embedding keys (those starting with ``EMBEDDING_KEY_PREFIX``) are
+        passed straight through without further embedding."""
 
         if key.startswith(self.EMBEDDING_KEY_PREFIX):
             return self.backend.save(key, data)
@@ -773,24 +554,12 @@ class RAGStorage(MemoryStorage):
         return success
 
     def load(self, key: str) -> Any | None:
-        """Load.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            Any | None: OUT: Result of the operation."""
+        """Delegate to the wrapped backend's ``load``."""
 
         return self.backend.load(key)
 
     def delete(self, key: str) -> bool:
-        """Delete.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Delete the data row and its sibling embedding row."""
 
         self.embeddings.pop(key, None)
         try:
@@ -800,10 +569,7 @@ class RAGStorage(MemoryStorage):
         return self.backend.delete(key)
 
     def _restore_embeddings(self) -> None:
-        """Internal helper to restore embeddings.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access."""
+        """Reload embeddings persisted under the ``EMBEDDING_KEY_PREFIX`` namespace."""
 
         if self.backend is None:
             return
@@ -829,35 +595,18 @@ class RAGStorage(MemoryStorage):
             logger.debug("Restored %d embeddings from backend", restored)
 
     def exists(self, key: str) -> bool:
-        """Exists.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            key (str): IN: key. OUT: Consumed during execution.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """Delegate to the wrapped backend's ``exists``."""
 
         return self.backend.exists(key)
 
     def list_keys(self, pattern: str | None = None) -> list[str]:
-        """List keys.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            pattern (str | None, optional): IN: pattern. Defaults to None. OUT: Consumed during execution.
-        Returns:
-            list[str]: OUT: Result of the operation."""
+        """Return data keys only, hiding the internal embedding-prefixed rows."""
 
         all_keys = self.backend.list_keys(pattern)
         return [k for k in all_keys if not k.startswith(self.EMBEDDING_KEY_PREFIX)]
 
     def clear(self) -> int:
-        """Clear.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            int: OUT: Result of the operation."""
+        """Drop every embedding and forward ``clear`` to the wrapped backend."""
 
         self.embeddings.clear()
         try:
@@ -868,38 +617,20 @@ class RAGStorage(MemoryStorage):
         return self.backend.clear()
 
     def supports_semantic_search(self) -> bool:
-        """Supports semantic search.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            bool: OUT: Result of the operation."""
+        """``RAGStorage`` always supports semantic search."""
 
         return True
 
     def semantic_search(self, query: str, limit: int = 10, threshold: float = 0.0) -> list[tuple[str, float, Any]]:
-        """Semantic search.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            threshold (float, optional): IN: threshold. Defaults to 0.0. OUT: Consumed during execution.
-        Returns:
-            list[tuple[str, float, Any]]: OUT: Result of the operation."""
+        """Alias for ``search_similar`` to satisfy the ``MemoryStorage`` protocol."""
 
         return self.search_similar(query, limit=limit, threshold=threshold)
 
     def search_similar(self, query: str, limit: int = 10, threshold: float = 0.0) -> list[tuple[str, float, Any]]:
-        """Search for similar.
+        """Cosine-similarity scan of the embedding cache against ``query``.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            query (str): IN: query. OUT: Consumed during execution.
-            limit (int, optional): IN: limit. Defaults to 10. OUT: Consumed during execution.
-            threshold (float, optional): IN: threshold. Defaults to 0.0. OUT: Consumed during execution.
-        Returns:
-            list[tuple[str, float, Any]]: OUT: Result of the operation."""
+        Returns ``(key, similarity, data)`` triples sorted highest-first
+        and filtered by ``threshold``."""
 
         query_embedding = self._compute_embedding(query)
         results = []

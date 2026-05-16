@@ -28,19 +28,17 @@ from datetime import datetime
 
 @dataclass
 class ToolCallEvent:
-    """Single observed tool invocation.
+    """A single observed tool invocation during an agent turn.
 
     Attributes:
-        tool_name (str): IN: Tool identifier. OUT: Stored.
-        arguments (dict[str, tp.Any]): IN: Arguments dict. OUT: Stored.
-        status (str): IN: Result status. OUT: Stored.
-        duration_ms (float): IN: Elapsed milliseconds. OUT: Stored.
-        error_type (str | None): IN: Exception type on failure. OUT: Stored.
-        error_message (str | None): IN: Exception message on failure. OUT:
-            Stored.
-        timestamp (datetime): IN: Wall-clock time. OUT: Defaults to ``now``.
-        retry_of (int | None): IN: Index of original call if this is a retry.
-            OUT: Stored.
+        tool_name: Tool identifier.
+        arguments: Arguments passed to the tool.
+        status: Result status (typically ``"success"`` or ``"failure"``).
+        duration_ms: Elapsed time in milliseconds.
+        error_type: Exception type, when the call failed.
+        error_message: Exception message, when the call failed.
+        timestamp: Wall-clock time of the event.
+        retry_of: Index of the original call if this event is a retry.
     """
 
     tool_name: str
@@ -58,13 +56,12 @@ class SkillCandidate:
     """Aggregated data from one agent turn, ready for skill drafting.
 
     Attributes:
-        agent_id (str | None): IN: Agent identifier. OUT: Stored.
-        turn_id (str | None): IN: Turn identifier. OUT: Stored.
-        events (list[ToolCallEvent]): IN: Observed calls. OUT: Stored.
-        user_prompt (str): IN: Original user message. OUT: Stored.
-        final_response (str): IN: Agent's final text. OUT: Stored.
-        completed_at (datetime): IN: Completion time. OUT: Defaults to
-            ``now``.
+        agent_id: Agent identifier.
+        turn_id: Turn identifier.
+        events: Observed tool call events.
+        user_prompt: Original user message text.
+        final_response: Agent's final textual response.
+        completed_at: Wall-clock time the turn finished.
     """
 
     agent_id: str | None = None
@@ -76,21 +73,13 @@ class SkillCandidate:
 
     @property
     def successful_events(self) -> list[ToolCallEvent]:
-        """Return only events with ``status == "success"``.
-
-        Returns:
-            list[ToolCallEvent]: OUT: Filtered events.
-        """
+        """Return only events whose status is ``"success"``."""
 
         return [e for e in self.events if e.status == "success"]
 
     @property
     def unique_tools(self) -> list[str]:
-        """Return deduplicated tool names in order of first appearance.
-
-        Returns:
-            list[str]: OUT: Tool name list.
-        """
+        """Return tool names in order of first appearance, deduplicated."""
 
         seen: set[str] = set()
         out: list[str] = []
@@ -102,36 +91,24 @@ class SkillCandidate:
 
     @property
     def retries(self) -> int:
-        """Count how many events are retries.
-
-        Returns:
-            int: OUT: Number of events with ``retry_of`` set.
-        """
+        """Return the count of events marked as retries."""
 
         return sum(1 for e in self.events if e.retry_of is not None)
 
     @property
     def total_duration_ms(self) -> float:
-        """Sum of all event durations.
-
-        Returns:
-            float: OUT: Total milliseconds.
-        """
+        """Return the sum of every event's ``duration_ms``."""
 
         return sum(e.duration_ms for e in self.events)
 
     def signature(self) -> str:
-        """Return a ``>``-joined string of all tool names in order.
-
-        Returns:
-            str: OUT: Sequence signature like ``"tool_a>tool_b"``.
-        """
+        """Return the sequence as a ``>``-joined string, e.g. ``"tool_a>tool_b"``."""
 
         return ">".join(e.tool_name for e in self.events)
 
 
 class ToolSequenceTracker:
-    """Accumulates tool call events across a single agent turn."""
+    """Accumulate tool call events across a single agent turn."""
 
     def __init__(self) -> None:
         """Initialize empty tracking state."""
@@ -149,16 +126,7 @@ class ToolSequenceTracker:
         turn_id: str | None = None,
         user_prompt: str = "",
     ) -> None:
-        """Reset state for a new turn.
-
-        Args:
-            agent_id (str | None): IN: Agent identifier. OUT: Stored.
-            turn_id (str | None): IN: Turn identifier. OUT: Stored.
-            user_prompt (str): IN: User message text. OUT: Stored.
-
-        Returns:
-            None: OUT: Internal buffers are cleared.
-        """
+        """Clear internal state and record identifiers for a new turn."""
 
         self._events = []
         self._agent_id = agent_id
@@ -176,19 +144,19 @@ class ToolSequenceTracker:
         error_type: str | None = None,
         error_message: str | None = None,
     ) -> ToolCallEvent:
-        """Record a single tool invocation.
+        """Record a single tool invocation as a ``ToolCallEvent``.
 
         Args:
-            tool_name (str): IN: Tool identifier. OUT: Stored.
-            arguments (dict[str, tp.Any] | None): IN: Arguments. OUT: Stored.
-            status (str): IN: Result status. OUT: Stored.
-            duration_ms (float | None): IN: Elapsed ms; auto-computed from
-                ``mark_call_start`` if omitted. OUT: Stored.
-            error_type (str | None): IN: Exception type. OUT: Stored.
-            error_message (str | None): IN: Exception message. OUT: Stored.
+            tool_name: Tool identifier.
+            arguments: Arguments passed to the tool.
+            status: Result status.
+            duration_ms: Elapsed milliseconds; auto-computed from ``mark_call_start``
+                if ``None``.
+            error_type: Exception type on failure.
+            error_message: Exception message on failure.
 
         Returns:
-            ToolCallEvent: OUT: Created event instance.
+            The newly recorded event.
         """
 
         args = dict(arguments or {})
@@ -213,11 +181,7 @@ class ToolSequenceTracker:
         return ev
 
     def mark_call_start(self) -> None:
-        """Record the start time for the next tool call.
-
-        Returns:
-            None: OUT: ``_call_start`` is set to ``time.perf_counter()``.
-        """
+        """Record ``time.perf_counter()`` so the next ``record_call`` can auto-time."""
 
         self._call_start = time.perf_counter()
 
@@ -225,15 +189,7 @@ class ToolSequenceTracker:
         self,
         final_response: str = "",
     ) -> SkillCandidate:
-        """Assemble the tracked events into a ``SkillCandidate``.
-
-        Args:
-            final_response (str): IN: Agent's final text response. OUT: Stored
-                on the candidate.
-
-        Returns:
-            SkillCandidate: OUT: Aggregated turn data.
-        """
+        """Finalize the turn and return a ``SkillCandidate`` snapshot."""
 
         candidate = SkillCandidate(
             agent_id=self._agent_id,
@@ -252,20 +208,12 @@ class ToolSequenceTracker:
 
     @property
     def call_count(self) -> int:
-        """Return the number of events recorded this turn.
-
-        Returns:
-            int: OUT: Length of ``_events``.
-        """
+        """Return the number of events recorded so far in this turn."""
 
         return len(self._events)
 
     @property
     def events(self) -> list[ToolCallEvent]:
-        """Return a snapshot of recorded events.
-
-        Returns:
-            list[ToolCallEvent]: OUT: Copy of ``_events``.
-        """
+        """Return a defensive copy of the events recorded this turn."""
 
         return list(self._events)

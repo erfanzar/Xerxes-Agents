@@ -11,10 +11,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Init module for Xerxes.
+"""LLM provider abstractions and registry.
 
-Exports:
-    - create_llm"""
+Provides a uniform :class:`BaseLLM` interface plus concrete adapters
+for OpenAI, Anthropic, Gemini, Ollama, and a family of
+OpenAI-compatible providers (DeepSeek, Kimi/Moonshot, Qwen,
+Zhipu/GLM, LMStudio, MiniMax). :func:`create_llm` is the public
+factory that resolves a provider name to its implementation; provider
+metadata (pricing, context limits, API key env var) is centralised in
+``registry`` and consumed by :func:`detect_provider`,
+:func:`get_context_limit`, :func:`calc_cost`, etc.
+"""
 
 from typing import Any, Literal
 
@@ -54,21 +61,10 @@ except ImportError:
 
 
 def _instantiate_provider(provider_impl, config: LLMConfig | None, kwargs: dict) -> BaseLLM:
-    """Instantiate a provider class or return an existing instance.
+    """Coerce ``provider_impl`` to a :class:`BaseLLM` instance.
 
-    Handles BaseLLM instances directly, classes deriving from BaseLLM,
-    and callable providers that accept config and kwargs.
-
-    Args:
-        provider_impl: Provider class, instance, or factory callable.
-        config: Optional LLM configuration.
-        kwargs: Additional keyword arguments passed to the provider.
-
-    Returns:
-        An initialized BaseLLM instance.
-
-    Raises:
-        ValueError: If the provider implementation type is unsupported.
+    Accepts already-built instances, :class:`BaseLLM` subclasses, or
+    plain callables. Returns the instantiated client.
     """
     if isinstance(provider_impl, BaseLLM):
         return provider_impl
@@ -122,24 +118,11 @@ def create_llm(
     plugin_registry: Any | None = None,
     **kwargs,
 ) -> BaseLLM:
-    """Factory function that creates an LLM client for the specified provider.
+    """Create an LLM client by provider name.
 
-    Routes the provider name to the appropriate LLM implementation class,
-    applies configuration overrides from kwargs, and delegates to a plugin
-    registry if one is provided.
-
-    Args:
-        provider: The name of the LLM provider (e.g., "openai", "anthropic").
-        config: Optional shared LLM configuration applied before kwargs.
-        plugin_registry: Optional plugin registry consulted before built-in providers.
-        **kwargs: Additional parameters forwarded to the LLM constructor
-            (e.g., model, temperature, api_key).
-
-    Returns:
-        An initialized LLM client instance.
-
-    Raises:
-        ValueError: If the provider name is not recognized.
+    Plugin-registered providers are consulted before the built-in
+    map, allowing third-party packages to extend the surface. Raises
+    ``ValueError`` when the provider isn't registered anywhere.
     """
 
     provider = provider.lower()

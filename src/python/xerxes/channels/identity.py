@@ -13,8 +13,11 @@
 # limitations under the License.
 """Identity resolution for cross-channel users.
 
-Maps ``(channel, channel_user_id)`` pairs to stable ``user_id`` values,
-with optional persistence via ``MemoryStorage``.
+Maps every ``(channel, channel_user_id)`` pair the agent has ever seen to a
+stable global ``user_id`` (UUID). The same human reaching out via Slack and
+Telegram can be linked to a single Xerxes user with ``link``, after which
+``channels_for`` returns every alias. Records are kept in memory for lookup
+speed and optionally persisted through ``MemoryStorage``.
 """
 
 from __future__ import annotations
@@ -33,7 +36,15 @@ IDENTITY_KEY_PREFIX = "_identity_"
 
 @dataclass
 class IdentityRecord:
-    """Persistent mapping between a channel-specific user and a global user ID."""
+    """One link between a platform identity and a global Xerxes user.
+
+    Attributes:
+        user_id: Stable global Xerxes user id (UUID string).
+        channel: Channel name, e.g. ``"slack"`` or ``"telegram"``.
+        channel_user_id: Platform-specific user id as the adapter sees it.
+        display_name: Human-readable name when known; otherwise empty.
+        first_seen: ISO timestamp captured on creation.
+    """
 
     user_id: str
     channel: str
@@ -42,11 +53,7 @@ class IdentityRecord:
     first_seen: str = ""
 
     def to_dict(self) -> dict[str, tp.Any]:
-        """Serialize the record to a plain dictionary.
-
-        Returns:
-            dict[str, Any]: OUT: field names mapped to their values.
-        """
+        """Serialise the record as a plain JSON-friendly dict."""
         return {
             "user_id": self.user_id,
             "channel": self.channel,
@@ -57,13 +64,14 @@ class IdentityRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, tp.Any]) -> IdentityRecord:
-        """Deserialize a record from a plain dictionary.
+        """Rebuild a record from the output of ``to_dict``.
 
         Args:
-            data (dict[str, Any]): IN: dictionary produced by ``to_dict``.
+            data: Mapping previously produced by ``to_dict`` (any extra keys
+                are ignored; missing optional keys fall back to defaults).
 
         Returns:
-            IdentityRecord: OUT: reconstructed identity record.
+            The reconstructed identity record.
         """
         return cls(
             user_id=data["user_id"],
@@ -75,28 +83,28 @@ class IdentityRecord:
 
 
 def _key(channel: str, channel_user_id: str) -> str:
-    """Build a storage key for an identity record.
-
-    Args:
-        channel (str): IN: channel name.
-        channel_user_id (str): IN: platform-specific user identifier.
-
-    Returns:
-        str: OUT: prefixed composite key.
-    """
+    """Build the prefixed storage key for one ``(channel, user)`` pair."""
     return f"{IDENTITY_KEY_PREFIX}{channel}::{channel_user_id}"
 
 
 class IdentityResolver:
-    """Resolves and persists identity mappings across channels."""
+    """Thread-safe in-memory index of identity records, optionally backed by storage.
+
+    On construction the resolver hydrates from ``storage`` if provided so
+    that restarts preserve user identities. ``resolve`` is the hot-path
+    entry: it returns an existing record or mints a fresh UUID-backed one.
+    All mutating operations hold an ``RLock`` so the resolver is safe to
+    share across daemon threads handling different channels.
+    """
 
     def __init__(self, storage: MemoryStorage | None = None) -> None:
-        """Initialize the resolver and hydrate the in-memory index.
+        """Build the resolver and load any persisted records.
 
         Args:
-            storage (MemoryStorage | None): IN: optional storage backend for
-                persistence. OUT: used to load and save ``IdentityRecord``
-                instances.
+            storage: Optional persistence backend. When provided the resolver
+                hydrates its in-memory index from existing keys and writes
+                every mutation back; when ``None`` the resolver is purely
+                in-memory.
         """
         self.storage = storage
         self._index: dict[str, IdentityRecord] = {}
@@ -104,9 +112,10 @@ class IdentityResolver:
         self._hydrate()
 
     def _hydrate(self) -> None:
-        """Load existing identity records from storage into memory.
+        """Pull every persisted ``IdentityRecord`` into the in-memory index.
 
-        Skips silently on storage errors or when no storage is configured.
+        Tolerant of storage errors and partially corrupt records — anything
+        that fails to deserialise is skipped silently rather than raising.
         """
         if self.storage is None:
             return
@@ -132,19 +141,23 @@ class IdentityResolver:
         *,
         display_name: str = "",
     ) -> IdentityRecord:
-        """Resolve an identity, creating a new record if necessary.
+        """Return the record for a channel user, creating it on first sight.
+
+        When the record exists and lacks a display name, the supplied
+        ``display_name`` is back-filled and persisted. This is the call
+        adapters make once per inbound message.
 
         Args:
-            channel (str): IN: channel name.
-            channel_user_id (str): IN: platform-specific user identifier.
-            display_name (str): IN: human-readable name to associate with the
-                identity. OUT: persisted if the record is new or has no name.
+            channel: Channel name.
+            channel_user_id: Platform-specific user identifier.
+            display_name: Optional human-readable name; back-filled into an
+                existing record only when it currently has no name.
 
         Returns:
-            IdentityRecord: OUT: existing or newly created identity record.
+            The existing or freshly minted identity record.
 
         Raises:
-            ValueError: If ``channel`` or ``channel_user_id`` is empty.
+            ValueError: ``channel`` or ``channel_user_id`` is empty.
         """
         if not channel or not channel_user_id:
             raise ValueError("channel and channel_user_id are required")
@@ -168,15 +181,20 @@ class IdentityResolver:
             return rec
 
     def link(self, user_id: str, channel: str, channel_user_id: str) -> IdentityRecord:
-        """Explicitly link a global user ID to a channel-specific ID.
+        """Force a channel identity to point at the given global ``user_id``.
+
+        Used to merge previously distinct identities — once two channel ids
+        share a ``user_id`` they will both surface via ``channels_for``. If
+        the channel id already mapped to a different global id, that mapping
+        is overwritten.
 
         Args:
-            user_id (str): IN: global user identifier.
-            channel (str): IN: channel name.
-            channel_user_id (str): IN: platform-specific user identifier.
+            user_id: Global Xerxes user id to associate.
+            channel: Channel name.
+            channel_user_id: Platform-specific user id.
 
         Returns:
-            IdentityRecord: OUT: the linked identity record (updated or new).
+            The updated or newly created identity record.
         """
         key = _key(channel, channel_user_id)
         with self._lock:
@@ -198,46 +216,38 @@ class IdentityResolver:
             return rec
 
     def get(self, channel: str, channel_user_id: str) -> IdentityRecord | None:
-        """Lookup an existing identity record.
+        """Look up an existing record without creating one.
 
         Args:
-            channel (str): IN: channel name.
-            channel_user_id (str): IN: platform-specific user identifier.
+            channel: Channel name.
+            channel_user_id: Platform-specific user id.
 
         Returns:
-            IdentityRecord | None: OUT: the record if found, otherwise ``None``.
+            The record if known, otherwise ``None``.
         """
         with self._lock:
             return self._index.get(_key(channel, channel_user_id))
 
     def channels_for(self, user_id: str) -> list[IdentityRecord]:
-        """Return all identity records linked to a global user ID.
+        """Return every channel-side alias linked to ``user_id``.
 
         Args:
-            user_id (str): IN: global user identifier.
+            user_id: Global Xerxes user id.
 
         Returns:
-            list[IdentityRecord]: OUT: matching identity records.
+            All ``IdentityRecord`` instances whose ``user_id`` matches. Empty
+            when no aliases exist.
         """
         with self._lock:
             return [r for r in self._index.values() if r.user_id == user_id]
 
     def all(self) -> list[IdentityRecord]:
-        """Return all known identity records.
-
-        Returns:
-            list[IdentityRecord]: OUT: snapshot of the in-memory index.
-        """
+        """Return a snapshot of every record currently in the index."""
         with self._lock:
             return list(self._index.values())
 
     def _persist(self, key: str, rec: IdentityRecord) -> None:
-        """Persist an identity record to storage.
-
-        Args:
-            key (str): IN: storage key.
-            rec (IdentityRecord): IN: record to save.
-        """
+        """Best-effort write of one record to ``storage`` (swallows errors)."""
         if self.storage is None:
             return
         try:

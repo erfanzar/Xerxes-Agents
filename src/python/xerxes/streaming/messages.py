@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Messages module for Xerxes.
+"""Neutral <-> provider message conversion for the streaming loop.
 
-Exports:
-    - messages_to_anthropic
-    - messages_to_openai
-    - messages_from_anthropic
-    - messages_from_openai"""
+The agent loop stores conversation state in a neutral list of dicts shaped
+as ``{"role": str, "content": str, "tool_calls": [...], "tool_call_id": str}``.
+These helpers translate to and from the Anthropic Messages and OpenAI
+Chat-Completions schemas so the loop body remains provider-agnostic.
+"""
 
 from __future__ import annotations
 
@@ -28,26 +28,21 @@ NeutralMessage: TypeAlias = dict[str, Any]
 
 
 def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]]:
-    """Messages to anthropic.
+    """Convert neutral messages to Anthropic Messages-API content blocks.
+
+    Assistant messages become a block list combining a ``text`` block (if any
+    content) with one ``tool_use`` block per call. Consecutive ``tool`` role
+    messages collapse into a single ``user`` message whose content is a list
+    of ``tool_result`` blocks, matching Anthropic's expected interleaving.
 
     Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
+        messages: Neutral conversation history.
+
     Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
+        Anthropic-format message list ready for the ``messages`` API field.
+    """
 
     result: list[dict[str, Any]] = []
-    """Messages to anthropic.
-
-    Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
-    """Messages to anthropic.
-
-    Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
     i = 0
     while i < len(messages):
         m = messages[i]
@@ -98,29 +93,21 @@ def messages_to_openai(
     messages: list[NeutralMessage],
     system: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Messages to openai.
+    """Convert neutral messages to OpenAI chat-completions form.
+
+    Tool calls are serialised as ``{"id", "type": "function", "function":
+    {"name", "arguments": json}}``. ``tool`` role messages carry the
+    ``tool_call_id`` linking them back to the originating call.
 
     Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
-        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
+        messages: Neutral conversation history.
+        system: Optional system prompt prepended as the first message.
+
     Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
+        OpenAI-format message list ready for ``client.chat.completions.create``.
+    """
 
     result: list[dict[str, Any]] = []
-    """Messages to openai.
-
-    Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
-        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
-    """Messages to openai.
-
-    Args:
-        messages (list[NeutralMessage]): IN: messages. OUT: Consumed during execution.
-        system (str | None, optional): IN: system. Defaults to None. OUT: Consumed during execution.
-    Returns:
-        list[dict[str, Any]]: OUT: Result of the operation."""
 
     if system:
         result.append({"role": "system", "content": system})
@@ -167,26 +154,20 @@ def messages_to_openai(
 
 
 def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessage]:
-    """Messages from anthropic.
+    """Convert Anthropic content-block messages back to the neutral format.
+
+    Text blocks join into a single content string; ``tool_use`` blocks become
+    ``tool_calls`` entries on the assistant message; ``tool_result`` blocks
+    become separate ``tool`` messages with the original ``tool_use_id``.
 
     Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+        messages: Anthropic-format message list.
+
     Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
+        Neutral conversation history.
+    """
 
     result: list[NeutralMessage] = []
-    """Messages from anthropic.
-
-    Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
-    """Messages from anthropic.
-
-    Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
 
     for m in messages:
         role = m["role"]
@@ -240,26 +221,20 @@ def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessa
 
 
 def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]:
-    """Messages from openai.
+    """Convert OpenAI chat-completions messages back to the neutral format.
+
+    ``system`` role is mapped to ``user`` because the neutral loop carries the
+    system prompt separately. Assistant ``tool_calls`` are JSON-decoded into
+    parsed argument dicts to match the neutral schema.
 
     Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
+        messages: OpenAI-format message list.
+
     Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
+        Neutral conversation history.
+    """
 
     result: list[NeutralMessage] = []
-    """Messages from openai.
-
-    Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
-    """Messages from openai.
-
-    Args:
-        messages (list[dict[str, Any]]): IN: messages. OUT: Consumed during execution.
-    Returns:
-        list[NeutralMessage]: OUT: Result of the operation."""
 
     for m in messages:
         role = m.get("role", "")

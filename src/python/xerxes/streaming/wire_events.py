@@ -11,20 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wire events module for Xerxes.
+"""Wire-format event vocabulary for the daemon/bridge JSON-RPC protocol.
 
-Exports:
-    - BriefDisplayBlock
-    - DiffDisplayBlock
-    - TodoDisplayBlock
-    - BackgroundTaskDisplayBlock
-    - GenericDisplayBlock
-    - DisplayBlock
-    - TextPart
-    - ThinkPart
-    - ImageURLPart
-    - AudioURLPart
-    - ... and 44 more."""
+Wire events are the *external* contract between the agent process and any
+client (TUI, web UI, headless bridge consumer). Internal streaming events
+from :mod:`xerxes.streaming.events` are translated into these frozen
+dataclasses, serialised via :func:`event_to_dict`, and shipped as JSON-RPC
+notifications. ``event_from_dict`` performs the reverse translation, including
+unwrapping ``SubagentEvent``\\ s recursively.
+
+The module also defines display blocks (rich UI payloads attached to tool
+results), content parts (text/think/image/audio/video deltas), and the
+JSON-RPC envelope dataclasses.
+"""
 
 from __future__ import annotations
 
@@ -34,11 +33,11 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class BriefDisplayBlock:
-    """A short plain-text display block.
+    """Plain-text display block attached to a tool result.
 
-    Args:
-        type (Literal["brief"]): IN: fixed tag "brief". OUT: identifies the block kind.
-        body (str): IN: text to display. OUT: rendered as brief content.
+    Attributes:
+        type: Block discriminator, always ``"brief"``.
+        body: Text to render.
     """
 
     type: Literal["brief"] = "brief"
@@ -47,12 +46,12 @@ class BriefDisplayBlock:
 
 @dataclass(frozen=True)
 class DiffDisplayBlock:
-    """A code-diff display block.
+    """Code-diff display block.
 
-    Args:
-        type (Literal["diff"]): IN: fixed tag "diff". OUT: identifies the block kind.
-        diff (str): IN: diff text content. OUT: rendered as a diff.
-        language (str): IN: programming language for syntax highlighting. OUT: used by the renderer.
+    Attributes:
+        type: Block discriminator, always ``"diff"``.
+        diff: Unified-diff text.
+        language: Language hint for syntax highlighting.
     """
 
     type: Literal["diff"] = "diff"
@@ -62,11 +61,12 @@ class DiffDisplayBlock:
 
 @dataclass(frozen=True)
 class TodoDisplayBlock:
-    """A todo-list display block.
+    """Todo-list display block.
 
-    Args:
-        type (Literal["todo"]): IN: fixed tag "todo". OUT: identifies the block kind.
-        items (list[dict[str, Any]]): IN: list of todo item dicts. OUT: rendered as a checklist.
+    Attributes:
+        type: Block discriminator, always ``"todo"``.
+        items: Todo entries; each dict carries at least a ``content`` and
+            ``status`` field as defined by the TodoTool schema.
     """
 
     type: Literal["todo"] = "todo"
@@ -75,12 +75,12 @@ class TodoDisplayBlock:
 
 @dataclass(frozen=True)
 class BackgroundTaskDisplayBlock:
-    """A background-task status display block.
+    """Background-task status display block.
 
-    Args:
-        type (Literal["background_task"]): IN: fixed tag "background_task". OUT: identifies the block kind.
-        title (str): IN: human-readable task title. OUT: shown in the UI.
-        status (str): IN: current status string. OUT: shown in the UI.
+    Attributes:
+        type: Block discriminator, always ``"background_task"``.
+        title: Human-readable task title.
+        status: Current status string (e.g. ``"running"``, ``"failed"``).
     """
 
     type: Literal["background_task"] = "background_task"
@@ -90,11 +90,11 @@ class BackgroundTaskDisplayBlock:
 
 @dataclass(frozen=True)
 class GenericDisplayBlock:
-    """A generic catch-all display block.
+    """Catch-all display block for tool results without a specialised renderer.
 
-    Args:
-        type (Literal["generic"]): IN: fixed tag "generic". OUT: identifies the block kind.
-        content (str): IN: raw content string. OUT: rendered as plain text.
+    Attributes:
+        type: Block discriminator, always ``"generic"``.
+        content: Raw text to render verbatim.
     """
 
     type: Literal["generic"] = "generic"
@@ -106,11 +106,11 @@ DisplayBlock = BriefDisplayBlock | DiffDisplayBlock | TodoDisplayBlock | Backgro
 
 @dataclass(frozen=True)
 class TextPart:
-    """A plain-text content part.
+    """Visible assistant text delta.
 
-    Args:
-        type (Literal["text"]): IN: fixed tag "text". OUT: identifies the part kind.
-        text (str): IN: text payload. OUT: rendered as message text.
+    Attributes:
+        type: Part discriminator, always ``"text"``.
+        text: Incremental text fragment.
     """
 
     type: Literal["text"] = "text"
@@ -119,11 +119,11 @@ class TextPart:
 
 @dataclass(frozen=True)
 class ThinkPart:
-    """A "thinking" content part (model reasoning).
+    """Hidden reasoning delta (model thinking channel).
 
-    Args:
-        type (Literal["think"]): IN: fixed tag "think". OUT: identifies the part kind.
-        think (str): IN: reasoning text. OUT: shown in a collapsible think block.
+    Attributes:
+        type: Part discriminator, always ``"think"``.
+        think: Incremental reasoning fragment.
     """
 
     type: Literal["think"] = "think"
@@ -132,12 +132,12 @@ class ThinkPart:
 
 @dataclass(frozen=True)
 class ImageURLPart:
-    """An image referenced by URL.
+    """Image content referenced by URL.
 
-    Args:
-        type (Literal["image_url"]): IN: fixed tag "image_url". OUT: identifies the part kind.
-        url (str): IN: image URL. OUT: loaded and displayed by the client.
-        alt (str | None): IN: optional alt text. OUT: used for accessibility.
+    Attributes:
+        type: Part discriminator, always ``"image_url"``.
+        url: Image URL (may be a ``data:`` URI).
+        alt: Optional alt text for accessibility.
     """
 
     type: Literal["image_url"] = "image_url"
@@ -147,11 +147,11 @@ class ImageURLPart:
 
 @dataclass(frozen=True)
 class AudioURLPart:
-    """An audio clip referenced by URL.
+    """Audio clip referenced by URL.
 
-    Args:
-        type (Literal["audio_url"]): IN: fixed tag "audio_url". OUT: identifies the part kind.
-        url (str): IN: audio URL. OUT: played by the client.
+    Attributes:
+        type: Part discriminator, always ``"audio_url"``.
+        url: Audio URL.
     """
 
     type: Literal["audio_url"] = "audio_url"
@@ -160,12 +160,12 @@ class AudioURLPart:
 
 @dataclass(frozen=True)
 class VideoURLPart:
-    """A video referenced by URL.
+    """Video referenced by URL.
 
-    Args:
-        type (Literal["video_url"]): IN: fixed tag "video_url". OUT: identifies the part kind.
-        url (str): IN: video URL. OUT: played by the client.
-        alt (str | None): IN: optional alt text. OUT: used for accessibility.
+    Attributes:
+        type: Part discriminator, always ``"video_url"``.
+        url: Video URL.
+        alt: Optional alt text.
     """
 
     type: Literal["video_url"] = "video_url"
@@ -178,13 +178,14 @@ ContentPart = TextPart | ThinkPart | ImageURLPart | AudioURLPart | VideoURLPart
 
 @dataclass(frozen=True)
 class QuestionItem:
-    """A single question in an interactive question request.
+    """One question inside an interactive ``QuestionRequest``.
 
-    Args:
-        id (str): IN: unique question identifier. OUT: used to match answers.
-        question (str): IN: question text. OUT: displayed to the user.
-        options (list[str]): IN: selectable answer options. OUT: shown as choices.
-        allow_free_form (bool): IN: whether free-text input is allowed. OUT: controls UI behaviour.
+    Attributes:
+        id: Stable identifier used to key the eventual answer.
+        question: Prompt text shown to the user.
+        options: Selectable answer choices; empty for free-form.
+        allow_free_form: Whether a free-text answer is accepted in addition
+            to (or instead of) the listed options.
     """
 
     id: str = ""
@@ -195,10 +196,13 @@ class QuestionItem:
 
 @dataclass(frozen=True)
 class WireEvent:
-    """Base class for all wire events.
+    """Base class for every wire-protocol event.
 
-    Args:
-        event_type (str): IN: event discriminator. OUT: used to look up the correct subclass.
+    Subclasses set ``event_type`` to the snake_case discriminator used in the
+    registry and JSON envelope.
+
+    Attributes:
+        event_type: Snake_case event discriminator.
     """
 
     event_type: str = ""
@@ -206,17 +210,17 @@ class WireEvent:
 
 @dataclass(frozen=True)
 class InitDone(WireEvent):
-    """Sent when the agent has finished initialising.
+    """Emitted once the agent process is ready for prompts.
 
-    Args:
-        event_type (str): IN: fixed "init_done". OUT: identifies the event kind.
-        model (str): IN: model name in use. OUT: displayed in the UI.
-        session_id (str): IN: current session identifier. OUT: used for session management.
-        cwd (str): IN: current working directory. OUT: shown in the UI.
-        git_branch (str): IN: active Git branch. OUT: shown in the UI.
-        context_limit (int): IN: maximum context token limit. OUT: shown in the UI.
-        agent_name (str): IN: name of the running agent. OUT: shown in the UI.
-        skills (list[str]): IN: list of loaded skill names. OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"init_done"``.
+        model: Model identifier the agent will use.
+        session_id: Session identifier (also used for replay).
+        cwd: Working directory.
+        git_branch: Active git branch in ``cwd``, or empty string.
+        context_limit: Maximum context window for the active model.
+        agent_name: Name of the loaded agent definition.
+        skills: List of loaded skill identifiers.
     """
 
     event_type: str = "init_done"
@@ -231,11 +235,12 @@ class InitDone(WireEvent):
 
 @dataclass(frozen=True)
 class TurnBegin(WireEvent):
-    """Signals the start of a new user turn.
+    """Marks the start of a new user-driven turn.
 
-    Args:
-        event_type (str): IN: fixed "turn_begin". OUT: identifies the event kind.
-        user_input (str | list[dict[str, Any]]): IN: raw user input or multimodal parts. OUT: processed by the agent.
+    Attributes:
+        event_type: Always ``"turn_begin"``.
+        user_input: User input — plain string for text-only turns, or a list
+            of multimodal content dicts.
     """
 
     event_type: str = "turn_begin"
@@ -244,10 +249,10 @@ class TurnBegin(WireEvent):
 
 @dataclass(frozen=True)
 class TurnEnd(WireEvent):
-    """Signals the end of a user turn.
+    """Marks the end of a user-driven turn.
 
-    Args:
-        event_type (str): IN: fixed "turn_end". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"turn_end"``.
     """
 
     event_type: str = "turn_end"
@@ -255,11 +260,11 @@ class TurnEnd(WireEvent):
 
 @dataclass(frozen=True)
 class StepBegin(WireEvent):
-    """Signals the start of an agent processing step.
+    """Marks the start of a single assistant step within a turn.
 
-    Args:
-        event_type (str): IN: fixed "step_begin". OUT: identifies the event kind.
-        n (int): IN: step number. OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"step_begin"``.
+        n: 1-based step index within the current turn.
     """
 
     event_type: str = "step_begin"
@@ -268,11 +273,11 @@ class StepBegin(WireEvent):
 
 @dataclass(frozen=True)
 class StepEnd(WireEvent):
-    """Signals the end of an agent processing step.
+    """Marks the end of a single assistant step within a turn.
 
-    Args:
-        event_type (str): IN: fixed "step_end". OUT: identifies the event kind.
-        n (int): IN: step number. OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"step_end"``.
+        n: Step index this event pairs with.
     """
 
     event_type: str = "step_end"
@@ -281,10 +286,10 @@ class StepEnd(WireEvent):
 
 @dataclass(frozen=True)
 class StepInterrupted(WireEvent):
-    """Signals that the current step was interrupted.
+    """Signals that the in-flight step was cancelled (e.g. by user Ctrl-C).
 
-    Args:
-        event_type (str): IN: fixed "step_interrupted". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"step_interrupted"``.
     """
 
     event_type: str = "step_interrupted"
@@ -292,11 +297,11 @@ class StepInterrupted(WireEvent):
 
 @dataclass(frozen=True)
 class SteerInput(WireEvent):
-    """User steering input injected mid-generation.
+    """User text injected mid-generation to redirect the model.
 
-    Args:
-        event_type (str): IN: fixed "steer_input". OUT: identifies the event kind.
-        content (str): IN: steering text from the user. OUT: forwarded to the agent loop.
+    Attributes:
+        event_type: Always ``"steer_input"``.
+        content: Steering text appended to the in-flight context.
     """
 
     event_type: str = "steer_input"
@@ -305,10 +310,10 @@ class SteerInput(WireEvent):
 
 @dataclass(frozen=True)
 class CompactionBegin(WireEvent):
-    """Signals the start of a context compaction operation.
+    """Marks the start of an automatic context compaction.
 
-    Args:
-        event_type (str): IN: fixed "compaction_begin". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"compaction_begin"``.
     """
 
     event_type: str = "compaction_begin"
@@ -316,10 +321,10 @@ class CompactionBegin(WireEvent):
 
 @dataclass(frozen=True)
 class CompactionEnd(WireEvent):
-    """Signals the end of a context compaction operation.
+    """Marks the end of an automatic context compaction.
 
-    Args:
-        event_type (str): IN: fixed "compaction_end". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"compaction_end"``.
     """
 
     event_type: str = "compaction_end"
@@ -327,12 +332,12 @@ class CompactionEnd(WireEvent):
 
 @dataclass(frozen=True)
 class HookTriggered(WireEvent):
-    """Sent when a lifecycle hook has been triggered.
+    """Emitted when a lifecycle hook fires.
 
-    Args:
-        event_type (str): IN: fixed "hook_triggered". OUT: identifies the event kind.
-        hook_name (str): IN: name of the triggered hook. OUT: shown in the UI.
-        trigger_type (str): IN: type of trigger (e.g. "pre", "post"). OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"hook_triggered"``.
+        hook_name: Hook identifier (e.g. ``"PreToolUse"``).
+        trigger_type: Trigger phase, typically ``"pre"`` or ``"post"``.
     """
 
     event_type: str = "hook_triggered"
@@ -342,11 +347,11 @@ class HookTriggered(WireEvent):
 
 @dataclass(frozen=True)
 class HookResolved(WireEvent):
-    """Sent when a triggered lifecycle hook has finished.
+    """Emitted after a hook finishes (success or controlled failure).
 
-    Args:
-        event_type (str): IN: fixed "hook_resolved". OUT: identifies the event kind.
-        hook_name (str): IN: name of the resolved hook. OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"hook_resolved"``.
+        hook_name: Hook identifier paired with the prior trigger.
     """
 
     event_type: str = "hook_resolved"
@@ -355,11 +360,11 @@ class HookResolved(WireEvent):
 
 @dataclass(frozen=True)
 class MCPLoadingBegin(WireEvent):
-    """Signals the start of MCP server loading.
+    """Emitted while an MCP server is being negotiated.
 
-    Args:
-        event_type (str): IN: fixed "mcp_loading_begin". OUT: identifies the event kind.
-        server_name (str): IN: name of the MCP server being loaded. OUT: shown in the UI.
+    Attributes:
+        event_type: Always ``"mcp_loading_begin"``.
+        server_name: MCP server identifier.
     """
 
     event_type: str = "mcp_loading_begin"
@@ -368,12 +373,12 @@ class MCPLoadingBegin(WireEvent):
 
 @dataclass(frozen=True)
 class MCPLoadingEnd(WireEvent):
-    """Signals the end of MCP server loading.
+    """Emitted when MCP server loading completes.
 
-    Args:
-        event_type (str): IN: fixed "mcp_loading_end". OUT: identifies the event kind.
-        server_name (str): IN: name of the MCP server. OUT: shown in the UI.
-        success (bool): IN: whether loading succeeded. OUT: controls UI status indicator.
+    Attributes:
+        event_type: Always ``"mcp_loading_end"``.
+        server_name: MCP server identifier.
+        success: ``True`` when tools were registered successfully.
     """
 
     event_type: str = "mcp_loading_end"
@@ -383,10 +388,10 @@ class MCPLoadingEnd(WireEvent):
 
 @dataclass(frozen=True)
 class BtwBegin(WireEvent):
-    """Signals the start of a "by the way" side note.
+    """Marks the start of a "by the way" side-channel note.
 
-    Args:
-        event_type (str): IN: fixed "btw_begin". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"btw_begin"``.
     """
 
     event_type: str = "btw_begin"
@@ -394,10 +399,10 @@ class BtwBegin(WireEvent):
 
 @dataclass(frozen=True)
 class BtwEnd(WireEvent):
-    """Signals the end of a "by the way" side note.
+    """Marks the end of a "by the way" side-channel note.
 
-    Args:
-        event_type (str): IN: fixed "btw_end". OUT: identifies the event kind.
+    Attributes:
+        event_type: Always ``"btw_end"``.
     """
 
     event_type: str = "btw_end"
@@ -405,13 +410,14 @@ class BtwEnd(WireEvent):
 
 @dataclass(frozen=True)
 class ToolCall(WireEvent):
-    """Represents a tool call emitted by the model.
+    """A completed tool call request emitted by the model.
 
-    Args:
-        event_type (str): IN: fixed "tool_call". OUT: identifies the event kind.
-        id (str): IN: unique tool-call identifier. OUT: used to correlate with results.
-        name (str): IN: name of the tool being called. OUT: shown in the UI.
-        arguments (str | None): IN: JSON-encoded arguments. OUT: parsed before execution.
+    Attributes:
+        event_type: Always ``"tool_call"``.
+        id: Provider-issued call id used to correlate with the result.
+        name: Tool identifier.
+        arguments: Fully-assembled argument JSON, or ``None`` if streamed in
+            pieces via :class:`ToolCallPart`.
     """
 
     event_type: str = "tool_call"
@@ -422,11 +428,14 @@ class ToolCall(WireEvent):
 
 @dataclass(frozen=True)
 class ToolCallPart(WireEvent):
-    """A partial/ streaming chunk of tool-call arguments.
+    """A streaming fragment of tool-call argument JSON.
 
-    Args:
-        event_type (str): IN: fixed "tool_call_part". OUT: identifies the event kind.
-        arguments_part (str): IN: incremental argument JSON. OUT: appended to the buffer.
+    Clients accumulate consecutive ``ToolCallPart`` events until a matching
+    :class:`ToolCall` arrives with the full arguments.
+
+    Attributes:
+        event_type: Always ``"tool_call_part"``.
+        arguments_part: Incremental argument-JSON fragment.
     """
 
     event_type: str = "tool_call_part"
@@ -437,12 +446,12 @@ class ToolCallPart(WireEvent):
 class ToolResult(WireEvent):
     """The result of executing a tool call.
 
-    Args:
-        event_type (str): IN: fixed "tool_result". OUT: identifies the event kind.
-        tool_call_id (str): IN: identifier of the matching tool call. OUT: used for correlation.
-        return_value (str): IN: serialised return value. OUT: displayed or fed back to the model.
-        duration_ms (float): IN: tool execution duration. OUT: displayed in the UI.
-        display_blocks (list[DisplayBlock]): IN: rich display blocks. OUT: rendered in the UI.
+    Attributes:
+        event_type: Always ``"tool_result"``.
+        tool_call_id: Matching tool call id.
+        return_value: Serialised return value (rendered in the UI).
+        duration_ms: Wall-clock execution time.
+        display_blocks: Optional rich-render blocks (diff, todo, etc.).
     """
 
     event_type: str = "tool_result"
@@ -454,14 +463,17 @@ class ToolResult(WireEvent):
 
 @dataclass(frozen=True)
 class ToolCallRequest(WireEvent):
-    """A request from the UI to execute a tool call.
+    """A client-issued request to invoke a tool directly.
 
-    Args:
-        event_type (str): IN: fixed "tool_call_request". OUT: identifies the event kind.
-        id (str): IN: request identifier. OUT: echoed in the response.
-        tool_call_id (str): IN: tool-call identifier. OUT: used for correlation.
-        name (str): IN: tool name. OUT: used to dispatch the correct tool.
-        arguments (dict[str, Any]): IN: parsed arguments dict. OUT: passed to the tool handler.
+    Used by harnesses that drive tool execution out-of-band rather than via
+    the LLM loop.
+
+    Attributes:
+        event_type: Always ``"tool_call_request"``.
+        id: Request id echoed in the response.
+        tool_call_id: Tool-call correlation id.
+        name: Tool identifier.
+        arguments: Parsed argument dict.
     """
 
     event_type: str = "tool_call_request"
@@ -473,14 +485,14 @@ class ToolCallRequest(WireEvent):
 
 @dataclass(frozen=True)
 class ApprovalRequest(WireEvent):
-    """A request for user approval before executing an action.
+    """Request for user approval before executing a sensitive action.
 
-    Args:
-        event_type (str): IN: fixed "approval_request". OUT: identifies the event kind.
-        id (str): IN: request identifier. OUT: echoed in the response.
-        tool_call_id (str): IN: related tool-call identifier. OUT: used for correlation.
-        action (str): IN: description of the action. OUT: shown to the user.
-        description (str): IN: detailed explanation. OUT: shown to the user.
+    Attributes:
+        event_type: Always ``"approval_request"``.
+        id: Request id echoed in the response.
+        tool_call_id: Tool call being gated.
+        action: Short action label (e.g. ``"Run shell command"``).
+        description: Longer explanation (the command, target file, etc.).
     """
 
     event_type: str = "approval_request"
@@ -492,13 +504,14 @@ class ApprovalRequest(WireEvent):
 
 @dataclass(frozen=True)
 class ApprovalResponse(WireEvent):
-    """The user's response to an approval request.
+    """User reply to an :class:`ApprovalRequest`.
 
-    Args:
-        event_type (str): IN: fixed "approval_response". OUT: identifies the event kind.
-        request_id (str): IN: identifier of the original request. OUT: used for correlation.
-        response (Literal["approve", "approve_for_session", "reject"]): IN: user decision. OUT: controls execution flow.
-        feedback (str | None): IN: optional free-form feedback. OUT: logged or shown.
+    Attributes:
+        event_type: Always ``"approval_response"``.
+        request_id: Id of the originating request.
+        response: ``"approve"`` (this call only), ``"approve_for_session"``
+            (remember for the rest of the session), or ``"reject"``.
+        feedback: Optional free-form note attached to the decision.
     """
 
     event_type: str = "approval_response"
@@ -509,13 +522,13 @@ class ApprovalResponse(WireEvent):
 
 @dataclass(frozen=True)
 class QuestionRequest(WireEvent):
-    """A request for the user to answer one or more questions.
+    """Request the user to answer one or more interactive questions.
 
-    Args:
-        event_type (str): IN: fixed "question_request". OUT: identifies the event kind.
-        id (str): IN: request identifier. OUT: echoed in the response.
-        tool_call_id (str): IN: related tool-call identifier. OUT: used for correlation.
-        questions (list[QuestionItem]): IN: questions to present. OUT: rendered in the UI.
+    Attributes:
+        event_type: Always ``"question_request"``.
+        id: Request id echoed in the response.
+        tool_call_id: Tool call that issued the question batch.
+        questions: Ordered list of questions to present.
     """
 
     event_type: str = "question_request"
@@ -526,12 +539,12 @@ class QuestionRequest(WireEvent):
 
 @dataclass(frozen=True)
 class QuestionResponse(WireEvent):
-    """The user's answers to a question request.
+    """User answers to a :class:`QuestionRequest`.
 
-    Args:
-        event_type (str): IN: fixed "question_response". OUT: identifies the event kind.
-        id (str): IN: request identifier. OUT: used for correlation.
-        answers (dict[str, str]): IN: mapping of question id -> answer text. OUT: processed by the agent.
+    Attributes:
+        event_type: Always ``"question_response"``.
+        id: Id of the originating request.
+        answers: Mapping of question id -> answer text.
     """
 
     event_type: str = "question_response"
@@ -541,14 +554,15 @@ class QuestionResponse(WireEvent):
 
 @dataclass(frozen=True)
 class StatusUpdate(WireEvent):
-    """Periodic status update broadcast to the UI.
+    """Periodic status snapshot for the UI status line.
 
-    Args:
-        event_type (str): IN: fixed "status_update". OUT: identifies the event kind.
-        context_tokens (int): IN: current token count. OUT: shown in the UI.
-        max_context (int): IN: maximum allowed tokens. OUT: shown in the UI.
-        mcp_status (dict[str, Any]): IN: per-server status dict. OUT: shown in the UI.
-        plan_mode (bool): IN: whether plan mode is active. OUT: controls UI state.
+    Attributes:
+        event_type: Always ``"status_update"``.
+        context_tokens: Current context window usage.
+        max_context: Model context limit.
+        mcp_status: Per-server MCP status dict (name -> state).
+        plan_mode: Whether plan mode is engaged.
+        mode: Active interaction mode (``"code"``, ``"plan"``, ``"chat"`` …).
     """
 
     event_type: str = "status_update"
@@ -556,21 +570,22 @@ class StatusUpdate(WireEvent):
     max_context: int = 0
     mcp_status: dict[str, Any] = field(default_factory=dict)
     plan_mode: bool = False
+    mode: str = "code"
 
 
 @dataclass(frozen=True)
 class Notification(WireEvent):
-    """A general notification event.
+    """General-purpose notification surfaced to the UI.
 
-    Args:
-        event_type (str): IN: fixed "notification". OUT: identifies the event kind.
-        id (str): IN: notification identifier. OUT: used for deduplication.
-        category (str): IN: notification category. OUT: used for filtering / styling.
-        type (str): IN: notification sub-type. OUT: used for filtering / styling.
-        severity (Literal["info", "success", "warning", "error"]): IN: severity level. OUT: controls UI colour / icon.
-        title (str): IN: short title. OUT: shown in the UI.
-        body (str): IN: detailed message. OUT: shown in the UI.
-        payload (dict[str, Any]): IN: arbitrary extra data. OUT: available to consumers.
+    Attributes:
+        event_type: Always ``"notification"``.
+        id: Notification id (used for dedup / dismissal).
+        category: High-level category (e.g. ``"system"``, ``"tool"``).
+        type: Finer-grained sub-type within the category.
+        severity: ``"info"``, ``"success"``, ``"warning"``, or ``"error"``.
+        title: Short headline.
+        body: Detailed message body.
+        payload: Arbitrary extra data forwarded to consumers.
     """
 
     event_type: str = "notification"
@@ -585,12 +600,12 @@ class Notification(WireEvent):
 
 @dataclass(frozen=True)
 class PlanDisplay(WireEvent):
-    """Displays a plan or plan update.
+    """Renders or updates a plan document in the UI.
 
-    Args:
-        event_type (str): IN: fixed "plan_display". OUT: identifies the event kind.
-        content (str): IN: plan markdown text. OUT: rendered in the UI.
-        file_path (str | None): IN: optional associated file path. OUT: shown as a link.
+    Attributes:
+        event_type: Always ``"plan_display"``.
+        content: Plan markdown.
+        file_path: Optional on-disk path of the underlying plan file.
     """
 
     event_type: str = "plan_display"
@@ -600,14 +615,17 @@ class PlanDisplay(WireEvent):
 
 @dataclass(frozen=True)
 class SubagentEvent(WireEvent):
-    """Wraps an event produced by a sub-agent.
+    """Wraps an event produced by a spawned subagent.
 
-    Args:
-        event_type (str): IN: fixed "subagent_event". OUT: identifies the event kind.
-        parent_tool_call_id (str | None): IN: parent tool-call id. OUT: used for correlation.
-        agent_id (str | None): IN: sub-agent identifier. OUT: shown in the UI.
-        subagent_type (str | None): IN: type of sub-agent. OUT: shown in the UI.
-        event (WireEvent | None): IN: nested wire event. OUT: unwrapped and displayed.
+    The nested ``event`` retains its original wire type and is recursively
+    decoded by :func:`event_from_dict`.
+
+    Attributes:
+        event_type: Always ``"subagent_event"``.
+        parent_tool_call_id: Tool call id of the spawning ``Agent`` call.
+        agent_id: Subagent identifier.
+        subagent_type: Subagent template name (``"researcher"``, etc.).
+        event: The inner wire event.
     """
 
     event_type: str = "subagent_event"
@@ -728,42 +746,45 @@ for kimi_name, internal_name in _INTERNAL_EVENT_NAME_BY_KIMI.items():
 
 
 def to_kimi_event_name(event_type: str) -> str:
-    """Convert an internal event type string to the Kimi/PascalCase name.
+    """Translate an internal snake_case event type to its Kimi PascalCase name.
 
     Args:
-        event_type (str): IN: internal snake_case event type. OUT: looked up in the mapping.
+        event_type: Internal snake_case discriminator.
 
     Returns:
-        str: OUT: PascalCase name if known, otherwise the original string.
+        Matching PascalCase name, or ``event_type`` unchanged if unknown.
     """
 
     return _KIMI_EVENT_NAME_BY_INTERNAL.get(event_type, event_type)
 
 
 def to_internal_event_name(event_type: str) -> str:
-    """Convert a Kimi/PascalCase event name to the internal snake_case type.
+    """Translate a Kimi PascalCase event name to its internal snake_case form.
 
     Args:
-        event_type (str): IN: PascalCase event name. OUT: looked up in the mapping.
+        event_type: PascalCase name as emitted by Kimi-style clients.
 
     Returns:
-        str: OUT: snake_case type if known, otherwise the original string.
+        Matching snake_case discriminator, or ``event_type`` unchanged if
+        unknown.
     """
 
     return _INTERNAL_EVENT_NAME_BY_KIMI.get(event_type, event_type)
 
 
 def event_from_dict(data: dict[str, Any]) -> WireEvent:
-    """Deserialise a dictionary into the correct WireEvent subclass.
+    """Deserialise a wire dict into the matching :class:`WireEvent` subclass.
 
-    The dictionary must contain a "type" key.  Unknown types fall back to
-    GenericWireEvent.
+    Looks up the ``"type"`` field in the registry, which accepts both
+    snake_case and PascalCase keys. Nested ``SubagentEvent`` payloads are
+    decoded recursively. Unknown types fall back to :class:`GenericWireEvent`
+    so callers can still inspect the raw payload.
 
     Args:
-        data (dict[str, Any]): IN: serialised event dict. OUT: used to look up the class and instantiate it.
+        data: Wire dict with a ``"type"`` discriminator and per-event fields.
 
     Returns:
-        WireEvent: OUT: concrete event instance (or GenericWireEvent for unknown types).
+        Concrete ``WireEvent`` (or ``GenericWireEvent`` for unknown types).
     """
 
     event_type = data.get("type", "")
@@ -785,13 +806,17 @@ def event_from_dict(data: dict[str, Any]) -> WireEvent:
 
 
 def event_to_dict(event: WireEvent) -> dict[str, Any]:
-    """Serialise a WireEvent into a dictionary suitable for the wire format.
+    """Serialise a :class:`WireEvent` to a ``{"type", "payload"}`` wire dict.
+
+    The discriminator is converted to PascalCase via :func:`to_kimi_event_name`
+    so the output is directly consumable by Kimi-style clients.
 
     Args:
-        event (WireEvent): IN: event instance to serialise. OUT: converted to a dict.
+        event: Event to serialise.
 
     Returns:
-        dict[str, Any]: OUT: dict with "type" (PascalCase) and "payload" keys.
+        Dict with a PascalCase ``"type"`` and a ``"payload"`` body holding the
+        remaining fields.
     """
 
     if is_dataclass(event):
@@ -804,11 +829,11 @@ def event_to_dict(event: WireEvent) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class GenericWireEvent(WireEvent):
-    """Fallback event for unknown event types.
+    """Fallback wrapper for wire dicts with an unknown ``type``.
 
-    Args:
-        event_type (str): IN: fixed "generic". OUT: identifies the event kind.
-        raw (dict[str, Any]): IN: original raw dict. OUT: preserved for inspection.
+    Attributes:
+        event_type: Always ``"generic"``.
+        raw: Verbatim payload preserved for inspection or forwarding.
     """
 
     event_type: str = "generic"
@@ -817,12 +842,12 @@ class GenericWireEvent(WireEvent):
 
 @dataclass(frozen=True)
 class JSONRPCEventMessage:
-    """A JSON-RPC notification wrapping an event.
+    """JSON-RPC notification envelope wrapping a wire event.
 
-    Args:
-        jsonrpc (Literal["2.0"]): IN: JSON-RPC version. OUT: always "2.0".
-        method (Literal["event"]): IN: JSON-RPC method. OUT: always "event".
-        params (dict[str, Any]): IN: event payload. OUT: forwarded to consumers.
+    Attributes:
+        jsonrpc: Protocol version, always ``"2.0"``.
+        method: Method name, always ``"event"``.
+        params: Wire-event payload produced by :func:`event_to_dict`.
     """
 
     jsonrpc: Literal["2.0"] = "2.0"
@@ -832,13 +857,13 @@ class JSONRPCEventMessage:
 
 @dataclass(frozen=True)
 class JSONRPCRequestMessage:
-    """A JSON-RPC request message.
+    """JSON-RPC request envelope.
 
-    Args:
-        jsonrpc (Literal["2.0"]): IN: JSON-RPC version. OUT: always "2.0".
-        method (Literal["request"]): IN: JSON-RPC method. OUT: always "request".
-        id (str): IN: request identifier. OUT: echoed in the response.
-        params (dict[str, Any]): IN: request parameters. OUT: used by the handler.
+    Attributes:
+        jsonrpc: Protocol version, always ``"2.0"``.
+        method: Method name, always ``"request"``.
+        id: Request id echoed in the response.
+        params: Request parameters consumed by the handler.
     """
 
     jsonrpc: Literal["2.0"] = "2.0"
@@ -849,12 +874,12 @@ class JSONRPCRequestMessage:
 
 @dataclass(frozen=True)
 class JSONRPCSuccessResponse:
-    """A JSON-RPC success response.
+    """JSON-RPC success response envelope.
 
-    Args:
-        jsonrpc (Literal["2.0"]): IN: JSON-RPC version. OUT: always "2.0".
-        id (str | int): IN: identifier matching the request. OUT: used for correlation.
-        result (dict[str, Any]): IN: result payload. OUT: returned to the caller.
+    Attributes:
+        jsonrpc: Protocol version, always ``"2.0"``.
+        id: Request id correlated with the originating call.
+        result: Response payload.
     """
 
     jsonrpc: Literal["2.0"] = "2.0"
@@ -864,12 +889,12 @@ class JSONRPCSuccessResponse:
 
 @dataclass(frozen=True)
 class JSONRPCErrorResponse:
-    """A JSON-RPC error response.
+    """JSON-RPC error response envelope.
 
-    Args:
-        jsonrpc (Literal["2.0"]): IN: JSON-RPC version. OUT: always "2.0".
-        id (str | int): IN: identifier matching the request. OUT: used for correlation.
-        error (dict[str, Any]): IN: error details. OUT: returned to the caller.
+    Attributes:
+        jsonrpc: Protocol version, always ``"2.0"``.
+        id: Request id correlated with the originating call.
+        error: Error dict with at minimum ``code`` and ``message`` fields.
     """
 
     jsonrpc: Literal["2.0"] = "2.0"
@@ -879,11 +904,11 @@ class JSONRPCErrorResponse:
 
 @dataclass(frozen=True)
 class PromptParams:
-    """Parameters for a prompt/request message.
+    """Parameters for a ``prompt`` JSON-RPC request.
 
-    Args:
-        user_input (str): IN: user text input. OUT: processed by the agent.
-        plan_mode (bool): IN: whether plan mode is requested. OUT: controls agent behaviour.
+    Attributes:
+        user_input: User text input for the turn.
+        plan_mode: Whether the turn should run in plan mode.
     """
 
     user_input: str = ""
@@ -892,13 +917,13 @@ class PromptParams:
 
 @dataclass(frozen=True)
 class InitializeParams:
-    """Parameters for the initialisation handshake.
+    """Parameters for the ``initialize`` handshake.
 
-    Args:
-        model (str): IN: model identifier. OUT: selects the backend model.
-        base_url (str): IN: API base URL. OUT: used for the model provider endpoint.
-        api_key (str): IN: API authentication key. OUT: sent with requests.
-        permission_mode (str): IN: default permission mode. OUT: controls approval behaviour.
+    Attributes:
+        model: Model identifier.
+        base_url: Override base URL for the LLM provider.
+        api_key: Explicit API key (overrides env vars).
+        permission_mode: Default permission mode (``"auto"``, ``"manual"``, …).
     """
 
     model: str = ""
@@ -909,12 +934,13 @@ class InitializeParams:
 
 @dataclass(frozen=True)
 class PermissionResponseParams:
-    """Parameters for a permission/approval response.
+    """Parameters for a ``permission_response`` JSON-RPC request.
 
-    Args:
-        request_id (str): IN: identifier of the approval request. OUT: used for correlation.
-        response (Literal["approve", "approve_for_session", "reject"]): IN: user decision. OUT: controls execution flow.
-        feedback (str | None): IN: optional free-form feedback. OUT: logged or shown.
+    Attributes:
+        request_id: Id of the original approval request.
+        response: Decision — ``"approve"``, ``"approve_for_session"``, or
+            ``"reject"``.
+        feedback: Optional free-form note logged with the decision.
     """
 
     request_id: str = ""

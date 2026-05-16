@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Integration module for Xerxes.
+"""Adapt :class:`MCPTool` records into Python callables an agent can register.
 
-Exports:
-    - logger
-    - mcp_tool_to_xerxes_function
-    - add_mcp_tools_to_agent
-    - create_mcp_enabled_agent"""
+The agent loop only knows about plain callables decorated with
+``__xerxes_schema__``-style metadata. This module synthesises such callables
+from MCP tools so a connected MCP server's tools can be appended onto an
+agent's ``functions`` list with a uniform interface, hiding the async
+``MCPManager.call_tool`` call behind a synchronous wrapper.
+"""
 
 from collections.abc import Callable
 from typing import Any, cast
@@ -31,13 +32,13 @@ logger = get_logger()
 
 
 def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
-    """Mcp tool to xerxes function.
+    """Build a sync Python callable that proxies to ``manager.call_tool(tool.name, ...)``.
 
-    Args:
-        tool (MCPTool): IN: tool. OUT: Consumed during execution.
-        manager (MCPManager): IN: manager. OUT: Consumed during execution.
-    Returns:
-        Callable: OUT: Result of the operation."""
+    The returned function carries a synthesised signature (one parameter per
+    field in ``tool.input_schema.properties``), a generated docstring, and
+    annotations so the agent loop's reflection-based schema builder produces
+    the expected tool entry.
+    """
 
     import inspect
 
@@ -74,12 +75,7 @@ def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
             param_docs.append(f"{param_name}: {param_info['description']}")
 
     def sync_wrapper(**kwargs) -> Any:
-        """Sync wrapper.
-
-        Args:
-            **kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-        Returns:
-            Any: OUT: Result of the operation."""
+        """Drive the async MCP call from synchronous agent code via :func:`run_sync`."""
 
         try:
             return run_sync(manager.call_tool(tool.name, kwargs))
@@ -105,12 +101,7 @@ def mcp_tool_to_xerxes_function(tool: MCPTool, manager: MCPManager) -> Callable:
 
 
 def _map_schema_type(json_type: str) -> type:
-    """Internal helper to map schema type.
-
-    Args:
-        json_type (str): IN: json type. OUT: Consumed during execution.
-    Returns:
-        type: OUT: Result of the operation."""
+    """Translate a JSON-Schema type name into the Python type used in annotations."""
 
     type_mapping = {
         "string": str,
@@ -124,12 +115,11 @@ def _map_schema_type(json_type: str) -> type:
 
 
 async def add_mcp_tools_to_agent(agent: Any, manager: MCPManager, server_names: list[str] | None = None) -> None:
-    """Asynchronously Add mcp tools to agent.
+    """Append each MCP tool (optionally filtered by ``server_names``) onto ``agent.functions``.
 
-    Args:
-        agent (Any): IN: agent. OUT: Consumed during execution.
-        manager (MCPManager): IN: manager. OUT: Consumed during execution.
-        server_names (list[str] | None, optional): IN: server names. Defaults to None. OUT: Consumed during execution."""
+    Falls back to ``agent._internal_agent.functions`` for agents that wrap a
+    delegate; warns when neither attribute is present.
+    """
 
     logger = get_logger()
 
@@ -166,15 +156,10 @@ def create_mcp_enabled_agent(
     server_names: list[str] | None = None,
     **agent_kwargs,
 ) -> Any:
-    """Create mcp enabled agent.
+    """Instantiate ``agent_class(**agent_kwargs)`` with MCP tools pre-registered.
 
-    Args:
-        agent_class (type): IN: agent class. OUT: Consumed during execution.
-        manager (MCPManager): IN: manager. OUT: Consumed during execution.
-        server_names (list[str] | None, optional): IN: server names. Defaults to None. OUT: Consumed during execution.
-        **agent_kwargs: IN: Additional keyword arguments. OUT: Passed through to downstream calls.
-    Returns:
-        Any: OUT: Result of the operation."""
+    Synchronous convenience over :func:`add_mcp_tools_to_agent`.
+    """
 
     agent = agent_class(**agent_kwargs)
 

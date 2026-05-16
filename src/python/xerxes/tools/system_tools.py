@@ -444,7 +444,9 @@ class FileSystemTools(AgentBaseFn):
 
             try:
 
-                def build_tree(dir_path: Path, prefix: str = "", max_depth: int = 3, current_depth: int = 0) -> list[str]:
+                def build_tree(
+                    dir_path: Path, prefix: str = "", max_depth: int = 3, current_depth: int = 0
+                ) -> list[str]:
                     """Recursively build directory tree representation."""
                     if current_depth >= max_depth:
                         return []

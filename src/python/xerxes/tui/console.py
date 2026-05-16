@@ -32,11 +32,7 @@ from rich.theme import Theme as RichTheme
 
 
 def _ansi_color_map() -> dict[str, str]:
-    """Return a mapping of common color names to 256-color ANSI indices.
-
-    Returns:
-        dict[str, str]: OUT: Mapping from color name to ANSI 256-color index string.
-    """
+    """Return the name-to-ANSI-256 mapping used by the bracket-tag parser."""
     return {
         "black": "16",
         "red": "196",
@@ -76,18 +72,11 @@ _ANSI_STYLE_MAP = {
 
 
 def _css_to_ansi(color: str) -> str:
-    """Convert a CSS-style color string to a 256-color ANSI index.
+    """Convert a CSS-style color to an ANSI 256-color index string.
 
-    Supports hex (#RRGGBB) and rgb(r, g, b) formats, as well as named colors
-    looked up via :func:`_ansi_color_map`.
-
-    Args:
-        color (str): IN: CSS color string (hex, rgb, or named). OUT: Parsed
-            into an ANSI 256-color index.
-
-    Returns:
-        str: OUT: ANSI 256-color index as a string, or empty if unrecognized.
-    """
+    Supports ``#RRGGBB``, ``rgb(r, g, b)``, and the named colors in
+    :func:`_ansi_color_map`. Returns ``""`` when ``color`` cannot be
+    parsed."""
     color = color.strip().lower()
     if not color:
         return ""
@@ -114,14 +103,9 @@ def _css_to_ansi(color: str) -> str:
 def _resolve_tag(tag: str) -> str | None:
     """Resolve a single rich-style markup tag into ANSI escape sequences.
 
-    Args:
-        tag (str): IN: Tag text such as ``"bold"``, ``"red"``, or ``"/dim"``.
-            OUT: Parsed into style and color components.
-
-    Returns:
-        str | None: OUT: Concatenated ANSI escape codes, or ``None`` if the
-            tag cannot be resolved.
-    """
+    Accepts space-separated tags (e.g. ``"bold red"``) and ``"/tag"``
+    closers. Returns ``None`` when ``tag`` contains no recognizable
+    keyword so the caller can pass the literal ``"[tag]"`` through."""
     parts = [p for p in tag.split() if p]
     if not parts:
         return None
@@ -149,17 +133,10 @@ def _resolve_tag(tag: str) -> str | None:
 
 
 def _prompt_text_to_ansi(markup: str) -> str:
-    """Convert custom bracket-style markup into ANSI escape sequences.
+    """Convert bracket-style markup (``[bold]...[/bold]``) into ANSI escapes.
 
-    Replaces ``[tag]...[/tag]`` style markers with equivalent ANSI codes.
-
-    Args:
-        markup (str): IN: Raw markup string using bracket tags. OUT: Transformed
-            into ANSI-escaped terminal output.
-
-    Returns:
-        str: OUT: ANSI-escaped string ready for terminal display.
-    """
+    Unknown tags are passed through verbatim — callers can therefore
+    mix literal ``[..]`` text with markup without escaping."""
     output = ""
     i = 0
     while i < len(markup):
@@ -189,28 +166,14 @@ def _prompt_text_to_ansi(markup: str) -> str:
 
 
 def render_to_ansi(text: str, columns: int) -> str:
-    """Render text to ANSI using the internal markup converter.
+    """Public wrapper around :func:`_prompt_text_to_ansi`.
 
-    Args:
-        text (str): IN: Input text with bracket markup. OUT: Converted to ANSI.
-        columns (int): IN: Terminal column width (currently unused). OUT: Reserved
-            for future wrapping logic.
-
-    Returns:
-        str: OUT: ANSI-escaped string.
-    """
+    ``columns`` is reserved for a future wrapping pass and currently ignored."""
     return _prompt_text_to_ansi(text)
 
 
 def text_to_ansi_escaped(text: str) -> str:
-    """Convert bracket markup text to ANSI escape sequences.
-
-    Args:
-        text (str): IN: Input text with bracket markup. OUT: Converted to ANSI.
-
-    Returns:
-        str: OUT: ANSI-escaped string.
-    """
+    """Public alias for :func:`_prompt_text_to_ansi`."""
     return _prompt_text_to_ansi(text)
 
 
@@ -218,13 +181,10 @@ _rich_console: RichConsole | None = None
 
 
 def _get_rich_console() -> RichConsole:
-    """Return a lazily-initialized global Rich console instance.
+    """Return a lazily-initialized process-wide :class:`RichConsole`.
 
-    The console is configured with a custom theme and terminal width.
-
-    Returns:
-        RichConsole: OUT: Shared Rich console instance for Markdown printing.
-    """
+    Configured with a Markdown-tuned theme and the live terminal width.
+    Cached so theme construction happens once per process."""
     global _rich_console
     if _rich_console is None:
         _rich_console = RichConsole(
@@ -254,21 +214,17 @@ def _get_rich_console() -> RichConsole:
 
 
 def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
-    """Render Markdown text to ANSI-escaped plain text.
+    """Render Markdown ``text`` to ANSI-escaped plain text via a one-shot Rich console.
 
-    Uses a temporary Rich console to capture rendered output. The default width
-    is the live terminal column count — rendering at a fixed wide canvas (e.g.
-    1000) causes Rich to pad code-block backgrounds and rule lines far past the
-    visible area, which then wrap and stack as vertical glitches when displayed.
+    The default width is the live terminal column count — rendering at
+    a fixed wide canvas (e.g. 1000) causes Rich to pad code-block
+    backgrounds and rule lines far past the visible area, which then
+    wrap and stack as vertical glitches.
 
     Args:
-        text (str): IN: Markdown source text. OUT: Rendered to ANSI via Rich.
-        columns (int | None): IN: Optional column width for wrapping. OUT: Passed
-            to the temporary Rich console. Defaults to the current terminal
-            width (clamped to a sensible minimum) when not provided.
-
-    Returns:
-        str: OUT: ANSI-escaped plain text with trailing whitespace stripped.
+        text: Markdown source.
+        columns: Override the wrap width; falls back to the live
+            terminal columns (min 40) when ``None`` or non-positive.
     """
     import io
 
@@ -302,13 +258,7 @@ def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
 
 
 def print_markdown(text: str, *, file: IO[str] | None = None) -> None:
-    """Print Markdown text to the terminal using Rich.
-
-    Args:
-        text (str): IN: Markdown source text. OUT: Printed via Rich console.
-        file (IO[str] | None): IN: Optional file-like object to write to instead
-            of stdout. OUT: Passed to Rich console print.
-    """
+    """Print Markdown ``text`` via the shared Rich console (or ``file`` if given)."""
     console = _get_rich_console()
     md = RichMarkdown(
         text,
@@ -322,14 +272,12 @@ def print_markdown(text: str, *, file: IO[str] | None = None) -> None:
 
 
 def print_syntax(code: str, language: str = "", label: str = "") -> None:
-    """Print syntax-highlighted code inside a box border.
+    """Print syntax-highlighted ``code`` inside a box border.
 
     Args:
-        code (str): IN: Source code to display. OUT: Wrapped in a Rich Syntax
-            block and printed with a border.
-        language (str): IN: Programming language for highlighting. OUT: Passed
-            to Rich Syntax lexer. Defaults to plain text.
-        label (str): IN: Optional header label. OUT: Displayed in the top border.
+        code: Source code to display.
+        language: Lexer name passed to Rich Syntax; falls back to plain text.
+        label: Optional header label drawn into the top border.
     """
     console = _get_rich_console()
     width = shutil.get_terminal_size().columns
@@ -377,21 +325,13 @@ class SpinnerState:
     text: str = ""
 
     def tick(self) -> str:
-        """Advance the spinner by one frame and return the new character.
-
-        Returns:
-            str: OUT: Next spinner frame character.
-        """
+        """Advance one frame and return the character that should be drawn now."""
         result = self.frames[self.frame % len(self.frames)]
         self.frame += 1
         return result
 
     def current(self) -> str:
-        """Return the current spinner frame without advancing.
-
-        Returns:
-            str: OUT: Current spinner frame character.
-        """
+        """Return the current spinner character without advancing."""
         return self.frames[self.frame % len(self.frames)]
 
 
@@ -405,28 +345,12 @@ SEVERITY_COLORS: dict[str, str] = {
 
 
 def severity_color(severity: str) -> str:
-    """Return the color name associated with a severity level.
-
-    Args:
-        severity (str): IN: Severity string such as ``"info"`` or ``"error"``.
-            OUT: Looked up in :data:`SEVERITY_COLORS`.
-
-    Returns:
-        str: OUT: Color name for the severity, defaulting to ``"white"``.
-    """
+    """Return the color name for ``severity`` (defaults to ``"white"``)."""
     return SEVERITY_COLORS.get(severity.lower(), "white")
 
 
 def severity_icon(severity: str) -> str:
-    """Return the icon character associated with a severity level.
-
-    Args:
-        severity (str): IN: Severity string such as ``"info"`` or ``"error"``.
-            OUT: Matched against known severity icons.
-
-    Returns:
-        str: OUT: Icon character for the severity, defaulting to ``"·"``.
-    """
+    """Return the icon glyph for ``severity`` (defaults to a middle dot)."""
     icons = {
         "info": "ℹ",  # noqa: RUF001
         "success": "✓",

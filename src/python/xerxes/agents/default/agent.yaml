@@ -17,6 +17,7 @@ agent:
     - TaskListTool
     - TaskStopTool
     - AskUserQuestionTool
+    - SetInteractionModeTool
     - SkillTool
     - TodoWriteTool
     - ToolSearchTool

@@ -11,10 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""State module for Xerxes.
+"""Aggregate operator state attached to a Xerxes session.
 
-Exports:
-    - OperatorState"""
+:class:`OperatorState` is the integration point that ties the per-session
+managers (PTY shells, browser pages, structured plan, user prompts, spawned
+subagents) into a single object the streaming runtime can use. It also owns
+the factory methods that produce the operator tool callables registered with
+the model.
+"""
 
 from __future__ import annotations
 
@@ -41,14 +45,30 @@ from .user_prompt import UserPromptManager
 
 
 class OperatorState:
-    """Operator state."""
+    """Container that owns every operator-side manager for one session.
+
+    The session lifecycle is:
+
+    1. The session creates an :class:`OperatorState` from its
+       :class:`OperatorRuntimeConfig`.
+    2. Once the Xerxes runtime and streaming state are available, the host
+       calls :meth:`attach_runtime` to wire in subagent support and audit
+       emission.
+    3. The session asks for the operator tool list via :meth:`build_tools`
+       and merges it into the model tool registry.
+
+    The class owns no I/O of its own — each manager attribute is responsible
+    for its own resources (PTY processes, browser contexts, subagent
+    handles).
+    """
 
     def __init__(self, config: OperatorRuntimeConfig) -> None:
-        """Initialize the instance.
+        """Construct managers and remember the runtime configuration.
 
         Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            config (OperatorRuntimeConfig): IN: config. OUT: Consumed during execution."""
+            config: Session-scoped operator configuration; consumed by the
+                browser and PTY managers and retained for tool factories.
+        """
 
         self.config = config
         self.pty_manager = PTYSessionManager()
@@ -64,23 +84,25 @@ class OperatorState:
         self._tool_cache: list[tp.Callable] | None = None
 
     def attach_runtime(self, xerxes: tp.Any, runtime_state: tp.Any) -> None:
-        """Attach runtime.
+        """Bind a live Xerxes runtime so subagent spawning can work.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            xerxes (tp.Any): IN: xerxes. OUT: Consumed during execution.
-            runtime_state (tp.Any): IN: runtime state. OUT: Consumed during execution."""
+        Called once per session after the streaming runtime has been
+        constructed. After this point :meth:`build_tools` can return
+        ``spawn_agent`` and the other subagent control tools.
+        """
 
         self.xerxes = xerxes
         self.runtime_state = runtime_state
         self.subagent_manager = SpawnedAgentManager(xerxes, runtime_state)
 
     def set_power_tools_enabled(self, enabled: bool) -> None:
-        """Set the power tools enabled.
+        """Toggle the high-power operator tool group at runtime.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            enabled (bool): IN: enabled. OUT: Consumed during execution."""
+        When disabled, every name in :data:`HIGH_POWER_OPERATOR_TOOLS` is
+        added to the policy engine's optional-tool set so the streaming
+        runtime hides them from the model. Re-enabling removes the gating
+        again. A no-op until :meth:`attach_runtime` has been called.
+        """
 
         self.config.power_tools_enabled = enabled
         if self.runtime_state is None:
@@ -92,12 +114,11 @@ class OperatorState:
             policy.optional_tools.update(HIGH_POWER_OPERATOR_TOOLS)
 
     def list_operator_state(self) -> dict[str, tp.Any]:
-        """List operator state.
+        """Return a JSON-safe snapshot of every owned manager.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            dict[str, tp.Any]: OUT: Result of the operation."""
+        Used by the bridge to power introspection endpoints and the TUI
+        status panels.
+        """
 
         return {
             "power_tools_enabled": self.config.power_tools_enabled,
@@ -109,12 +130,12 @@ class OperatorState:
         }
 
     def build_tools(self) -> list[tp.Callable]:
-        """Build tools.
+        """Return the ordered list of operator tools for the streaming loop.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            list[tp.Callable]: OUT: Result of the operation."""
+        Results are cached: the first invocation instantiates each tool and
+        subsequent calls return a fresh copy of the cached list (so callers
+        can mutate the list without disturbing the cache).
+        """
 
         if self._tool_cache is None:
             self._tool_cache = [
@@ -144,10 +165,7 @@ class OperatorState:
 
     @staticmethod
     def _validate_patch_text(patch: str) -> None:
-        """Internal helper to validate patch text.
-
-        Args:
-            patch (str): IN: patch. OUT: Consumed during execution."""
+        """Reject patch text that is not a real unified diff."""
 
         text = patch.strip()
         if not text:
@@ -159,13 +177,13 @@ class OperatorState:
             raise ValueError("Patch must be a unified diff with ---/+++ headers and @@ hunks")
 
     def create_reinvoke_message(self, result: tp.Any) -> UserMessage | None:
-        """Create reinvoke message.
+        """Build a follow-up multimodal message for tool results that need it.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            result (tp.Any): IN: result. OUT: Consumed during execution.
-        Returns:
-            UserMessage | None: OUT: Result of the operation."""
+        Currently fires only for :class:`ImageInspectionResult`: the image
+        returned by ``view_image`` is wrapped in a synthetic user message so
+        the next model turn can actually see it. Returns ``None`` when no
+        re-invocation is needed.
+        """
 
         if isinstance(result, ImageInspectionResult):
             image = result.image.copy()
@@ -178,25 +196,24 @@ class OperatorState:
         return None
 
     def summarize_result(self, result: tp.Any) -> tuple[tp.Any, dict[str, tp.Any]]:
-        """Summarize result.
+        """Reduce a tool result to a wire-safe value plus structured metadata.
 
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-            result (tp.Any): IN: result. OUT: Consumed during execution.
+        Most results pass through unchanged with an empty metadata dict.
+        :class:`ImageInspectionResult` is collapsed to its summary string and
+        the JSON-safe metadata payload.
+
         Returns:
-            tuple[tp.Any, dict[str, tp.Any]]: OUT: Result of the operation."""
+            ``(display_value, metadata)`` — ``display_value`` is what gets
+            shown to the model; ``metadata`` is attached to the tool
+            envelope for downstream consumers.
+        """
 
         if isinstance(result, ImageInspectionResult):
             return result.summary(), result.tool_metadata()
         return result, {}
 
     def _build_exec_command(self) -> tp.Callable:
-        """Internal helper to build exec command.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``exec_command`` PTY tool."""
 
         @operator_tool(
             "exec_command",
@@ -213,16 +230,7 @@ class OperatorState:
             max_output_chars: int | None = None,
             login: bool = True,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Exec command.
-
-            Args:
-                cmd (str): IN: cmd. OUT: Consumed during execution.
-                workdir (str | None, optional): IN: workdir. Defaults to None. OUT: Consumed during execution.
-                yield_time_ms (int | None, optional): IN: yield time ms. Defaults to None. OUT: Consumed during execution.
-                max_output_chars (int | None, optional): IN: max output chars. Defaults to None. OUT: Consumed during execution.
-                login (bool, optional): IN: login. Defaults to True. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Spawn a new PTY session and stream its first chunk of output."""
 
             return await asyncio.to_thread(
                 self.pty_manager.create_session,
@@ -236,12 +244,7 @@ class OperatorState:
         return exec_command
 
     def _build_write_stdin(self) -> tp.Callable:
-        """Internal helper to build write stdin.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``write_stdin`` PTY interaction tool."""
 
         @operator_tool(
             "write_stdin",
@@ -258,17 +261,7 @@ class OperatorState:
             close_stdin: bool = False,
             interrupt: bool = False,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Write stdin.
-
-            Args:
-                session_id (str): IN: session id. OUT: Consumed during execution.
-                chars (str, optional): IN: chars. Defaults to ''. OUT: Consumed during execution.
-                yield_time_ms (int | None, optional): IN: yield time ms. Defaults to None. OUT: Consumed during execution.
-                max_output_chars (int | None, optional): IN: max output chars. Defaults to None. OUT: Consumed during execution.
-                close_stdin (bool, optional): IN: close stdin. Defaults to False. OUT: Consumed during execution.
-                interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Write to an existing PTY session and return any new output."""
 
             return await asyncio.to_thread(
                 self.pty_manager.write,
@@ -283,12 +276,7 @@ class OperatorState:
         return write_stdin
 
     def _build_apply_patch(self) -> tp.Callable:
-        """Internal helper to build apply patch.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``apply_patch`` git-apply tool."""
 
         @operator_tool(
             "apply_patch",
@@ -298,14 +286,7 @@ class OperatorState:
             ),
         )
         def apply_patch(patch: str, check: bool = False, workdir: str | None = None) -> dict[str, tp.Any]:
-            """Apply patch.
-
-            Args:
-                patch (str): IN: patch. OUT: Consumed during execution.
-                check (bool, optional): IN: check. Defaults to False. OUT: Consumed during execution.
-                workdir (str | None, optional): IN: workdir. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Validate and shell out to ``git apply`` (optionally ``--check``)."""
 
             import subprocess
 
@@ -333,12 +314,7 @@ class OperatorState:
         return apply_patch
 
     def _build_spawn_agent(self) -> tp.Callable:
-        """Internal helper to build spawn agent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``spawn_agent`` subagent-creation tool."""
 
         @operator_tool(
             "spawn_agent",
@@ -354,16 +330,7 @@ class OperatorState:
             prompt_profile: str | None = None,
             nickname: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Spawn agent.
-
-            Args:
-                message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
-                task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
-                agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-                prompt_profile (str | None, optional): IN: prompt profile. Defaults to None. OUT: Consumed during execution.
-                nickname (str | None, optional): IN: nickname. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`SpawnedAgentManager.spawn`."""
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
@@ -378,12 +345,7 @@ class OperatorState:
         return spawn_agent
 
     def _build_resume_agent(self) -> tp.Callable:
-        """Internal helper to build resume agent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``resume_agent`` reattach tool."""
 
         @operator_tool(
             "resume_agent",
@@ -392,12 +354,7 @@ class OperatorState:
             ),
         )
         def resume_agent(agent_id: str) -> dict[str, tp.Any]:
-            """Resume agent.
-
-            Args:
-                agent_id (str): IN: agent id. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`SpawnedAgentManager.resume`."""
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
@@ -406,12 +363,7 @@ class OperatorState:
         return resume_agent
 
     def _build_send_input(self) -> tp.Callable:
-        """Internal helper to build send input.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``send_input`` subagent-messaging tool."""
 
         @operator_tool(
             "send_input",
@@ -428,17 +380,7 @@ class OperatorState:
             handle_id: str | None = None,
             task_description: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Send input.
-
-            Args:
-                target (str | None, optional): IN: target. Defaults to None. OUT: Consumed during execution.
-                message (str | None, optional): IN: message. Defaults to None. OUT: Consumed during execution.
-                interrupt (bool, optional): IN: interrupt. Defaults to False. OUT: Consumed during execution.
-                agent_id (str | None, optional): IN: agent id. Defaults to None. OUT: Consumed during execution.
-                handle_id (str | None, optional): IN: handle id. Defaults to None. OUT: Consumed during execution.
-                task_description (str | None, optional): IN: task description. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Resolve the target alias and delegate to the subagent manager."""
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
@@ -453,25 +395,14 @@ class OperatorState:
         return send_input
 
     def _build_wait_agent(self) -> tp.Callable:
-        """Internal helper to build wait agent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``wait_agent`` join tool."""
 
         @operator_tool(
             "wait_agent",
             description=("Wait for one or more spawned agents to reach a terminal state or until a timeout expires."),
         )
         async def wait_agent(targets: list[str], timeout_ms: int = 30000) -> dict[str, tp.Any]:
-            """Asynchronously Wait agent.
-
-            Args:
-                targets (list[str]): IN: targets. OUT: Consumed during execution.
-                timeout_ms (int, optional): IN: timeout ms. Defaults to 30000. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`SpawnedAgentManager.wait`."""
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
@@ -480,12 +411,7 @@ class OperatorState:
         return wait_agent
 
     def _build_close_agent(self) -> tp.Callable:
-        """Internal helper to build close agent.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``close_agent`` teardown tool."""
 
         @operator_tool(
             "close_agent",
@@ -495,12 +421,7 @@ class OperatorState:
             ),
         )
         def close_agent(target: str) -> dict[str, tp.Any]:
-            """Close agent.
-
-            Args:
-                target (str): IN: target. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`SpawnedAgentManager.close`."""
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
@@ -509,12 +430,7 @@ class OperatorState:
         return close_agent
 
     def _build_ask_user(self) -> tp.Callable:
-        """Internal helper to build ask user.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``ask_user`` human-in-the-loop tool."""
 
         @operator_tool(
             "ask_user",
@@ -530,15 +446,7 @@ class OperatorState:
             allow_freeform: bool = True,
             placeholder: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Ask user.
-
-            Args:
-                question (str): IN: question. OUT: Consumed during execution.
-                options (list[str] | None, optional): IN: options. Defaults to None. OUT: Consumed during execution.
-                allow_freeform (bool, optional): IN: allow freeform. Defaults to True. OUT: Consumed during execution.
-                placeholder (str | None, optional): IN: placeholder. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Queue a prompt with :class:`UserPromptManager` and await reply."""
 
             return await self.user_prompt_manager.request(
                 question,
@@ -550,12 +458,7 @@ class OperatorState:
         return ask_user
 
     def _build_view_image(self) -> tp.Callable:
-        """Internal helper to build view image.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``view_image`` multimodal helper."""
 
         @operator_tool(
             "view_image",
@@ -566,13 +469,7 @@ class OperatorState:
             ),
         )
         def view_image(path: str, detail: str = "auto") -> ImageInspectionResult:
-            """View image.
-
-            Args:
-                path (str): IN: path. OUT: Consumed during execution.
-                detail (str, optional): IN: detail. Defaults to 'auto'. OUT: Consumed during execution.
-            Returns:
-                ImageInspectionResult: OUT: Result of the operation."""
+            """Load the image off disk and return an :class:`ImageInspectionResult`."""
 
             resolved = pathlib.Path(path).expanduser().resolve()
             if not resolved.is_file():
@@ -593,12 +490,7 @@ class OperatorState:
         return view_image
 
     def _build_update_plan(self) -> tp.Callable:
-        """Internal helper to build update plan.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``update_plan`` structured-plan tool."""
 
         @operator_tool(
             "update_plan",
@@ -608,13 +500,7 @@ class OperatorState:
             ),
         )
         def update_plan(explanation: str | None = None, plan: list[dict[str, str]] | None = None) -> dict[str, tp.Any]:
-            """Update plan.
-
-            Args:
-                explanation (str | None, optional): IN: explanation. Defaults to None. OUT: Consumed during execution.
-                plan (list[dict[str, str]] | None, optional): IN: plan. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Apply the update via :class:`PlanStateManager` and emit an audit hook."""
 
             updated = self.plan_manager.update(explanation, plan or [])
             if self.runtime_state is not None and self.runtime_state.audit_emitter is not None:
@@ -628,12 +514,7 @@ class OperatorState:
         return update_plan
 
     def _build_web_search_query(self) -> tp.Callable:
-        """Internal helper to build web search query.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.search_query`` Google search tool."""
 
         @operator_tool(
             "web.search_query",
@@ -648,15 +529,7 @@ class OperatorState:
             n_results: int = 5,
             domains: list[str] | None = None,
         ) -> dict[str, tp.Any]:
-            """Web search query.
-
-            Args:
-                q (str): IN: q. OUT: Consumed during execution.
-                search_type (str, optional): IN: search type. Defaults to 'text'. OUT: Consumed during execution.
-                n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
-                domains (list[str] | None, optional): IN: domains. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Run a Google text query, optionally domain- or news-restricted."""
 
             site = domains[0] if domains else None
             time_range = "d" if search_type == "news" else None
@@ -676,12 +549,7 @@ class OperatorState:
         return web_search_query
 
     def _build_web_image_query(self) -> tp.Callable:
-        """Internal helper to build web image query.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.image_query`` image-search tool."""
 
         @operator_tool(
             "web.image_query",
@@ -691,14 +559,7 @@ class OperatorState:
             ),
         )
         def web_image_query(q: str, n_results: int = 5, domains: list[str] | None = None) -> dict[str, tp.Any]:
-            """Web image query.
-
-            Args:
-                q (str): IN: q. OUT: Consumed during execution.
-                n_results (int, optional): IN: n results. Defaults to 5. OUT: Consumed during execution.
-                domains (list[str] | None, optional): IN: domains. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Run a Google image query for the supplied phrase."""
 
             site = domains[0] if domains else None
             payload = GoogleSearch.static_call(
@@ -711,12 +572,7 @@ class OperatorState:
         return web_image_query
 
     def _build_web_open(self) -> tp.Callable:
-        """Internal helper to build web open.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.open`` browser-navigation tool."""
 
         @operator_tool(
             "web.open",
@@ -726,26 +582,14 @@ class OperatorState:
             ),
         )
         async def web_open(url: str | None = None, ref_id: str | None = None, wait_ms: int = 500) -> dict[str, tp.Any]:
-            """Asynchronously Web open.
-
-            Args:
-                url (str | None, optional): IN: url. Defaults to None. OUT: Consumed during execution.
-                ref_id (str | None, optional): IN: ref id. Defaults to None. OUT: Consumed during execution.
-                wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`BrowserManager.open`."""
 
             return await self.browser_manager.open(url=url, ref_id=ref_id, wait_ms=wait_ms)
 
         return web_open
 
     def _build_web_click(self) -> tp.Callable:
-        """Internal helper to build web click.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.click`` DOM interaction tool."""
 
         @operator_tool(
             "web.click",
@@ -760,16 +604,7 @@ class OperatorState:
             text: str | None = None,
             wait_ms: int = 500,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Web click.
-
-            Args:
-                ref_id (str): IN: ref id. OUT: Consumed during execution.
-                link_id (int | None, optional): IN: link id. Defaults to None. OUT: Consumed during execution.
-                selector (str | None, optional): IN: selector. Defaults to None. OUT: Consumed during execution.
-                text (str | None, optional): IN: text. Defaults to None. OUT: Consumed during execution.
-                wait_ms (int, optional): IN: wait ms. Defaults to 500. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`BrowserManager.click`."""
 
             return await self.browser_manager.click(
                 ref_id,
@@ -782,12 +617,7 @@ class OperatorState:
         return web_click
 
     def _build_web_find(self) -> tp.Callable:
-        """Internal helper to build web find.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.find`` in-page text search tool."""
 
         @operator_tool(
             "web.find",
@@ -796,25 +626,14 @@ class OperatorState:
             ),
         )
         async def web_find(ref_id: str, pattern: str) -> dict[str, tp.Any]:
-            """Asynchronously Web find.
-
-            Args:
-                ref_id (str): IN: ref id. OUT: Consumed during execution.
-                pattern (str): IN: pattern. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`BrowserManager.find`."""
 
             return await self.browser_manager.find(ref_id, pattern)
 
         return web_find
 
     def _build_web_screenshot(self) -> tp.Callable:
-        """Internal helper to build web screenshot.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.screenshot`` page-capture tool."""
 
         @operator_tool(
             "web.screenshot",
@@ -824,26 +643,14 @@ class OperatorState:
             ),
         )
         async def web_screenshot(ref_id: str, path: str | None = None, full_page: bool = True) -> dict[str, tp.Any]:
-            """Asynchronously Web screenshot.
-
-            Args:
-                ref_id (str): IN: ref id. OUT: Consumed during execution.
-                path (str | None, optional): IN: path. Defaults to None. OUT: Consumed during execution.
-                full_page (bool, optional): IN: full page. Defaults to True. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Delegate to :meth:`BrowserManager.screenshot`."""
 
             return await self.browser_manager.screenshot(ref_id, path=path, full_page=full_page)
 
         return web_screenshot
 
     def _build_web_weather(self) -> tp.Callable:
-        """Internal helper to build web weather.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.weather`` Open-Meteo tool."""
 
         @operator_tool(
             "web.weather",
@@ -853,12 +660,7 @@ class OperatorState:
             ),
         )
         async def web_weather(location: str) -> dict[str, tp.Any]:
-            """Asynchronously Web weather.
-
-            Args:
-                location (str): IN: location. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Geocode ``location`` and fetch the current forecast block."""
 
             async with httpx.AsyncClient(timeout=20) as client:
                 geo = await client.get(
@@ -888,12 +690,7 @@ class OperatorState:
         return web_weather
 
     def _build_web_finance(self) -> tp.Callable:
-        """Internal helper to build web finance.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.finance`` Yahoo-quote tool."""
 
         @operator_tool(
             "web.finance",
@@ -903,14 +700,7 @@ class OperatorState:
             ),
         )
         async def web_finance(ticker: str, market: str | None = None, kind: str = "equity") -> dict[str, tp.Any]:
-            """Asynchronously Web finance.
-
-            Args:
-                ticker (str): IN: ticker. OUT: Consumed during execution.
-                market (str | None, optional): IN: market. Defaults to None. OUT: Consumed during execution.
-                kind (str, optional): IN: kind. Defaults to 'equity'. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Hit the Yahoo Finance quote endpoint for the resolved symbol."""
 
             symbol = ticker if not market else f"{ticker}.{market}"
             async with httpx.AsyncClient(timeout=20) as client:
@@ -937,12 +727,7 @@ class OperatorState:
         return web_finance
 
     def _build_web_sports(self) -> tp.Callable:
-        """Internal helper to build web sports.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the ``web.sports`` ESPN scoreboard tool."""
 
         @operator_tool(
             "web.sports",
@@ -957,15 +742,7 @@ class OperatorState:
             team: str | None = None,
             opponent: str | None = None,
         ) -> dict[str, tp.Any]:
-            """Asynchronously Web sports.
-
-            Args:
-                league (str): IN: league. OUT: Consumed during execution.
-                fn (str, optional): IN: fn. Defaults to 'schedule'. OUT: Consumed during execution.
-                team (str | None, optional): IN: team. Defaults to None. OUT: Consumed during execution.
-                opponent (str | None, optional): IN: opponent. Defaults to None. OUT: Consumed during execution.
-            Returns:
-                dict[str, tp.Any]: OUT: Result of the operation."""
+            """Hit the ESPN scoreboard or standings endpoint for a known league."""
 
             league_map = {
                 "nba": "basketball/nba",
@@ -994,12 +771,7 @@ class OperatorState:
         return web_sports
 
     def _build_web_time(self) -> tp.Callable:
-        """Internal helper to build web time.
-
-        Args:
-            self: IN: The instance. OUT: Used for attribute access.
-        Returns:
-            tp.Callable: OUT: Result of the operation."""
+        """Factory for the offline ``web.time`` UTC-offset tool."""
 
         @operator_tool(
             "web.time",
@@ -1009,12 +781,7 @@ class OperatorState:
             ),
         )
         def web_time(utc_offset: str) -> dict[str, str]:
-            """Web time.
-
-            Args:
-                utc_offset (str): IN: utc offset. OUT: Consumed during execution.
-            Returns:
-                dict[str, str]: OUT: Result of the operation."""
+            """Return the wall clock for the given ``+HH:MM`` or ``-HH:MM`` offset."""
 
             sign = 1 if utc_offset.startswith("+") else -1
             hours_str, minutes_str = utc_offset[1:].split(":", 1)

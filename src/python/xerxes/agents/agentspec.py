@@ -53,19 +53,18 @@ class Inherit(NamedTuple):
 INHERIT = Inherit()
 
 
+def _is_inherit(value: Any) -> bool:
+    """Return whether a value is the inheritance sentinel."""
+    return value is INHERIT or isinstance(value, Inherit)
+
+
 def _deep_merge(base: Any, override: Any) -> Any:
     """Recursively merge ``override`` into ``base``.
 
-    Args:
-        base (Any): IN: The base value to merge into. OUT: Used as the fallback
-            when ``override`` is :data:`INHERIT`.
-        override (Any): IN: The overriding value. OUT: Replaces or extends
-            ``base`` according to type (dict, list, or scalar).
-
-    Returns:
-        Any: OUT: The merged result.
+    Dicts are merged key-by-key, lists are concatenated, and scalars
+    are replaced. :data:`INHERIT` on the override side keeps ``base``.
     """
-    if override is INHERIT:
+    if _is_inherit(override):
         return base
     if isinstance(base, dict) and isinstance(override, dict):
         result = dict(base)
@@ -170,17 +169,14 @@ class _RawSubagentSpec:
 
 
 def _parse_agent_yaml(path: Path) -> AgentSpec:
-    """Parse a single ``agent.yaml`` file into an :class:`AgentSpec`.
+    """Parse a single ``agent.yaml`` file into an unresolved :class:`AgentSpec`.
 
-    Args:
-        path (Path): IN: Filesystem path to the YAML spec. OUT: Read and parsed.
-
-    Returns:
-        AgentSpec: OUT: The parsed (but not yet resolved) agent specification.
+    Fields absent from the YAML stay as :data:`INHERIT` so the merger in
+    :func:`_load_agent_spec_recursive` can fill them from a parent spec.
 
     Raises:
-        AgentSpecError: If the file is missing, YAML is invalid, or the version
-            is unsupported.
+        AgentSpecError: If the file is missing, YAML is invalid, or the
+            ``version`` field is not in :data:`SUPPORTED_AGENT_SPEC_VERSIONS`.
     """
     if not path.exists():
         raise AgentSpecError(f"Agent spec file not found: {path}")
@@ -257,18 +253,11 @@ def _parse_agent_yaml(path: Path) -> AgentSpec:
 
 
 def _resolve_system_prompt(path: Path | None, args: dict[str, str]) -> str:
-    """Resolve a system prompt template with ``${var}`` substitution.
+    """Load and template a system-prompt file with ``${var}`` substitution.
 
-    Supports ``${var:-default}`` syntax for fallback values.
-
-    Args:
-        path (Path | None): IN: Path to the prompt template file. OUT: Read
-            as UTF-8 text. If missing or ``None``, returns an empty string.
-        args (dict[str, str]): IN: Mapping of variable names to replacement
-            values. OUT: Substituted into the template.
-
-    Returns:
-        str: OUT: The resolved prompt text.
+    Returns an empty string when ``path`` is missing. Supports the shell-like
+    ``${var:-default}`` fallback syntax for variables not provided in
+    ``args``.
     """
     if path is None or not path.exists():
         return ""
@@ -276,12 +265,7 @@ def _resolve_system_prompt(path: Path | None, args: dict[str, str]) -> str:
     text = path.read_text(encoding="utf-8")
 
     def _replacer(match: Any) -> str:
-        """Internal helper to replacer.
-
-        Args:
-            match (Any): IN: match. OUT: Consumed during execution.
-        Returns:
-            str: OUT: Result of the operation."""
+        """Substitute one ``${var}`` or ``${var:-default}`` match."""
         full = match.group(1)
         if ":-" in full:
             key, default = full.split(":-", 1)
@@ -294,26 +278,25 @@ def _resolve_system_prompt(path: Path | None, args: dict[str, str]) -> str:
 
 
 def load_agent_spec(path: Path) -> ResolvedAgentSpec:
-    """Load and fully resolve an agent spec from a YAML file.
+    """Load ``path``, resolve every ``extend``, and return a finalised spec.
 
-    Args:
-        path (Path): IN: Path to the ``agent.yaml`` file. OUT: Passed to
-            recursive loading and resolution.
-
-    Returns:
-        ResolvedAgentSpec: OUT: The fully resolved agent specification.
+    Walks the inheritance chain via :func:`_load_agent_spec_recursive`, then
+    materialises the system prompt (either inline or from
+    ``system_prompt_path``) and freezes every field into a
+    :class:`ResolvedAgentSpec`.
 
     Raises:
-        AgentSpecError: If required fields (name, system_prompt) are missing.
+        AgentSpecError: If ``name`` is missing or neither ``system_prompt``
+            nor ``system_prompt_path`` is provided.
     """
     raw_spec = _load_agent_spec_recursive(path)
 
-    if raw_spec.name is INHERIT:
+    if _is_inherit(raw_spec.name):
         raise AgentSpecError(f"Agent name is required: {path}")
-    if raw_spec.system_prompt is INHERIT and raw_spec.system_prompt_path is INHERIT:
+    if _is_inherit(raw_spec.system_prompt) and _is_inherit(raw_spec.system_prompt_path):
         raise AgentSpecError(f"system_prompt or system_prompt_path is required: {path}")
 
-    if raw_spec.system_prompt is not INHERIT:
+    if not _is_inherit(raw_spec.system_prompt):
         system_prompt = str(raw_spec.system_prompt)
     else:
         sp_path: Path | None = None
@@ -322,30 +305,24 @@ def load_agent_spec(path: Path) -> ResolvedAgentSpec:
         system_prompt = _resolve_system_prompt(sp_path, raw_spec.system_prompt_args)
 
     tools: list[str] = []
-    if raw_spec.tools is not INHERIT and raw_spec.tools is not None:
+    if not _is_inherit(raw_spec.tools) and raw_spec.tools is not None:
         tools = list(raw_spec.tools)
 
     allowed_tools: list[str] | None = None
-    if raw_spec.allowed_tools is not INHERIT:
+    if not _is_inherit(raw_spec.allowed_tools):
         allowed_tools = list(raw_spec.allowed_tools) if raw_spec.allowed_tools is not None else None
 
     exclude_tools: list[str] = []
-    if raw_spec.exclude_tools is not INHERIT and raw_spec.exclude_tools is not None:
+    if not _is_inherit(raw_spec.exclude_tools) and raw_spec.exclude_tools is not None:
         exclude_tools = list(raw_spec.exclude_tools)
 
     subagents: dict[str, SubagentSpec] = {}
-    if raw_spec.subagents is not INHERIT and raw_spec.subagents is not None:
+    if not _is_inherit(raw_spec.subagents) and raw_spec.subagents is not None:
         subagents = dict(raw_spec.subagents)
 
     def _resolve(val: Any, default: Any) -> Any:
-        """Internal helper to resolve.
-
-        Args:
-            val (Any): IN: val. OUT: Consumed during execution.
-            default (Any): IN: default. OUT: Consumed during execution.
-        Returns:
-            Any: OUT: Result of the operation."""
-        if val is INHERIT or isinstance(val, Inherit):
+        """Return ``default`` when ``val`` is the :data:`INHERIT` sentinel."""
+        if _is_inherit(val):
             return default
         return val
 
@@ -365,14 +342,12 @@ def load_agent_spec(path: Path) -> ResolvedAgentSpec:
 
 
 def _load_agent_spec_recursive(path: Path) -> AgentSpec:
-    """Recursively load an agent spec, merging parent specs via ``extend``.
+    """Load ``path`` and merge it onto its ``extend`` parent, recursively.
 
-    Args:
-        path (Path): IN: Path to the agent YAML file. OUT: Read and parsed;
-            if ``extend`` is set, the parent is loaded recursively.
-
-    Returns:
-        AgentSpec: OUT: The merged (but not yet fully resolved) spec.
+    ``extend: default`` resolves against the built-in default spec; any
+    other value is treated as a path relative to ``path``'s directory. The
+    returned spec still uses :data:`INHERIT` for any field neither layer
+    set — :func:`load_agent_spec` is responsible for picking defaults.
     """
     spec = _parse_agent_yaml(path)
 
@@ -400,7 +375,7 @@ def _load_agent_spec_recursive(path: Path) -> AgentSpec:
         "isolation",
     ):
         child_val = getattr(spec, field_name)
-        if child_val is not INHERIT:
+        if not _is_inherit(child_val):
             setattr(merged, field_name, child_val)
 
     if spec.system_prompt_args:
@@ -408,13 +383,13 @@ def _load_agent_spec_recursive(path: Path) -> AgentSpec:
 
     for list_field in ("tools", "allowed_tools", "exclude_tools"):
         child_val = getattr(spec, list_field)
-        if child_val is not INHERIT:
+        if not _is_inherit(child_val):
             setattr(merged, list_field, child_val)
 
-    if spec.max_depth is not INHERIT:
+    if not _is_inherit(spec.max_depth):
         merged.max_depth = spec.max_depth
 
-    if spec.subagents is not INHERIT:
+    if not _is_inherit(spec.subagents):
         if spec.subagents is not None:
             merged.subagents = {**(merged.subagents or {}), **spec.subagents}
         else:

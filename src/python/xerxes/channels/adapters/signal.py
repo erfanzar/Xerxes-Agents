@@ -13,7 +13,9 @@
 # limitations under the License.
 """Signal channel adapter.
 
-Connects to a Signal REST API (e.g. signal-cli-rest-api) for messaging.
+Targets a self-hosted Signal REST bridge (e.g. ``signal-cli-rest-api``).
+Inbound payloads follow the bridge's ``envelope``/``dataMessage`` shape;
+outbound is a POST to ``/v2/send`` with the registered sender number.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class SignalChannel(WebhookChannel):
-    """Channel implementation for Signal."""
+    """Self-hosted Signal REST-bridge adapter."""
 
     name = "signal"
 
@@ -36,15 +38,15 @@ class SignalChannel(WebhookChannel):
         *,
         http_client: tp.Any = None,
     ) -> None:
-        """Initialize the Signal channel.
+        """Build the channel.
 
         Args:
-            rest_base (str): IN: base URL of the Signal REST API.
-                OUT: stored with trailing slash removed.
-            sender_number (str): IN: phone number of the sending account.
-                OUT: used as the ``from`` field on outbound messages.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            rest_base: Base URL of the Signal REST bridge; trailing ``/``
+                is stripped.
+            sender_number: Registered phone number used as ``number`` on
+                outbound sends.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.rest_base = rest_base.rstrip("/")
@@ -52,14 +54,19 @@ class SignalChannel(WebhookChannel):
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Signal webhook payload into ``ChannelMessage``.
+        """Translate a Signal REST-bridge payload into ``ChannelMessage``.
+
+        Handles both the wrapped ``envelope`` form and the bare envelope
+        shape, plus both ``dataMessage`` (Signal native) and ``message``
+        (some bridges normalise to this). Drops events with no message
+        text.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            Parsed messages, or empty when no message text is present.
         """
         data = parse_json_body(body)
         if not data:
@@ -82,12 +89,12 @@ class SignalChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a text message via the Signal REST API.
+        """Send one message via ``POST /v2/send``.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` or
-                ``channel_user_id`` is used as the recipient list, and
-                ``text`` as the message body.
+            message: Outbound message. ``room_id`` (preferred) or
+                ``channel_user_id`` becomes the sole recipient; ``text``
+                is the body.
         """
         body = {
             "number": self.sender_number,

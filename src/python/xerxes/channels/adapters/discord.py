@@ -13,7 +13,11 @@
 # limitations under the License.
 """Discord channel adapter.
 
-Connects to Discord via bot token for sending and receiving messages.
+Authenticates with a bot token, parses inbound webhook payloads, and
+sends replies via Discord's REST v10 ``messages`` endpoint. Webhook
+authenticity (Ed25519 signature) is out of scope here — front the
+webhook URL with a verifier if you need defence against forged inbound
+traffic.
 """
 
 from __future__ import annotations
@@ -25,32 +29,35 @@ from ..types import ChannelMessage, MessageDirection
 
 
 class DiscordChannel(WebhookChannel):
-    """Channel implementation for Discord."""
+    """Discord bot-token adapter using REST v10."""
 
     name = "discord"
 
     def __init__(self, bot_token: str, *, http_client: tp.Any = None) -> None:
-        """Initialize the Discord channel.
+        """Build the channel.
 
         Args:
-            bot_token (str): IN: Discord bot authentication token.
-                OUT: stored for authorizing API requests.
-            http_client (Any): IN: optional HTTP client override.
-                OUT: forwarded to ``http_post``.
+            bot_token: Discord bot authentication token.
+            http_client: Optional HTTP client override forwarded to
+                ``http_post``.
         """
         super().__init__()
         self.bot_token = bot_token
         self._http = http_client
 
     def _parse_inbound(self, headers, body):
-        """Parse a Discord webhook payload into ``ChannelMessage``.
+        """Translate a Discord webhook payload into ``ChannelMessage`` instances.
+
+        Tolerates two shapes — payloads with a nested ``message`` object
+        and payloads where the message fields sit at the top level.
 
         Args:
-            headers (dict[str, str]): IN: HTTP headers (unused).
-            body (bytes): IN: raw JSON webhook body.
+            headers: HTTP headers (unused).
+            body: Raw JSON webhook body.
 
         Returns:
-            list[ChannelMessage]: OUT: parsed inbound messages.
+            One parsed inbound message, or an empty list if the payload
+            decoded to an empty dict.
         """
         data = parse_json_body(body)
         if not data:
@@ -70,12 +77,12 @@ class DiscordChannel(WebhookChannel):
         ]
 
     async def _send_outbound(self, message):
-        """Send a message to a Discord channel.
+        """Send one message via ``POST /channels/{channel_id}/messages``.
 
         Args:
-            message (ChannelMessage): IN: message to send. ``room_id`` is the
-                target channel ID, ``text`` is the content, and ``reply_to``
-                (if set) becomes a message reference.
+            message: Outbound message. ``room_id`` is the channel id,
+                ``text`` the content, and ``reply_to`` (when set) becomes a
+                ``message_reference`` so the reply quotes the original.
         """
         url = f"https://discord.com/api/v10/channels/{message.room_id}/messages"
         body = {"content": message.text}

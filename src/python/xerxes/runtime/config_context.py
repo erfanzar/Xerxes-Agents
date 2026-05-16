@@ -11,15 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Config context module for Xerxes.
+"""Process-global runtime config snapshot and event bus.
 
-Exports:
-    - set_config
-    - get_config
-    - get_inheritable
-    - set_event_callback
-    - get_event_callback
-    - emit_event"""
+Stores the active CLI/daemon configuration as a lock-protected dict that
+modules (sub-agent spawners, tool wrappers, telemetry) can consult without
+plumbing it through every call. :data:`_INHERITABLE` lists the keys that
+sub-agents should pick up from their parent. A single optional event callback
+funnels lightweight events (sub-agent start/stop, model change, etc.) into
+whichever bridge or telemetry sink the host installs.
+"""
 
 from __future__ import annotations
 
@@ -48,10 +48,7 @@ _INHERITABLE = {
 
 
 def set_config(config: dict[str, Any]) -> None:
-    """Set the config.
-
-    Args:
-        config (dict[str, Any]): IN: config. OUT: Consumed during execution."""
+    """Replace the process-global config snapshot with a copy of ``config``."""
 
     global _config
     with _lock:
@@ -59,30 +56,26 @@ def set_config(config: dict[str, Any]) -> None:
 
 
 def get_config() -> dict[str, Any]:
-    """Retrieve the config.
-
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+    """Return a shallow copy of the current global config."""
 
     with _lock:
         return dict(_config)
 
 
 def get_inheritable() -> dict[str, Any]:
-    """Retrieve the inheritable.
+    """Return only the config keys that sub-agents should inherit.
 
-    Returns:
-        dict[str, Any]: OUT: Result of the operation."""
+    Filters :func:`get_config` to the whitelist in :data:`_INHERITABLE`,
+    skipping ``None`` and empty-string values so callers can ``**spread``
+    the result without clobbering child defaults.
+    """
 
     with _lock:
         return {k: v for k, v in _config.items() if k in _INHERITABLE and v is not None and v != ""}
 
 
 def set_event_callback(cb: Callable[[str, dict[str, Any]], None] | None) -> None:
-    """Set the event callback.
-
-    Args:
-        cb (Callable[[str, dict[str, Any]], None] | None): IN: cb. OUT: Consumed during execution."""
+    """Install (or clear with ``None``) the global event-bus callback."""
 
     global _event_callback
     with _lock:
@@ -90,21 +83,18 @@ def set_event_callback(cb: Callable[[str, dict[str, Any]], None] | None) -> None
 
 
 def get_event_callback() -> Callable[[str, dict[str, Any]], None] | None:
-    """Retrieve the event callback.
-
-    Returns:
-        Callable[[str, dict[str, Any]], None] | None: OUT: Result of the operation."""
+    """Return the currently installed event callback, or ``None``."""
 
     with _lock:
         return _event_callback
 
 
 def emit_event(event_type: str, data: dict[str, Any]) -> None:
-    """Emit event.
+    """Forward ``(event_type, data)`` to the installed callback, swallowing errors.
 
-    Args:
-        event_type (str): IN: event type. OUT: Consumed during execution.
-        data (dict[str, Any]): IN: data. OUT: Consumed during execution."""
+    Exceptions raised by the callback are intentionally suppressed so a
+    misbehaving telemetry sink can't crash the agent loop.
+    """
 
     cb = get_event_callback()
     if cb is not None:
