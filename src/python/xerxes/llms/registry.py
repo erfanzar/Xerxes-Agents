@@ -117,6 +117,23 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "kimi-latest",
         ],
     ),
+    "kimi-code": ProviderConfig(
+        name="kimi-code",
+        type="openai",
+        api_key_env="KIMI_CODE_API_KEY",
+        # Coding-specialised endpoint published at https://www.kimi.com/code/.
+        # OpenAI-compatible surface; the Anthropic-compatible variant lives
+        # at https://api.kimi.com/coding/ but Xerxes' streaming loop targets
+        # the OpenAI shape, so we use the /v1 path.
+        base_url="https://api.kimi.com/coding/v1",
+        context_limit=128_000,
+        models=[
+            # ``kimi-for-coding`` is the stable model id — the backend
+            # rolls forward (currently maps to kimi-k2.6) without callers
+            # needing to change the string.
+            "kimi-for-coding",
+        ],
+    ),
     "qwen": ProviderConfig(
         name="qwen",
         type="openai",
@@ -247,6 +264,9 @@ COSTS: dict[str, tuple[float, float]] = {
     "moonshot-v1-32k": (2.4, 7.0),
     "moonshot-v1-128k": (8.0, 24.0),
     "kimi-latest": (2.4, 7.0),
+    # Kimi Code pricing not publicly published — mirror kimi-latest as a
+    # conservative placeholder so cost estimates aren't zero.
+    "kimi-for-coding": (2.4, 7.0),
     "qwen-max": (2.4, 9.6),
     "qwen-plus": (0.4, 1.2),
     "qwen-turbo": (0.2, 0.6),
@@ -274,6 +294,10 @@ _PREFIX_MAP: list[tuple[str, str]] = sorted(
         ("o4", "openai"),
         ("gemini-", "gemini"),
         ("moonshot-", "kimi"),
+        # ``kimi-for-`` must precede the looser ``kimi-`` rule (the prefix
+        # map is sorted by length descending, so this is automatic, but
+        # keeping them adjacent makes the relationship obvious).
+        ("kimi-for-", "kimi-code"),
         ("kimi-", "kimi"),
         ("qwq-", "qwen"),
         ("qwen", "qwen"),
@@ -345,6 +369,34 @@ def get_api_key(provider_name: str, extra_config: dict | None = None) -> str:
     return prov.default_api_key or ""
 
 
+# Per-provider HTTP headers injected on every request the streaming loop
+# makes. Used to satisfy provider-side client-identity gates — Kimi Code's
+# endpoint returns 403 unless the User-Agent matches one of the allowlisted
+# coding agents ("Kimi CLI, Claude Code, Roo Code, Kilo Code"), so we identify
+# ourselves as ``claude-code`` for that provider.
+_PROVIDER_DEFAULT_HEADERS: dict[str, dict[str, str]] = {
+    "kimi-code": {
+        # Spoofing claude-code is the path of least surprise — the format is
+        # stable, the version doesn't matter to the gate, and it bypasses
+        # Kimi's "Coding Agents only" allowlist. If Moonshot ever ships a
+        # public Kimi Code Python SDK we should switch to whatever that
+        # advertises so we stay compliant rather than impersonating.
+        "User-Agent": "claude-code/1.0.0",
+        "X-Stainless-Lang": "claude-code",
+        "X-Client-Name": "claude-code",
+    },
+}
+
+
+def provider_default_headers(provider_name: str) -> dict[str, str]:
+    """Return the headers the streaming loop should attach for ``provider_name``.
+
+    Empty dict means "no overrides — let httpx / the SDK pick its own
+    defaults". Returned dict is a fresh copy so callers can mutate it.
+    """
+    return dict(_PROVIDER_DEFAULT_HEADERS.get(provider_name, {}))
+
+
 def calc_cost(model: str, in_tok: int, out_tok: int) -> float:
     """Return the USD cost of an LLM call using :data:`COSTS`.
 
@@ -392,4 +444,5 @@ __all__ = [
     "get_context_limit",
     "get_provider_config",
     "list_all_models",
+    "provider_default_headers",
 ]

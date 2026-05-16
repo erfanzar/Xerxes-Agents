@@ -22,8 +22,10 @@ skills. All key bindings live here as well."""
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import re
+import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -147,10 +149,20 @@ class StatusRenderer:
     SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     THINKING_PREVIEW_LINES = 4
     SUBAGENT_PREVIEW_LINES = 5
+    # Slide window over committed history so a long-running session can't
+    # grow ``_content_lines`` unbounded. ~2000 entries is a few hours of
+    # active use; older lines roll off (the daemon-side session history
+    # remains authoritative).
+    CONTENT_HISTORY_LIMIT = 2000
+    # Cap the in-flight streaming buffer at ~64KB. Reasoning models can
+    # emit hundreds of KB per turn; once the buffer crosses this, we keep
+    # only the tail so render cost stays bounded and we don't trigger
+    # quadratic blowups in downstream consumers.
+    STREAMING_BUFFER_CHAR_LIMIT = 64 * 1024
 
     def __init__(self) -> None:
         """Build an empty renderer with the spinner parked and no panels active."""
-        self._content_lines: list[str] = []
+        self._content_lines: collections.deque[str] = collections.deque(maxlen=self.CONTENT_HISTORY_LIMIT)
         self._running = False
         self._queue_count = 0
         self._plan_mode = False
@@ -160,7 +172,11 @@ class StatusRenderer:
 
         self._active_panel: str = ""
 
-        self._streaming_text: str = ""
+        # ``_streaming_parts`` is a list of chunks; we materialise to a
+        # single string only when we need to render. Avoids the O(n²)
+        # cost of ``self._streaming_text += text`` for every token.
+        self._streaming_parts: list[str] = []
+        self._streaming_chars: int = 0
 
         self._thinking_text: str = ""
 
@@ -173,49 +189,92 @@ class StatusRenderer:
         self._spinner_label: str = "Working"
         self._last_render_line_count: int = 1
         self._last_render_last_line_width: int = 0
+        # Version counter bumped on every state mutation. ``_markup``
+        # caches its output keyed by ``(_state_version, columns, rows)``
+        # so unchanged frames cost a single dict lookup instead of a
+        # full ANSI rebuild.
+        self._state_version: int = 0
+        self._cached_markup: str | None = None
+        self._cached_markup_key: tuple[int, int, int, int] | None = None
+        # ``_streaming_text`` is exposed as a property to existing callers
+        # that read it directly (legacy API). The setter funnels through
+        # ``set_streaming_text`` to keep the parts buffer consistent.
+
+    @property
+    def _streaming_text(self) -> str:
+        """Materialised in-flight streaming buffer (joins lazily)."""
+        if not self._streaming_parts:
+            return ""
+        joined = "".join(self._streaming_parts)
+        # Collapse multi-part buffer back into one so repeated reads are O(1).
+        self._streaming_parts = [joined]
+        return joined
+
+    @_streaming_text.setter
+    def _streaming_text(self, value: str) -> None:
+        """Replace the streaming buffer; back-compat for legacy callers that assigned to it."""
+        self._streaming_parts = [value] if value else []
+        self._streaming_chars = len(value)
+        self._mark_dirty()
+
+    def _mark_dirty(self) -> None:
+        """Invalidate the markup cache. Cheap — just bumps a counter."""
+        self._state_version += 1
 
     def set_running(self, running: bool) -> None:
         """Flip the running indicator; rearms the spinner clock on each off→on edge."""
-        import time
-
         was_running = self._running
+        if running == was_running:
+            return
         self._running = running
-        if running and not was_running:
+        if running:
             self._spinner_started_at = time.monotonic()
             self._spinner_frame = 0
+        self._mark_dirty()
 
     def reset_spinner_timer(self) -> None:
         """Restart the spinner elapsed clock at 0.
 
         Call when a new tool starts or the spinner label flips so the
         timer reflects the current step, not the turn."""
-        import time
-
         self._spinner_started_at = time.monotonic()
+        self._mark_dirty()
 
     def set_spinner_label(self, label: str) -> None:
         """Update the spinner caption; restarts the elapsed clock if it changed."""
         new_label = label or "Working"
         if new_label != self._spinner_label:
             self.reset_spinner_timer()
-        self._spinner_label = new_label
+        if self._spinner_label != new_label:
+            self._spinner_label = new_label
+            self._mark_dirty()
 
     def set_queue_count(self, count: int) -> None:
         """Update the queued-inputs badge (clamped at 0)."""
-        self._queue_count = max(0, count)
+        new = max(0, count)
+        if new != self._queue_count:
+            self._queue_count = new
+            self._mark_dirty()
 
     def set_plan_mode(self, plan_mode: bool) -> None:
         """Record whether plan mode is currently active."""
-        self._plan_mode = plan_mode
+        if self._plan_mode != plan_mode:
+            self._plan_mode = plan_mode
+            self._mark_dirty()
 
     def set_activity_mode(self, mode: str) -> None:
         """Record the activity label shown in the bottom rule when plan mode is off."""
-        self._activity_mode = mode or "code"
+        new = mode or "code"
+        if self._activity_mode != new:
+            self._activity_mode = new
+            self._mark_dirty()
 
     def set_stats(self, tokens: str = "", cost: str = "") -> None:
         """Store optional token / cost strings (currently informational only)."""
-        self._token_info = tokens
-        self._cost_info = cost
+        if tokens != self._token_info or cost != self._cost_info:
+            self._token_info = tokens
+            self._cost_info = cost
+            self._mark_dirty()
 
     def append_line(self, line: str) -> None:
         """Commit ``line`` to history after stripping leading/trailing blank edges."""
@@ -223,42 +282,75 @@ class StatusRenderer:
         if not line:
             return
         self._content_lines.append(line)
+        self._mark_dirty()
 
     def clear_content(self) -> None:
         """Drop every committed history line."""
         self._content_lines.clear()
+        self._mark_dirty()
 
     def set_active_panel(self, text: str) -> None:
         """Pin ``text`` as the active modal panel (approval / question)."""
-        self._active_panel = text or ""
+        new = text or ""
+        if new != self._active_panel:
+            self._active_panel = new
+            self._mark_dirty()
 
     def clear_active_panel(self) -> None:
         """Remove the pinned modal panel."""
-        self._active_panel = ""
+        if self._active_panel:
+            self._active_panel = ""
+            self._mark_dirty()
 
     def append_streaming(self, text: str) -> None:
-        """Append ``text`` to the in-flight assistant response buffer."""
-        self._streaming_text += text
+        """Append ``text`` to the in-flight streaming buffer in O(1)."""
+        if not text:
+            return
+        self._streaming_parts.append(text)
+        self._streaming_chars += len(text)
+        if self._streaming_chars > self.STREAMING_BUFFER_CHAR_LIMIT:
+            # Compact to a single tailing chunk so memory and downstream
+            # render cost stay bounded for huge responses.
+            joined = "".join(self._streaming_parts)
+            tail = joined[-self.STREAMING_BUFFER_CHAR_LIMIT :]
+            self._streaming_parts = [tail]
+            self._streaming_chars = len(tail)
+        self._mark_dirty()
 
     def commit_streaming(self) -> None:
         """Move the streaming buffer onto the committed history and clear it."""
         text = self._strip_blank_edges(self._streaming_text)
-        self._streaming_text = ""
+        self._streaming_parts = []
+        self._streaming_chars = 0
         if text:
             self._content_lines.append(text)
+        self._mark_dirty()
 
     def clear_streaming(self) -> None:
         """Discard the streaming buffer without committing it."""
-        self._streaming_text = ""
+        if self._streaming_parts:
+            self._streaming_parts = []
+            self._streaming_chars = 0
+            self._mark_dirty()
 
     def append_thinking(self, text: str) -> None:
         """Append ``text`` to the rolling thinking preview (last ``N`` lines only)."""
+        if not text:
+            return
         self._thinking_text += text
+        # Keep only the rendered tail in memory. Tailing here (not just at
+        # render) ensures the underlying buffer stays small even when the
+        # model dumps tens of KB of reasoning.
+        if len(self._thinking_text) > 4096:
+            self._thinking_text = self._thinking_text[-4096:]
         self._thinking_text = self._tail_lines(self._thinking_text, self.THINKING_PREVIEW_LINES)
+        self._mark_dirty()
 
     def clear_thinking(self) -> None:
         """Discard the thinking preview."""
-        self._thinking_text = ""
+        if self._thinking_text:
+            self._thinking_text = ""
+            self._mark_dirty()
 
     @staticmethod
     def _tail_lines(text: str, limit: int) -> str:
@@ -304,6 +396,7 @@ class StatusRenderer:
             return
         self._subagent_previews.pop(task_id, None)
         self._subagent_previews[task_id] = f"{label}: {text}" if text else label
+        self._mark_dirty()
 
     def clear_subagent_preview(self, task_id: str) -> None:
         """Remove the live preview line for a finished sub-agent.
@@ -311,11 +404,14 @@ class StatusRenderer:
         Args:
             task_id (str): IN: Sub-agent task identifier whose preview to drop.
         """
-        self._subagent_previews.pop(task_id, None)
+        if self._subagent_previews.pop(task_id, None) is not None:
+            self._mark_dirty()
 
     def clear_subagent_previews(self) -> None:
         """Remove all live sub-agent preview lines."""
-        self._subagent_previews.clear()
+        if self._subagent_previews:
+            self._subagent_previews.clear()
+            self._mark_dirty()
 
     def _terminal_columns(self) -> int:
         """Return the active prompt_toolkit output columns (default 80)."""
@@ -342,13 +438,33 @@ class StatusRenderer:
 
         Order: committed history → thinking preview → active tool blocks
         → subagent previews → streaming text → modal panel → spinner row
-        → mode-aware separator. Side effect: caches the line count and
-        last-line width so :meth:`_status_cursor_position` can position
-        the cursor accurately."""
+        → mode-aware separator.
+
+        Caching: the result is keyed by ``(_state_version, columns, rows,
+        spinner_tick)`` — unchanged frames re-use the cached string instead
+        of re-walking content lines, joining strings, and parsing ANSI.
+        ``spinner_tick`` advances at ~4 FPS only while running, so the
+        cached path is hit on every paint when the screen is idle.
+        """
+        columns = self._terminal_columns()
+        rows = self._terminal_rows()
+        spinner_tick = self._current_spinner_tick()
+        key = (self._state_version, columns, rows, spinner_tick)
+        if self._cached_markup is not None and self._cached_markup_key == key:
+            return self._cached_markup
+
+        # Tool-call render funcs and active panels can be dynamic — we treat
+        # them as part of the cache invalidation contract by requiring
+        # callers to ``_mark_dirty`` whenever the underlying state changes.
         parts: list[str] = []
 
-        budget = max(20, self._terminal_rows() * 2)
-        for line in self._content_lines[-budget:]:
+        budget = max(20, rows * 2)
+        # Slice a bounded tail from the deque without materialising the
+        # whole history.
+        history_len = len(self._content_lines)
+        start = max(0, history_len - budget)
+        for i in range(start, history_len):
+            line = self._content_lines[i]
             parts.append(line)
             if line and not line.endswith("\n"):
                 parts.append("\n")
@@ -368,13 +484,14 @@ class StatusRenderer:
                 parts.append("\n")
 
         if self._subagent_previews:
-            spin_frame = self.SPINNER_FRAMES[self._spinner_frame % len(self.SPINNER_FRAMES)]
+            spin_frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
             for preview in list(self._subagent_previews.values())[-self.SUBAGENT_PREVIEW_LINES :]:
                 parts.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m\n")
 
-        if self._streaming_text:
-            parts.append(self._streaming_text)
-            if not self._streaming_text.endswith("\n"):
+        streaming = self._streaming_text
+        if streaming:
+            parts.append(streaming)
+            if not streaming.endswith("\n"):
                 parts.append("\n")
 
         if self._active_panel:
@@ -382,13 +499,8 @@ class StatusRenderer:
             if not self._active_panel.endswith("\n"):
                 parts.append("\n")
 
-        columns = self._terminal_columns()
-
         if self._running:
-            import time
-
-            self._spinner_frame = (self._spinner_frame + 1) % len(self.SPINNER_FRAMES)
-            frame = self.SPINNER_FRAMES[self._spinner_frame]
+            frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
             elapsed = int(time.monotonic() - self._spinner_started_at) if self._spinner_started_at else 0
             queued = f"  ·  {self._queue_count} queued" if self._queue_count else ""
             spinner_line = (
@@ -411,11 +523,58 @@ class StatusRenderer:
         parts.append(f"{border_style}{border}\x1b[0m\n")
 
         markup = "".join(parts)
-        plain = _ANSI_RE.sub("", markup)
-        lines = plain.split("\n") if plain else [""]
-        self._last_render_line_count = max(1, len(lines))
-        self._last_render_last_line_width = len(lines[-1]) if lines else 0
+        self._last_render_line_count, self._last_render_last_line_width = self._count_lines(markup)
+        self._cached_markup = markup
+        self._cached_markup_key = key
         return markup
+
+    @staticmethod
+    def _count_lines(markup: str) -> tuple[int, int]:
+        """Count newlines and last-line width in O(n) without a regex sweep.
+
+        The previous implementation ran ``_ANSI_RE.sub("", markup)`` then
+        ``split("\\n")`` on the result — two full passes per frame. We can
+        do both jobs in a single linear scan: track newlines as we go,
+        and reset the last-line counter on each ``\\n``. Skipping inside
+        ``\\x1b[...m`` runs gives the same plain-text width as the regex
+        without allocating a stripped copy.
+        """
+        if not markup:
+            return 1, 0
+        newlines = 0
+        last_width = 0
+        i = 0
+        n = len(markup)
+        while i < n:
+            ch = markup[i]
+            if ch == "\x1b" and i + 1 < n and markup[i + 1] == "[":
+                # Skip CSI sequence: ESC [ params terminator
+                j = i + 2
+                while j < n and not (0x40 <= ord(markup[j]) <= 0x7E):
+                    j += 1
+                i = j + 1
+                continue
+            if ch == "\n":
+                newlines += 1
+                last_width = 0
+            else:
+                last_width += 1
+            i += 1
+        return max(1, newlines + 1), last_width
+
+    def _current_spinner_tick(self) -> int:
+        """Return the spinner tick at ~4 FPS (only advances while running).
+
+        Decoupling the spinner clock from paint count means idle screens
+        cache forever, and animation rate is wall-clock-based instead of
+        "however many paints happened this second".
+        """
+        if not self._running or not self._spinner_started_at:
+            return self._spinner_frame
+        # 4 FPS animation → 250ms per frame.
+        tick = int((time.monotonic() - self._spinner_started_at) * 4)
+        self._spinner_frame = tick
+        return tick
 
     def line_count(self) -> int:
         """Count the printable lines in the current markup (ANSI stripped)."""
@@ -598,6 +757,12 @@ class PersistentPrompt:
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
         self._running = False
         self._exit_armed = False
+        # Invalidate throttling: ``_last_invalidate_ts`` records the wall
+        # clock of the last forced paint; ``_pending_invalidate`` is the
+        # asyncio handle for the trailing-edge flush when a paint was
+        # suppressed during the throttle window.
+        self._last_invalidate_ts: float = 0.0
+        self._pending_invalidate: Any = None
 
         self._active_question: Any = None
         self._active_approval: Any = None
@@ -1065,23 +1230,67 @@ class PersistentPrompt:
         self._status.clear_subagent_previews()
         self._invalidate()
 
+    # Minimum gap between forced re-paints. Streamed LLM tokens arrive
+    # dozens of times per second; without throttling each chunk would
+    # trigger a full status rebuild. 33ms = ~30 FPS upper bound, which
+    # is smoother than a human eye notices and dramatically cheaper
+    # than the previous "one paint per token" behaviour.
+    _INVALIDATE_MIN_INTERVAL = 0.033
+
     def _invalidate(self) -> None:
-        """Request a redraw of the prompt application (no-op if not running)."""
-        if self._app:
+        """Request a redraw — coalesced to at most :data:`_INVALIDATE_MIN_INTERVAL` apart.
+
+        prompt_toolkit ``invalidate()`` schedules a full status rebuild on
+        the next event-loop tick. When the daemon streams a hot response
+        (Kimi-for-coding emits 50-100 tokens/sec) the resulting paint
+        storm dominates the TUI's CPU profile. We coalesce: if a paint
+        is already pending or we paint too recently, the call is a no-op
+        — the trailing edge of the burst still lands as a paint thanks
+        to the scheduled task below, so no content is lost.
+        """
+        if self._app is None:
+            return
+        now = time.monotonic()
+        gap = now - self._last_invalidate_ts
+        if gap >= self._INVALIDATE_MIN_INTERVAL:
+            self._last_invalidate_ts = now
             self._app.invalidate()
+            return
+        # We're inside the throttle window — schedule a single trailing
+        # invalidate so a final state change always reaches the screen.
+        if self._pending_invalidate is not None:
+            return
+        loop = asyncio.get_event_loop()
+        delay = self._INVALIDATE_MIN_INTERVAL - gap
+        self._pending_invalidate = loop.call_later(delay, self._flush_invalidate)
+
+    def _flush_invalidate(self) -> None:
+        """Trailing-edge paint; clears the pending-invalidate handle."""
+        self._pending_invalidate = None
+        if self._app is None:
+            return
+        self._last_invalidate_ts = time.monotonic()
+        self._app.invalidate()
 
     async def run(self) -> Application[None]:
         """Run the prompt_toolkit application until it exits; returns it for inspection.
 
         Set ``XERXES_MOUSE=1`` to enable mouse support (off by default
-        so it doesn't fight the host terminal's text-selection)."""
+        so it doesn't fight the host terminal's text-selection).
+
+        ``refresh_interval`` is bumped to 500ms — prompt_toolkit only
+        needs the periodic refresh to advance time-based UI (the spinner
+        and elapsed counter); all content updates already trigger
+        :meth:`_invalidate`. The previous 100ms tick was costing 10
+        CPU-bound paints per second on every idle screen.
+        """
         self._app = Application(
             self._layout,
             key_bindings=self._kb,
             erase_when_done=True,
             mouse_support=os.environ.get("XERXES_MOUSE", "0") == "1",
             full_screen=True,
-            refresh_interval=0.1,
+            refresh_interval=0.5,
         )
         await self._app.run_async(handle_sigint=False)
         return self._app
@@ -1090,6 +1299,9 @@ class PersistentPrompt:
         """Ask the running application to exit; no-op when not running."""
         if self._app and self._app.is_running:
             self._app.exit()
+        if self._pending_invalidate is not None:
+            self._pending_invalidate.cancel()
+            self._pending_invalidate = None
 
     async def __aenter__(self) -> PersistentPrompt:
         """Async context entry — returns ``self``; does not start the application."""

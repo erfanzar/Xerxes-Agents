@@ -224,26 +224,75 @@ class _ContentBlock:
 class _ThinkingBlock:
     """Accumulates reasoning-trace fragments with an animated spinner.
 
+    Reasoning models (Kimi-for-coding, R1-style chains) can emit tens of
+    KB per turn. Storing the whole stream as a single string and growing
+    it with ``+=`` was O(n²) — for a 200 KB trace that's ~20 G char ops.
+    We accumulate into a chunk list and only collapse when we actually
+    need the text. The raw buffer is also capped at
+    :data:`RAW_BUFFER_CHAR_LIMIT` since :meth:`compose` only renders the
+    tail anyway, so holding more is wasted memory.
+
     Attributes:
         block_id: Identifier matching the parent content block.
     """
 
+    RAW_BUFFER_CHAR_LIMIT = 8 * 1024
+    THINKING_TAIL_LINES = 3
+    THINKING_TAIL_CHARS = 200
+
     block_id: str
     _raw: str = ""
+    _parts: list[str] = field(default_factory=list, repr=False)
+    _raw_chars: int = field(default=0, repr=False)
+    _token_count: int = field(default=0, repr=False)
     _started_at: float = field(default_factory=lambda: time.monotonic(), repr=False)
     _frame: int = 0
     _frames: tuple[str, ...] = (".  ", ".. ", "...", " ..", "  .", "   ")
     _committed: bool = field(default=False, repr=False)
 
-    def append(self, text: str) -> list[str]:
-        """Append ``text``; return any paragraphs that closed since the last call."""
-        self._raw += text
+    def _materialise(self) -> str:
+        """Join the chunk buffer back into a single string; cached after first call."""
+        if not self._parts:
+            return self._raw
+        if self._raw:
+            self._parts.insert(0, self._raw)
+        joined = "".join(self._parts)
+        if len(joined) > self.RAW_BUFFER_CHAR_LIMIT:
+            joined = joined[-self.RAW_BUFFER_CHAR_LIMIT :]
+        self._raw = joined
+        self._parts = []
+        self._raw_chars = len(joined)
+        return joined
 
-        if "\n\n" not in text and not _is_block_boundary(self._raw):
+    def append(self, text: str) -> list[str]:
+        """Append ``text``; return any paragraphs that closed since the last call.
+
+        Storage is O(1) — we only materialise the full string when checking
+        for paragraph boundaries, and even then only the tail is kept.
+        Token-count tracking moves to an incremental counter so we don't
+        ``.split()`` the entire buffer every render.
+        """
+        if not text:
             return []
-        parts = self._raw.split("\n\n")
+        self._parts.append(text)
+        self._raw_chars += len(text)
+        self._token_count += len(text.split())
+        # Cheap pre-check: only materialise when the new chunk could close a
+        # paragraph. ``_is_block_boundary`` previously ran on every call.
+        if "\n\n" not in text and not _is_block_boundary(text):
+            if self._raw_chars > self.RAW_BUFFER_CHAR_LIMIT * 2:
+                # Compact periodically so the chunk list doesn't bloat.
+                self._materialise()
+            return []
+        full = self._materialise()
+        if "\n\n" not in full and not _is_block_boundary(full):
+            return []
+        parts = full.split("\n\n")
         committed = "\n\n".join(parts[:-1])
-        self._raw = parts[-1] if parts[-1].strip() else ""
+        tail = parts[-1] if parts[-1].strip() else ""
+        self._raw = tail
+        self._raw_chars = len(tail)
+        self._parts = []
         return [committed]
 
     def finalize(self) -> None:
@@ -253,19 +302,50 @@ class _ThinkingBlock:
     @property
     def raw_text(self) -> str:
         """Uncommitted text currently sitting in the buffer."""
-        return self._raw
+        return self._materialise()
 
     def compose(self, *, running: bool = False) -> AnyFormattedText:
-        """Render the thinking block; advances the spinner frame on every call."""
+        """Render the thinking block; advances the spinner frame on every call.
+
+        Reasoning traces from models like Kimi-for-coding can run for tens of
+        thousands of characters; rendering the whole buffer pushes everything
+        else off-screen and traps the user in scrollback. We tail to the last
+        few lines / chars instead — enough to show what the model is currently
+        chewing on, without owning the viewport. Token count comes from the
+        incremental counter, so we don't ``.split()`` the whole buffer on
+        every frame.
+        """
         from prompt_toolkit.formatted_text import ANSI
 
         self._frame = (self._frame + 1) % len(self._frames)
         frame = self._frames[self._frame]
         elapsed = int(time.monotonic() - self._started_at)
-        content = self._raw.strip() if self._raw.strip() else "[thinking...]"
+        raw = self._materialise().strip()
+        if raw:
+            content = self._tail(raw, self.THINKING_TAIL_LINES, self.THINKING_TAIL_CHARS)
+        else:
+            content = "[thinking...]"
         return ANSI(
-            f"[dim i]Thinking {frame}  {elapsed}s · {len(self._raw.split())} tokens[/dim i]\n[dim i]{content}[/dim i]"
+            f"[dim i]Thinking {frame}  {elapsed}s · {self._token_count} tokens[/dim i]\n[dim i]{content}[/dim i]"
         )
+
+    @staticmethod
+    def _tail(text: str, max_lines: int, max_chars: int) -> str:
+        """Return the last ``max_lines`` lines (and ``max_chars`` chars) of ``text``.
+
+        Truncated text is prefixed with ``…`` so the user can see at a glance
+        that there is more reasoning above the displayed window.
+        """
+        truncated = False
+        if len(text) > max_chars:
+            text = text[-max_chars:]
+            truncated = True
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+            truncated = True
+        rendered = "\n".join(lines)
+        return ("…" + rendered) if truncated else rendered
 
 
 @dataclass

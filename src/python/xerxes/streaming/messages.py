@@ -136,6 +136,18 @@ def messages_to_openai(
                     }
                     for tc in tcs
                 ]
+            # Round-trip reasoning back to the provider. Kimi-style endpoints
+            # (Kimi Code, DeepSeek, Qwen QwQ) REQUIRE ``reasoning_content``
+            # on any assistant message that produced tool calls while
+            # thinking was enabled — otherwise the next turn 400s with
+            # "thinking is enabled but reasoning_content is missing".
+            # We persist thinking under ``thinking`` (the neutral key the
+            # streaming loop writes); translate to ``reasoning_content`` on
+            # the way out. Vanilla OpenAI ignores unknown fields, so this
+            # is safe to send unconditionally when present.
+            thinking = m.get("thinking")
+            if thinking:
+                msg["reasoning_content"] = thinking
             result.append(msg)
 
         elif role == "tool":
@@ -260,6 +272,12 @@ def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]
                     }
                     for tc in tcs
                 ]
+            # Preserve reasoning content round-trip so providers that
+            # require it on subsequent turns (Kimi Code, DeepSeek, QwQ)
+            # don't 400 when the conversation is reloaded from history.
+            reasoning = m.get("reasoning_content")
+            if reasoning:
+                msg["thinking"] = reasoning
             result.append(msg)
 
         elif role == "tool":

@@ -98,6 +98,140 @@ def test_run_preserves_full_tool_result_for_model_context() -> None:
     assert tool_messages[0]["content"] == long_result
 
 
+def test_steer_drain_injects_user_message_between_tool_iterations() -> None:
+    """Pending steers must land as a user message before the next LLM call."""
+    original = loop._stream_llm
+    calls = {"n": 0}
+    state = loop.AgentState()
+    drained: list[list[str]] = []
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {"id": "c1", "name": "Bash", "input": {"command": "ls"}},
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("final")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    pending = ["please reconsider"]
+
+    def drain():
+        out = pending[:]
+        pending.clear()
+        drained.append(out)
+        return out
+
+    loop._stream_llm = fake_stream
+    try:
+        list(
+            loop.run(
+                user_message="initial",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+                steer_drain=drain,
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    # drain() ran on both iterations.
+    assert len(drained) == 2
+    assert drained[0] == ["please reconsider"]
+    assert drained[1] == []
+    # The drained steer landed as a synthetic user message between the
+    # tool result and the next LLM call.
+    user_messages = [m for m in state.messages if m.get("role") == "user"]
+    assert any("please reconsider" in m["content"] for m in user_messages)
+    assert any("[mid-turn steer from user]" in m["content"] for m in user_messages)
+
+
+def test_agent_event_drain_injects_synthetic_user_message() -> None:
+    """Drained agent-event lines should land as a [sub-agent events] message."""
+    original = loop._stream_llm
+    calls = {"n": 0}
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {"id": "c1", "name": "Bash", "input": {"command": "ls"}},
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("ack")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    pending = ["[agent worker] spawned", "[agent worker] → Read(file=x)"]
+
+    def drain():
+        out = pending[:]
+        pending.clear()
+        return out
+
+    loop._stream_llm = fake_stream
+    try:
+        list(
+            loop.run(
+                user_message="please track",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+                agent_event_drain=drain,
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    user_messages = [m for m in state.messages if m.get("role") == "user"]
+    assert any("[sub-agent events]" in m["content"] for m in user_messages)
+    assert any("[agent worker] spawned" in m["content"] for m in user_messages)
+
+
+def test_steer_drain_noop_when_empty() -> None:
+    """An empty drain must not append spurious user messages."""
+    original = loop._stream_llm
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        yield TextChunk("done")
+        yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    try:
+        list(
+            loop.run(
+                user_message="ping",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "",
+                tool_schemas=[],
+                steer_drain=lambda: [],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    user_messages = [m for m in state.messages if m.get("role") == "user"]
+    assert len(user_messages) == 1
+    assert user_messages[0]["content"] == "ping"
+
+
 def test_tool_end_duration_reflects_executor_time() -> None:
     original = loop._stream_llm
     calls = {"n": 0}

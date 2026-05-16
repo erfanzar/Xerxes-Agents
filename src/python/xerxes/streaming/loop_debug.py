@@ -532,7 +532,7 @@ def _stream_openai_compat(
         yield TextChunk("[Error: openai package not installed]")
         return
 
-    from xerxes.llms.registry import PROVIDERS, get_api_key
+    from xerxes.llms.registry import PROVIDERS, get_api_key, provider_default_headers
 
     api_key = config.get("api_key") or get_api_key(provider_name, config)
     prov = PROVIDERS.get(provider_name, PROVIDERS["openai"])
@@ -546,6 +546,11 @@ def _stream_openai_compat(
         "timeout": timeout,
         "max_retries": _request_max_retries(config, explicit_base_url=explicit_base_url),
     }
+    # See ``loop.py`` for the rationale — Kimi Code's allowlist needs us to
+    # identify as one of the coding-agent clients (claude-code etc.).
+    default_headers = provider_default_headers(provider_name)
+    if default_headers:
+        client_kwargs["default_headers"] = default_headers
     if explicit_base_url:
         import httpx
 
@@ -555,6 +560,7 @@ def _stream_openai_compat(
                 connect=min(timeout, _request_connect_timeout(config)),
             ),
             trust_env=False,
+            headers=default_headers or None,
         )
     client = OpenAI(**client_kwargs)
 

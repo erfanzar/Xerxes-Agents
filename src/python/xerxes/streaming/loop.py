@@ -218,6 +218,8 @@ def run(
     depth: int = 0,
     cancel_check: Callable[[], bool] | None = None,
     runtime_features_state: Any = None,
+    steer_drain: Callable[[], list[str]] | None = None,
+    agent_event_drain: Callable[[], list[str]] | None = None,
 ) -> Generator[StreamEvent, None, None]:
     """Drive a full turn: stream LLM output, run tools, and yield stream events.
 
@@ -243,6 +245,15 @@ def run(
         runtime_features_state: Optional runtime container holding an
             ``authoring_pipeline``; when present its ``on_turn_end`` is called
             and any authored skill is surfaced as :class:`SkillSuggestion`.
+        steer_drain: Optional poll invoked between tool-loop iterations.
+            Returns the list of pending steer strings to inject as a single
+            user message before the next LLM request. Empty list ⇒ no-op.
+        agent_event_drain: Optional poll invoked between tool-loop iterations.
+            Returns rendered one-line summaries of sub-agent events
+            (spawn / tool_start / done / …) accumulated since the last drain.
+            Folded into a single ``user`` message so the main agent passively
+            sees what its children are doing without having to poll
+            ``CheckAgentMessages``. Empty list ⇒ no-op.
 
     Yields:
         Stream events in arrival order: :class:`TextChunk` /
@@ -273,6 +284,28 @@ def run(
             # marker instead of treating the silent return as a clean finish.
             yield TextChunk("\n[Cancelled]")
             return
+
+        if steer_drain is not None:
+            pending = steer_drain()
+            if pending:
+                joined = "\n\n".join(pending)
+                state.messages.append(
+                    {
+                        "role": "user",
+                        "content": f"[mid-turn steer from user]\n{joined}",
+                    }
+                )
+                yield TextChunk(f"\n[Steer applied: {pending[0][:80]}{'…' if len(pending[0]) > 80 else ''}]\n")
+
+        if agent_event_drain is not None:
+            agent_lines = agent_event_drain()
+            if agent_lines:
+                state.messages.append(
+                    {
+                        "role": "user",
+                        "content": "[sub-agent events]\n" + "\n".join(agent_lines),
+                    }
+                )
 
         state.turn_count += 1
 
@@ -682,7 +715,7 @@ def _stream_openai_compat(
         yield TextChunk("[Error: openai package not installed]")
         return
 
-    from xerxes.llms.registry import PROVIDERS, get_api_key
+    from xerxes.llms.registry import PROVIDERS, get_api_key, provider_default_headers
 
     api_key = config.get("api_key") or get_api_key(provider_name, config)
     prov = PROVIDERS.get(provider_name, PROVIDERS["openai"])
@@ -696,6 +729,13 @@ def _stream_openai_compat(
         "timeout": timeout,
         "max_retries": _request_max_retries(config, explicit_base_url=explicit_base_url),
     }
+    # Some providers gate access by client identity (e.g. Kimi Code's
+    # "Coding Agents only" allowlist returns 403 unless the request comes
+    # from Kimi CLI / Claude Code / Roo Code / Kilo Code). Inject a matching
+    # User-Agent so the request goes through.
+    default_headers = provider_default_headers(provider_name)
+    if default_headers:
+        client_kwargs["default_headers"] = default_headers
     if explicit_base_url:
         import httpx
 
@@ -705,6 +745,7 @@ def _stream_openai_compat(
                 connect=min(timeout, _request_connect_timeout(config)),
             ),
             trust_env=False,
+            headers=default_headers or None,
         )
     client = OpenAI(**client_kwargs)
 
