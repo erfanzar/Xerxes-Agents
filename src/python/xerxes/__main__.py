@@ -152,11 +152,25 @@ def main(argv: list[str] | None = None) -> None:
         help="Ignored for one-shot prompts; they always use accept-all permissions.",
     )
     parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Kill the running daemon so the next launch starts fresh.",
+    )
+    parser.add_argument(
         "prompt",
         nargs=argparse.REMAINDER,
         help="Run a one-shot prompt instead of opening the TUI.",
     )
     args = parser.parse_args(argv)
+
+    if args.refresh:
+        from .tui.engine import BridgeClient
+
+        client = BridgeClient()
+        client.restart()
+        print("Daemon refreshed. Restart xerxes to connect to the new daemon.")
+        return
+
     prompt, one_shot = _resolve_one_shot_prompt(
         args.prompt,
         stdin_is_tty=sys.stdin.isatty(),

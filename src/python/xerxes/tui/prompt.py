@@ -34,18 +34,74 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI, AnyFormattedText
+from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit, Window
-from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl, UIContent
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class _ScrollableFormattedTextControl(FormattedTextControl):
+    """A FormattedTextControl that only renders a visible slice of content.
+
+    This works around prompt_toolkit's cursor-driven scrolling by:
+    1. Rendering only the visible lines (not all content)
+    2. Reporting line_count as the visible slice size
+    3. Placing cursor at the end of the visible slice
+
+    The Window will naturally show exactly what we render because
+    there's nothing extra to scroll to.
+    """
+
+    def __init__(self, renderer: StatusRenderer, scroll_y_accessor: Callable[[], int | None]):
+        super().__init__(
+            text="",
+            focusable=False,
+            show_cursor=False,
+        )
+        self._renderer = renderer
+        self._scroll_y_accessor = scroll_y_accessor
+
+    def create_content(self, width: int, height: int | None) -> UIContent:
+        """Return only the visible slice of content."""
+        from prompt_toolkit.formatted_text.utils import split_lines, fragment_list_width
+
+        scroll_y = self._scroll_y_accessor()
+        markup = self._renderer._markup(scroll_y)
+
+        # Parse the markup into fragments
+        fragments = to_formatted_text(ANSI(markup))
+        fragment_lines = list(split_lines(fragments))
+
+        # The line count is exactly what we rendered
+        line_count = len(fragment_lines)
+
+        # Place cursor at the end of the visible content
+        if line_count > 0:
+            last_line = fragment_lines[-1]
+            cursor_x = fragment_list_width(last_line)
+            cursor_pos = Point(x=cursor_x, y=line_count - 1)
+        else:
+            cursor_pos = Point(x=0, y=0)
+
+        def get_line(i: int) -> Any:
+            if 0 <= i < len(fragment_lines):
+                return [(item[0], item[1]) for item in fragment_lines[i]]
+            return []
+
+        return UIContent(
+            get_line=get_line,
+            line_count=line_count,
+            show_cursor=False,
+            cursor_position=cursor_pos,
+        )
 
 
 def _mode_style(plan_mode: bool, activity_mode: str) -> str:
@@ -843,17 +899,16 @@ class PersistentPrompt:
             complete_while_typing=True,
         )
 
-        self._status_control = FormattedTextControl(
-            text=self._status_text_callable,
-            focusable=False,
-            show_cursor=False,
-            get_cursor_position=self._status_cursor_position,
+        self._status_control = _ScrollableFormattedTextControl(
+            renderer=self._status,
+            scroll_y_accessor=lambda: self._scroll_y,
         )
 
         self._status_window = Window(
             content=self._status_control,
             height=Dimension(weight=1),
             wrap_lines=True,
+            always_hide_cursor=True,
         )
 
         self._status_control.mouse_handler = self._on_status_mouse
@@ -898,21 +953,6 @@ class PersistentPrompt:
         )
 
         self._app: Application[None] | None = None
-
-    def _status_text_callable(self) -> AnyFormattedText:
-        """Return the status markup sliced by the current scroll offset.
-
-        When ``_scroll_y`` is ``None`` we render the tail (live mode).
-        When ``_scroll_y`` is set we render a fixed window starting there."""
-        return self._status(self._scroll_y)
-
-    def _status_cursor_position(self) -> Point:
-        """Position the (hidden) status cursor at the end of the *rendered* slice.
-
-        Since the control only renders the visible slice, the cursor should
-        be at the end of that slice so the Window shows exactly what we rendered."""
-        last = max(0, self._status._last_render_line_count - 1)
-        return Point(x=self._status._last_render_last_line_width, y=last)
 
     def _status_total_lines(self) -> int:
         """Total printable lines in the *full* content history (not just rendered)."""

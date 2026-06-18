@@ -49,6 +49,11 @@ class ProviderFlowMixin:
         "together",
         "kimi",
         "kimi-code",
+        "zhipu",
+        "qwen",
+        "minimax",
+        "lmstudio",
+        "custom",
     )
 
     async def _emit_provider_edit_panel(self, emit: EmitFn) -> None:

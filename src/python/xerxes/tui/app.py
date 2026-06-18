@@ -1013,6 +1013,8 @@ class XerxesTUI:
                 method="slash",
                 params={"command": text},
             )
+        elif cmd == "/refresh":
+            await self._handle_refresh()
         else:
             await self._client._send_jsonrpc(
                 method="slash",
@@ -1073,6 +1075,31 @@ class XerxesTUI:
 
         if self._prompt:
             self._prompt.set_todo_items(list(self._todo_items))
+
+    async def _handle_refresh(self) -> None:
+        """Kill the daemon, clear state, and respawn so code changes take effect."""
+        if self._prompt:
+            self._prompt.append_line("\x1b[36m↻ Refreshing daemon…\x1b[0m")
+
+        if self._client:
+            self._client.restart()
+
+        # Re-spawn the daemon and reconnect
+        if self._client:
+            try:
+                self._client.spawn()
+                await self._client.initialize(
+                    model=self._model,
+                    base_url=self._base_url,
+                    api_key=self._api_key,
+                    permission_mode=self._permission_mode,
+                    resume_session_id=self._session_id,
+                )
+                if self._prompt:
+                    self._prompt.append_line("\x1b[32m✓ Daemon refreshed.\x1b[0m")
+            except Exception as exc:
+                if self._prompt:
+                    self._prompt.append_line(f"\x1b[31m✗ Refresh failed: {exc}\x1b[0m")
 
     async def _toggle_plan_mode(self) -> None:
         """Flip ``_plan_mode`` and inform the daemon."""

@@ -142,6 +142,32 @@ class BridgeClient:
         self._socket_reader = None
         self._socket_writer = None
 
+    def restart(self) -> None:
+        """Kill the daemon subprocess and close the socket so the next spawn starts fresh."""
+        # Kill the daemon subprocess if we launched it
+        if self._proc is not None:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+
+        # Close socket connection
+        self.close()
+
+        # Remove stale socket file so spawn() doesn't think a daemon is alive
+        try:
+            config = load_config()
+            socket_path = Path(config.socket_path).expanduser()
+            if socket_path.exists():
+                socket_path.unlink()
+        except Exception:
+            pass
+
     def stderr_tail(self) -> list[str]:
         """Snapshot the last ~200 stderr lines captured from the daemon subprocess."""
         with self._stderr_lock:
