@@ -458,17 +458,17 @@ class _ToolCallBlock:
         self._subagent_type = subagent_type
 
     def compose(self) -> str:
-        """Render an ultra-compact single-line tool call.
+        """Render an ultra-compact single-line tool call with status icon.
 
         Format::
 
-            called {name} ({key_arg}) — {truncated_result} — {duration}
+            {icon} {name} ({key_arg}) — {truncated_result} — {duration}
 
         Examples::
 
-            called ReadFile (src/foo.py) — import os; import sys; from... — 12ms
-            called WriteFile (out.txt) — done — 5ms
-            called ExecuteShell (ls -la) — file1.txt file2.txt dir1/... — 45ms
+            ✓ ReadFile (src/foo.py) — import os; import sys; from... — 12ms
+            ✗ ReadFile (bad.txt) — Error: file not found — 1ms
+            ○ ExecuteShell (ls -la) — ... — 0s
         """
         from .console import _prompt_text_to_ansi
 
@@ -477,7 +477,18 @@ class _ToolCallBlock:
         name = _markup_safe(self.name)
         key_arg = _markup_safe(self.key_arg)
 
-        line = f"called [cyan]{name}[/cyan] ([dim]{key_arg}[/dim])"
+        # Status icon: running=○, done=✓, error=✗
+        if self._status == "running":
+            icon = "○"
+            icon_color = "yellow"
+        elif self._status == "done":
+            icon = "✓"
+            icon_color = "green"
+        else:
+            icon = "✗"
+            icon_color = "red"
+
+        line = f"[{icon_color}]{icon}[/{icon_color}] [cyan]{name}[/cyan] ([dim]{key_arg}[/dim])"
 
         if self._status == "done" and self._result:
             collapsed = _markup_safe(self._result).replace("\n", " ").strip()

@@ -304,7 +304,7 @@ def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
         "",
         "# Tools",
         "ReadFile, WriteFile, FileEditTool, AppendFile, ListDir, GlobTool, GrepTool,",
-        "ExecuteShell, ExecutePythonCode, GoogleSearch, DuckDuckGoSearch, WebScraper,",
+        "ExecuteShell, GoogleSearch, DuckDuckGoSearch, WebScraper,",
         "AgentTool, SendMessageTool, TodoWriteTool, Calculator, JSONProcessor, CSVProcessor",
         "",
         "# How to decide",

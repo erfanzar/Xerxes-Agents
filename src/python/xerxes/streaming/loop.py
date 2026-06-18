@@ -215,6 +215,73 @@ def _parse_thinking_tags(
 
 logger = logging.getLogger(__name__)
 
+def _try_compact_messages(state: AgentState, budget_limit: int) -> bool:
+    """Try to compact messages to free up token budget.
+
+    Removes old tool results and subagent outputs, keeping only the most
+    recent messages and system messages.
+
+    Returns True if compaction was performed.
+    """
+    messages = state.messages
+    if len(messages) < 6:
+        return False
+
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    conv_msgs = [m for m in messages if m.get("role") != "system"]
+
+    if len(conv_msgs) < 4:
+        return False
+
+    # Keep last 4 conversation messages, compact older ones
+    preserve_recent = 4
+    older = conv_msgs[:-preserve_recent]
+    recent = conv_msgs[-preserve_recent:]
+
+    # Summarize older messages into a single context message
+    summary_parts = []
+    for msg in older:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            text_parts = []
+            for p in content:
+                if isinstance(p, dict):
+                    text_parts.append(p.get("text", str(p)))
+                else:
+                    text_parts.append(str(p))
+            content = " | ".join(text_parts)
+        # Truncate very long content
+        if len(content) > 500:
+            content = content[:500] + "..."
+        summary_parts.append(f"{role}: {content}")
+
+    summary = "\n".join(summary_parts)
+    if len(summary) > 4000:
+        summary = summary[:4000] + "..."
+
+    compacted_msg = {
+        "role": "user",
+        "content": (
+            f"[Previous context summary ({len(older)} messages condensed):\n"
+            f"{summary}\n"
+            f"End of summary. Continuing from recent messages below.]"
+        ),
+    }
+
+    state.messages = [
+        *system_msgs,
+        compacted_msg,
+        *recent,
+    ]
+
+    # Reset token counts since we can't know exact counts without re-counting
+    # The next turn will recalculate
+    state.total_input_tokens = 0
+    state.total_output_tokens = 0
+
+    return True
+
 MAX_TOOL_TURNS = 50
 
 # Default token budget when none is specified in config. Prevents runaway
@@ -331,6 +398,17 @@ def run(
         budget_limit = config.get("max_budget_tokens") or _DEFAULT_TOKEN_BUDGET
         cumulative = state.total_input_tokens + state.total_output_tokens
         if cumulative >= budget_limit:
+            # Try to compact context before giving up
+            compacted = _try_compact_messages(state, budget_limit)
+            if compacted:
+                yield TextChunk(
+                    "\n[Context compacted to free up tokens. Continuing...]"
+                )
+                # Recalculate after compaction
+                cumulative = state.total_input_tokens + state.total_output_tokens
+                if cumulative < budget_limit:
+                    continue  # Retry the turn with compacted context
+
             yield TextChunk(
                 f"\n[Stopped: token budget ({budget_limit:,}) exhausted. "
                 f"Used {cumulative:,} tokens across {_turn} tool turns.]"
@@ -377,54 +455,76 @@ def run(
         cache_creation_tokens = 0
         thinking_parser = _ThinkingParser()
 
-        try:
-            _llm_gen = _stream_llm(
-                model=model,
-                provider_type=provider_cfg.type,
-                system=system_prompt,
-                messages=state.messages,
-                tool_schemas=tool_schemas or [],
-                config=config,
-            )
-            for chunk in _llm_gen:
-                if isinstance(chunk, TextChunk):
-                    subs = thinking_parser.process(chunk.text)
-                    for sub in subs:
-                        if isinstance(sub, ThinkingChunk):
-                            thinking_text += sub.text
-                            yield sub
-                        else:
-                            text += sub.text
-                            yield sub
-                elif isinstance(chunk, ThinkingChunk):
-                    thinking_text += chunk.text
-                    yield chunk
-                elif isinstance(chunk, dict):
-                    tool_calls = chunk.get("tool_calls", [])
-                    in_tokens = chunk.get("in_tokens", 0)
-                    out_tokens = chunk.get("out_tokens", 0)
-                    cache_read_tokens = chunk.get("cache_read_tokens", 0)
-                    cache_creation_tokens = chunk.get("cache_creation_tokens", 0)
-                    thinking_signature = chunk.get("thinking_signature")
+        # Retry configuration: 3 attempts with exponential backoff (5s, 10s, 20s)
+        _MAX_RETRIES = 3
+        _RETRY_DELAYS = [5, 10, 20]
+        _retry_attempt = 0
+        _last_error: Exception | None = None
 
-            remaining = thinking_parser.process("")
-            for sub in remaining:
-                if isinstance(sub, ThinkingChunk):
-                    thinking_text += sub.text
-                    yield sub
-        except Exception as e:
-            logger.error("LLM streaming error: %s", e)
-            # Recoverable error: record whatever was already streamed so history
-            # stays consistent. Without this the partial assistant text is dropped
-            # and the dangling user message desyncs the conversation (next request
-            # 400s or the model loses what it just said). Append the partial turn +
-            # a concise marker, then close the turn cleanly with TurnDone so the
-            # daemon persists the consistent state and the model can recover next turn.
+        while _retry_attempt <= _MAX_RETRIES:
+            try:
+                _llm_gen = _stream_llm(
+                    model=model,
+                    provider_type=provider_cfg.type,
+                    system=system_prompt,
+                    messages=state.messages,
+                    tool_schemas=tool_schemas or [],
+                    config=config,
+                )
+                for chunk in _llm_gen:
+                    if isinstance(chunk, TextChunk):
+                        subs = thinking_parser.process(chunk.text)
+                        for sub in subs:
+                            if isinstance(sub, ThinkingChunk):
+                                thinking_text += sub.text
+                                yield sub
+                            else:
+                                text += sub.text
+                                yield sub
+                    elif isinstance(chunk, ThinkingChunk):
+                        thinking_text += chunk.text
+                        yield chunk
+                    elif isinstance(chunk, dict):
+                        tool_calls = chunk.get("tool_calls", [])
+                        in_tokens = chunk.get("in_tokens", 0)
+                        out_tokens = chunk.get("out_tokens", 0)
+                        cache_read_tokens = chunk.get("cache_read_tokens", 0)
+                        cache_creation_tokens = chunk.get("cache_creation_tokens", 0)
+                        thinking_signature = chunk.get("thinking_signature")
+
+                remaining = thinking_parser.process("")
+                for sub in remaining:
+                    if isinstance(sub, ThinkingChunk):
+                        thinking_text += sub.text
+                        yield sub
+                break  # Success — exit retry loop
+            except Exception as e:
+                _last_error = e
+                if _retry_attempt < _MAX_RETRIES:
+                    delay = _RETRY_DELAYS[_retry_attempt]
+                    logger.warning(
+                        "LLM streaming error (attempt %d/%d): %s. Retrying in %ds...",
+                        _retry_attempt + 1,
+                        _MAX_RETRIES + 1,
+                        e,
+                        delay,
+                    )
+                    yield TextChunk(
+                        f"\n[Error: the response was interrupted: {e}. Retrying in {delay}s... ({_retry_attempt + 1}/{_MAX_RETRIES})]"
+                    )
+                    time.sleep(delay)
+                    _retry_attempt += 1
+                else:
+                    logger.error("LLM streaming failed after %d attempts: %s", _MAX_RETRIES + 1, e)
+                    break  # All retries exhausted — fall through to error handling below
+
+        # If all retries failed, handle the error gracefully
+        if _last_error is not None and _retry_attempt >= _MAX_RETRIES:
             for sub in thinking_parser.process(""):
                 if isinstance(sub, ThinkingChunk):
                     thinking_text += sub.text
                     yield sub
-            err_note = f"[Error: the response was interrupted: {e}]"
+            err_note = f"[Error: the response was interrupted: {_last_error}]"
             combined = (f"{text}\n\n{err_note}" if text else err_note).strip()
             msg_err: dict[str, Any] = {"role": "assistant", "content": combined, "tool_calls": []}
             if thinking_text:

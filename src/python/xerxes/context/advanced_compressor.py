@@ -111,7 +111,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
             goal = goal[:57] + "..."
         return f"[{tool_name}] '{goal}' ({content_len:,} chars result)"
 
-    if tool_name in ("execute_code", "ExecutePythonCode"):
+    if tool_name in ("execute_code", "ExecuteShell"):
         code_preview = (args.get("code") or "")[:60].replace("\n", " ")
         if len(args.get("code", "")) > 60:
             code_preview += "..."

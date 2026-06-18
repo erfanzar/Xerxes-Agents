@@ -71,7 +71,7 @@ class _ScrollableFormattedTextControl(FormattedTextControl):
 
     def create_content(self, width: int, height: int | None) -> UIContent:
         """Return only the visible slice of content."""
-        from prompt_toolkit.formatted_text.utils import split_lines, fragment_list_width
+        from prompt_toolkit.formatted_text.utils import fragment_list_width, split_lines
 
         scroll_y = self._scroll_y_accessor()
         markup = self._renderer._markup(scroll_y)

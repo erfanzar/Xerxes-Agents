@@ -1221,7 +1221,6 @@ class XerxesTUI:
             "AppendFile",
             "FileEditTool",
             "ExecuteShell",
-            "ExecutePythonCode",
         }
         if tool_name in research_tools:
             return "researcher"

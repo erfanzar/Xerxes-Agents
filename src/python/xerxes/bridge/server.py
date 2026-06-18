@@ -319,6 +319,18 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             prompt = str(agent_def.system_prompt).rstrip()
         else:
             prompt = self.system_prompt.rstrip()
+
+        # Inject agent self-knowledge from persistent memory
+        try:
+            from ..memory.agent_memory import get_agent_memory
+            agent_id = getattr(self, "agent_id", "default")
+            memory = get_agent_memory(agent_id)
+            memory_addendum = memory.get_system_prompt_addendum()
+            if memory_addendum:
+                prompt += "\n\n[Agent Self-Knowledge]\n" + memory_addendum
+        except Exception:
+            pass
+
         return prompt + "\n\n" + self._mode_switch_hint(mode) + "\n"
 
     @staticmethod
