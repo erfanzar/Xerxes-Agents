@@ -237,6 +237,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                     self.state.total_input_tokens,
                     self.state.total_output_tokens,
                 ),
+                "reasoning_effort": self.config.get("reasoning_effort", "off"),
             },
         )
 
@@ -1263,6 +1264,9 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         output = self._run_slash(cmd, args)
         if output:
             self._emit("slash_result", {"output": output})
+        # Refresh the status bar for commands that change footer-visible state.
+        if self._wire_mode and cmd in {"thinking", "reasoning", "mode", "plan"}:
+            self._emit_wire_status()
 
     def _parse_json_messages(self, line: str) -> list[dict[str, Any]]:
         """Parse one or more JSON objects from one stdin line (fall back to whitespace-split)."""

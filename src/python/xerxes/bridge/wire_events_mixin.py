@@ -317,6 +317,7 @@ class WireEventMixin:
                 "mcp_status": {},
                 "plan_mode": self.config.get("plan_mode", False),
                 "mode": self.config.get("mode", "code"),
+                "reasoning_effort": self.config.get("reasoning_effort", "off"),
             },
         )
 

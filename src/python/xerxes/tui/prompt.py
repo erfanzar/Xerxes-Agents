@@ -86,6 +86,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/steer", "Inject mid-turn guidance"),
     ("/cancel", "Cancel the current turn"),
     ("/cancel-all", "Cancel all running turns"),
+    ("/todo", "Show or edit the TODO list"),
     ("/exit", "Exit Xerxes"),
 ]
 
@@ -217,6 +218,7 @@ class StatusRenderer:
         self._active_tools: dict[str, Callable[[], str]] = {}
 
         self._subagent_previews: dict[str, str] = {}
+        self._todo_items: list[str] = []
 
         self._spinner_frame: int = 0
         self._spinner_started_at: float = 0.0
@@ -447,6 +449,19 @@ class StatusRenderer:
             self._subagent_previews.clear()
             self._mark_dirty()
 
+    def set_todo_items(self, items: list[str]) -> None:
+        """Replace the TODO list displayed above the input area."""
+        new_items = [i for i in items if i]
+        if new_items != self._todo_items:
+            self._todo_items = new_items
+            self._mark_dirty()
+
+    def clear_todo_items(self) -> None:
+        """Remove the TODO list from the status area."""
+        if self._todo_items:
+            self._todo_items = []
+            self._mark_dirty()
+
     def _terminal_columns(self) -> int:
         """Return the active prompt_toolkit output columns (default 80)."""
         columns = 80
@@ -467,46 +482,44 @@ class StatusRenderer:
         except Exception:
             return 24
 
-    def _markup(self) -> str:
-        """Compose the full ANSI markup string consumed by ``ANSI(...)``.
+    def _markup(self, scroll_y: int | None = None) -> str:
+        """Compose the ANSI markup string, optionally sliced by ``scroll_y``.
 
-        Order: committed history → thinking preview → active tool blocks
-        → subagent previews → streaming text → modal panel → spinner row
-        → mode-aware separator.
+        When ``scroll_y`` is ``None`` (default) the view follows the tail
+        (live mode).  When ``scroll_y >= 0`` the view is pinned to that line
+        offset, allowing the user to scroll back through history.
 
         Caching: the result is keyed by ``(_state_version, columns, rows,
-        spinner_tick)`` — unchanged frames re-use the cached string instead
-        of re-walking content lines, joining strings, and parsing ANSI.
-        ``spinner_tick`` advances at ~4 FPS only while running, so the
-        cached path is hit on every paint when the screen is idle.
+        spinner_tick, scroll_y)`` so unchanged frames re-use the cached string.
         """
         columns = self._terminal_columns()
         rows = self._terminal_rows()
         spinner_tick = self._current_spinner_tick()
-        key = (self._state_version, columns, rows, spinner_tick)
+        key = (self._state_version, columns, rows, spinner_tick, scroll_y)
         if self._cached_markup is not None and self._cached_markup_key == key:
             return self._cached_markup
 
-        # Tool-call render funcs and active panels can be dynamic — we treat
-        # them as part of the cache invalidation contract by requiring
-        # callers to ``_mark_dirty`` whenever the underlying state changes.
         parts: list[str] = []
-
         budget = max(20, rows * 2)
-        # Slice a bounded tail from the deque without materialising the
-        # whole history.
         history_len = len(self._content_lines)
-        start = max(0, history_len - budget)
-        for i in range(start, history_len):
+
+        if scroll_y is not None:
+            # Scrolled-back mode: show a fixed window starting at scroll_y.
+            start = max(0, scroll_y)
+            end = min(history_len, scroll_y + budget)
+        else:
+            # Live tail-follow mode: show the last ``budget`` lines.
+            start = max(0, history_len - budget)
+            end = history_len
+
+        for i in range(start, end):
             line = self._content_lines[i]
             parts.append(line)
             if line and not line.endswith("\n"):
                 parts.append("\n")
 
-        if self._thinking_text:
-            parts.append(f"\x1b[2;3m✻ {self._thinking_text}\x1b[0m")
-            if not self._thinking_text.endswith("\n"):
-                parts.append("\n")
+        # Thinking/reasoning traces are intentionally not shown in the TUI.
+        # Only tool calls and assistant responses are displayed.
 
         for render_fn in self._active_tools.values():
             try:
@@ -532,6 +545,15 @@ class StatusRenderer:
             parts.append(self._active_panel)
             if not self._active_panel.endswith("\n"):
                 parts.append("\n")
+
+        if self._todo_items:
+            parts.append("\x1b[1;33mTODO:\x1b[0m\n")
+            for _i, item in enumerate(self._todo_items[:10], 1):
+                prefix = "☐" if not item.startswith("✓") else "✓"
+                text = item[1:].strip() if item.startswith("✓") else item
+                parts.append(f"  \x1b[33m{prefix}\x1b[0m {text}\n")
+            if len(self._todo_items) > 10:
+                parts.append(f"  \x1b[2m... and {len(self._todo_items) - 10} more\x1b[0m\n")
 
         if self._running:
             frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
@@ -618,9 +640,9 @@ class StatusRenderer:
         plain = _ANSI_RE.sub("", markup)
         return plain.count("\n") + (0 if plain.endswith("\n") else 1)
 
-    def __call__(self) -> AnyFormattedText:
-        """Return ``ANSI(self._markup())`` so this object plugs into prompt_toolkit."""
-        return ANSI(self._markup())
+    def __call__(self, scroll_y: int | None = None) -> AnyFormattedText:
+        """Return ``ANSI(self._markup(scroll_y))`` so this object plugs into prompt_toolkit."""
+        return ANSI(self._markup(scroll_y))
 
 
 class FooterRenderer:
@@ -822,7 +844,7 @@ class PersistentPrompt:
         )
 
         self._status_control = FormattedTextControl(
-            text=self._status,
+            text=self._status_text_callable,
             focusable=False,
             show_cursor=False,
             get_cursor_position=self._status_cursor_position,
@@ -877,20 +899,30 @@ class PersistentPrompt:
 
         self._app: Application[None] | None = None
 
+    def _status_text_callable(self) -> AnyFormattedText:
+        """Return the status markup sliced by the current scroll offset.
+
+        When ``_scroll_y`` is ``None`` we render the tail (live mode).
+        When ``_scroll_y`` is set we render a fixed window starting there."""
+        return self._status(self._scroll_y)
+
     def _status_cursor_position(self) -> Point:
-        """Position the (hidden) status cursor for prompt_toolkit scroll math."""
+        """Position the (hidden) status cursor at the end of the *rendered* slice.
+
+        Since the control only renders the visible slice, the cursor should
+        be at the end of that slice so the Window shows exactly what we rendered."""
         last = max(0, self._status._last_render_line_count - 1)
-        if self._scroll_y is None or self._scroll_y >= last:
-            return Point(x=self._status._last_render_last_line_width, y=last)
-        y = max(0, self._scroll_y)
-        return Point(x=0, y=y)
+        return Point(x=self._status._last_render_last_line_width, y=last)
 
     def _status_total_lines(self) -> int:
-        """Total printable lines currently rendered in the status area."""
-        return max(0, len(_ANSI_RE.sub("", self._status._markup()).split("\n")) - 1)
+        """Total printable lines in the *full* content history (not just rendered)."""
+        return max(0, len(self._status._content_lines))
 
     def _scroll_by(self, delta: int) -> None:
-        """Adjust the scroll offset by ``delta`` lines; ``None`` means tracking bottom."""
+        """Adjust the scroll offset by ``delta`` lines; ``None`` means tracking bottom.
+
+        The scroll offset is measured in raw content lines (entries in
+        ``_content_lines``), not rendered lines."""
         total = self._status_total_lines()
         current = self._scroll_y if self._scroll_y is not None else total
         new = current + delta
@@ -1210,8 +1242,9 @@ class PersistentPrompt:
         self._invalidate()
 
     def clear_content(self) -> None:
-        """Wipe the committed status history."""
+        """Wipe the committed status history and reset scroll to tail-follow."""
         self._status.clear_content()
+        self._scroll_y = None
         self._invalidate()
 
     def append_streaming(self, text: str) -> None:
@@ -1278,6 +1311,16 @@ class PersistentPrompt:
     def clear_subagent_previews(self) -> None:
         """Drop every subagent preview line."""
         self._status.clear_subagent_previews()
+        self._invalidate()
+
+    def set_todo_items(self, items: list[str]) -> None:
+        """Replace the TODO list displayed above the input area."""
+        self._status.set_todo_items(items)
+        self._invalidate()
+
+    def clear_todo_items(self) -> None:
+        """Remove the TODO list from the status area."""
+        self._status.clear_todo_items()
         self._invalidate()
 
     # Minimum gap between forced re-paints. Streamed LLM tokens arrive

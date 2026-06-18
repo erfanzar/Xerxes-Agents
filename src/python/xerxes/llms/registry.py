@@ -126,7 +126,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
         # at https://api.kimi.com/coding/ but Xerxes' streaming loop targets
         # the OpenAI shape, so we use the /v1 path.
         base_url="https://api.kimi.com/coding/v1",
-        context_limit=128_000,
+        context_limit=256_000,
         models=[
             # ``kimi-for-coding`` is the stable model id — the backend
             # rolls forward (currently maps to kimi-k2.6) without callers
@@ -430,15 +430,42 @@ _MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "MiniMax-Text-01": 256_000,
     "MiniMax-Text-01-MiniApp": 256_000,
     "glm-5.2": 1_048_576,
+    # Moonshot / Kimi models — per-model limits override the provider default.
+    "moonshot-v1-8k": 8_192,
+    "moonshot-v1-32k": 32_768,
+    "moonshot-v1-128k": 128_000,
+    "kimi-latest": 256_000,
+    "kimi-for-coding": 256_000,
+    "kimi-k2.5": 256_000,
+    "kimi-k2.6": 256_000,
+    "kimi-k2.7": 256_000,
+    "kimi-k2.5-001": 256_000,
+    "kimi-k2.6-001": 256_000,
+    "kimi-k2.7-001": 256_000,
+    "kimi-k2.7-code": 256_000,
 }
 
 
 def get_context_limit(model: str) -> int:
-    """Return the context window for ``model`` (model-specific or provider default)."""
+    """Return the context window for ``model``.
+
+    Resolution order (same as the daemon):
+      1. ``_MODEL_CONTEXT_LIMITS`` — exact model id override.
+      2. ``pricing._PRICING`` — per-model entry from the pricing table.
+      3. ``ProviderConfig.context_limit`` — provider default fallback.
+      4. ``128_000`` — last resort.
+    """
 
     name = bare_model(model)
     if name in _MODEL_CONTEXT_LIMITS:
         return _MODEL_CONTEXT_LIMITS[name]
+    try:
+        from ..runtime.pricing import _PRICING
+        pricing = _PRICING.get(name)
+        if pricing:
+            return pricing.context_window
+    except Exception:
+        pass
     provider_name = detect_provider(model)
     prov = PROVIDERS.get(provider_name)
     return prov.context_limit if prov else 128_000
