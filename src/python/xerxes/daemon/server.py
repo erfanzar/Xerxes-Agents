@@ -140,6 +140,26 @@ class DaemonServer:
         self._current_session_key = "tui:default"
         self._current_mode = "code"
         self._current_plan_mode = False
+        # Per-connection session binding. The daemon multiplexes several
+        # clients (Unix socket, websocket, channels) onto one loop, so a
+        # single shared ``_current_session_key`` lets a second client's
+        # ``prompt`` run against the first client's session. Each connection's
+        # ``emit`` closure is a stable per-connection identity; we bind the
+        # session key to it at ``initialize`` and resolve it per ``prompt`` so
+        # concurrent turns never clobber one another. ``_current_session_key``
+        # remains the fallback for legacy single-client paths (slash handlers,
+        # un-initialized callers).
+        self._connection_sessions: dict[EmitFn, str] = {}
+        # Owning connection for each in-flight turn, keyed by session key.
+        # ``TurnRunner.ask_user_question`` fires its ``question_request``
+        # through the broadcast sink (it runs on a worker thread with no
+        # per-connection ``emit``); we use this to route that question to the
+        # connection that actually started the turn instead of fanning it out
+        # to every client, and to reject answers from other connections.
+        self._turn_owner_emits: dict[str, EmitFn] = {}
+        # request_id -> owning emit, captured the first time a question is
+        # routed so the matching ``question_response`` can be authorised.
+        self._question_owner_emits: dict[str, EmitFn] = {}
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._agent_event_callback: Any = None
         # When a slash command needs an argument it couldn't parse from the
@@ -256,9 +276,12 @@ class DaemonServer:
         if method == "initialize":
             return await self._initialize(params, emit)
         if method == "prompt":
+            # Resolve the session bound to *this* connection rather than the
+            # shared ``_current_session_key`` so a concurrent client's turn
+            # can't redirect this prompt into its own session.
             return await self._submit_turn(
                 {
-                    "session_key": self._current_session_key,
+                    "session_key": self._connection_session_key(emit),
                     "text": params.get("user_input", ""),
                     "mode": params.get("mode", self._current_mode),
                     "plan_mode": params.get("plan_mode", self._current_plan_mode),
@@ -330,10 +353,21 @@ class DaemonServer:
                 await self._advance_provider_flow(answers, emit)
             else:
                 # Fall through to the general-purpose waiter used by the
-                # ``AskUserQuestionTool`` callback. ``False`` means the
-                # request id was unknown (e.g. the turn was already
-                # cancelled) — fine, drop silently.
+                # ``AskUserQuestionTool`` callback. Only the connection the
+                # question was routed to may answer it — otherwise a second
+                # client could resolve another client's turn with the wrong
+                # user's input. If we never recorded an owner for this id
+                # (e.g. a question that was broadcast because the owner was
+                # ambiguous, or a test stub) we accept it for back-compat.
+                question_owners = getattr(self, "_question_owner_emits", None)
+                owner = question_owners.get(rid) if question_owners is not None else None
+                if owner is not None and owner is not emit:
+                    return {"ok": False, "error": "question owned by another connection"}
+                # ``False`` means the request id was unknown (e.g. the turn was
+                # already cancelled) — fine, drop silently.
                 await self.turns.respond_question(rid, answers)
+                if question_owners is not None:
+                    question_owners.pop(rid, None)
             return {"ok": True}
         if method == "fetch_models":
             return self._fetch_models(params)
@@ -388,6 +422,13 @@ class DaemonServer:
             self.runtime.reload(overrides)
         resume_id = str(params.get("resume_session_id") or "").strip()
         self._current_session_key = resume_id or "tui:default"
+        # Bind this session to the originating connection so its ``prompt``
+        # calls resolve to the right session even while other clients are
+        # connected to the same daemon. ``getattr`` guards test fixtures that
+        # build the server via ``__new__`` and skip ``__init__``.
+        conn_sessions = getattr(self, "_connection_sessions", None)
+        if conn_sessions is not None:
+            conn_sessions[emit] = self._current_session_key
         # Daemon is long-lived; the in-memory ``SessionManager._sessions``
         # slot for ``tui:default`` outlives any single TUI connection.
         # When the user launches ``xerxes`` *without* ``-r`` they expect a
@@ -421,6 +462,18 @@ class DaemonServer:
             "daemon_protocol": DAEMON_PROTOCOL_VERSION,
             **self.runtime.status(),
         }
+
+    def _connection_session_key(self, emit: EmitFn) -> str:
+        """Return the session key bound to ``emit``'s connection.
+
+        Falls back to the shared ``_current_session_key`` for connections
+        that never sent ``initialize`` (e.g. a channel emit or a test stub),
+        so behaviour for the single-client case is unchanged.
+        """
+        conn_sessions = getattr(self, "_connection_sessions", None)
+        if conn_sessions is None:
+            return self._current_session_key
+        return conn_sessions.get(emit, self._current_session_key)
 
     async def _submit_turn(self, params: dict[str, Any], emit: EmitFn) -> dict[str, Any]:
         """Queue a new turn on the resolved session and stream events to ``emit``."""
@@ -491,12 +544,40 @@ class DaemonServer:
         agent_id = str(params.get("agent_id") or self.workspaces.default_agent_id)
         mode = str(params.get("mode") or self._current_mode or "code")
         plan_mode = bool(params.get("plan_mode", self._current_plan_mode or mode == "plan"))
-        self._current_session_key = session_key
+        # Keep this connection's binding current, but DON'T overwrite the
+        # shared ``_current_session_key`` when the caller carried an explicit
+        # session key — doing so is exactly the cross-client clobber bug. We
+        # only fall back to mutating the shared key for legacy callers that
+        # submitted without one. ``getattr`` guards ``__new__``-built test
+        # fixtures that skip ``__init__``.
+        conn_sessions = getattr(self, "_connection_sessions", None)
+        if conn_sessions is not None and emit in conn_sessions:
+            conn_sessions[emit] = session_key
+        if params.get("session_key") is None:
+            self._current_session_key = session_key
         self._current_mode = mode
         self._current_plan_mode = plan_mode
         session = self.sessions.open(session_key, agent_id)
+        # Record the connection that owns this turn so an interactive
+        # ``question_request`` (which TurnRunner emits through the broadcast
+        # sink) gets routed back to it instead of every client.
+        turn_owners = getattr(self, "_turn_owner_emits", None)
+        if turn_owners is not None:
+            turn_owners[session_key] = emit
         turn_task = self._track_task(self.turns.run_turn(session, text, emit, mode=mode, plan_mode=plan_mode))
+        if turn_owners is not None and hasattr(turn_task, "add_done_callback"):
+            turn_task.add_done_callback(lambda _t, key=session_key, e=emit: self._release_turn_owner(key, e))
         return {"ok": True, "session": session.status(), "turn_task": turn_task}
+
+    def _release_turn_owner(self, session_key: str, emit: EmitFn) -> None:
+        """Drop the turn-owner binding once a turn finishes.
+
+        Only clears the slot if it still points at ``emit`` so a newer turn on
+        the same session (queued before this one's done-callback fired) keeps
+        its own owner.
+        """
+        if self._turn_owner_emits.get(session_key) is emit:
+            self._turn_owner_emits.pop(session_key, None)
 
     async def _handle_channel_message(self, message: ChannelMessage) -> None:
         """Run a one-shot turn for an inbound channel message and reply on the same channel."""
@@ -535,6 +616,7 @@ class DaemonServer:
                 "mcp_status": {},
                 "plan_mode": self._current_plan_mode,
                 "mode": self._current_mode,
+                "reasoning_effort": self.runtime.reasoning_state()["effort"],
             },
         )
 
@@ -629,9 +711,41 @@ class DaemonServer:
         return False
 
     def _broadcast_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Fan an event out to every connected socket and websocket client."""
+        """Fan an event out to every connected socket and websocket client.
+
+        ``question_request`` is the exception: an interactive question belongs
+        to exactly one turn, so — like ``approval_request`` — it must reach
+        only the connection that started that turn. If we can identify the
+        owning connection we unicast to it and record the owner so the
+        matching ``question_response`` can be authorised; otherwise we fall
+        back to broadcasting (e.g. no turn owner known, or an unidentified
+        single-client setup) to preserve the previous behaviour.
+        """
+        if event_type == "question_request":
+            owner = self._resolve_question_owner(payload)
+            if owner is not None:
+                request_id = str(payload.get("id", ""))
+                if request_id:
+                    self._question_owner_emits[request_id] = owner
+                self._track_task(owner(event_type, payload))
+                return
         self._socket.broadcast(event_type, payload)
         self._gateway.broadcast(event_type, payload)
+
+    def _resolve_question_owner(self, payload: dict[str, Any]) -> EmitFn | None:
+        """Find the connection that owns an interactive ``question_request``.
+
+        ``TurnRunner.ask_user_question`` runs on a turn's worker thread and has
+        no per-connection ``emit``, so the request payload carries no session
+        key. When exactly one turn is in flight we can attribute the question
+        to it unambiguously; with several concurrent turns we can't tell which
+        one asked, so we return ``None`` and let the caller broadcast rather
+        than risk routing it to the wrong client.
+        """
+        owners = list(self._turn_owner_emits.values())
+        if len(owners) == 1:
+            return owners[0]
+        return None
 
     def _on_background_task_done(self, task: asyncio.Task[Any]) -> None:
         """Drop completed tasks and log unexpected exceptions."""
@@ -712,9 +826,12 @@ class DaemonServer:
                 await self._emit_slash(emit, f"Permission mode: {new_mode}")
             return
 
-        # ``/thinking`` is the alias for canonical ``/reasoning``; accept either.
-        if cmd in {"thinking", "reasoning", "verbose", "debug"}:
-            # Persist under canonical key, but echo whatever the user typed.
+        # ``/thinking`` (alias ``/reasoning``) shows/sets the reasoning effort level.
+        if cmd in {"thinking", "reasoning"}:
+            await self._slash_thinking(args, emit)
+            return
+
+        if cmd in {"verbose", "debug"}:
             new_value = self.runtime.toggle_flag(cmd)
             await self._emit_slash(emit, f"{original_cmd.title()}: {new_value}")
             return
@@ -1963,6 +2080,42 @@ class DaemonServer:
             )
             await self._emit_slash(emit, "Steer injected — will land on the next turn.")
 
+    async def _slash_thinking(self, args: str, emit: EmitFn) -> None:
+        """Show or set the reasoning ('thinking') effort level.
+
+        ``/thinking`` shows the current effort and how it maps to the active
+        provider; ``/thinking <off|low|medium|high>`` sets it.
+        """
+        from ..llms.registry import detect_provider
+
+        target = args.strip().lower()
+        if not target:
+            state = self.runtime.reasoning_state()
+            provider = detect_provider(self.runtime.model or "") or "?"
+            if state["effort"] == "off":
+                mapping = "reasoning disabled"
+            elif provider in {"anthropic", "claude"}:
+                mapping = f"{provider} → budget_tokens={state['budget_tokens']}"
+            else:
+                mapping = f"{provider} → reasoning_effort={state['effort']}"
+            await self._emit_slash(
+                emit,
+                f"Thinking: {state['effort']}  ({mapping})\n"
+                f"Levels: off | low | medium | high\n"
+                f"Set with `/thinking <level>`.",
+            )
+            return
+        try:
+            state = self.runtime.set_reasoning_effort(target)
+        except ValueError as exc:
+            await self._emit_slash(emit, str(exc))
+            return
+        await self._emit_slash(emit, f"Thinking effort set to: {state['effort']}.")
+        # Refresh the status bar so the new effort shows immediately. Guarded so
+        # the minimally-wired test fixture (no session manager) doesn't trip.
+        if getattr(self, "sessions", None) is not None:
+            await self._emit_status(emit)
+
     async def _slash_model(self, args: str, emit: EmitFn) -> None:
         """Show the active model or switch to a new one.
 
@@ -1972,13 +2125,48 @@ class DaemonServer:
         """
         target = args.strip()
         if not target:
-            await self._emit_slash(
-                emit,
-                f"Active model: `{self.runtime.model or '(none)'}`\n"
-                f"Base URL:      `{self.runtime.runtime_config.get('base_url', '(provider default)')}`\n"
-                f"Switch with `/model <id>` or pick a profile with `/provider`.",
-            )
+            cfg = self.runtime.runtime_config
+            base_url = str(cfg.get("base_url", ""))
+            api_key = str(cfg.get("api_key", ""))
+            active = self.runtime.model or "(none)"
+            lines = [
+                f"Active model: `{active}`",
+                f"Base URL:     `{base_url or '(provider default)'}`",
+            ]
+            models: list[str] = []
+            if base_url:
+                try:
+                    models = await asyncio.to_thread(profiles.fetch_models, base_url, api_key)
+                except Exception as exc:  # noqa: BLE001 — surface any fetch failure inline
+                    lines.append(f"\n(could not fetch model list from provider: {exc})")
+            if models:
+                lines.append("\nAvailable models from provider:")
+                lines.extend(f"  {'● ' if m == active else '  '}{m}" for m in models)
+            lines.append("\nSwitch with `/model <id>` or pick a profile with `/provider`.")
+            await self._emit_slash(emit, "\n".join(lines))
             return
+        # Validate against the provider's catalogue (best-effort): reject an
+        # unknown id rather than silently binding a model that 404s at call time.
+        # If the catalogue can't be fetched, we skip validation and allow it.
+        base_url = str(self.runtime.runtime_config.get("base_url", ""))
+        if base_url:
+            from ..llms.registry import bare_model
+
+            try:
+                available = await asyncio.to_thread(
+                    profiles.fetch_models, base_url, str(self.runtime.runtime_config.get("api_key", ""))
+                )
+            except Exception:  # noqa: BLE001 — can't validate offline; fall through and allow
+                available = []
+            if available and not ({target, bare_model(target)} & set(available)):
+                preview = ", ".join(available[:8]) + (" …" if len(available) > 8 else "")
+                await self._emit_slash(
+                    emit,
+                    f"Unknown model `{target}` for this provider.\n"
+                    f"Available: {preview}\n"
+                    f"Run `/model` for the full list, or `/provider` to switch profiles.",
+                )
+                return
         try:
             self.runtime.reload({"model": target})
         except Exception as exc:

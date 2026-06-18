@@ -568,7 +568,20 @@ def create_diff(original: str, modified: str, file_name: str = "file.txt", conte
             original_lines, modified_lines, fromfile=f"a/{file_name}", tofile=f"b/{file_name}", n=3
         )
 
-        return "".join(diff)
+        # difflib does not emit the git-style "\ No newline at end of file" marker
+        # when a body line lacks a trailing newline; it just leaves the line without
+        # a "\n", which glues it to the next line on join. Emit the marker explicitly
+        # so the diff stays line-oriented and apply_diff can round-trip it correctly.
+        out = []
+        for line in diff:
+            if line.startswith(("+++", "---", "@@")):
+                out.append(line)
+            elif line.endswith("\n"):
+                out.append(line)
+            else:
+                out.append(line + "\n")
+                out.append("\\ No newline at end of file\n")
+        return "".join(out)
 
     except Exception as e:
         return f"Error creating diff: {e!s}"
@@ -594,9 +607,19 @@ def apply_diff(original: str, diff: str, context_variables: dict | None = None) 
 
         result = []
         current_line = 0
+        prev_body_prefix = ""
 
         for diff_line in diff_lines:
             if diff_line.startswith("+++") or diff_line.startswith("---"):
+                continue
+            elif diff_line.startswith("\\"):
+                # git-style "\ No newline at end of file" marker: the previous diff
+                # body line had no trailing newline. It only affects emitted output
+                # when that line was a "+" addition (the "+" branch appends a "\n"
+                # unconditionally); for context lines the original line-ending state
+                # is already preserved, and for "-" deletions nothing was emitted.
+                if prev_body_prefix == "+" and result and result[-1].endswith("\n"):
+                    result[-1] = result[-1][:-1]
                 continue
             elif diff_line.startswith("@@"):
                 match = re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff_line)
@@ -607,24 +630,21 @@ def apply_diff(original: str, diff: str, context_variables: dict | None = None) 
                         current_line += 1
             elif diff_line.startswith("+") and not diff_line.startswith("+++"):
                 result.append(diff_line[1:] + "\n")
+                prev_body_prefix = "+"
             elif diff_line.startswith("-") and not diff_line.startswith("---"):
                 current_line += 1
+                prev_body_prefix = "-"
             elif diff_line.startswith(" "):
                 if current_line < len(lines):
                     result.append(lines[current_line])
                     current_line += 1
+                prev_body_prefix = " "
 
         while current_line < len(lines):
             result.append(lines[current_line])
             current_line += 1
 
-        output = "".join(result)
-        if output.endswith("\n") and not original.endswith("\n"):
-            output = output[:-1]
-        elif not output.endswith("\n") and original.endswith("\n"):
-            output += "\n"
-
-        return output.rstrip("\n") if not original.endswith("\n") else output
+        return "".join(result)
 
     except Exception as e:
         return f"Error applying diff: {e!s}"
@@ -678,7 +698,10 @@ def find_and_replace(
                 count = content.count(search)
             else:
                 pattern = re.compile(re.escape(search), re.IGNORECASE)
-                new_content, count = pattern.subn(replace, content)
+                # Use a callable replacement so backslash sequences in `replace`
+                # (\n, \t, \1, \g<name>, ...) stay literal, matching the semantics
+                # of the case-sensitive str.replace path above.
+                new_content, count = pattern.subn(lambda _m: replace, content)
 
         if count > 0:
             with open(path, "w", encoding="utf-8") as f:

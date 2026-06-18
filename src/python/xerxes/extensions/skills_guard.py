@@ -139,7 +139,7 @@ def scan_skill(
         return ScanResult(is_safe=False, reasons=[f"Unreadable SKILL.md: {exc}"])
 
     safe = scan_context_content(content, filename=str(skill_md))
-    if safe.startswith("[BLOCKED:"):
+    if "[BLOCKED:" in safe:
         injection = True
         reasons.append("Prompt injection detected in SKILL.md")
 

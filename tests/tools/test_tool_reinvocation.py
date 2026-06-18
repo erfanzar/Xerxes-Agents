@@ -108,6 +108,9 @@ class _FakeLLM(BaseLLM):
         for chunk in response:
             yield chunk
 
+    async def close(self) -> None:
+        pass
+
 
 def test_manage_messages_adds_post_tool_rules_for_native_tool_mode():
     agent = Agent(model="gpt-4o-mini", functions=[_tool_example])

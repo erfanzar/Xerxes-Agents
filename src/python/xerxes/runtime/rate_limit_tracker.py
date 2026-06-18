@@ -56,6 +56,10 @@ class RateLimitState:
         remaining_tokens: Tokens still available in the current window.
         reset_at: Epoch seconds when the request bucket resets, if known.
         retry_after: Explicit retry hint in seconds from the most recent 429.
+        retry_after_until: Absolute epoch seconds until which the most recent
+            ``retry-after`` window remains active. Stored as a deadline (rather
+            than a duration relative to ``last_updated``) so a later healthy
+            response that refreshes ``last_updated`` cannot re-arm a stale hint.
         last_updated: Wall-clock time when this snapshot was last refreshed.
     """
 
@@ -65,6 +69,7 @@ class RateLimitState:
     remaining_tokens: int | None = None
     reset_at: float | None = None
     retry_after: float | None = None
+    retry_after_until: float | None = None
     last_updated: float = field(default_factory=time.time)
 
 
@@ -140,6 +145,7 @@ class RateLimitTracker:
             v = self._pluck(headers, self.HEADER_RETRY_AFTER)
             if (parsed := _parse_float(v)) is not None:
                 state.retry_after = parsed
+                state.retry_after_until = now + parsed
             state.last_updated = now
             return state
 
@@ -157,7 +163,7 @@ class RateLimitTracker:
         st = self.state(provider, model)
         if st is None:
             return False
-        if st.retry_after and st.last_updated + st.retry_after > time.time():
+        if st.retry_after_until is not None and st.retry_after_until > time.time():
             return True
         # Check both ratios — whichever signals first wins.
         for limit, remaining in ((st.limit_requests, st.remaining_requests), (st.limit_tokens, st.remaining_tokens)):
@@ -178,8 +184,8 @@ class RateLimitTracker:
         st = self.state(provider, model)
         if st is None:
             return 0
-        if st.retry_after:
-            remaining_window = st.last_updated + st.retry_after - time.time()
+        if st.retry_after_until is not None:
+            remaining_window = st.retry_after_until - time.time()
             if remaining_window > 0:
                 return int(remaining_window * 1000)
         if not self.should_throttle(provider, model):

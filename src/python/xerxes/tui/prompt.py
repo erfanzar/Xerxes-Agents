@@ -93,23 +93,57 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
 class SlashCompleter(Completer):
     """Completer for slash commands and registered skills."""
 
+    _EFFORT_LEVELS = ("off", "low", "medium", "high")
+
     def __init__(self, commands: list[tuple[str, str]] = SLASH_COMMANDS) -> None:
         """Seed the completer with built-in ``(name, description)`` pairs."""
         self._commands = commands
         self._skills: list[str] = []
+        self._models: list[str] = []
+        self._active_model: str = ""
 
     def set_skills(self, skills: list[str]) -> None:
         """Replace the dynamic skill list (deduplicated, sorted)."""
         self._skills = sorted(set(skills))
 
-    def get_completions(self, document: Document, complete_event: CompleteEvent):
-        """Yield matching slash commands and skills for the input under the cursor.
+    def set_models(self, models: list[str], active: str = "") -> None:
+        """Replace the model list used for ``/model`` argument completion."""
+        self._models = list(dict.fromkeys(m for m in models if m))
+        self._active_model = active
 
-        Only fires when the text starts with ``/`` and contains no space —
-        post-space we let the underlying command parser handle args."""
+    def get_completions(self, document: Document, complete_event: CompleteEvent):
+        """Yield slash commands/skills, or argument values for ``/model`` & ``/thinking``.
+
+        For a bare ``/cmd`` (no space) we complete command + skill names. After
+        a space we complete arguments for commands with a known value set:
+        ``/model`` → provider model ids, ``/thinking``/``/reasoning`` → effort
+        levels. This is why the menu now appears as you type ``/model ``."""
         text = document.text_before_cursor
 
         if not text.startswith("/"):
+            return
+
+        # Argument completion (post-space) for the commands that have choices.
+        arg_match = re.match(r"^/(model|thinking|reasoning)\s+(.*)$", text, re.IGNORECASE)
+        if arg_match:
+            arg = arg_match.group(2)
+            arg_l = arg.lower()
+            if arg_match.group(1).lower() == "model":
+                for name in self._models:
+                    if arg_l and arg_l not in name.lower():
+                        continue
+                    is_active = name == self._active_model
+                    yield Completion(
+                        name,
+                        start_position=-len(arg),
+                        display=("● " + name) if is_active else name,
+                        display_meta="active" if is_active else "model",
+                    )
+            else:
+                for level in self._EFFORT_LEVELS:
+                    if arg_l and not level.startswith(arg_l):
+                        continue
+                    yield Completion(level, start_position=-len(arg), display=level, display_meta="effort")
             return
 
         if " " in text:
@@ -605,6 +639,7 @@ class FooterRenderer:
         self._running = False
         self._plan_mode = False
         self._activity_mode = "code"
+        self._reasoning_effort = "off"
         self._context_used = 0
         self._context_max = 0
         self._tip = "shift-tab: mode  ctrl-j: newline"
@@ -637,6 +672,10 @@ class FooterRenderer:
     def set_activity_mode(self, mode: str) -> None:
         """Record the non-plan activity label (``"code"`` / ``"researcher"`` / ...)."""
         self._activity_mode = mode or "code"
+
+    def set_reasoning_effort(self, effort: str) -> None:
+        """Record the current thinking effort (``off``/``low``/``medium``/``high``) for the footer."""
+        self._reasoning_effort = effort or "off"
 
     def set_context(self, used: int, max_: int) -> None:
         """Record used / max context tokens (clamped at 0)."""
@@ -678,6 +717,7 @@ class FooterRenderer:
         model = self._model or "—"
         agent = f"agent ({model} {spinner})"
         mode = f"mode: {'plan' if self._plan_mode else self._activity_mode}"
+        think = f"think: {self._reasoning_effort}"
         columns = self._terminal_columns()
 
         cwd_max = max(20, columns // 3)
@@ -688,6 +728,7 @@ class FooterRenderer:
         if self._branch:
             left_segments.append(self._branch)
         left_segments.append(mode)
+        left_segments.append(think)
         left_segments.append(self._tip)
         left = "  ".join(left_segments)
 
@@ -1132,9 +1173,18 @@ class PersistentPrompt:
         """Replace the slash-command skill list so completions stay in sync."""
         self._completer.set_skills(skills)
 
+    def set_models(self, models: list[str], active: str = "") -> None:
+        """Feed the provider's model ids to the completer for ``/model`` completion."""
+        self._completer.set_models(models, active)
+
     def set_context(self, used: int, max_: int) -> None:
         """Update the footer's context-usage gauge."""
         self._footer.set_context(used, max_)
+        self._invalidate()
+
+    def set_reasoning_effort(self, effort: str) -> None:
+        """Update the footer's thinking-effort indicator."""
+        self._footer.set_reasoning_effort(effort)
         self._invalidate()
 
     def set_queue_count(self, count: int) -> None:

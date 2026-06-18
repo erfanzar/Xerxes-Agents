@@ -84,12 +84,17 @@ class _BreakerState:
         failures: Monotonic timestamps of failures inside the rolling window.
         consecutive_successes: HALF_OPEN successes accumulated so far.
         opened_at: Monotonic timestamp at which the breaker last opened.
+        probe_in_flight: Whether a HALF_OPEN trial call is currently
+            outstanding. Limits HALF_OPEN to a single in-flight probe so a
+            recovering downstream is not re-flooded; cleared by
+            ``record_success`` / ``record_failure``.
     """
 
     state: CircuitState = CircuitState.CLOSED
     failures: list[float] = field(default_factory=list)
     consecutive_successes: int = 0
     opened_at: float = 0.0
+    probe_in_flight: bool = False
 
 
 class CircuitBreakerRegistry:
@@ -114,7 +119,10 @@ class CircuitBreakerRegistry:
         """Decide whether a call against ``key`` should proceed.
 
         Transitions an OPEN breaker to HALF_OPEN once ``cooldown_seconds``
-        have elapsed and returns ``True`` so the caller can probe.
+        have elapsed and returns ``True`` so the caller can probe. HALF_OPEN
+        admits only a single in-flight probe at a time; concurrent callers
+        are rejected until that probe resolves via ``record_success`` /
+        ``record_failure``.
         """
 
         now = time.monotonic() if now is None else now
@@ -126,28 +134,34 @@ class CircuitBreakerRegistry:
                 if now - s.opened_at >= self.config.cooldown_seconds:
                     s.state = CircuitState.HALF_OPEN
                     s.consecutive_successes = 0
+                    s.probe_in_flight = True
                     return True
                 return False
+            if s.probe_in_flight:
+                return False
+            s.probe_in_flight = True
             return True
 
     def record_success(self, key: str, *, now: float | None = None) -> None:
         """Note a successful call against ``key``.
 
         HALF_OPEN breakers transition to CLOSED once enough consecutive
-        successes accumulate; CLOSED breakers reset their failure window.
+        successes accumulate. CLOSED breakers do NOT discard the rolling
+        failure window on a single success; stale failures age out via the
+        time-based cutoff in :meth:`record_failure` so intermittent failures
+        still accumulate toward the threshold.
         """
 
         now = time.monotonic() if now is None else now
         with self._lock:
             s = self._entry(key)
             if s.state == CircuitState.HALF_OPEN:
+                s.probe_in_flight = False
                 s.consecutive_successes += 1
                 if s.consecutive_successes >= self.config.success_threshold:
                     s.state = CircuitState.CLOSED
                     s.failures.clear()
                     s.consecutive_successes = 0
-            elif s.state == CircuitState.CLOSED:
-                s.failures.clear()
 
     def record_failure(self, key: str, *, now: float | None = None) -> bool:
         """Note a failed call against ``key`` and return whether it tripped the breaker.
@@ -166,6 +180,7 @@ class CircuitBreakerRegistry:
                 s.state = CircuitState.OPEN
                 s.opened_at = now
                 s.consecutive_successes = 0
+                s.probe_in_flight = False
                 return True
             if s.state == CircuitState.CLOSED and len(s.failures) >= self.config.failure_threshold:
                 s.state = CircuitState.OPEN

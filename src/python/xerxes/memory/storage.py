@@ -478,7 +478,8 @@ class RAGStorage(MemoryStorage):
         vec = [0.0] * dim
         for word, count in word_freq.items():
             tf = count / total
-            idx = hash(word) % dim
+            word_hash = int.from_bytes(hashlib.blake2b(word.encode(), digest_size=8).digest(), "little")
+            idx = word_hash % dim
             vec[idx] += tf
 
         norm = sum(v * v for v in vec) ** 0.5
@@ -541,7 +542,12 @@ class RAGStorage(MemoryStorage):
 
         success = self.backend.save(key, data)
         if success and isinstance(data, str | dict):
-            text = str(data) if not isinstance(data, str) else data
+            if isinstance(data, str):
+                text = data
+            elif isinstance(data.get("content"), str):
+                text = data["content"]
+            else:
+                text = str(data)
             try:
                 vec = self._compute_embedding(text)
                 self.embeddings[key] = vec

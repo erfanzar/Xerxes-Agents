@@ -44,20 +44,29 @@ class UrlSafetyDecision:
     reason: str = ""
 
 
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
-
 _DEFAULT_ALLOWLIST: frozenset[str] = frozenset()
 _DENY_SCHEMES: frozenset[str] = frozenset({"file", "ftp", "gopher", "data"})
+
+
+def _is_internal_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if ``addr`` is a private/internal/non-routable address.
+
+    Uses the stdlib ``ipaddress`` classification rather than a hand-rolled
+    network list so that we correctly catch IPv4-mapped IPv6 literals
+    (e.g. ``::ffff:169.254.169.254``), the unspecified addresses
+    (``0.0.0.0`` / ``::``), and the full set of reserved/link-local ranges."""
+    # Unwrap IPv4-mapped IPv6 literals (e.g. ::ffff:169.254.169.254) so the
+    # embedded IPv4 address is classified, not the IPv6 wrapper.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_unspecified
+        or addr.is_multicast
+    )
 
 
 def _classify_host(host: str) -> bool:
@@ -74,7 +83,7 @@ def _classify_host(host: str) -> bool:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False  # hostname — let caller decide based on policy
-    return any(addr in net for net in _PRIVATE_NETWORKS)
+    return _is_internal_address(addr)
 
 
 def is_url_safe(url: str, *, allowlist: frozenset[str] = _DEFAULT_ALLOWLIST) -> bool:

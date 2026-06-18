@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,7 +59,7 @@ class SshSandboxBackend:
     def _resolve_config(self, **overrides: Any) -> SshBackendConfig:
         """Return the active config, applying per-call ``overrides`` on a copy."""
         if self._config is not None:
-            base = self._config
+            base = dataclasses.replace(self._config)
         else:
             host = overrides.pop("ssh_host", None) or os.environ.get("XERXES_SSH_HOST")
             if not host:

@@ -23,6 +23,7 @@ presence of ``sentence_transformers``, falling back to hashing."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import typing as tp
@@ -77,7 +78,8 @@ class HashEmbedder(Embedder):
         vec = [0.0] * self.dim
         total = float(len(tokens))
         for tok in tokens:
-            idx = (hash(tok) & 0x7FFFFFFF) % self.dim
+            tok_hash = int.from_bytes(hashlib.blake2b(tok.encode(), digest_size=8).digest(), "little")
+            idx = tok_hash % self.dim
             vec[idx] += 1.0 / total
         norm = sum(v * v for v in vec) ** 0.5
         if norm > 0:

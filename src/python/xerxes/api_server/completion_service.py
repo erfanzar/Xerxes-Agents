@@ -111,7 +111,7 @@ class CompletionService:
                 True,
             ),
         )
-        usage_info = response.response.usage
+        usage_info = getattr(response.response, "usage", None)
         return ChatCompletionResponse(
             model=request.model,
             choices=[
@@ -155,31 +155,52 @@ class CompletionService:
         )
         if isinstance(stream_result, ResponseResult):
             return
+        # Strip inline ``<think>...</think>`` reasoning from streamed deltas so SSE
+        # clients see only the visible answer. Reasoning models (MiniMax M-series,
+        # DeepSeek-R1, etc.) emit chain-of-thought inline in ``content``; the parser
+        # is a pure pass-through for models that don't use think tags.
+        from ..streaming.events import TextChunk
+        from ..streaming.loop import _ThinkingParser
+
+        thinking_parser = _ThinkingParser()
+
+        def _sse_delta(text: str) -> bytes:
+            stream_response = ChatCompletionStreamResponse(
+                model=request.model,
+                choices=[
+                    ChatCompletionStreamResponseChoice(
+                        index=0,
+                        delta=DeltaMessage(role="assistant", content=text),
+                        finish_reason=None,
+                    )
+                ],
+                usage=UsageInfo.model_construct(
+                    completion_tokens=getattr(usage_info, "completion_tokens", 0) or 0,
+                    completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
+                    processing_time=getattr(usage_info, "processing_time", 0.0) or 0.0,
+                    prompt_tokens=getattr(usage_info, "prompt_tokens", 0) or 0,
+                    prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
+                    tokens_per_second=getattr(usage_info, "tokens_per_second", 0.0) or 0.0,
+                    total_tokens=getattr(usage_info, "total_tokens", 0) or 0,
+                ),
+            )
+            return f"data: {stream_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()
+
         for chunk in stream_result:
             if isinstance(chunk, StreamChunk):
                 usage_info = getattr(chunk.chunk, "usage", None) if chunk.chunk is not None else None
-
-                stream_response = ChatCompletionStreamResponse(
-                    model=request.model,
-                    choices=[
-                        ChatCompletionStreamResponseChoice(
-                            index=0,
-                            delta=DeltaMessage(role="assistant", content=chunk.content),
-                            finish_reason=None,
-                        )
-                    ],
-                    usage=UsageInfo.model_construct(
-                        completion_tokens=getattr(usage_info, "completion_tokens", 0) or 0,
-                        completion_tokens_details=getattr(usage_info, "completion_tokens_details", None),
-                        processing_time=getattr(usage_info, "processing_time", 0.0) or 0.0,
-                        prompt_tokens=getattr(usage_info, "prompt_tokens", 0) or 0,
-                        prompt_tokens_details=getattr(usage_info, "prompt_tokens_details", None),
-                        tokens_per_second=getattr(usage_info, "tokens_per_second", 0.0) or 0.0,
-                        total_tokens=getattr(usage_info, "total_tokens", 0) or 0,
-                    ),
+                visible = "".join(
+                    ev.text for ev in thinking_parser.process(chunk.content or "") if isinstance(ev, TextChunk)
                 )
-                yield f"data: {stream_response.model_dump_json(exclude_unset=True, exclude_none=True)}\n\n".encode()
+                if not visible:
+                    continue
+                yield _sse_delta(visible)
                 await asyncio.sleep(0)
+
+        # Flush any visible text held back across the final chunk boundary.
+        tail = "".join(ev.text for ev in thinking_parser.process("") if isinstance(ev, TextChunk))
+        if tail:
+            yield _sse_delta(tail)
 
         final_response = ChatCompletionStreamResponse(
             model=request.model,

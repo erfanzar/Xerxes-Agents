@@ -75,6 +75,9 @@ class _FakeLLM(BaseLLM):
         for chunk in response:
             yield chunk
 
+    async def close(self) -> None:
+        pass
+
 
 def _write_runtime_plugin(path: Path, *, with_hooks: bool = False) -> None:
     hook_block = ""

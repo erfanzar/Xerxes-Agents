@@ -31,6 +31,19 @@ from typing import TypeVar
 T = TypeVar("T")
 
 
+class MCPReconnectError(RuntimeError):
+    """Raised when :func:`reconnect_with_backoff` exhausts all attempts.
+
+    Wraps the final underlying failure with a single, credential-scrubbed
+    message. The original exception is preserved via ``__cause__`` (``raise
+    ... from``). Using a dedicated single-argument exception avoids trying to
+    reconstruct the original type, which fails for exceptions whose
+    constructor is not ``(str) -> exc`` (e.g. ``ExceptionGroup`` /
+    ``BaseExceptionGroup`` raised by anyio task groups in the MCP SDK
+    transports).
+    """
+
+
 @dataclass
 class ReconnectPolicy:
     """Exponential-backoff parameters for :func:`reconnect_with_backoff`.
@@ -53,7 +66,7 @@ _CRED_PATTERNS = [
     re.compile(r"(token)[\s:=\"']+([A-Za-z0-9._\-]{16,})", re.I),
     re.compile(r"(authorization:\s*bearer)\s+([A-Za-z0-9._\-]+)", re.I),
     re.compile(r"(password)[\s:=\"']+(\S+)", re.I),
-    re.compile(r"sk-[A-Za-z0-9]{16,}"),
+    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
 ]
 
 
@@ -94,10 +107,13 @@ def reconnect_with_backoff(
                 break
             delay = min(p.max_seconds, p.base_seconds * (p.factor ** (attempt - 1)))
             sleep(delay)
-    # Re-raise with credentials scrubbed.
+    # Re-raise with credentials scrubbed. Do not reconstruct the original
+    # exception type -- many exceptions (e.g. ExceptionGroup) cannot be
+    # rebuilt from a single string. Wrap in a dedicated single-message error
+    # and chain the original via ``from`` so it is never lost.
     assert last_exc is not None
     scrubbed = scrub_credentials(str(last_exc))
-    raise type(last_exc)(scrubbed) from last_exc
+    raise MCPReconnectError(scrubbed) from last_exc
 
 
-__all__ = ["ReconnectPolicy", "reconnect_with_backoff", "scrub_credentials"]
+__all__ = ["MCPReconnectError", "ReconnectPolicy", "reconnect_with_backoff", "scrub_credentials"]

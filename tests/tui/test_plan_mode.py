@@ -39,6 +39,9 @@ class _PromptStub:
     def set_activity_mode(self, mode: str) -> None:
         self.activity_mode = mode
 
+    def set_reasoning_effort(self, effort: str) -> None:
+        self.reasoning_effort = effort
+
     def append_line(self, line: str) -> None:
         self.lines.append(line)
 

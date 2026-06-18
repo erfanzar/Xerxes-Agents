@@ -163,6 +163,11 @@ class BridgeServer:
         self._query_thread: threading.Thread | None = None
         self._permission_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self._question_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        # Id of the permission/question request currently being waited on, used
+        # to reject stale responses that arrive after a cancel or that belong to
+        # a previous turn (an empty string means "no active prompt").
+        self._active_permission_id: str = ""
+        self._active_question_id: str = ""
 
         set_ask_user_question_callback(self._ask_question)
 
@@ -1263,6 +1268,13 @@ class BridgeServer:
         self._suppressing_tag = False
         self._suppress_buf.clear()
         self._pending_tool_inputs = None
+        # Discard any permission/question response that was enqueued for a
+        # previous (possibly cancelled) turn so it cannot auto-resolve a fresh
+        # prompt raised during this turn.
+        self._active_permission_id = ""
+        self._active_question_id = ""
+        self._drain_queue(self._permission_queue)
+        self._drain_queue(self._question_queue)
 
         if self._wire_mode:
             self._maybe_compact_context_wire()
@@ -1347,14 +1359,22 @@ class BridgeServer:
                 )
 
             elif isinstance(event, PermissionRequest):
+                # Drain any response left over from a previous (possibly
+                # cancelled) prompt before issuing a fresh request id, so a
+                # stale verdict can never auto-resolve this request.
+                self._drain_queue(self._permission_queue)
                 if self._wire_mode:
-                    self._emit_wire_permission_request(self._current_tool_call_id, event.tool_name, event.description)
+                    self._active_permission_id = self._emit_wire_permission_request(
+                        self._current_tool_call_id, event.tool_name, event.description
+                    )
 
                     event.granted = self._wait_for_permission()
                 else:
+                    self._active_permission_id = str(uuid.uuid4())
                     self._emit(
                         "permission_request",
                         {
+                            "id": self._active_permission_id,
                             "tool_name": event.tool_name,
                             "description": event.description,
                             "inputs": event.inputs,
@@ -1646,14 +1666,39 @@ class BridgeServer:
             body=f"Summarized {len(older)} messages → kept {len(self.state.messages)} messages.",
         )
 
+    @staticmethod
+    def _drain_queue(q: queue.Queue[dict[str, Any]]) -> None:
+        """Discard every item currently buffered in ``q`` without blocking.
+
+        Called at the start of each turn so a permission/question response that
+        was enqueued after a cancel (or for a previous turn) can never be popped
+        as the answer to a *new* prompt.
+        """
+        while not q.empty():
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
     def _wait_for_permission(self) -> bool:
-        """Block the query thread until the TUI answers; ``True`` means approved (incl. for-session)."""
+        """Block the query thread until the TUI answers; ``True`` means approved (incl. for-session).
+
+        Responses whose ``request_id`` does not match the active prompt are
+        discarded so a stale verdict (e.g. one that arrived after a cancel)
+        cannot auto-resolve an unrelated permission request.
+        """
         while True:
             if self._cancel:
+                self._active_permission_id = ""
                 return False
             try:
                 msg = self._permission_queue.get(timeout=0.1)
                 params = msg.get("params", {})
+                request_id = params.get("request_id", "")
+                if self._active_permission_id and request_id and request_id != self._active_permission_id:
+                    # Stale response for a previous prompt — drop it and keep waiting.
+                    continue
+                self._active_permission_id = ""
                 response = params.get("response")
                 if response is not None:
                     return response in ("approve", "approve_for_session")
@@ -1663,8 +1708,10 @@ class BridgeServer:
 
     def _ask_question(self, question: str) -> str:
         """Synchronously prompt the user for an answer; returns ``"[cancelled]"`` on cancel."""
+        # Drop any answer left over from a previous prompt before arming a new one.
+        self._drain_queue(self._question_queue)
         if self._wire_mode:
-            self._emit_wire_question_request(
+            self._active_question_id = self._emit_wire_question_request(
                 [
                     {
                         "id": str(uuid.uuid4()),
@@ -1675,12 +1722,14 @@ class BridgeServer:
                 ]
             )
         else:
-            self._emit("question_request", {"question": question})
+            self._active_question_id = str(uuid.uuid4())
+            self._emit("question_request", {"id": self._active_question_id, "question": question})
         return self._wait_for_question_response()
 
     def _ask_free_form(self, question: str) -> str:
         """Wire-protocol free-form prompt; returns the user's answer or ``"[cancelled]"``."""
-        self._emit_wire_question_request(
+        self._drain_queue(self._question_queue)
+        self._active_question_id = self._emit_wire_question_request(
             [
                 {
                     "id": str(uuid.uuid4()),
@@ -1716,13 +1765,24 @@ class BridgeServer:
         return f"Created and switched to profile '{name}'  (model: {model})"
 
     def _wait_for_question_response(self) -> str:
-        """Block the query thread until the TUI returns an answer."""
+        """Block the query thread until the TUI returns an answer.
+
+        Responses whose ``request_id`` does not match the active prompt are
+        discarded so a stale answer (e.g. one that arrived after a cancel)
+        cannot be consumed as the answer to an unrelated question.
+        """
         while True:
             if self._cancel:
+                self._active_question_id = ""
                 return "[cancelled]"
             try:
                 msg = self._question_queue.get(timeout=0.1)
                 params = msg.get("params", {})
+                request_id = params.get("request_id", "")
+                if self._active_question_id and request_id and request_id != self._active_question_id:
+                    # Stale response for a previous prompt — drop it and keep waiting.
+                    continue
+                self._active_question_id = ""
                 answers = params.get("answers")
                 if isinstance(answers, dict):
                     return "\n".join(str(v) for v in answers.values())
@@ -1881,6 +1941,14 @@ class BridgeServer:
         if not command.startswith("/"):
             self._emit_error(f"Not a slash command: {command}")
             return
+
+        # A slash command (e.g. interactive ``/provider``) may raise its own
+        # question prompts; clear any answer left over from a previous turn so
+        # it cannot be consumed as the answer to a fresh prompt.
+        self._active_permission_id = ""
+        self._active_question_id = ""
+        self._drain_queue(self._permission_queue)
+        self._drain_queue(self._question_queue)
 
         parts = command[1:].split(None, 1)
         cmd = parts[0].lower() if parts else ""
@@ -2501,7 +2569,8 @@ class BridgeServer:
                     for p in plist
                 ]
                 options.append({"label": NEW, "description": "Add a new provider profile"})
-                self._emit_wire_question_request(
+                self._drain_queue(self._question_queue)
+                self._active_question_id = self._emit_wire_question_request(
                     [
                         {
                             "id": "provider",

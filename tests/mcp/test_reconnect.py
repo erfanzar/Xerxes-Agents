@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import pytest
-from xerxes.mcp.reconnect import ReconnectPolicy, reconnect_with_backoff, scrub_credentials
+from xerxes.mcp.reconnect import MCPReconnectError, ReconnectPolicy, reconnect_with_backoff, scrub_credentials
 
 
 class TestScrubCredentials:
@@ -62,8 +62,10 @@ class TestReconnect:
         def connect():
             raise ConnectionError("nope")
 
-        with pytest.raises(ConnectionError):
+        with pytest.raises(MCPReconnectError) as exc_info:
             reconnect_with_backoff(connect, policy=ReconnectPolicy(max_attempts=2), sleep=lambda s: None)
+        # Original exception is preserved via chaining.
+        assert isinstance(exc_info.value.__cause__, ConnectionError)
 
     def test_on_error_callback(self):
         seen = []
@@ -74,7 +76,7 @@ class TestReconnect:
         def on_err(attempt, exc):
             seen.append((attempt, type(exc).__name__))
 
-        with pytest.raises(ConnectionError) as exc_info:
+        with pytest.raises(MCPReconnectError) as exc_info:
             reconnect_with_backoff(
                 connect, policy=ReconnectPolicy(max_attempts=2), sleep=lambda s: None, on_error=on_err
             )
@@ -91,7 +93,7 @@ class TestReconnect:
         def sleep(s):
             delays.append(s)
 
-        with pytest.raises(ConnectionError):
+        with pytest.raises(MCPReconnectError):
             reconnect_with_backoff(
                 connect,
                 policy=ReconnectPolicy(max_attempts=4, base_seconds=1, factor=2, max_seconds=10),
@@ -99,3 +101,14 @@ class TestReconnect:
             )
         # 4 attempts → 3 sleeps; delays follow 1, 2, 4.
         assert delays == [1.0, 2.0, 4.0]
+
+    def test_exception_group_does_not_crash(self):
+        # anyio task groups (used by the MCP SSE/streamable-HTTP transports)
+        # raise ExceptionGroup, whose constructor is not (str) -> exc. The
+        # helper must not try to reconstruct it.
+        def connect():
+            raise ExceptionGroup("connect failed", [ConnectionError("down")])
+
+        with pytest.raises(MCPReconnectError) as exc_info:
+            reconnect_with_backoff(connect, policy=ReconnectPolicy(max_attempts=1), sleep=lambda s: None)
+        assert isinstance(exc_info.value.__cause__, ExceptionGroup)

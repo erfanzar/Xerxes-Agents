@@ -67,6 +67,41 @@ def _unified_diff(old: str, new: str, filename: str = "", context: int = 3) -> s
     return result
 
 
+def _closest_match_hint(content: str, old_string: str, max_candidates: int = 3) -> str:
+    """Diagnose a failed FileEdit by pointing at the closest existing lines.
+
+    A no-match edit is the single highest-frequency tool failure; surfacing the
+    nearest line(s) with their numbers turns a blind retry loop into a fixable
+    one (usually whitespace/indentation drift or stale content).
+
+    Args:
+        content: Current file text.
+        old_string: The text the caller tried (and failed) to match.
+        max_candidates: Maximum number of near-miss lines to report.
+
+    Returns:
+        A short hint string, never raising.
+    """
+    file_lines = content.splitlines()
+    probe = next((ln for ln in old_string.splitlines() if ln.strip()), old_string).strip()
+    if not probe or not file_lines:
+        return (
+            "Hint: text not present — re-read the file before retrying (it may target the wrong file or stale content)."
+        )
+    scored = sorted(
+        ((difflib.SequenceMatcher(None, probe, fl.strip()).ratio(), idx, fl) for idx, fl in enumerate(file_lines)),
+        key=lambda t: t[0],
+        reverse=True,
+    )
+    best = [s for s in scored[:max_candidates] if s[0] >= 0.5]
+    if not best:
+        return "Hint: no similar line found — re-read the file; old_string may target the wrong file or stale content."
+    out = ["Hint: closest existing lines (old_string must match EXACTLY, including whitespace):"]
+    for ratio, idx, fl in best:
+        out.append(f"  L{idx + 1} (~{int(ratio * 100)}% match): {fl.strip()[:120]}")
+    return "\n".join(out)
+
+
 class FileEditTool(AgentBaseFn):
     """Edit a file by replacing text with new content.
 
@@ -113,7 +148,7 @@ class FileEditTool(AgentBaseFn):
         count = content.count(old_string)
 
         if count == 0:
-            return "Error: old_string not found in file."
+            return "Error: old_string not found in file.\n" + _closest_match_hint(content, old_string)
         if count > 1 and not replace_all:
             return (
                 f"Error: old_string appears {count} times. "
@@ -265,20 +300,59 @@ def _has_ripgrep() -> bool:
 _agent_manager = None
 
 
+def _default_subagent_base() -> str:
+    """Build a scoped delegate-context base prompt for a spawned subagent.
+
+    A bare "You are a helpful AI assistant." leaves delegated work context-blind:
+    no project facts, no memory, no cwd. This layers in delegate etiquette, the
+    parent's project/workspace context (when an active session is bound), the
+    shared-memory note, and the working directory — without leaking the parent's
+    full conversation. Best-effort: every lookup degrades gracefully.
+    """
+    parts: list[str] = [
+        "You are a focused subagent spawned by a parent Xerxes agent to complete a "
+        "single delegated subtask. You do NOT see the parent's conversation, so work "
+        "only from the prompt you were given. Use your tools to take real action, "
+        "verify your work, and return a COMPLETE, self-contained result the parent "
+        "can use without a follow-up round-trip. You share this project's persistent "
+        "memory: read what's relevant and record durable findings with the "
+        "agent_memory_* tools.",
+    ]
+    try:
+        from ..runtime.session_context import get_active_session
+
+        session = get_active_session()
+        if session is not None:
+            ctx = session.workspace.load_context()
+            if getattr(ctx, "prompt", ""):
+                parts.append(ctx.prompt)
+    except Exception:
+        pass
+    try:
+        parts.append(f"Working directory: {os.getcwd()}")
+    except Exception:
+        pass
+    return "\n\n".join(parts)
+
+
 def _build_subagent_system_prompt(
-    base: str = "You are a helpful AI assistant.",
+    base: str | None = None,
     *,
     include_active_skills: bool = False,
 ) -> str:
     """Build system prompt for spawned subagents.
 
     Args:
-        base: Base system prompt.
+        base: Base system prompt. When ``None``, a scoped delegate-context base
+            (project context + memory note + cwd) is built via
+            :func:`_default_subagent_base` so subagents aren't context-blind.
         include_active_skills: Whether to include active skills in prompt.
 
     Returns:
         Complete system prompt for subagent.
     """
+    if base is None:
+        base = _default_subagent_base()
     if not include_active_skills:
         return base
 
@@ -348,7 +422,7 @@ def _parse_agents_payload(raw: str) -> list[dict[str, Any]] | str:
 
     candidates = [stripped]
     # Normalise smart quotes to ASCII so json.loads stops choking on copy-pastes.
-    smart_q = {"“": '"', "”": '"', "‘": "'", "’": "'"}
+    smart_q = {"“": '"', "”": '"', "‘": "'", "’": "'"}  # noqa: RUF001 - keys are intentionally smart quotes
     norm = "".join(smart_q.get(ch, ch) for ch in stripped)
     if norm != stripped:
         candidates.append(norm)
@@ -1163,9 +1237,7 @@ class AskUserQuestionTool(AgentBaseFn):
         # we raise instead of fabricating an answer — the LLM would otherwise
         # read the fake string back as if the user had typed it.
         if _ask_user_question_callback is None:
-            raise RuntimeError(
-                "AskUserQuestion callback was never registered; daemon bootstrap is broken"
-            )
+            raise RuntimeError("AskUserQuestion callback was never registered; daemon bootstrap is broken")
         return _ask_user_question_callback(question)
 
 

@@ -49,7 +49,7 @@ from .events import (
     ToolStart,
     TurnDone,
 )
-from .messages import messages_to_anthropic, messages_to_openai
+from .messages import bound_tool_result, messages_to_anthropic, messages_to_openai
 from .permissions import (
     PermissionMode,
     check_permission,
@@ -102,6 +102,27 @@ class _ThinkingParser:
                 earliest_tag = tag
         return earliest_idx, earliest_tag
 
+    @staticmethod
+    def _partial_tail(text: str, tags: tuple[str, ...]) -> int:
+        """Length of the longest trailing run of ``text`` that is a proper prefix of a tag.
+
+        Returns ``0`` when no non-empty suffix of ``text`` starts any tag. The
+        held-back suffix is never the full tag (a complete tag is matched by
+        :meth:`_find_any` instead), so callers must keep it buffered until the
+        next chunk arrives in case the tag straddles a chunk boundary.
+        """
+
+        max_len = 0
+        for tag in tags:
+            # A split tag can hold back at most len(tag) - 1 characters.
+            limit = min(len(text), len(tag) - 1)
+            for k in range(limit, 0, -1):
+                if text[-k:] == tag[:k]:
+                    if k > max_len:
+                        max_len = k
+                    break
+        return max_len
+
     def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
         """Feed a streamed text fragment and emit any completed chunks.
 
@@ -119,12 +140,18 @@ class _ThinkingParser:
 
         events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
+        final_flush = not chunk_text
 
-        if not chunk_text and self._in_thinking:
+        if final_flush and self._in_thinking:
+            # End of stream while still inside a thinking block: any buffered
+            # partial close tag we held back can never complete, so treat it as
+            # reasoning content rather than dropping it.
+            if self._buffer:
+                self._thinking_buf += self._buffer
+                self._buffer = ""
             if self._thinking_buf:
                 events.append(ThinkingChunk(self._thinking_buf))
             self._thinking_buf = ""
-            self._buffer = ""
             self._in_thinking = False
             return events
 
@@ -132,9 +159,15 @@ class _ThinkingParser:
             if not self._in_thinking:
                 idx, tag = self._find_any(self._buffer, self._OPEN_TAGS)
                 if idx == -1:
-                    if self._buffer:
-                        events.append(TextChunk(self._buffer))
-                        self._buffer = ""
+                    # No complete open tag. Hold back a trailing fragment that
+                    # could be the start of one split across the next chunk
+                    # (e.g. "<thi" before "nk>"). On the final flush nothing
+                    # more is coming, so emit the whole buffer verbatim.
+                    hold = 0 if final_flush else self._partial_tail(self._buffer, self._OPEN_TAGS)
+                    emit = self._buffer[: len(self._buffer) - hold] if hold else self._buffer
+                    if emit:
+                        events.append(TextChunk(emit))
+                    self._buffer = self._buffer[len(self._buffer) - hold :] if hold else ""
                     break
                 if idx > 0:
                     events.append(TextChunk(self._buffer[:idx]))
@@ -145,8 +178,14 @@ class _ThinkingParser:
             else:
                 idx, tag = self._find_any(self._buffer, self._CLOSE_TAGS)
                 if idx == -1:
-                    self._thinking_buf += self._buffer
-                    self._buffer = ""
+                    # No complete close tag. Hold back a trailing fragment that
+                    # could be the start of one split across the next chunk
+                    # (e.g. "</thi" before "nk>") so the visible answer after it
+                    # is not swallowed into the thinking channel.
+                    hold = 0 if final_flush else self._partial_tail(self._buffer, self._CLOSE_TAGS)
+                    keep = self._buffer[: len(self._buffer) - hold] if hold else self._buffer
+                    self._thinking_buf += keep
+                    self._buffer = self._buffer[len(self._buffer) - hold :] if hold else ""
                     break
                 if idx > 0:
                     self._thinking_buf += self._buffer[:idx]
@@ -311,6 +350,7 @@ def run(
 
         text = ""
         thinking_text = ""
+        thinking_signature: str | None = None
         tool_calls: list[dict[str, Any]] = []
         in_tokens = 0
         out_tokens = 0
@@ -346,6 +386,7 @@ def run(
                     out_tokens = chunk.get("out_tokens", 0)
                     cache_read_tokens = chunk.get("cache_read_tokens", 0)
                     cache_creation_tokens = chunk.get("cache_creation_tokens", 0)
+                    thinking_signature = chunk.get("thinking_signature")
 
             remaining = thinking_parser.process("")
             for sub in remaining:
@@ -354,17 +395,51 @@ def run(
                     yield sub
         except Exception as e:
             logger.error("LLM streaming error: %s", e)
-            yield TextChunk(f"\n[Error: {e}]")
+            # Recoverable error: record whatever was already streamed so history
+            # stays consistent. Without this the partial assistant text is dropped
+            # and the dangling user message desyncs the conversation (next request
+            # 400s or the model loses what it just said). Append the partial turn +
+            # a concise marker, then close the turn cleanly with TurnDone so the
+            # daemon persists the consistent state and the model can recover next turn.
+            for sub in thinking_parser.process(""):
+                if isinstance(sub, ThinkingChunk):
+                    thinking_text += sub.text
+                    yield sub
+            err_note = f"[Error: the response was interrupted: {e}]"
+            combined = (f"{text}\n\n{err_note}" if text else err_note).strip()
+            msg_err: dict[str, Any] = {"role": "assistant", "content": combined, "tool_calls": []}
+            if thinking_text:
+                msg_err["thinking"] = thinking_text
+                if thinking_signature:
+                    msg_err["thinking_signature"] = thinking_signature
+            state.messages.append(msg_err)
+            if thinking_text:
+                state.thinking_content.append(thinking_text)
+            yield TextChunk(f"\n{err_note}")
+            yield TurnDone(
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                tool_calls_count=0,
+                model=model,
+            )
             return
 
-        msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": text,
-            "tool_calls": tool_calls,
-        }
-        if thinking_text:
-            msg["thinking"] = thinking_text
-        state.messages.append(msg)
+        # Skip appending an empty assistant turn (no visible text, no tool
+        # calls, no thinking). messages_to_anthropic/messages_to_openai do not
+        # serialise the 'thinking' key, so such a message would convert to an
+        # empty content body and the provider would reject the next request
+        # with HTTP 400.
+        if text or tool_calls or thinking_text:
+            msg: dict[str, Any] = {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": tool_calls,
+            }
+            if thinking_text:
+                msg["thinking"] = thinking_text
+                if thinking_signature:
+                    msg["thinking_signature"] = thinking_signature
+            state.messages.append(msg)
 
         if thinking_text:
             state.thinking_content.append(thinking_text)
@@ -400,7 +475,28 @@ def run(
         if not tool_calls:
             break
 
-        for tc in tool_calls:
+        for tc_index, tc in enumerate(tool_calls):
+            # Poll for cancellation BETWEEN tools so /cancel takes effect within the
+            # turn instead of only at the next turn boundary. Every tool_use in the
+            # assistant message needs a matching tool_result or the next request
+            # 400s, so backfill synthetic cancelled-results for this and all
+            # remaining (un-run) calls before returning.
+            if cancel_check and cancel_check():
+                for unrun_tc in tool_calls[tc_index:]:
+                    pid = unrun_tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                    unrun_tc["id"] = pid
+                    state.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": pid,
+                            "name": unrun_tc.get("name", ""),
+                            "content": "[Cancelled by user before execution]",
+                            "is_error": True,
+                        }
+                    )
+                yield TextChunk("\n[Cancelled]")
+                return
+
             tc_id = tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
             tc["id"] = tc_id
             tc_name = tc.get("name", "")
@@ -419,14 +515,9 @@ def run(
                 permitted = req.granted
 
             duration_ms = 0.0
+            is_error = not permitted
             if not permitted:
                 result = "Denied: user rejected this operation."
-                yield ToolEnd(
-                    name=tc_name,
-                    result=result,
-                    permitted=False,
-                    tool_call_id=tc_id,
-                )
             else:
                 t0 = time.monotonic()
                 if tool_executor:
@@ -434,23 +525,31 @@ def run(
                         result = tool_executor(tc_name, tc_input)
                     except Exception as e:
                         result = f"Error executing {tc_name}: {e}"
+                        is_error = True
                 else:
                     result = f"Tool '{tc_name}' executed (no executor configured)."
                 duration_ms = (time.monotonic() - t0) * 1000
 
-                yield ToolEnd(
-                    name=tc_name,
-                    result=result,
-                    permitted=True,
-                    tool_call_id=tc_id,
-                    duration_ms=duration_ms,
-                )
+            # Clamp oversized output so one tool can't poison the whole window.
+            result = bound_tool_result(result)
+            # A tool-level failure surfaced as an "Error:" string (FileEdit no-match,
+            # non-zero shell, etc.) should also be flagged so the model recovers.
+            if not is_error and isinstance(result, str) and result.lstrip()[:6].lower() == "error:":
+                is_error = True
+
+            yield ToolEnd(
+                name=tc_name,
+                result=result,
+                permitted=permitted,
+                tool_call_id=tc_id,
+                duration_ms=duration_ms,
+            )
             state.tool_executions.append(
                 {
                     "name": tc_name,
                     "inputs": tc_input,
                     "result": result,
-                    "duration_ms": duration_ms if permitted else 0.0,
+                    "duration_ms": duration_ms,
                     "permitted": permitted,
                     "tool_call_id": tc_id,
                 }
@@ -462,6 +561,7 @@ def run(
                     "tool_call_id": tc_id,
                     "name": tc_name,
                     "content": result,
+                    "is_error": is_error,
                 }
             )
     else:
@@ -658,6 +758,7 @@ def _stream_anthropic(
                     yield ThinkingChunk(delta.thinking)
 
         final = stream.get_final_message()
+        thinking_signature: str | None = None
         for block in final.content:
             if block.type == "tool_use":
                 tool_calls.append(
@@ -667,6 +768,10 @@ def _stream_anthropic(
                         "input": block.input,
                     }
                 )
+            elif block.type == "thinking":
+                # Capture the signature so the thinking block can be replayed on a
+                # later turn; Anthropic 400s on a text+tool_use turn that drops it.
+                thinking_signature = getattr(block, "signature", None) or thinking_signature
 
         in_tok = getattr(final.usage, "input_tokens", 0) or 0
         out_tok = getattr(final.usage, "output_tokens", 0) or 0
@@ -690,6 +795,7 @@ def _stream_anthropic(
             "out_tokens": out_tok,
             "cache_read_tokens": cache_read_tok,
             "cache_creation_tokens": cache_creation_tok,
+            "thinking_signature": thinking_signature,
         }
 
 
@@ -773,8 +879,13 @@ def _stream_openai_compat(
             else:
                 normalized_msg: dict[str, Any] = {"role": role}
 
+                # Preserve content alongside tool_calls: an assistant turn may
+                # carry both narration text and tool_calls, and dropping the
+                # text corrupts the history MiniMax sees on later turns.
                 if "tool_calls" in msg:
                     normalized_msg["tool_calls"] = msg["tool_calls"]
+                    if content:
+                        normalized_msg["content"] = content
                 else:
                     normalized_msg["content"] = content
                 if "tool_call_id" in msg:
@@ -802,6 +913,11 @@ def _stream_openai_compat(
             extra_body[param] = config[param]
     if extra_body:
         kwargs["extra_body"] = extra_body
+
+    # Reasoning effort (off/low/medium/high) for OpenAI-compatible providers that
+    # honour it (OpenAI o-series, MiniMax, etc.). Set via the ``/thinking`` command.
+    if config.get("thinking") and config.get("reasoning_effort"):
+        kwargs["reasoning_effort"] = config["reasoning_effort"]
 
     if config.get("debug"):
         debug_payload = {

@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import sys
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -76,6 +77,14 @@ SubmitFn = Callable[[ChannelMessage], str]
 # inbound silently with a log warning, otherwise a chat can grow the asyncio
 # lock waiters list without bound.
 _MAX_QUEUED_PER_CHAT = 4
+
+# Hard cap on the number of distinct sessions (AgentState + asyncio.Lock) we
+# retain. The session_key embeds an attacker-controllable thread_id (forum
+# topics), so without a ceiling a single allowlisted group member could post
+# into unboundedly many topics and grow _sessions / _session_locks forever.
+# When the cap is exceeded we evict the least-recently-used idle session;
+# sessions with in-flight turns are never evicted.
+_MAX_TRACKED_SESSIONS = 256
 
 
 def _parse_csv_set(value: str) -> set[str]:
@@ -297,8 +306,10 @@ class TelegramAgentGateway:
         self._base_system_prompt = ""
         self._tool_executor: Any = None
         self._tool_schemas: list[dict[str, Any]] = []
-        self._sessions: dict[str, AgentState] = {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        # OrderedDicts so we can evict least-recently-used sessions once the
+        # tracked-session cap is reached (see _touch_session / _evict_sessions).
+        self._sessions: OrderedDict[str, AgentState] = OrderedDict()
+        self._session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._polling_offset: int | None = None
         self._shutdown = False
         self._allowed_user_ids = _parse_csv_set(config.allowed_user_ids)
@@ -405,6 +416,11 @@ class TelegramAgentGateway:
             return
         self._inflight[session_key] = self._inflight.get(session_key, 0) + 1
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        # Mark this session most-recently-used and evict idle LRU sessions once
+        # the cap is exceeded, so attacker-controlled thread_ids cannot grow
+        # _sessions / _session_locks without bound.
+        self._touch_session(session_key)
+        self._evict_sessions(protect=session_key)
         try:
             async with lock:
                 # Snapshot AgentState.messages so we can roll back on a turn
@@ -620,7 +636,14 @@ class TelegramAgentGateway:
 
     @staticmethod
     def _format_channel_prompt(message: ChannelMessage) -> str:
-        """Render the user message into the structured prompt the agent sees."""
+        """Render the user message into the structured prompt the agent sees.
+
+        The user-supplied body is run through the prompt-injection scanner
+        before it is embedded, so the text the model actually consumes on
+        this turn carries the same neutralised content that is journalled and
+        reloaded on later turns. Scanning only the journal copy would leave
+        the live turn completely unprotected.
+        """
         username = message.metadata.get("username", "") if message.metadata else ""
         chat_type = message.metadata.get("chat_type", "") if message.metadata else ""
         return (
@@ -630,8 +653,39 @@ class TelegramAgentGateway:
             f"thread_id: {message.metadata.get('thread_id', '') if message.metadata else ''}\n"
             f"from_user_id: {message.channel_user_id or ''}\n"
             f"from_username: {username}\n\n"
-            f"{message.text}"
+            f"{_scan_inbound(message.text)}"
         )
+
+    def _touch_session(self, session_key: str) -> None:
+        """Mark ``session_key`` as most-recently-used for LRU eviction.
+
+        Moves the lock (and any materialised ``AgentState``) to the end of
+        their ``OrderedDict`` so the front always holds the least-recently
+        touched sessions, which are the ones eviction targets first.
+        """
+        if session_key in self._session_locks:
+            self._session_locks.move_to_end(session_key)
+        if session_key in self._sessions:
+            self._sessions.move_to_end(session_key)
+
+    def _evict_sessions(self, *, protect: str | None = None) -> None:
+        """Drop least-recently-used idle sessions once the tracked cap is hit.
+
+        Walks the ``_session_locks`` LRU front-to-back and removes the oldest
+        entries (and their paired ``AgentState``) until the number of tracked
+        sessions is back within ``_MAX_TRACKED_SESSIONS``. Sessions with an
+        in-flight turn — and the explicitly ``protect``-ed key — are skipped so
+        a live turn never has its lock yanked out from under it.
+        """
+        if len(self._session_locks) <= _MAX_TRACKED_SESSIONS:
+            return
+        for key in list(self._session_locks):
+            if len(self._session_locks) <= _MAX_TRACKED_SESSIONS:
+                break
+            if key == protect or self._inflight.get(key, 0) > 0:
+                continue
+            self._session_locks.pop(key, None)
+            self._sessions.pop(key, None)
 
     @staticmethod
     def _session_key(message: ChannelMessage) -> str:

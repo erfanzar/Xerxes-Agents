@@ -23,6 +23,16 @@ from typing import Any
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 RPCHandler = Callable[[str, dict[str, Any], EmitFn], Awaitable[dict[str, Any]]]
 
+# Hard cap on an inbound frame's declared payload length. A client (or fuzzer)
+# can claim up to 2**64-1 bytes in the 64-bit length prefix; honoring that would
+# let a single frame demand arbitrary buffering. Frames over this size get a
+# 1009 (Message Too Big) close instead.
+_MAX_FRAME_SIZE = 16 * 1024 * 1024
+# Per-client outbound transport buffer cap. A client that stops reading lets the
+# never-drained transport buffer grow without bound; once it exceeds this, the
+# writer is force-closed and dropped rather than allowed to grow the daemon RSS.
+_MAX_WRITE_BUFFER = 8 * 1024 * 1024
+
 
 class WebSocketGateway:
     """Tiny RFC 6455 server speaking JSON-RPC 2.0 to remote daemon clients."""
@@ -66,12 +76,19 @@ class WebSocketGateway:
         frame = self._encode_ws_frame(msg)
         dead: list[asyncio.StreamWriter] = []
         for writer in self._clients:
+            if self._writer_overflowed(writer):
+                dead.append(writer)
+                continue
             try:
                 writer.write(frame)
             except Exception:
                 dead.append(writer)
         for writer in dead:
             self._clients.discard(writer)
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Complete the WebSocket upgrade and pump frames through :meth:`_handle_message`."""
@@ -117,9 +134,11 @@ class WebSocketGateway:
                 )
 
             while True:
-                raw = await self._read_ws_frame(reader)
+                raw = await self._read_ws_frame(reader, writer)
                 if raw is None:
                     break
+                if raw == "":
+                    continue
                 await self._handle_message(raw, writer, emit)
         except (TimeoutError, ConnectionResetError, BrokenPipeError, OSError):
             pass
@@ -155,10 +174,33 @@ class WebSocketGateway:
 
     def _send_ws(self, writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
         """Best-effort encode + write of a JSON object as one WebSocket text frame."""
+        if self._writer_overflowed(writer):
+            self._clients.discard(writer)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
         try:
             writer.write(self._encode_ws_frame(json.dumps(data, ensure_ascii=False, default=str)))
         except Exception:
             pass
+
+    @staticmethod
+    def _writer_overflowed(writer: asyncio.StreamWriter) -> bool:
+        """Report whether ``writer``'s un-drained transport buffer exceeds the cap.
+
+        A client that stalls (or reads slowly) never lets the transport buffer
+        drain; once it grows past :data:`_MAX_WRITE_BUFFER` the writer is treated
+        as dead so callers can evict it instead of buffering without bound.
+        """
+        transport = writer.transport
+        if transport is None:
+            return True
+        try:
+            return transport.get_write_buffer_size() > _MAX_WRITE_BUFFER
+        except Exception:
+            return False
 
     @staticmethod
     def _encode_ws_frame(text: str) -> bytes:
@@ -173,36 +215,79 @@ class WebSocketGateway:
             header = struct.pack("!BBQ", 0x81, 127, length)
         return header + payload
 
-    @staticmethod
-    async def _read_ws_frame(reader: asyncio.StreamReader) -> str | None:
-        """Read one client-to-server frame.
+    async def _read_ws_frame(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter | None = None
+    ) -> str | None:
+        """Read one logical client-to-server text message.
 
-        Returns the decoded payload, an empty string for a ping frame the
-        caller should ignore, or ``None`` to signal close/EOF.
+        Reassembles fragmented messages (a non-FIN text frame followed by one or
+        more ``0x0`` continuation frames), ignores control frames the caller
+        shouldn't act on (ping/pong) by returning an empty string, and returns
+        ``None`` to signal close/EOF. A frame (or reassembled message) whose
+        declared length exceeds :data:`_MAX_FRAME_SIZE` triggers a 1009
+        (Message Too Big) close and ``None``.
         """
+        accumulated = b""
+        # 0x1 text starts a (possibly fragmented) message; 0x0 continues it.
+        message_opcode: int | None = None
+        while True:
+            try:
+                header = await reader.readexactly(2)
+            except (asyncio.IncompleteReadError, ConnectionError):
+                return None
+
+            fin = bool(header[0] & 0x80)
+            opcode = header[0] & 0x0F
+
+            masked = bool(header[1] & 0x80)
+            length = header[1] & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", await reader.readexactly(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", await reader.readexactly(8))[0]
+
+            if length > _MAX_FRAME_SIZE or len(accumulated) + length > _MAX_FRAME_SIZE:
+                self._close_ws(writer, code=1009)
+                return None
+
+            mask_key = await reader.readexactly(4) if masked else b""
+            payload = await reader.readexactly(length)
+            if masked:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+
+            if opcode == 0x8:  # close
+                return None
+            if opcode in (0x9, 0xA):  # ping / pong -> ignore (don't parse as JSON)
+                if message_opcode is not None:
+                    # Control frame interleaved mid-message; keep reassembling.
+                    continue
+                return ""
+            if opcode == 0x1:  # text frame (possibly first of a fragmented message)
+                message_opcode = 0x1
+                accumulated += payload
+            elif opcode == 0x0:  # continuation
+                if message_opcode is None:
+                    # Continuation with no message in progress: protocol error.
+                    self._close_ws(writer, code=1002)
+                    return None
+                accumulated += payload
+            else:  # binary (0x2) or reserved: gateway only speaks JSON text.
+                self._close_ws(writer, code=1003)
+                return None
+
+            if fin:
+                return accumulated.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _close_ws(writer: asyncio.StreamWriter | None, code: int) -> None:
+        """Best-effort send of a WebSocket close frame carrying ``code``."""
+        if writer is None:
+            return
         try:
-            header = await reader.readexactly(2)
-        except (asyncio.IncompleteReadError, ConnectionError):
-            return None
-
-        opcode = header[0] & 0x0F
-        if opcode == 0x8:
-            return None
-        if opcode == 0x9:
-            return ""
-
-        masked = bool(header[1] & 0x80)
-        length = header[1] & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", await reader.readexactly(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", await reader.readexactly(8))[0]
-
-        mask_key = await reader.readexactly(4) if masked else b""
-        payload = await reader.readexactly(length)
-        if masked:
-            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-        return payload.decode("utf-8", errors="replace")
+            body = struct.pack("!H", code)
+            writer.write(struct.pack("!BB", 0x88, len(body)) + body)
+        except Exception:
+            pass
 
     def _is_authorized(self, request: str, headers: dict[str, str]) -> bool:
         """Constant-time compare a Bearer token from ``Authorization`` or ``?token=``."""

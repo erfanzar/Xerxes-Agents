@@ -17,9 +17,11 @@ When the user (or a tool) pulls external content into the model's
 context, that content can carry adversarial instructions —
 "ignore previous instructions", base64-wrapped curl payloads, hidden
 HTML, zero-width characters. This module runs a small set of regex
-and unicode checks; matched content is replaced with a ``[BLOCKED:
-...]`` placeholder so the model never sees the payload. The checks
-are cheap, deterministic and best-effort: they catch unsophisticated
+and unicode checks; each matched span (and each invisible codepoint)
+is replaced in place with a short ``[BLOCKED: ...]`` placeholder while
+the surrounding legitimate text is preserved, so the model never sees
+the payload but does keep the rest of the message. The checks are
+cheap, deterministic and best-effort: they catch unsophisticated
 injections, not a targeted attacker."""
 
 from __future__ import annotations
@@ -78,29 +80,61 @@ _CONTEXT_INVISIBLE_CHARS: Final[set[str]] = {
 
 
 def scan_context_content(content: str, filename: str = "unknown") -> str:
-    """Return ``content`` unchanged, or a ``[BLOCKED: ...]`` placeholder.
+    """Return ``content`` with each detected threat span neutralised in place.
 
     Runs every compiled threat pattern and checks for known invisible
-    unicode codepoints. If any rule matches, the original content is
-    discarded and replaced with a short marker naming the matched
-    pattern ids. ``filename`` only appears in log messages and the
-    placeholder string."""
+    unicode codepoints. Each matched span (and each invisible codepoint)
+    is replaced with a short ``[BLOCKED: <filename> <pid>]`` placeholder
+    while the surrounding legitimate text is preserved, so a message that
+    merely quotes a flagged phrase keeps the rest of its body instead of
+    being discarded wholesale. Clean content is returned unchanged.
+    ``filename`` appears in log messages and in the placeholders."""
 
+    # Collect every threatening span as (start, end, pid) over the original
+    # text. Invisible codepoints are single-character spans; regex matches use
+    # their reported span. We scan the original (unmodified) text for all
+    # patterns so that an inserted placeholder can never itself be re-matched.
+    spans: list[tuple[int, int, str]] = []
     findings: list[str] = []
 
-    for char in _CONTEXT_INVISIBLE_CHARS:
-        if char in content:
-            findings.append(f"invisible_unicode_U+{ord(char):04X}")
-
-    for compiled, pid in _COMPILED_PATTERNS:
-        if compiled.search(content):
+    for idx, char in enumerate(content):
+        if char in _CONTEXT_INVISIBLE_CHARS:
+            pid = f"invisible_unicode_U+{ord(char):04X}"
+            spans.append((idx, idx + 1, pid))
             findings.append(pid)
 
-    if not findings:
+    for compiled, pid in _COMPILED_PATTERNS:
+        for m in compiled.finditer(content):
+            spans.append((m.start(), m.end(), pid))
+            findings.append(pid)
+
+    if not spans:
         return content
 
-    logger.warning("Context file %s blocked: %s", filename, ", ".join(findings))
-    return f"[BLOCKED: {filename} contained potential prompt injection ({', '.join(findings)}). Content not loaded.]"
+    # Merge overlapping/adjacent spans (regex patterns may overlap, and an
+    # invisible char may sit inside a phrase match) into a single placeholder
+    # so the output stays readable. Sort by start, then by widest end.
+    spans.sort(key=lambda s: (s[0], -s[1]))
+    merged: list[tuple[int, int, list[str]]] = []
+    for start, end, pid in spans:
+        if merged and start <= merged[-1][1]:
+            prev_start, prev_end, pids = merged[-1]
+            if pid not in pids:
+                pids.append(pid)
+            merged[-1] = (prev_start, max(prev_end, end), pids)
+        else:
+            merged.append((start, end, [pid]))
+
+    parts: list[str] = []
+    cursor = 0
+    for start, end, pids in merged:
+        parts.append(content[cursor:start])
+        parts.append(f"[BLOCKED: {filename} {', '.join(pids)}]")
+        cursor = end
+    parts.append(content[cursor:])
+
+    logger.warning("Context file %s neutralised: %s", filename, ", ".join(findings))
+    return "".join(parts)
 
 
 def scan_context_file(path: str | os.PathLike[str], filename: str | None = None) -> str:

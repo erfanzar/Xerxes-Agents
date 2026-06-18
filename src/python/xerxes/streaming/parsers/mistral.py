@@ -34,11 +34,11 @@ class MistralParser(ToolCallParser):
 
     def parse(self, text: str) -> list[ParsedToolCall]:
         """Extract Mistral tool calls from a ``[TOOL_CALLS][...]`` JSON array."""
-        match = re.search(r"\[TOOL_CALLS\]\s*(\[.*?\])", text, re.S)
+        match = re.search(r"\[TOOL_CALLS\]\s*", text, re.S)
         if not match:
             return []
         try:
-            arr = json.loads(match.group(1))
+            arr, _ = json.JSONDecoder().raw_decode(text, match.end())
         except (json.JSONDecodeError, ValueError):
             return []
         out: list[ParsedToolCall] = []

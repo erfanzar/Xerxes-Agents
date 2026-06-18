@@ -198,6 +198,14 @@ class Cortex:
                 long_term_capacity=config.get("long_term_capacity", 5000),
             )
 
+        # PARALLEL topology fans tasks across worker threads that all share this
+        # single CortexMemory; its tiers are not thread-safe (concurrent save
+        # while another thread iterates can raise "changed size during iteration"
+        # and entity-frequency updates can be lost). Serialize the mutating and
+        # search entry points behind one lock so concurrent workers cannot
+        # mutate a tier while another is iterating it.
+        self._guard_cortex_memory(self.cortex_memory)
+
         self.memory = MemoryStore()
         self.memory_type = memory_type
         self.task_outputs: list[CortexTaskOutput] = []
@@ -279,6 +287,51 @@ class Cortex:
 
             if self.planner.planner_agent.memory_enabled and not self.planner.planner_agent.memory:
                 self.planner.planner_agent.memory = self.cortex_memory
+
+    @staticmethod
+    def _guard_cortex_memory(memory: CortexMemory) -> None:
+        """Serialize ``memory``'s mutating/search entry points behind one lock.
+
+        The PARALLEL topology shares a single :class:`CortexMemory` across
+        worker threads. Its underlying tiers (short-term / long-term / entity /
+        contextual) iterate and mutate plain lists/dicts without locking, so a
+        concurrent ``save`` during another thread's ``search`` can raise
+        ``RuntimeError: ... changed size during iteration`` and concurrent
+        entity-frequency updates can be lost. Wrapping the public read/write
+        methods with a shared re-entrant lock makes those accesses mutually
+        exclusive. Idempotent: a memory instance shared across several Cortex
+        objects is only guarded once.
+        """
+
+        if getattr(memory, "_cortex_thread_guarded", False):
+            return
+
+        lock = threading.RLock()
+
+        guarded_methods = (
+            "build_context_for_task",
+            "save_task_result",
+            "save_agent_interaction",
+            "save_cortex_decision",
+            "get_agent_history",
+            "get_user_context",
+            "get_summary",
+        )
+
+        def make_guarded(func: Callable[..., Any]) -> Callable[..., Any]:
+            def guarded(*args: Any, **kwargs: Any) -> Any:
+                with lock:
+                    return func(*args, **kwargs)
+
+            return guarded
+
+        for name in guarded_methods:
+            original = getattr(memory, name, None)
+            if callable(original):
+                setattr(memory, name, make_guarded(original))
+
+        memory._cortex_thread_guarded = True
+        memory._cortex_memory_lock = lock
 
     def _run_async_coro(self, coro):
         """Run ``coro`` from synchronous code, even inside a live event loop.
@@ -468,58 +521,86 @@ class Cortex:
     ) -> str:
         """Drive one agent in streaming mode and return its concatenated text.
 
-        Drains chunks from ``main_buffer``, re-emits them so downstream
-        consumers also see the stream, optionally forwards them to
-        ``stream_callback``, and returns the joined ``chunk.content`` once
-        the underlying agent thread (if any) has terminated.
+        ``agent.execute`` runs synchronously here: while it consumes the
+        underlying generator it both ``put``s every chunk into
+        ``main_buffer`` (so downstream consumers see the stream) and
+        forwards each chunk to ``stream_callback`` exactly once. It also
+        returns the full result once the stream is exhausted, so the call
+        is self-terminating. We therefore return that result directly
+        instead of re-draining (and re-enqueuing into) the same buffer,
+        which would loop forever and duplicate every chunk.
         """
 
-        agent.execute(
+        result = agent.execute(
             task_description=task_description,
             context=context,
             streamer_buffer=main_buffer,
             stream_callback=stream_callback,
         )
 
-        collected_content = []
-        streaming_complete = False
+        return _resolve_execute_output(result)
 
-        while not streaming_complete:
+    def _finalize_streamed_task_output(
+        self,
+        task: CortexTask,
+        output: str,
+        agent: CortexAgent,
+        had_context: bool = False,
+    ) -> CortexTaskOutput:
+        """Apply the per-task side effects that streaming runs would otherwise skip.
+
+        ``_stream_agent_execution`` drives the agent directly and so bypasses
+        :meth:`CortexTask.execute`, which normally validates the output against
+        ``output_json``/``output_pydantic``, writes ``output_file`` and persists
+        the result via ``save_to_memory``. This helper replicates those effects
+        on the collected streamed ``output`` so streaming and non-streaming runs
+        stay behaviourally consistent, then returns the populated
+        :class:`CortexTaskOutput`.
+        """
+
+        validation_results: dict[str, Any] = {}
+        pydantic_output = None
+
+        if getattr(task, "output_json", None) or getattr(task, "output_pydantic", None):
             try:
-                chunk = main_buffer.get(timeout=0.1)
-                if chunk is None:
-                    agent_thread = getattr(main_buffer, "agent_thread", None)
-                    if agent_thread and hasattr(agent_thread, "is_alive"):
-                        if not agent_thread.is_alive():
-                            streaming_complete = True
-                    else:
-                        streaming_complete = True
-                    continue
+                _passed, pydantic_output, validation_results = task._validate_output(output)
+            except Exception as e:  # validation must never abort the stream
+                validation_results = {"validation_error": str(e)}
 
-                main_buffer.put(chunk)
-                if stream_callback:
-                    stream_callback(chunk)
+        if getattr(task, "output_file", None):
+            try:
+                with open(task.output_file, "w") as f:
+                    f.write(output)
+            except Exception as e:  # a write failure must not abort the run
+                self.logger.error(f"❌ Failed to write task output_file {task.output_file}: {e}")
 
-                if hasattr(chunk, "content") and chunk.content:
-                    collected_content.append(chunk.content)
+        if getattr(task, "save_to_memory", False) and getattr(task, "memory", None):
+            try:
+                task.memory.save_task_result(
+                    task_description=task.description,
+                    result=output,
+                    agent_role=agent.role,
+                    importance=getattr(task, "importance", 0.5),
+                    task_metadata={
+                        "expected_output": task.expected_output[:100] if task.expected_output else "",
+                        "tools_used": [tool.__class__.__name__ for tool in task.tools],
+                        "had_context": had_context,
+                        "had_human_input": getattr(task, "human_input", False),
+                        "validation_applied": bool(
+                            getattr(task, "output_json", None) or getattr(task, "output_pydantic", None)
+                        ),
+                    },
+                )
+            except Exception as e:  # memory persistence must not abort the run
+                self.logger.error(f"❌ Failed to persist streamed task result: {e}")
 
-            except Exception:
-                agent_thread = getattr(main_buffer, "agent_thread", None)
-                if agent_thread and hasattr(agent_thread, "is_alive"):
-                    if not agent_thread.is_alive():
-                        streaming_complete = True
-                else:
-                    streaming_complete = True
-                continue
-
-        agent_thread = getattr(main_buffer, "agent_thread", None)
-        thread = getattr(main_buffer, "thread", None)
-        if agent_thread and hasattr(agent_thread, "join"):
-            agent_thread.join(timeout=30)
-        elif thread and hasattr(thread, "join"):
-            thread.join(timeout=30)
-
-        return "".join(collected_content) if collected_content else ""
+        return CortexTaskOutput(
+            task=task,
+            output=output,
+            agent=agent,
+            validation_results=validation_results,
+            pydantic_output=pydantic_output,
+        )
 
     def _run_sequential(self) -> str:
         """Run every task in declaration order, threading outputs as context.
@@ -639,10 +720,11 @@ class Cortex:
 
             all_content.append(output_content)
 
-            task_output = CortexTaskOutput(
+            task_output = self._finalize_streamed_task_output(
                 task=task,
                 output=output_content,
                 agent=task.agent,
+                had_context=bool(task_context),
             )
 
             context_outputs.append(task_output.output)
@@ -1024,14 +1106,39 @@ class Cortex:
         for step_id, result in step_results.items():
             final_outputs.append(f"Step {step_id} result: {result}")
 
-        for i, task in enumerate(self.tasks):
-            if i < len(step_results):
-                result_key = list(step_results.keys())[i]
+        # Map each task to a step result by explicit association: prefer a step
+        # whose assigned agent role matches the task's agent role, consuming
+        # each executed step at most once. Tasks with no agent match fall back
+        # to the next unconsumed executed step in execution order. This avoids
+        # the positional ``list(keys())[i]`` pairing that mismatched outputs to
+        # tasks whenever steps did not line up 1:1 with the task list.
+        executed_step_ids = list(step_results.keys())
+        step_by_id = {step.step_id: step for step in execution_plan.steps}
+        consumed: set[int] = set()
+
+        for task in self.tasks:
+            agent = task.agent if task.agent else self.agents[0]
+
+            result_key: int | None = None
+            for step_id in executed_step_ids:
+                if step_id in consumed:
+                    continue
+                step = step_by_id.get(step_id)
+                if step is not None and agent is not None and step.agent.lower() == agent.role.lower():
+                    result_key = step_id
+                    break
+
+            if result_key is None:
+                for step_id in executed_step_ids:
+                    if step_id not in consumed:
+                        result_key = step_id
+                        break
+
+            if result_key is not None:
+                consumed.add(result_key)
                 result = step_results[result_key]
             else:
                 result = "Task completed as part of the execution plan"
-
-            agent = task.agent if task.agent else self.agents[0]
 
             task_output = CortexTaskOutput(task=task, output=result, agent=agent)
             self.task_outputs.append(task_output)
@@ -1080,7 +1187,10 @@ class Cortex:
 
         for task_plan in plan.get("execution_plan", []):
             task_id = task_plan.get("task_id", 1) - 1
-            if task_id >= len(self.tasks):
+            if task_id < 0 or task_id >= len(self.tasks):
+                self.logger.warning(
+                    f"⚠️ Skipping invalid task_id {task_plan.get('task_id')} (valid range: 1-{len(self.tasks)})"
+                )
                 continue
 
             task = self.tasks[task_id]
@@ -1120,7 +1230,7 @@ class Cortex:
             )
             self.task_outputs.append(task_output)
 
-        return completed_tasks.get(len(self.tasks), "")
+        return self.task_outputs[-1].output if self.task_outputs else ""
 
     def _run_planned_streaming(
         self,
@@ -1159,25 +1269,34 @@ class Cortex:
         if self.verbose:
             self.logger.info(f"📋 Executing plan with {len(execution_plan.steps)} steps")
 
+        step_results: dict[int, str] = {}
         for i, task in enumerate(self.tasks):
             if i >= len(execution_plan.steps):
                 break
 
             step = execution_plan.steps[i]
+            # Resolve the agent by the planner's assigned role. The field is
+            # ``step.agent`` (a role string); the previous code read
+            # ``step.assigned_agent``, which never exists on PlanStep, so the
+            # planner's assignment was always silently dropped and every step
+            # fell back to agents[0]. Match case-insensitively like _run_planned.
             assigned_agent = None
-            if hasattr(step, "assigned_agent"):
+            step_role = getattr(step, "agent", None)
+            if step_role:
                 for agent in self.agents:
-                    if agent.role == step.assigned_agent:
+                    if agent.role.lower() == str(step_role).lower():
                         assigned_agent = agent
                         break
-
             if not assigned_agent:
                 assigned_agent = task.agent if task.agent else self.agents[0]
 
-            task_context = []
-            if i > 0 and self.task_outputs:
-                for prev_output in self.task_outputs:
-                    task_context.append(prev_output.output)
+            # Context = outputs of the steps THIS step declares as dependencies,
+            # not an undifferentiated dump of everything run so far. Fall back to
+            # the immediately prior output so a linear (dependency-free) plan
+            # still threads context through.
+            task_context = [step_results[d] for d in getattr(step, "dependencies", []) if d in step_results]
+            if not task_context and i > 0 and self.task_outputs:
+                task_context = [self.task_outputs[-1].output]
 
             task_description = f"{task.description}\n\nExpected Output: {task.expected_output}"
             context_str = "\n\n".join(task_context) if task_context else None
@@ -1189,8 +1308,14 @@ class Cortex:
                 main_buffer=buffer,
                 stream_callback=stream_callback,
             )
+            step_results[step.step_id] = output
 
-            task_output = CortexTaskOutput(task=task, output=output, agent=assigned_agent)
+            task_output = self._finalize_streamed_task_output(
+                task=task,
+                output=output,
+                agent=assigned_agent,
+                had_context=bool(task_context),
+            )
             self.task_outputs.append(task_output)
 
         return self.task_outputs[-1].output if self.task_outputs else "Planning execution completed"

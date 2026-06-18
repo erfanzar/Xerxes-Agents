@@ -73,17 +73,45 @@ class _ThinkingParser:
     _in_thinking: bool = False
     _thinking_buf: str = ""
 
+    @staticmethod
+    def _partial_tail(text: str, tag: str) -> int:
+        """Length of the longest trailing run of ``text`` that is a proper prefix of ``tag``.
+
+        Returns ``0`` when no non-empty suffix of ``text`` starts ``tag``. The
+        held-back suffix is never the full tag (a complete tag is matched by
+        ``str.find`` instead), so callers must keep it buffered until the next
+        chunk arrives in case the tag straddles a chunk boundary.
+        """
+
+        # A split tag can hold back at most len(tag) - 1 characters.
+        limit = min(len(text), len(tag) - 1)
+        for k in range(limit, 0, -1):
+            if text[-k:] == tag[:k]:
+                return k
+        return 0
+
     def process(self, chunk_text: str) -> list[TextChunk | ThinkingChunk]:
-        """Feed a streamed fragment and emit any completed chunks."""
+        """Feed a streamed fragment and emit any completed chunks.
+
+        Pass ``""`` after the stream ends to flush a still-open thinking
+        block. Partial tags straddling chunk boundaries are buffered across
+        calls so reasoning is not leaked and the visible answer is not lost.
+        """
 
         events: list[TextChunk | ThinkingChunk] = []
         self._buffer += chunk_text
+        final_flush = not chunk_text
 
-        if not chunk_text and self._in_thinking:
+        if final_flush and self._in_thinking:
+            # End of stream while still inside a thinking block: any buffered
+            # partial close tag we held back can never complete, so treat it as
+            # reasoning content rather than dropping it.
+            if self._buffer:
+                self._thinking_buf += self._buffer
+                self._buffer = ""
             if self._thinking_buf:
                 events.append(ThinkingChunk(self._thinking_buf))
             self._thinking_buf = ""
-            self._buffer = ""
             self._in_thinking = False
             return events
 
@@ -91,9 +119,15 @@ class _ThinkingParser:
             if not self._in_thinking:
                 idx = self._buffer.find(self._open_tag)
                 if idx == -1:
-                    if self._buffer:
-                        events.append(TextChunk(self._buffer))
-                        self._buffer = ""
+                    # No complete open tag. Hold back a trailing fragment that
+                    # could be the start of one split across the next chunk
+                    # (e.g. "<thi" before "nk>"). On the final flush nothing
+                    # more is coming, so emit the whole buffer verbatim.
+                    hold = 0 if final_flush else self._partial_tail(self._buffer, self._open_tag)
+                    emit = self._buffer[: len(self._buffer) - hold] if hold else self._buffer
+                    if emit:
+                        events.append(TextChunk(emit))
+                    self._buffer = self._buffer[len(self._buffer) - hold :] if hold else ""
                     break
                 if idx > 0:
                     events.append(TextChunk(self._buffer[:idx]))
@@ -104,8 +138,14 @@ class _ThinkingParser:
             else:
                 idx = self._buffer.find(self._close_tag)
                 if idx == -1:
-                    self._thinking_buf += self._buffer
-                    self._buffer = ""
+                    # No complete close tag. Hold back a trailing fragment that
+                    # could be the start of one split across the next chunk
+                    # (e.g. "</thi" before "nk>") so the visible answer after it
+                    # is not swallowed into the thinking channel.
+                    hold = 0 if final_flush else self._partial_tail(self._buffer, self._close_tag)
+                    keep = self._buffer[: len(self._buffer) - hold] if hold else self._buffer
+                    self._thinking_buf += keep
+                    self._buffer = self._buffer[len(self._buffer) - hold :] if hold else ""
                     break
                 if idx > 0:
                     self._thinking_buf += self._buffer[:idx]

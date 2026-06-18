@@ -283,6 +283,14 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
         else:
             middle_msgs = []
 
+        # Always keep at least the final message in the tail, even when it
+        # alone exceeds tail_budget. Otherwise the latest user turn would be
+        # folded into the reference-only summary, leaving no live message for
+        # the model to answer.
+        if not tail_msgs:
+            tail_msgs = [pruned[-1]]
+            middle_msgs = pruned[:-1]
+
         stats["tail_messages"] = len(tail_msgs)
         stats["middle_messages"] = len(middle_msgs)
 
@@ -332,7 +340,21 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
             content = msg.get("content", "")[:200]
             if content:
                 lines.append(f"  {role}: {content}")
-        return "\n".join(lines)
+        fallback = "\n".join(lines)
+
+        # The fallback can be larger than the content it replaces (it adds a
+        # "  role: " prefix per message while only truncating per-message at
+        # 200 chars). Cap it to the summary budget and never let it exceed the
+        # middle content it is meant to compress, so compaction always shrinks.
+        middle_chars = sum(len(m.get("content", "") or "") for m in messages)
+        budget_tokens = min(
+            _SUMMARY_TOKENS_CEILING,
+            max(_MIN_SUMMARY_TOKENS, int((middle_chars / _CHARS_PER_TOKEN) * _SUMMARY_RATIO)),
+        )
+        max_chars = min(budget_tokens * _CHARS_PER_TOKEN, middle_chars)
+        if len(fallback) > max_chars:
+            fallback = fallback[:max_chars]
+        return fallback
 
     def _call_llm(self, prompt: str) -> str | None:
         """Run ``generate_completion`` on the bound client; return text or ``None``."""

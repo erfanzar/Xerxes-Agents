@@ -44,6 +44,11 @@ def branch_session(
     source = store.load_session(source_session_id)
     if source is None:
         raise KeyError(f"unknown source session: {source_session_id}")
+    if new_session_id is not None:
+        if new_session_id == source_session_id:
+            raise ValueError("new_session_id must differ from source_session_id")
+        if store.load_session(new_session_id) is not None:
+            raise ValueError(f"session already exists: {new_session_id}")
     now = datetime.now(UTC).isoformat()
     new = SessionRecord(
         session_id=new_session_id or uuid.uuid4().hex,
@@ -69,8 +74,10 @@ def lineage(store: SessionStore, session_id: str) -> list[str]:
 
     The first element is ``session_id``; the last has no parent."""
     chain: list[str] = []
+    seen: set[str] = set()
     current = session_id
-    while True:
+    while current and current not in seen:
+        seen.add(current)
         sess = store.load_session(current)
         if sess is None:
             break

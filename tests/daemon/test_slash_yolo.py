@@ -140,10 +140,18 @@ class TestSlashPermissions:
 
 class TestSlashFlags:
     def test_thinking(self, daemon_with_runtime):
+        # ``/thinking`` (no arg) shows the current effort level + the level menu.
         out = _drive(daemon_with_runtime, "/thinking")
-        assert "Thinking: True" in out[0]
-        out2 = _drive(daemon_with_runtime, "/thinking")
-        assert "Thinking: False" in out2[0]
+        assert "Thinking:" in out[0] and "Levels:" in out[0]
+        # ``/thinking <level>`` sets the reasoning effort...
+        out2 = _drive(daemon_with_runtime, "/thinking high")
+        assert "set to: high" in out2[0]
+        assert daemon_with_runtime.runtime.reasoning_state()["effort"] == "high"
+        out3 = _drive(daemon_with_runtime, "/thinking")
+        assert "Thinking: high" in out3[0]
+        # ...and rejects unknown levels.
+        out4 = _drive(daemon_with_runtime, "/thinking bogus")
+        assert "Unknown reasoning level" in out4[0]
 
     def test_verbose(self, daemon_with_runtime):
         out = _drive(daemon_with_runtime, "/verbose")
