@@ -159,7 +159,14 @@ class ShortTermMemory(Memory):
             if filters:
                 match = True
                 for key, value in filters.items():
-                    if hasattr(item, key) and getattr(item, key) != value:
+                    if hasattr(item, key):
+                        actual = getattr(item, key)
+                    elif key in item.metadata:
+                        actual = item.metadata[key]
+                    else:
+                        match = False
+                        break
+                    if actual != value:
                         match = False
                         break
                 if not match:
@@ -208,7 +215,14 @@ class ShortTermMemory(Memory):
             for item in self._items:
                 match = True
                 for key, value in filters.items():
-                    if hasattr(item, key) and getattr(item, key) != value:
+                    if hasattr(item, key):
+                        actual = getattr(item, key)
+                    elif key in item.metadata:
+                        actual = item.metadata[key]
+                    else:
+                        match = False
+                        break
+                    if actual != value:
                         match = False
                         break
                 if match:

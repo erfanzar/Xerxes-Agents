@@ -50,7 +50,7 @@ def _rule(name: str, pat: str, replacement: str = "[redacted]") -> RedactionRule
 
 DEFAULT_PATTERNS: tuple[RedactionRule, ...] = (
     _rule("api_key_field", r"(api[_-]?key)[\s:=\"']+([A-Za-z0-9._\-]{8,})", r"\1=[redacted]"),
-    _rule("openai_token", r"sk-[A-Za-z0-9]{16,}"),
+    _rule("openai_token", r"sk-[A-Za-z0-9_\-]{16,}"),
     _rule("anthropic_token", r"sk-ant-[A-Za-z0-9_\-]{16,}"),
     _rule("bearer_header", r"(authorization:\s*bearer)\s+([A-Za-z0-9._\-]+)", r"\1 [redacted]"),
     _rule("password_field", r"(password)[\s:=\"']+(\S+)", r"\1=[redacted]"),

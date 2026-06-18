@@ -26,6 +26,43 @@ from typing import Any, TypeAlias
 
 NeutralMessage: TypeAlias = dict[str, Any]
 
+# A single oversized tool result (a huge file read, a verbose command dump) can
+# otherwise crowd out the rest of the window and the model can't self-correct out
+# of a context it already poisoned. Clamp at the shared message boundary so BOTH
+# engines get the same protection.
+MAX_TOOL_RESULT_CHARS = 30_000
+
+
+def bound_tool_result(result: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Clamp an oversized tool result, keeping its head and tail.
+
+    The signal in a long tool output usually lives at the start (what ran) and
+    the end (the final error/summary); the middle is elided with a marker.
+    Idempotent for already-small results, so it is safe to call more than once.
+
+    Args:
+        result: The tool's string output.
+        max_chars: Maximum characters to keep before eliding the middle.
+
+    Returns:
+        The original string if within budget, else a head+tail excerpt with an
+        elision marker.
+    """
+    if not isinstance(result, str) or len(result) <= max_chars:
+        return result
+    # Reserve room for the elision marker so the OUTPUT stays within max_chars.
+    # That keeps this idempotent: a second pass sees a within-budget string and
+    # returns it unchanged (the loop and the shared executor both bound results).
+    budget = max(0, max_chars - 200)
+    head = budget * 2 // 3
+    tail = budget - head
+    elided = len(result) - head - tail
+    marker = (
+        f"\n\n[... {elided} characters elided to fit context; re-run with a narrower "
+        "query/range or read the file directly for the full output ...]\n\n"
+    )
+    return result[:head] + marker + (result[-tail:] if tail else "")
+
 
 def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]]:
     """Convert neutral messages to Anthropic Messages-API content blocks.
@@ -54,6 +91,14 @@ def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]
 
         elif role == "assistant":
             blocks: list[dict[str, Any]] = []
+            # Anthropic requires the thinking block FIRST, and only accepts it
+            # paired with the signature returned by the original response —
+            # replaying text+tool_use without it 400s ("expected thinking ...")
+            # when extended thinking is on. Only emit when both are present.
+            thinking = m.get("thinking")
+            signature = m.get("thinking_signature")
+            if thinking and signature:
+                blocks.append({"type": "thinking", "thinking": thinking, "signature": signature})
             text = m.get("content", "")
             if text:
                 blocks.append({"type": "text", "text": text})
@@ -73,13 +118,16 @@ def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]
             tool_blocks: list[dict[str, Any]] = []
             while i < len(messages) and messages[i]["role"] == "tool":
                 t = messages[i]
-                tool_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": t["tool_call_id"],
-                        "content": t["content"],
-                    }
-                )
+                block: dict[str, Any] = {
+                    "type": "tool_result",
+                    "tool_use_id": t["tool_call_id"],
+                    "content": t["content"],
+                }
+                # Flag failures so the model recognises an error result and is
+                # more likely to recover instead of treating it as success.
+                if t.get("is_error"):
+                    block["is_error"] = True
+                tool_blocks.append(block)
                 i += 1
             result.append({"role": "user", "content": tool_blocks})
 
@@ -193,11 +241,16 @@ def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessa
             text_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
             tool_results: list[dict[str, Any]] = []
+            thinking_block = ""
+            thinking_sig: str | None = None
 
             for block in content:
                 btype = block.get("type", "")
                 if btype == "text":
                     text_parts.append(block["text"])
+                elif btype == "thinking":
+                    thinking_block = block.get("thinking", "")
+                    thinking_sig = block.get("signature")
                 elif btype == "tool_use":
                     tool_calls.append(
                         {
@@ -213,17 +266,23 @@ def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessa
                             "tool_call_id": block["tool_use_id"],
                             "name": block.get("name", ""),
                             "content": block.get("content", ""),
+                            "is_error": bool(block.get("is_error", False)),
                         }
                     )
 
             if tool_calls:
-                result.append(
-                    {
-                        "role": "assistant",
-                        "content": "\n".join(text_parts),
-                        "tool_calls": tool_calls,
-                    }
-                )
+                asst: NeutralMessage = {
+                    "role": "assistant",
+                    "content": "\n".join(text_parts),
+                    "tool_calls": tool_calls,
+                }
+                # Preserve the thinking block + signature so a reloaded Anthropic
+                # turn can be replayed without a 400 when thinking is enabled.
+                if thinking_block:
+                    asst["thinking"] = thinking_block
+                    if thinking_sig:
+                        asst["thinking_signature"] = thinking_sig
+                result.append(asst)
             elif tool_results:
                 result.extend(tool_results)
             else:
@@ -294,7 +353,9 @@ def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]
 
 
 __all__ = [
+    "MAX_TOOL_RESULT_CHARS",
     "NeutralMessage",
+    "bound_tool_result",
     "messages_from_anthropic",
     "messages_from_openai",
     "messages_to_anthropic",

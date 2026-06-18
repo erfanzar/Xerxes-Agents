@@ -77,10 +77,8 @@ class BaseCompactionStrategy(ABC):
         preserved_messages = []
         compactable_messages = []
 
-        for msg in messages:
-            if msg.get("role") == "system" and self.preserve_system:
-                system_messages.append(msg)
-                break
+        if self.preserve_system:
+            system_messages = [m for m in messages if m.get("role") == "system"]
 
         non_system = [m for m in messages if m.get("role") != "system"]
 

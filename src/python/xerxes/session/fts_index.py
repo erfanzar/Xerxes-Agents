@@ -18,8 +18,11 @@ ranking, just a SQLite FTS5 virtual table indexed by ``(session_id, turn_id,
 agent_id, content)``. If the local SQLite build lacks FTS5 the index becomes
 a best-effort no-op so search callers degrade gracefully.
 
-Each public method opens its own short-lived connection so the index can be
-shared across threads without holding long-lived locks.
+For on-disk databases each public method opens its own short-lived connection
+so the index can be shared across threads without holding long-lived locks.
+For ``":memory:"`` a single long-lived connection is reused by every method,
+because each ``sqlite3.connect(":memory:")`` would otherwise return a fresh,
+empty database and the FTS schema would be lost between calls.
 """
 
 from __future__ import annotations
@@ -27,8 +30,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import SessionRecord
 
@@ -44,26 +48,51 @@ class SessionFTSIndex:
     """
 
     def __init__(self, db_path: str | Path) -> None:
-        """Open the index at ``db_path`` (parent dirs are created)."""
-        self._db_path = Path(db_path)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        """Open the index at ``db_path`` (parent dirs are created).
+
+        When ``db_path`` is ``":memory:"`` a single long-lived connection is
+        held for the lifetime of the index; otherwise each method opens its own
+        short-lived connection.
+        """
+        self._db_path = db_path if db_path == ":memory:" else Path(db_path)
+        self._in_memory = self._db_path == ":memory:"
+        if not self._in_memory:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
         self._lock = threading.Lock()
+        # Long-lived connection used only for the in-memory case so the schema
+        # survives across calls. ``check_same_thread=False`` mirrors SessionIndex.
+        self._conn: sqlite3.Connection | None = (
+            sqlite3.connect(":memory:", check_same_thread=False) if self._in_memory else None
+        )
         self._fts_available = self._check_fts5()
         if self._fts_available:
             self._ensure_schema()
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection: the persistent one for ``:memory:``, else a fresh one."""
+
+        if self._in_memory:
+            assert self._conn is not None
+            yield self._conn
+        else:
+            conn = sqlite3.connect(str(self._db_path))
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     def _check_fts5(self) -> bool:
         """Probe whether the SQLite build supports FTS5."""
 
         try:
-            conn = sqlite3.connect(str(self._db_path))
-            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_fts5_test'")
-            cur.fetchall()
-            conn.close()
+            with self._connect() as conn:
+                cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_fts5_test'")
+                cur.fetchall()
 
-            conn = sqlite3.connect(":memory:")
-            conn.execute("CREATE VIRTUAL TABLE fts_test USING fts5(content)")
-            conn.close()
+            probe = sqlite3.connect(":memory:")
+            probe.execute("CREATE VIRTUAL TABLE fts_test USING fts5(content)")
+            probe.close()
             return True
         except Exception as exc:
             logger.warning("FTS5 not available (%s). Session search will use linear scan.", exc)
@@ -72,7 +101,7 @@ class SessionFTSIndex:
     def _ensure_schema(self) -> None:
         """Create the ``session_fts`` virtual table if absent."""
 
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
@@ -91,7 +120,7 @@ class SessionFTSIndex:
         if not self._fts_available:
             return
 
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM session_fts WHERE session_id = ?",
                 (session.session_id,),
@@ -112,7 +141,7 @@ class SessionFTSIndex:
 
         if not self._fts_available:
             return
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "DELETE FROM session_fts WHERE session_id = ?",
                 (session_id,),
@@ -154,7 +183,7 @@ class SessionFTSIndex:
         sql += " ORDER BY rank LIMIT ?"
         params.append(k)
 
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(sql, params)
             rows = cur.fetchall()

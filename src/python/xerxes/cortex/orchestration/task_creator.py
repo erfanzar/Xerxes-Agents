@@ -505,14 +505,41 @@ Respond ONLY with the XML plan, no additional text.
             cortex.process = process_type
 
         if use_streaming:
-            kickoff_result = cortex.kickoff(use_streaming=True, stream_callback=stream_callback, log_process=log_process)
-            assert isinstance(kickoff_result, tuple)
-            buffer, thread = kickoff_result
-        else:
-            result = cortex.kickoff(use_streaming=False, stream_callback=stream_callback, log_process=log_process)
+            try:
+                kickoff_result = cortex.kickoff(
+                    use_streaming=True, stream_callback=stream_callback, log_process=log_process
+                )
+                assert isinstance(kickoff_result, tuple)
+                buffer, worker_thread = kickoff_result
+            except BaseException:
+                # kickoff failed before the worker thread was started; restore now.
+                if process_type:
+                    cortex.process = original_process
+                raise
 
-        if process_type:
-            cortex.process = original_process
-        if use_streaming:
+            # The streaming worker thread reads ``cortex.process`` at run time, so
+            # restoring it synchronously here would race the worker. Defer the
+            # restore until the worker has finished by joining it on a wrapper
+            # thread that callers receive in place of the raw worker thread.
+            if process_type:
+
+                def _restore_after_worker() -> None:
+                    """Join the streaming worker, then restore the original process."""
+                    try:
+                        worker_thread.join()
+                    finally:
+                        cortex.process = original_process
+
+                thread: Thread = Thread(target=_restore_after_worker, daemon=True)
+                thread.start()
+            else:
+                thread = worker_thread
             return buffer, thread
+
+        try:
+            result = cortex.kickoff(use_streaming=False, stream_callback=stream_callback, log_process=log_process)
+        finally:
+            # Non-streaming kickoff runs synchronously, so it is safe to restore now.
+            if process_type:
+                cortex.process = original_process
         return result

@@ -100,6 +100,28 @@ _TOOL_PARAMETER_TAG_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_THINK_BLOCK_RE = re.compile(r"<think\s*>(.*?)</think\s*>", re.DOTALL | re.IGNORECASE)
+
+
+def _split_inline_reasoning(content: str) -> tuple[str, str]:
+    """Split inline ``<think>...</think>`` reasoning out of a complete content string.
+
+    MiniMax M-series and other open reasoning models emit their chain-of-thought
+    inline in the assistant content rather than in a separate ``reasoning_content``
+    field. Operating on the fully-assembled (non-streaming) string, this returns
+    ``(visible_text, reasoning_text)`` with the think blocks removed from the
+    visible text. Returns the content unchanged (and empty reasoning) when no
+    complete think block is present, so it is a no-op for non-reasoning models.
+    """
+    if "<think" not in content.lower():
+        return content, ""
+    reasoning_parts = _THINK_BLOCK_RE.findall(content)
+    if not reasoning_parts:
+        return content, ""
+    visible = _THINK_BLOCK_RE.sub("", content).strip()
+    reasoning = "\n".join(part.strip() for part in reasoning_parts).strip()
+    return visible, reasoning
+
 
 @dataclass
 class _RuntimeTurnState:
@@ -1450,9 +1472,14 @@ class Xerxes:
                     print(prompt_str)
                 else:
                     pprint.pprint(prompt_messages.to_openai())
-            with open("debug_prompt.json", "a") as f:
-                json.dump({"key": prompt_str}, f, indent=2)
-                f.write("\n")
+            debug_prompt_path = os.environ.get("XERXES_DEBUG_PROMPT_FILE")
+            if debug_prompt_path:
+                try:
+                    with open(debug_prompt_path, "a") as f:
+                        json.dump({"key": prompt_str}, f, indent=2)
+                        f.write("\n")
+                except OSError as exc:
+                    logger.warning("Failed to write debug prompt to %s: %s", debug_prompt_path, exc)
             assert self.llm_client is not None
             response = await self.llm_client.generate_completion(
                 prompt=prompt_str,
@@ -1501,8 +1528,11 @@ class Xerxes:
                     if isinstance(chunk, Completion):
                         completion = chunk
 
+                _visible, _inline_reasoning = _split_inline_reasoning("".join(collected_content))
+                if _inline_reasoning and not collected_reasoning:
+                    collected_reasoning = _inline_reasoning
                 return ResponseResult(
-                    content="".join(collected_content),
+                    content=_visible,
                     reasoning_content=collected_reasoning,
                     response=response,
                     completion=completion,
@@ -1556,7 +1586,9 @@ class Xerxes:
                 if isinstance(chunk, Completion):
                     completion = chunk
 
-            final_content = "".join(collected_content)
+            final_content, _inline_reasoning = _split_inline_reasoning("".join(collected_content))
+            if _inline_reasoning and not collected_reasoning:
+                collected_reasoning = _inline_reasoning
             return ResponseResult(
                 content=final_content,
                 reasoning_content=collected_reasoning,
@@ -1866,9 +1898,10 @@ class Xerxes:
                         return
 
             self._finalize_runtime_turn(agent.id or "default", buffered_content, runtime_turn_state)
+            _visible, _inline_reasoning = _split_inline_reasoning(buffered_content)
             out = Completion(
-                final_content=buffered_content,
-                reasoning_content=buffered_reasoning_content,
+                final_content=_visible,
+                reasoning_content=buffered_reasoning_content or _inline_reasoning,
                 function_calls_executed=len(function_calls),
                 agent_id=agent.id or "default",
                 execution_history=self.orchestrator.execution_history[-3:],
@@ -1944,9 +1977,10 @@ class Xerxes:
                     yield out
 
             self._finalize_runtime_turn(agent.id or "default", buffered_content, runtime_turn_state)
+            _visible, _inline_reasoning = _split_inline_reasoning(buffered_content)
             out = Completion(
-                final_content=buffered_content,
-                reasoning_content=buffered_reasoning_content,
+                final_content=_visible,
+                reasoning_content=buffered_reasoning_content or _inline_reasoning,
                 function_calls_executed=0,
                 agent_id=agent.id or "default",
                 execution_history=self.orchestrator.execution_history[-3:],
@@ -2042,10 +2076,11 @@ class Xerxes:
                 if isinstance(chunk, Completion):
                     completion = chunk
                 response = chunk
-            final_content = "".join(collected_content)
+            final_content, _inline_reasoning = _split_inline_reasoning("".join(collected_content))
 
             return ResponseResult(
                 content=final_content,
+                reasoning_content=_inline_reasoning,
                 response=response,
                 completion=completion,
                 function_calls=function_calls,

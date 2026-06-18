@@ -353,7 +353,9 @@ def build_tool_executor(
     propagated, so the LLM can recover by trying a different tool.
     """
 
-    def executor(tool_name: str, tool_input: dict[str, Any]) -> str:
+    from xerxes.streaming.messages import bound_tool_result
+
+    def _dispatch(tool_name: str, tool_input: dict[str, Any]) -> str:
         """Dispatch ``tool_name`` against the resolution chain and return text."""
         if registry is not None:
             entry = registry.get_tool(tool_name)
@@ -405,6 +407,12 @@ def build_tool_executor(
             return f"Error: {e}"
 
         return f"Unknown tool: {tool_name}"
+
+    def executor(tool_name: str, tool_input: dict[str, Any]) -> str:
+        # Clamp oversized output at the shared boundary so one huge tool result
+        # can't blow the context window — applies to both the streaming and
+        # Cortex engines, which share this executor.
+        return bound_tool_result(_dispatch(tool_name, tool_input))
 
     return executor
 

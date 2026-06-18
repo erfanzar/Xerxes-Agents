@@ -392,6 +392,7 @@ class LongTermMemory(Memory):
             return
 
         merged_ids: set[str] = set()
+        modified_keep_ids: set[str] = set()
 
         for i, item_a in enumerate(self._items):
             if item_a.memory_id in merged_ids:
@@ -419,6 +420,7 @@ class LongTermMemory(Memory):
                     keep.metadata["importance"] = max(keep_importance, discard_importance)
 
                     merged_ids.add(discard.memory_id)
+                    modified_keep_ids.add(keep.memory_id)
 
         if merged_ids:
             for mid in merged_ids:
@@ -428,3 +430,8 @@ class LongTermMemory(Memory):
                     del self._index[mid]
                     if self.storage:
                         self.storage.delete(f"ltm_{mid}")
+
+            if self.storage:
+                for kid in modified_keep_ids - merged_ids:
+                    if kid in self._index:
+                        self.storage.save(f"ltm_{kid}", self._index[kid].to_dict())

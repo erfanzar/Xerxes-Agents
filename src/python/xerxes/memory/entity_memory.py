@@ -157,7 +157,14 @@ class EntityMemory(Memory):
             if filters:
                 skip = False
                 for key, value in filters.items():
-                    if hasattr(item, key) and getattr(item, key) != value:
+                    if hasattr(item, key):
+                        actual = getattr(item, key)
+                    elif key in item.metadata:
+                        actual = item.metadata[key]
+                    else:
+                        skip = True
+                        break
+                    if actual != value:
                         skip = True
                         break
                 if skip:

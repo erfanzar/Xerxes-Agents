@@ -216,8 +216,10 @@ class AnthropicLLM(BaseLLM):
                 if role in ["user", "assistant"]:
                     converted.append({"role": role, "content": content})
 
-        if system_content and converted:
-            if converted[0]["role"] == "user":
+        if system_content:
+            if not converted:
+                converted.append({"role": "user", "content": system_content})
+            elif converted[0]["role"] == "user":
                 converted[0]["content"] = f"{system_content}\n\n{converted[0]['content']}"
             else:
                 converted.insert(0, {"role": "user", "content": system_content})
@@ -289,6 +291,7 @@ class AnthropicLLM(BaseLLM):
 
         buffered_content = ""
         function_calls: list[dict[str, Any]] = []
+        tool_blocks: dict[int, dict[str, Any]] = {}
 
         for event in response:
             chunk_data = {
@@ -302,27 +305,46 @@ class AnthropicLLM(BaseLLM):
 
             event_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
 
-            if event_type == "content_block_delta":
+            if event_type == "content_block_start":
+                block = event.get("content_block", {}) if isinstance(event, dict) else getattr(event, "content_block", {})
+                block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+                if block_type == "tool_use":
+                    index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                    tool_blocks[index] = {
+                        "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
+                        "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
+                        "partial_json": "",
+                    }
+            elif event_type == "content_block_delta":
                 delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
-                text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
-                if text:
-                    buffered_content += text
-                    chunk_data["content"] = text
-                    chunk_data["buffered_content"] = buffered_content
+                delta_type = delta.get("type") if isinstance(delta, dict) else getattr(delta, "type", None)
+                if delta_type == "input_json_delta":
+                    index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                    partial = (
+                        delta.get("partial_json", "") if isinstance(delta, dict) else getattr(delta, "partial_json", "")
+                    )
+                    if index in tool_blocks:
+                        tool_blocks[index]["partial_json"] += partial or ""
+                else:
+                    text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
+                    if text:
+                        buffered_content += text
+                        chunk_data["content"] = text
+                        chunk_data["buffered_content"] = buffered_content
+            elif event_type == "content_block_stop":
+                index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                block = tool_blocks.get(index)
+                if block and block.get("name"):
+                    function_calls.append(
+                        {
+                            "id": block.get("id"),
+                            "name": block["name"],
+                            "arguments": block["partial_json"] or "",
+                        }
+                    )
             elif event_type == "message_stop":
                 chunk_data["is_final"] = True
                 chunk_data["function_calls"] = function_calls
-            elif event_type == "tool_use":
-                name = event.get("name") if isinstance(event, dict) else getattr(event, "name", None)
-                input_data = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
-                if name:
-                    function_calls.append(
-                        {
-                            "id": event.get("id") if isinstance(event, dict) else getattr(event, "id", None),
-                            "name": name,
-                            "arguments": json.dumps(input_data) if input_data else "",
-                        }
-                    )
 
             yield chunk_data
 
@@ -351,6 +373,7 @@ class AnthropicLLM(BaseLLM):
             """
             buffered_content = ""
             function_calls: list[dict[str, Any]] = []
+            tool_blocks: dict[int, dict[str, Any]] = {}
 
             async for event in response:
                 chunk_data = {
@@ -364,27 +387,52 @@ class AnthropicLLM(BaseLLM):
 
                 event_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
 
-                if event_type == "content_block_delta":
+                if event_type == "content_block_start":
+                    block = (
+                        event.get("content_block", {})
+                        if isinstance(event, dict)
+                        else getattr(event, "content_block", {})
+                    )
+                    block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+                    if block_type == "tool_use":
+                        index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                        tool_blocks[index] = {
+                            "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
+                            "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
+                            "partial_json": "",
+                        }
+                elif event_type == "content_block_delta":
                     delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
-                    text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
-                    if text:
-                        buffered_content += text
-                        chunk_data["content"] = text
-                        chunk_data["buffered_content"] = buffered_content
+                    delta_type = delta.get("type") if isinstance(delta, dict) else getattr(delta, "type", None)
+                    if delta_type == "input_json_delta":
+                        index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                        partial = (
+                            delta.get("partial_json", "")
+                            if isinstance(delta, dict)
+                            else getattr(delta, "partial_json", "")
+                        )
+                        if index in tool_blocks:
+                            tool_blocks[index]["partial_json"] += partial or ""
+                    else:
+                        text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
+                        if text:
+                            buffered_content += text
+                            chunk_data["content"] = text
+                            chunk_data["buffered_content"] = buffered_content
+                elif event_type == "content_block_stop":
+                    index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
+                    block = tool_blocks.get(index)
+                    if block and block.get("name"):
+                        function_calls.append(
+                            {
+                                "id": block.get("id"),
+                                "name": block["name"],
+                                "arguments": block["partial_json"] or "",
+                            }
+                        )
                 elif event_type == "message_stop":
                     chunk_data["is_final"] = True
                     chunk_data["function_calls"] = function_calls
-                elif event_type == "tool_use":
-                    name = event.get("name") if isinstance(event, dict) else getattr(event, "name", None)
-                    input_data = event.get("input") if isinstance(event, dict) else getattr(event, "input", None)
-                    if name:
-                        function_calls.append(
-                            {
-                                "id": event.get("id") if isinstance(event, dict) else getattr(event, "id", None),
-                                "name": name,
-                                "arguments": json.dumps(input_data) if input_data else "",
-                            }
-                        )
 
                 yield chunk_data
 

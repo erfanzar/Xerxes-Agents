@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from ..bridge import profiles
 from ..channels.workspace import MarkdownAgentWorkspace
@@ -132,15 +132,20 @@ class RuntimeManager:
         runtime.update({k: v for k, v in (overrides or {}).items() if v not in (None, "")})
 
         profile = profiles.get_active_profile()
-        if profile and not runtime.get("model"):
-            runtime.update(
-                {
-                    "model": profile.get("model", ""),
-                    "base_url": profile.get("base_url", ""),
-                    "api_key": profile.get("api_key", ""),
-                    **profile.get("sampling", {}),
-                }
-            )
+        if profile:
+            # Backfill provider settings from the active profile for any field the
+            # caller didn't override. Critically, ``base_url``/``api_key`` are filled
+            # even when ``model`` IS provided (e.g. ``/model <id>`` switches within
+            # the same provider) — otherwise the override would drop the creds and
+            # break the next turn.
+            if not runtime.get("model"):
+                runtime["model"] = profile.get("model", "")
+            if not runtime.get("base_url"):
+                runtime["base_url"] = profile.get("base_url", "")
+            if not runtime.get("api_key"):
+                runtime["api_key"] = profile.get("api_key", "")
+            for _k, _v in profile.get("sampling", {}).items():
+                runtime.setdefault(_k, _v)
 
         if not runtime.get("model"):
             raise RuntimeError("No provider profile or daemon runtime model configured.")
@@ -176,6 +181,7 @@ class RuntimeManager:
             "permission_mode": self.runtime_config.get("permission_mode", "auto"),
             "tools": len(self.tool_schemas),
             "skills": len(self.skill_registry.skill_names),
+            "reasoning_effort": self.reasoning_state()["effort"],
         }
 
     @property
@@ -209,6 +215,45 @@ class RuntimeManager:
         self.runtime_config[name] = new
         set_global_config(self.runtime_config)
         return new
+
+    # Reasoning/"thinking" effort levels. Each level maps to an Anthropic
+    # ``budget_tokens`` preset and an OpenAI-compatible ``reasoning_effort``
+    # string (OpenAI o-series, MiniMax, …). ``off`` disables reasoning.
+    REASONING_LEVELS: ClassVar[dict[str, int]] = {"off": 0, "low": 2048, "medium": 8192, "high": 24576}
+
+    def reasoning_state(self) -> dict[str, Any]:
+        """Return the current reasoning effort: ``{effort, thinking, budget_tokens}``."""
+        thinking = bool(self.runtime_config.get("thinking", False))
+        effort = "off" if not thinking else str(self.runtime_config.get("reasoning_effort") or "medium")
+        return {
+            "effort": effort,
+            "thinking": thinking,
+            "budget_tokens": int(self.runtime_config.get("thinking_budget", 0) or 0),
+        }
+
+    def set_reasoning_effort(self, level: str) -> dict[str, Any]:
+        """Set the reasoning effort to one of ``off``/``low``/``medium``/``high``.
+
+        Updates ``thinking`` (bool), ``reasoning_effort`` (the level string sent
+        to OpenAI-compatible providers), and ``thinking_budget`` (Anthropic
+        ``budget_tokens``) in the live config, then republishes it. Raises
+        ``ValueError`` for an unrecognised level.
+        """
+        clean = level.strip().lower()
+        aliases = {"none": "off", "no": "off", "false": "off", "0": "off", "disable": "off", "med": "medium"}
+        clean = aliases.get(clean, clean)
+        if clean not in self.REASONING_LEVELS:
+            raise ValueError(f"Unknown reasoning level '{level}'. Use one of: {', '.join(self.REASONING_LEVELS)}.")
+        if clean == "off":
+            self.runtime_config["thinking"] = False
+            self.runtime_config["thinking_budget"] = 0
+            self.runtime_config.pop("reasoning_effort", None)
+        else:
+            self.runtime_config["thinking"] = True
+            self.runtime_config["reasoning_effort"] = clean
+            self.runtime_config["thinking_budget"] = self.REASONING_LEVELS[clean]
+        set_global_config(self.runtime_config)
+        return self.reasoning_state()
 
     def discover_skills(self) -> list[str]:
         """Re-scan bundled, user, and cwd skill directories; return sorted ids.
@@ -377,6 +422,65 @@ class SessionManager:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def _archive_path(self, session_id: str) -> Path:
+        """Return the sidecar path where compacted-out messages are appended."""
+        return self._store_dir / f"{session_id}.archive.jsonl"
+
+    def _archive_evicted(self, session: DaemonSession, evicted: list[dict[str, Any]]) -> None:
+        """Append compacted-out messages to a sidecar so history isn't lost unrecoverably.
+
+        Best-effort: a failure here must never break the turn.
+        """
+        if not evicted:
+            return
+        try:
+            with self._archive_path(session.id).open("a", encoding="utf-8") as fh:
+                for m in evicted:
+                    fh.write(json.dumps(m, default=str, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _repair_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Back-fill synthetic results for orphaned tool calls before reuse.
+
+        The session is persisted at ``TurnDone`` — which fires after the assistant
+        message (with its ``tool_calls``) is appended but before the tool results
+        are. A crash in that window leaves a ``tool_use`` with no matching
+        ``tool_result`` on disk, which makes Anthropic 400 on resume. Insert a
+        synthetic error result for every unanswered call so ``xerxes -r`` always
+        rehydrates into a valid conversation.
+        """
+        repaired: list[dict[str, Any]] = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            m = messages[i]
+            repaired.append(m)
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                answered: set[str | None] = set()
+                j = i + 1
+                while j < n and messages[j].get("role") == "tool":
+                    answered.add(messages[j].get("tool_call_id"))
+                    repaired.append(messages[j])
+                    j += 1
+                for tc in m["tool_calls"]:
+                    cid = tc.get("id")
+                    if cid and cid not in answered:
+                        repaired.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": cid,
+                                "name": tc.get("name", ""),
+                                "content": "[interrupted: no result recorded — the previous turn ended before this tool finished]",
+                                "is_error": True,
+                            }
+                        )
+                i = j
+            else:
+                i += 1
+        return repaired
+
     def save(self, session: DaemonSession) -> None:
         """Persist ``session`` to disk via a tempfile + ``os.replace`` swap.
 
@@ -449,7 +553,9 @@ class SessionManager:
                 workspace=workspace,
             )
             state = session.state
-            state.messages = list(loaded.get("messages", []))
+            # Repair any orphaned tool calls from a mid-turn crash so resume
+            # doesn't 400 (see _repair_tool_pairs).
+            state.messages = self._repair_tool_pairs(list(loaded.get("messages", [])))
             state.turn_count = int(loaded.get("turn_count", 0))
             state.total_input_tokens = int(loaded.get("total_input_tokens", 0))
             state.total_output_tokens = int(loaded.get("total_output_tokens", 0))
@@ -533,12 +639,31 @@ class SessionManager:
         compacted = False
 
         if len(state.messages) > self.keep_messages:
-            removed = len(state.messages) - self.keep_messages
-            session.workspace.append_daily_note(
-                f"[session:{session.key}] compacted {removed} old messages; kept last {self.keep_messages}."
-            )
-            state.messages = state.messages[-self.keep_messages :]
-            compacted = True
+            cut = len(state.messages) - self.keep_messages
+            # Snap the window start forward to a clean boundary. A raw tail slice
+            # can begin on a `tool` message whose matching `tool_use` was sliced
+            # off (or mid tool-use/result pair); messages_to_anthropic would then
+            # emit a tool_result with no tool_use and the provider 400s. Starting
+            # at the first user message at/after the cut guarantees a valid prefix.
+            start = cut
+            while start < len(state.messages) and state.messages[start].get("role") != "user":
+                start += 1
+            if start >= len(state.messages):
+                # No user-message boundary in the tail (pathological — e.g. a single
+                # assistant turn with a huge parallel tool batch). Skip the message
+                # trim THIS round rather than emptying the window or starting on an
+                # orphan tool_result; the side buffers below still trim, and the next
+                # turn introduces a user message that gives a clean boundary.
+                start = 0
+            if start > 0:
+                evicted = state.messages[:start]
+                self._archive_evicted(session, evicted)
+                session.workspace.append_daily_note(
+                    f"[session:{session.key}] compacted {len(evicted)} old messages "
+                    f"(archived to {session.id}.archive.jsonl); kept last {len(state.messages) - start}."
+                )
+                state.messages = state.messages[start:]
+                compacted = True
 
         if len(state.thinking_content) > self._THINKING_KEEP:
             state.thinking_content = state.thinking_content[-self._THINKING_KEEP :]
@@ -595,10 +720,87 @@ class TurnRunner:
         self._subagent_thinking_buffers: dict[str, str] = {}
         self._current_tool_call_id = ""
         self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
+        # Install a session_search backend over the persisted transcripts so the
+        # session_search tool actually works on the daemon path. Previously no
+        # searcher was ever installed here and every call returned an error,
+        # which silently broke cross-session recall.
+        try:
+            from ..tools.agent_meta_tools import set_session_searcher
+
+            set_session_searcher(self._build_session_searcher())
+        except Exception:
+            pass
+
+    def _build_session_searcher(self) -> Callable[..., dict[str, Any]]:
+        """Return a ``session_search`` backend over the daemon's persisted transcripts.
+
+        Scans the :class:`SessionManager` store (one JSON record per session) for
+        messages whose text contains the query — a best-effort, case-insensitive
+        substring match, newest sessions first. Enough to make cross-session
+        recall work without a separate FTS index the daemon never populates.
+        """
+        store = self.sessions
+
+        def _search(
+            query: str,
+            limit: int = 5,
+            agent_id: str | None = None,
+            session_id: str | None = None,
+        ) -> dict[str, Any]:
+            q = (query or "").strip().lower()
+            if not q:
+                return {"hits": []}
+            try:
+                paths = sorted(store._store_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            except OSError:
+                return {"hits": []}
+            hits: list[dict[str, Any]] = []
+            for path in paths:
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if session_id and str(record.get("session_id")) != session_id:
+                    continue
+                if agent_id and str(record.get("agent_id")) != agent_id:
+                    continue
+                for msg in record.get("messages", []):
+                    if not isinstance(msg, dict):
+                        continue  # tolerate legacy/hand-edited records
+                    content = msg.get("content")
+                    text = content if isinstance(content, str) else json.dumps(content, default=str)
+                    pos = text.lower().find(q)
+                    if pos == -1:
+                        continue
+                    flat = text.strip().replace("\n", " ")
+                    start = max(0, flat.lower().find(q) - 80)
+                    hits.append(
+                        {
+                            "session_id": record.get("session_id"),
+                            "agent_id": record.get("agent_id"),
+                            "role": msg.get("role"),
+                            "snippet": flat[start : start + 240],
+                        }
+                    )
+                    if len(hits) >= limit:
+                        return {"hits": hits}
+            return {"hits": hits}
+
+        return _search
 
     def close(self) -> None:
         """Shut the worker pool down without waiting for in-flight tasks."""
         self._pool.shutdown(wait=False)
+        # Detach the process-global session searcher this runner installed so it
+        # can't outlive the runner (avoids cross-runner/test-isolation bleed).
+        try:
+            from ..tools.agent_meta_tools import set_session_searcher
+
+            set_session_searcher(None)
+        except Exception:
+            pass
 
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         """Install the daemon-level event sink used by background sub-agents."""

@@ -477,7 +477,19 @@ class AgentMemory:
         sections.append(
             "## How you must use these — operational protocol\n"
             "\n"
-            "Treat persistent memory as an active loop, not a passive archive:\n"
+            "Treat persistent memory as an active loop YOU drive every turn — recall\n"
+            "before you act, record after you finish. Nothing writes it for you:\n"
+            "if you don't call these tools, your memory goes stale and tomorrow-you\n"
+            "starts blind. Calling them is part of doing the task, not optional.\n"
+            "\n"
+            "**The one rule you must never skip:** the instant the user hands you\n"
+            'something to keep — explicitly ("remember this", "note that", "for\n'
+            'your memory") or implicitly (a fact, value, preference, decision, or\n'
+            "correction) — write it to the right memory file IN THE SAME TURN,\n"
+            "before you treat the turn as done. A short reply is never an excuse to\n"
+            "skip the write: persist first, then answer — even if the user only\n"
+            'asked you to "acknowledge in one word." If a value changed, record the\n'
+            "NEW value so a later recall can't hand back the stale one.\n"
             "\n"
             "1. **Right now (wake-up):** Everything below is the current state of\n"
             "   your memory. You've already read it. Use it.\n"
@@ -502,10 +514,11 @@ class AgentMemory:
             '7. **When the user signals a preference** ("I like terse answers",\n'
             '   "never use emoji", "prefer x over y"): append to `USER.md`\n'
             "   in the **global** scope.\n"
-            "8. **At the end of each substantive turn** (you made progress, you\n"
-            "   shipped something, you got blocked): call\n"
-            '   `agent_memory_journal("project", "<one-line summary>")` so\n'
-            "   tomorrow-you sees today's progress.\n"
+            "8. **At the end of EVERY substantive turn, as your final action:**\n"
+            '   call `agent_memory_journal("project", "<one-line summary>")`\n'
+            "   yourself — every time, no exceptions. Nothing auto-saves this; if\n"
+            "   a value changed this turn, journal the NEW value so a later recall\n"
+            "   doesn't return the stale one.\n"
             "9. **Soul / identity drift** — if the user reshapes how you should\n"
             "   show up, update `SOUL.md` or `IDENTITY.md` accordingly.\n"
             "\n"
@@ -555,11 +568,30 @@ class AgentMemory:
                 continue
             text = text.strip()
             if len(text) > max_bytes_per_file:
-                text = (
-                    text[:max_bytes_per_file].rstrip()
-                    + f'\n\n[... truncated; agent_memory_read("{entry.scope.value}", "{entry.relative}") for full text ...]'
-                )
+                read_hint = f'agent_memory_read("{entry.scope.value}", "{entry.relative}") for full text'
+                # Append-only logs keep their NEWEST entries at the END. Cutting the
+                # prefix would discard exactly what recall needs, so keep the TAIL for
+                # journals/experiences and the head for everything else.
+                is_log = entry.relative.startswith("journal/") or entry.relative.endswith("EXPERIENCES.md")
+                if is_log:
+                    text = f"[... older entries truncated; {read_hint} ...]\n\n" + text[-max_bytes_per_file:].lstrip()
+                else:
+                    text = text[:max_bytes_per_file].rstrip() + f"\n\n[... truncated; {read_hint} ...]"
             sections.append(f"### [{entry.scope.value}] {entry.relative}\n\n{text}\n")
+
+        # Recency anchor: this write-check is LAST on purpose so it stays closest to
+        # the model's generation point — the memory-write step is the one the model
+        # most often skips, so it gets the final word every turn.
+        sections.append(
+            "## Before you finish this turn — write check\n"
+            "Re-read this before you end the turn. Did the user hand you a fact,\n"
+            "value, preference, decision, or correction — or did you learn something\n"
+            "durable this turn? If yes, it is NOT saved unless you called a memory\n"
+            "tool. Do it NOW: `agent_memory_append` for MEMORY.md / EXPERIENCES.md /\n"
+            "USER.md, or `agent_memory_journal` for a one-line summary — then finish.\n"
+            "A short reply is never an excuse to skip the write; if a value changed,\n"
+            "record the NEW value so a later recall can't hand back the stale one.\n"
+        )
         return "\n".join(sections).rstrip() + "\n"
 
     # ---------------------------- export -------------------------------

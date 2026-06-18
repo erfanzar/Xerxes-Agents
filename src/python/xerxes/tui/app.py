@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import signal
@@ -41,6 +42,10 @@ from .blocks import (
 )
 from .engine import BridgeClient
 from .prompt import PersistentPrompt
+
+# No handler is attached by default, so this never writes to the full-screen
+# TUI's stdout/stderr; it's captured only when file logging is configured.
+logger = logging.getLogger(__name__)
 
 
 def _git_branch(cwd: str | None = None) -> str:
@@ -372,8 +377,17 @@ class XerxesTUI:
 
         try:
             async for event in self._client.events():
-                self._handle_event(event)
-                if self._prompt and self._prompt.is_running:
+                # A single malformed/unexpected event must NOT kill the consumer —
+                # otherwise the whole TUI silently stops rendering daemon output
+                # (e.g. slash responses, status/model updates) for the rest of the
+                # session. Log and carry on instead.
+                try:
+                    self._handle_event(event)
+                except Exception as exc:  # noqa: BLE001 — resilience: never let one event stop the stream
+                    logger.warning("event handler failed for %s: %s", type(event).__name__, exc)
+                # Repaint even when idle (no active turn): slash responses and
+                # status/model updates arrive between turns and must show up.
+                if self._prompt is not None:
                     self._prompt._invalidate()
         except asyncio.CancelledError:
             pass
@@ -798,6 +812,11 @@ class XerxesTUI:
         if getattr(event, "skills", None):
             self._prompt.set_skills(list(event.skills))
 
+        # Populate the /model completion dropdown in the background so it's ready
+        # by the time the user types "/model " (network fetch — don't block init).
+        self._active_model = event.model or self._model
+        asyncio.create_task(self._load_models())
+
         if self._banner_index >= 0 and event.session_id:
             cwd = event.cwd or self._banner_cwd
             new_banner = _build_welcome_banner(
@@ -810,11 +829,27 @@ class XerxesTUI:
                 history[self._banner_index] = new_banner
                 self._prompt._invalidate()
 
+    async def _load_models(self) -> None:
+        """Fetch the active provider's model ids and feed them to the ``/model`` completer.
+
+        Best-effort and non-blocking: failures (offline / no ``/models`` endpoint)
+        just leave the dropdown empty rather than disrupting the TUI."""
+        if self._client is None or self._prompt is None:
+            return
+        try:
+            models = await self._client.fetch_models("", "")
+        except Exception:
+            return
+        ids = [str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")]
+        if ids and self._prompt is not None:
+            self._prompt.set_models(ids, getattr(self, "_active_model", "") or self._model)
+
     def _on_status_update(self, event: Any) -> None:
         """Apply a daemon status push (context tokens, plan/research mode) to the footer."""
         if self._prompt is None:
             return
         self._prompt.set_context(event.context_tokens, event.max_context)
+        self._prompt.set_reasoning_effort(str(getattr(event, "reasoning_effort", "") or "off"))
         self._plan_mode = bool(getattr(event, "plan_mode", self._plan_mode))
         mode = str(getattr(event, "mode", "") or "")
         if mode and mode != "code" and not self._plan_mode:

@@ -193,12 +193,39 @@ class DynamicCortex(Cortex):
             original_process = self.process
             self.process = process
 
-        try:
-            if stream:
+        if stream:
+            try:
                 result = self.kickoff(inputs=inputs, use_streaming=True, stream_callback=stream_callback)
-            else:
-                result = self.kickoff(inputs=inputs)
+                assert isinstance(result, tuple)
+                buffer, worker_thread = result
+            except BaseException:
+                # kickoff failed before the worker thread was started; restore now.
+                if process:
+                    self.process = original_process
+                raise
+
+            # The streaming worker thread reads ``self.process`` at run time, so
+            # restoring it synchronously here would race the worker. Defer the
+            # restore until the worker has finished by joining it on a wrapper
+            # thread that callers receive in place of the raw worker thread.
+            if process:
+
+                def _restore_after_worker() -> None:
+                    """Join the streaming worker, then restore the original process."""
+                    try:
+                        worker_thread.join()
+                    finally:
+                        self.process = original_process
+
+                wrapper_thread = threading.Thread(target=_restore_after_worker, daemon=True)
+                wrapper_thread.start()
+                return buffer, wrapper_thread
+            return result
+
+        try:
+            result = self.kickoff(inputs=inputs)
         finally:
+            # Non-streaming kickoff runs synchronously, so it is safe to restore now.
             if process:
                 self.process = original_process
 
@@ -324,14 +351,34 @@ class DynamicCortex(Cortex):
             if streamer_buffer is None:
                 streamer_buffer = StreamerBuffer()
 
-            kickoff_result = self.kickoff(use_streaming=True, stream_callback=stream_callback)
-            assert isinstance(kickoff_result, tuple)
-            buffer, thread = kickoff_result
+            try:
+                kickoff_result = self.kickoff(use_streaming=True, stream_callback=stream_callback)
+                assert isinstance(kickoff_result, tuple)
+                buffer, worker_thread = kickoff_result
+            except BaseException:
+                # kickoff failed before the worker thread was started; restore now.
+                if process:
+                    self.process = original_process
+                raise
 
+            # The streaming worker thread reads ``self.process`` at run time, so
+            # restoring it synchronously here would race the worker. Defer the
+            # restore until the worker has finished by joining it on a wrapper
+            # thread that callers receive in place of the raw worker thread.
             if process:
-                self.process = original_process
 
-            return buffer, thread
+                def _restore_after_worker() -> None:
+                    """Join the streaming worker, then restore the original process."""
+                    try:
+                        worker_thread.join()
+                    finally:
+                        self.process = original_process
+
+                wrapper_thread = threading.Thread(target=_restore_after_worker, daemon=True)
+                wrapper_thread.start()
+                return buffer, wrapper_thread
+
+            return buffer, worker_thread
         else:
             result = self.kickoff(use_streaming=False)
             assert not isinstance(result, tuple)

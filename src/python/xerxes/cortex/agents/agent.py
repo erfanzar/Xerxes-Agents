@@ -18,7 +18,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from pydantic import BaseModel
 
@@ -821,8 +821,6 @@ Ensure your response is valid JSON that can be parsed directly.
                         buffer_was_none = streamer_buffer is None
                         if streamer_buffer is None:
                             streamer_buffer = StreamerBuffer()
-
-                        from typing import cast
 
                         response_gen = self.xerxes_instance.run(
                             prompt=prompt,

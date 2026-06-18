@@ -220,6 +220,26 @@ class FileSessionStore(SessionStore):
                     return candidate
         return None
 
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        """Flush the directory entry so a rename survives a crash.
+
+        Opening a directory for ``os.fsync`` is not supported on every
+        platform (notably Windows); failures here are best-effort and must not
+        defeat the surrounding write.
+        """
+
+        try:
+            dir_fd = os.open(str(directory), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
+
     def save_session(self, session: SessionRecord) -> None:
         """Atomically write ``session`` to its workspace-scoped JSON file.
 
@@ -236,7 +256,10 @@ class FileSessionStore(SessionStore):
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     fh.write(payload)
+                    fh.flush()
+                    os.fsync(fh.fileno())
                 os.replace(tmp_path, path)
+                self._fsync_dir(path.parent)
             except Exception:
                 try:
                     os.unlink(tmp_path)
@@ -258,7 +281,7 @@ class FileSessionStore(SessionStore):
             if path is None:
                 return None
             data = json.loads(path.read_text(encoding="utf-8"))
-            stored_version = int(data.get("schema_version", 1))
+            stored_version = max(1, int(data.get("schema_version", 1)))
             if stored_version < CURRENT_SCHEMA_VERSION:
                 data = migrate_record(data, CURRENT_SCHEMA_VERSION)
                 # Persist the upgraded form. Use the same atomic-write path.
@@ -267,7 +290,10 @@ class FileSessionStore(SessionStore):
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as fh:
                         fh.write(payload)
+                        fh.flush()
+                        os.fsync(fh.fileno())
                     os.replace(tmp_path, path)
+                    self._fsync_dir(path.parent)
                 except Exception:
                     try:
                         os.unlink(tmp_path)

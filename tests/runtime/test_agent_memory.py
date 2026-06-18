@@ -239,7 +239,12 @@ class TestPromptSection:
     def test_protocol_directs_journal_at_turn_end(self, memory):
         out = memory.to_prompt_section()
         assert "agent_memory_journal" in out
-        assert "end of each substantive turn" in out.lower()
+        # The protocol must direct the agent to journal at the end of a substantive
+        # turn. Wording was strengthened ("EVERY substantive turn" + a terminal
+        # write-check block) so match the durable intent, not an exact phrase.
+        low = out.lower()
+        assert "substantive turn" in low
+        assert "before you finish this turn" in low
 
     def test_protocol_routes_user_prefs_to_global(self, memory):
         out = memory.to_prompt_section()

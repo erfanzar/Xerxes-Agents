@@ -26,7 +26,7 @@ import textwrap
 from enum import StrEnum
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from ..core.multimodal import SerializableImage
 from ..core.utils import XerxesBase
@@ -118,17 +118,18 @@ class ImageChunk(BaseContentChunk):
             An ``ImageChunk`` instance.
 
         Raises:
-            AssertionError: If the input does not have ``type: "image_url"``.
+            AssertionError: If the input does not have ``type: "image"`` or ``"image_url"``.
         """
-        assert openai_chunk.get("type") == "image_url", openai_chunk
+        assert openai_chunk.get("type") in {"image", "image_url"}, openai_chunk
 
         image_url_dict = openai_chunk["image_url"]
         assert isinstance(image_url_dict, dict) and "url" in image_url_dict, image_url_dict
 
-        if re.match(r"^data:image/\w+;base64,", image_url_dict["url"]):
-            image_url_dict["url"] = image_url_dict["url"].split(",")[1]
+        url = image_url_dict["url"]
+        if re.match(r"^data:image/\w+;base64,", url):
+            url = url.split(",", 1)[1]
 
-        return cls.model_validate({"image": image_url_dict["url"]})
+        return cls.model_validate({"image": url})
 
 
 class ImageURL(XerxesBase):
@@ -470,16 +471,26 @@ class ToolMessage(BaseMessage):
     role: Literal[Roles.tool] = Roles.tool
     tool_call_id: str | None = None
 
+    @model_validator(mode="after")
+    def _require_tool_call_id(self) -> "ToolMessage":
+        """Enforce that ``tool_call_id`` is present on tool messages.
+
+        Uses a validator (not an ``assert``) so the invariant holds even under
+        ``python -O`` where assert statements are stripped.
+
+        Raises:
+            ValueError: If ``tool_call_id`` is not set.
+        """
+        if self.tool_call_id is None:
+            raise ValueError("tool_call_id must be provided for tool messages.")
+        return self
+
     def to_openai(self) -> dict[str, str | list[dict[str, str | dict[str, Any]]]]:
         """Serialize to an OpenAI messages API dictionary.
 
         Returns:
             An OpenAI-compatible ``{"role": "tool", "content": ..., "tool_call_id": ...}`` dict.
-
-        Raises:
-            AssertionError: If ``tool_call_id`` is not set.
         """
-        assert self.tool_call_id is not None, "tool_call_id must be provided for tool messages."
         return self.model_dump()
 
     @classmethod
@@ -493,17 +504,15 @@ class ToolMessage(BaseMessage):
             A ``ToolMessage`` instance.
 
         Raises:
-            AssertionError: If ``tool_call_id`` is not present in the input.
+            ValueError: If ``tool_call_id`` is not present in the input.
         """
-        tool_message = cls.model_validate(
+        return cls.model_validate(
             dict(
                 content=messages["content"],
                 role=messages["role"],
                 tool_call_id=messages.get("tool_call_id", None),
             )
         )
-        assert tool_message.tool_call_id is not None, "tool_call_id must be provided for tool messages."
-        return tool_message
 
 
 _map_type_to_role = {

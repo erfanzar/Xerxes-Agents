@@ -345,7 +345,10 @@ def main() -> None:
             return [{"type": "text", "text": json.dumps({"error": f"unknown tool: {name}"})}]
         result = method(**(arguments or {}))
         if hasattr(result, "__await__"):
-            result = await result
+            # Async bridge callables return the awaitable verbatim (un-redacted)
+            # from events_wait/messages_send; redact the resolved value here so
+            # async and sync paths both scrub credentials before serialisation.
+            result = _redact(await result)
         return [{"type": "text", "text": json.dumps(result, default=str)}]
 
     import asyncio

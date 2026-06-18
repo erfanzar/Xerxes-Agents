@@ -106,6 +106,9 @@ class _FakeLLM(BaseLLM):
         for chunk in response:
             yield chunk
 
+    async def close(self) -> None:
+        pass
+
 
 class _FakeLLMAsyncResponse(_FakeLLM):
     """Fake LLM whose generate_completion returns an async-iterable response."""

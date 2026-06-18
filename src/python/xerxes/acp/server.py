@@ -205,17 +205,76 @@ class AcpServer:
         ]
 
 
-def main() -> None:
-    """Console entry point for ``xerxes-acp``.
+def build_server(*, default_permission_mode: str = "accept-all") -> tuple[AcpServer, Any]:
+    """Bootstrap the agent runner and an :class:`AcpServer` wired to it.
 
-    Wires the in-process server to stdio JSON-RPC. The real Xerxes
-    daemon hooks ``prompt_handler`` to its streaming loop."""
+    Returns ``(server, runner)``. The runner bootstraps a full
+    :class:`RuntimeManager` (provider/tools/skills) from the active profile,
+    so this raises if no provider is configured."""
+    from ..tools.claude_tools import set_ask_user_question_callback
+    from .runner import AcpAgentRunner
 
-    raise SystemExit(
-        "xerxes-acp transport adapter not yet wired (need agent-client-protocol package).\n"
-        "Install with: uv pip install 'agent-client-protocol>=0.9.0,<1.0' or "
-        "use the in-process AcpServer directly."
+    runner = AcpAgentRunner(default_permission_mode=default_permission_mode)
+    server = AcpServer(
+        prompt_handler=runner.run_prompt,
+        tool_list_provider=runner.list_tools,
+        model_list_provider=runner.list_models,
     )
+    runner.permission_board = server.permissions
+    # Route the blocking AskUserQuestion tool through the ACP client too, so ALL
+    # interactive prompts (approvals AND questions) are handled by the editor.
+    set_ask_user_question_callback(runner.ask_user_question)
+    return server, runner
 
 
-__all__ = ["AcpServer", "ServerCapabilities", "main"]
+def main(argv: list[str] | None = None) -> None:
+    """Console entry point for ``xerxes-acp`` — a stdio JSON-RPC ACP server.
+
+    ``xerxes-acp`` runs the server on stdin/stdout. ``--write-registry`` writes
+    the ACP discovery manifest (``agent.json``) for IDE clients and exits."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="xerxes-acp",
+        description="Xerxes Agent Client Protocol (ACP) server over stdio JSON-RPC.",
+    )
+    parser.add_argument(
+        "--write-registry",
+        action="store_true",
+        help="Write the ACP discovery manifest (agent.json) to the registry dir and exit.",
+    )
+    parser.add_argument(
+        "--permission-mode",
+        default="auto",
+        choices=("accept-all", "auto", "manual"),
+        help=(
+            "Default tool-approval mode for ACP sessions (default: auto). "
+            "'auto' routes risky ops to the client, 'manual' routes every tool, "
+            "'accept-all' bypasses approval."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    if args.write_registry:
+        from .registry import write_registry_file
+
+        path = write_registry_file()
+        # stdout is safe here (not in server/protocol mode).
+        print(f"Wrote ACP registry manifest: {path}")
+        return
+
+    # NOTE: in server mode stdout is the JSON-RPC channel — never print to it.
+    from .transport import StdioJsonRpcServer
+
+    try:
+        server, runner = build_server(default_permission_mode=args.permission_mode)
+    except Exception as exc:  # noqa: BLE001 — surface a clear startup error on stderr
+        raise SystemExit(
+            f"xerxes-acp: failed to initialise runtime: {exc}\n"
+            "Ensure a provider profile is configured (run `xerxes` and use /provider)."
+        ) from exc
+
+    StdioJsonRpcServer(server, runner).serve_forever()
+
+
+__all__ = ["AcpServer", "ServerCapabilities", "build_server", "main"]

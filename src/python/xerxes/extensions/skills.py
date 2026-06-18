@@ -275,7 +275,7 @@ class SkillRegistry:
                 try:
                     content = skill_file.read_text(encoding="utf-8")
                     safe = scan_context_content(content, filename=f"SKILL.md: {skill_file}")
-                    if safe.startswith("[BLOCKED:"):
+                    if "[BLOCKED:" in safe:
                         logger.warning("Blocked skill file %s due to security scan", skill_file)
                         continue
                     skill = parse_skill_md(safe, skill_file)

@@ -426,8 +426,9 @@ _MODEL_CONTEXT_LIMITS: dict[str, int] = {
 def get_context_limit(model: str) -> int:
     """Return the context window for ``model`` (model-specific or provider default)."""
 
-    if model in _MODEL_CONTEXT_LIMITS:
-        return _MODEL_CONTEXT_LIMITS[model]
+    name = bare_model(model)
+    if name in _MODEL_CONTEXT_LIMITS:
+        return _MODEL_CONTEXT_LIMITS[name]
     provider_name = detect_provider(model)
     prov = PROVIDERS.get(provider_name)
     return prov.context_limit if prov else 128_000

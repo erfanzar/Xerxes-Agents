@@ -76,7 +76,7 @@ class ChatMessage(OpenAIBaseModel):
     """
 
     role: str
-    content: str | list[tp.Mapping[str, str]]
+    content: str | list[tp.Mapping[str, tp.Any]] | None = None
     name: str | None = None
     function_call: dict[str, tp.Any] | None = None
 

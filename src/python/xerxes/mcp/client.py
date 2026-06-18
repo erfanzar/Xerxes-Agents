@@ -538,8 +538,40 @@ class MCPClient:
         self.session_id = None
         self.logger.info(f"Disconnected from MCP server {self.config.name}")
 
+    async def __aenter__(self) -> "MCPClient":
+        """Enter an async context: connect and return ``self``.
+
+        Pair with ``async with`` so :meth:`disconnect` always runs on exit,
+        even on the exception path, avoiding leaked network transports.
+        """
+
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Exit the async context by always closing the connection."""
+
+        await self.disconnect()
+
     def __del__(self):
-        """Last-resort: terminate a still-running subprocess on garbage collection."""
+        """Last-resort cleanup on garbage collection.
+
+        Terminates a still-running stdio subprocess. Async transports
+        (SSE / streamable HTTP) hold their connection in :attr:`_exit_stack`,
+        which can only be closed from an event loop; ``__del__`` cannot do that,
+        so we just warn that the connection was abandoned without
+        :meth:`disconnect`.
+        """
+
+        if self._exit_stack is not None:
+            try:
+                self.logger.warning(
+                    f"MCPClient for {self.config.name} garbage-collected without disconnect(); "
+                    "the SSE / streamable-HTTP connection may have leaked. "
+                    "Call disconnect() or use 'async with MCPClient(...)'."
+                )
+            except Exception:
+                pass
 
         if self.process and self.process.poll() is None:
             try:

@@ -563,6 +563,7 @@ class StatusUpdate(WireEvent):
         mcp_status: Per-server MCP status dict (name -> state).
         plan_mode: Whether plan mode is engaged.
         mode: Active interaction mode (``"code"``, ``"plan"``, ``"chat"`` …).
+        reasoning_effort: Current thinking effort (``"off"``/``"low"``/``"medium"``/``"high"``).
     """
 
     event_type: str = "status_update"
@@ -571,6 +572,7 @@ class StatusUpdate(WireEvent):
     mcp_status: dict[str, Any] = field(default_factory=dict)
     plan_mode: bool = False
     mode: str = "code"
+    reasoning_effort: str = "off"
 
 
 @dataclass(frozen=True)
