@@ -27,6 +27,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from ..types import AgentBaseFn
 
@@ -40,6 +41,32 @@ class ReadFile(AgentBaseFn):
         >>> ReadFile.static_call(file_path="README.md")
         >>> ReadFile.static_call(file_path="large_file.txt", max_chars=1000)
     """
+
+    @staticmethod
+    def get_schema() -> dict[str, Any]:
+        return {
+            "name": "ReadFile",
+            "description": "Read the contents of a file from the file system. Use 'file_path' parameter (not 'path').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to read. Use this parameter name, not 'path'.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Optional maximum characters to return. Truncates with '...' if exceeded.",
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "description": "Text encoding. Defaults to 'utf-8'.",
+                        "default": "utf-8",
+                    },
+                },
+                "required": ["file_path"],
+            },
+        }
 
     @staticmethod
     def static_call(
@@ -270,7 +297,6 @@ class AppendFile(AgentBaseFn):
 
 __all__ = (
     "AppendFile",
-    "ExecutePythonCode",
     "ExecuteShell",
     "ListDir",
     "ReadFile",

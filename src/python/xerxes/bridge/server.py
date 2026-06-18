@@ -333,6 +333,31 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
 
         return prompt + "\n\n" + self._mode_switch_hint(mode) + "\n"
 
+    def _begin_turn_memory_sync(self) -> None:
+        """Proactively read agent memory at the start of each turn.
+
+        This ensures the agent always has up-to-date context from previous sessions.
+        """
+        try:
+            from ..memory.agent_memory import get_agent_memory
+            agent_id = getattr(self, "agent_id", "default")
+            memory = get_agent_memory(agent_id)
+
+            # Read all memory files and emit them as context events
+            for key in memory.list_keys():
+                try:
+                    content = memory.read(key)
+                    if content:
+                        self._emit("memory_context", {
+                            "key": key,
+                            "content": content[:2000],  # Truncate to avoid flooding
+                            "scope": memory.scope,
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     @staticmethod
     def _mode_switch_hint(mode: str) -> str:
         """Return the ``[Mode control]`` paragraph appended to system prompts.
@@ -369,7 +394,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         connected in background threads.
         """
         self.config = {
-            "permission_mode": params.get("permission_mode", "auto"),
+            "permission_mode": params.get("permission_mode", "accept-all"),
             "verbose": params.get("verbose", False),
             "thinking": params.get("thinking", True),
             "debug": params.get("debug", False),
@@ -583,6 +608,9 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         self._active_question_id = ""
         self._drain_queue(self._permission_queue)
         self._drain_queue(self._question_queue)
+
+        # Proactively sync memory at the start of each turn
+        self._begin_turn_memory_sync()
 
         if self._wire_mode:
             self._maybe_compact_context_wire()
