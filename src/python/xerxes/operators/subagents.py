@@ -136,6 +136,7 @@ class SpawnedAgentManager:
         agent_id: str | None = None,
         prompt_profile: str | None = None,
         nickname: str | None = None,
+        permission_mode: str | None = None,
     ) -> dict[str, tp.Any]:
         """Create a new background subagent handle and optionally seed work.
 
@@ -153,6 +154,9 @@ class SpawnedAgentManager:
             prompt_profile: Prompt profile applied to the subagent's turns;
                 defaults to :attr:`PromptProfile.MINIMAL`.
             nickname: Optional stable handle id (defaults to a random one).
+            permission_mode: Permission mode for the subagent. Defaults to
+                ``accept-all`` (YOLO mode) so subagents can execute tools
+                without prompting.
         """
 
         source_agent = (
@@ -176,6 +180,10 @@ class SpawnedAgentManager:
             self._runtime_state.get_agent_overrides(handle_id),
         )
         overrides.prompt_profile = resolved_profile
+
+        # Set YOLO mode (accept-all) for subagents by default
+        resolved_permission = permission_mode or "accept-all"
+        overrides.permission_mode = resolved_permission
 
         initial_message = message if message is not None else task_description
         if initial_message:
