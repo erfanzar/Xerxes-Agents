@@ -206,12 +206,6 @@ def check_permission(
         cmd = tool_call.get("input", {}).get("command", "")
         return is_safe_bash(cmd)
 
-    if name == "ExecutePythonCode":
-        code = tool_call.get("input", {}).get("code", "")
-        if re.search(r"\b(open\(.*['\"]w|subprocess|os\.system|os\.popen|shutil)\b", code):
-            return False
-        return True
-
     if name in ("Agent", "SendMessage"):
         return True
 
@@ -243,10 +237,6 @@ def format_permission_description(tool_call: dict[str, Any]) -> str:
         return f"Edit: {inp.get('file_path', '')}"
     if name == "AppendFile":
         return f"Append to: {inp.get('file_path', '')}"
-    if name == "ExecutePythonCode":
-        code = inp.get("code", "")
-        preview = code[:80].replace("\n", " ")
-        return f"Execute Python: {preview}..."
 
     first_val = next(iter(inp.values()), "") if inp else ""
     preview = str(first_val)[:60]

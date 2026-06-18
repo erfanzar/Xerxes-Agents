@@ -48,7 +48,7 @@ from .google_search import (
     configure_google_search,
     set_google_search_client,
 )
-from .standalone import AppendFile, ExecutePythonCode, ExecuteShell, ListDir, ReadFile, WriteFile
+from .standalone import AppendFile, ExecuteShell, ListDir, ReadFile, WriteFile
 
 try:
     from .web_tools import APIClient, RSSReader, URLAnalyzer, WebScraper
@@ -66,6 +66,7 @@ try:
 except ImportError:
     _SYSTEM_TOOLS_AVAILABLE = False
 
+from ..memory.agent_memory import get_agent_memory, list_agent_memories
 from .agent_memory_tool import (
     agent_memory_append,
     agent_memory_journal,
@@ -74,6 +75,10 @@ from .agent_memory_tool import (
     agent_memory_search,
     agent_memory_status,
     agent_memory_write,
+)
+from .agent_memory_tools import (
+    agent_memory_learn,
+    agent_memory_sync_context,
 )
 from .agent_meta_tools import (
     configure_mixture_of_agents,
@@ -177,6 +182,19 @@ from .rl_tools import (
     rl_test_inference,
     set_rl_backend,
 )
+from .skill_authoring_tools import (
+    skill_list,
+    skill_read,
+    skill_update,
+    skill_write,
+)
+
+try:
+    from .computer_use import computer_use
+
+    _COMPUTER_USE_AVAILABLE = True
+except ImportError:
+    _COMPUTER_USE_AVAILABLE = False
 
 __all__ = [
     "MEMORY_TOOLS",
@@ -194,7 +212,6 @@ __all__ = [
     "EnterPlanModeTool",
     "EnterWorktreeTool",
     "EntityExtractor",
-    "ExecutePythonCode",
     "ExecuteShell",
     "ExitPlanModeTool",
     "ExitWorktreeTool",
@@ -245,10 +262,14 @@ __all__ = [
     "WriteFile",
     "agent_memory_append",
     "agent_memory_journal",
+    "agent_memory_learn",
     "agent_memory_list",
+    "agent_memory_read",
     "agent_memory_read",
     "agent_memory_search",
     "agent_memory_status",
+    "agent_memory_sync_context",
+    "agent_memory_write",
     "agent_memory_write",
     "analyze_code_structure",
     "apply_diff",
@@ -262,6 +283,8 @@ __all__ = [
     "browser_snapshot",
     "browser_type",
     "browser_vision",
+    "computer_use",
+    "computer_use",
     "configure_google_search",
     "configure_media",
     "configure_mixture_of_agents",
@@ -307,14 +330,17 @@ __all__ = [
     "set_rl_backend",
     "set_session_searcher",
     "set_skill_registry",
+    "skill_list",
     "skill_manage",
+    "skill_read",
+    "skill_update",
     "skill_view",
+    "skill_write",
     "skills_list",
     "text_to_speech",
     "vision_analyze",
     "write_file",
 ]
-
 if _WEB_TOOLS_AVAILABLE:
     __all__.extend(
         [
@@ -348,7 +374,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "FileSystemTools",
         "TempFileManager",
     ],
-    "execution": ["ExecutePythonCode", "ExecuteShell", "ProcessManager"],
+    "execution": ["ExecuteShell", "ProcessManager"],
     "web": ["DuckDuckGoSearch", "APIClient", "RSSReader", "URLAnalyzer"],
     "data": ["JSONProcessor", "CSVProcessor", "TextProcessor", "DataConverter", "DateTimeProcessor"],
     "ai": ["TextEmbedder", "TextSimilarity", "TextClassifier", "TextSummarizer", "EntityExtractor"],
@@ -370,6 +396,9 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "agent_memory_search",
         "agent_memory_journal",
         "agent_memory_status",
+        # New self-learning memory tools
+        "agent_memory_learn",
+        "agent_memory_sync_context",
     ],
     "agent": [
         "AgentTool",
@@ -438,12 +467,17 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "vision_analyze",
         "text_to_speech",
     ],
+    "computer_use": ["computer_use"],
     "meta": [
         "mixture_of_agents",
         "session_search",
         "skill_view",
         "skills_list",
         "skill_manage",
+        "skill_write",
+        "skill_read",
+        "skill_list",
+        "skill_update",
     ],
 }
 
@@ -456,6 +490,7 @@ TOOL_REQUIREMENTS: dict[str, str] = {
     "FileSystemTools": "core",
     "TextEmbedder": "xerxes[vectors] for advanced methods",
     "TextSimilarity": "xerxes[vectors] for semantic similarity",
+    "computer_use": "cua-driver (macOS only)",
 }
 
 

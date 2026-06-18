@@ -25,8 +25,6 @@ Example:
 from __future__ import annotations
 
 import subprocess
-import sys
-import textwrap
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -160,42 +158,6 @@ class ListDir(AgentBaseFn):
             else:
                 entries.append(f.name)
         return sorted(entries)
-
-
-class ExecutePythonCode(AgentBaseFn):
-    """Execute Python code in a subprocess.
-
-    Safely runs Python code with output capture.
-
-    Example:
-        >>> ExecutePythonCode.static_call(code="print(2 + 2)")
-    """
-
-    @staticmethod
-    def static_call(
-        code: str,
-        timeout: float | None = 10.0,
-        **context_variables,
-    ) -> dict[str, str]:
-        """Execute Python code.
-
-        Args:
-            code: Python code to execute.
-            timeout: Maximum execution time in seconds. Defaults to 10.
-            **context_variables: Additional context passed through to downstream calls.
-
-        Returns:
-            Dictionary with 'stdout' and 'stderr' strings.
-        """
-        wrapped = textwrap.dedent(code).strip()
-
-        proc = subprocess.run(
-            [sys.executable, "-c", wrapped],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return {"stdout": proc.stdout, "stderr": proc.stderr}
 
 
 class ExecuteShell(AgentBaseFn):

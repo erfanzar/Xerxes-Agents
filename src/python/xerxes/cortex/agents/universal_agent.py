@@ -15,7 +15,7 @@
 
 from typing import Any, cast
 
-from ...tools import ExecutePythonCode, GoogleSearch, WriteFile
+from ...tools import GoogleSearch, WriteFile
 from ...tools.coding_tools import (
     analyze_code_structure,
     apply_diff,
@@ -170,9 +170,8 @@ class UniversalAgent(CortexAgent):
                 analyze_code_structure,
                 name="analyze_code_structure",
                 description="Analyze code file structure (classes, functions, imports)",
-            ),
-            ExecutePythonCode,
-        ]
+                ),
+                ]
 
         if additional_tools:
             tools.extend(additional_tools)
