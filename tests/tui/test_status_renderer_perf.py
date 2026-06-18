@@ -53,7 +53,7 @@ def test_append_streaming_is_o1_per_chunk():
 def test_streaming_buffer_capped_after_threshold():
     r = StatusRenderer()
     cap = StatusRenderer.STREAMING_BUFFER_CHAR_LIMIT
-    # Pump 3× the cap; the buffer must compact down to ≤ cap chars.
+    # Pump 3x the cap; the buffer must compact down to ≤ cap chars.
     r.append_streaming("a" * (cap * 3))
     assert r._streaming_chars <= cap
     # The retained slice is the tail.

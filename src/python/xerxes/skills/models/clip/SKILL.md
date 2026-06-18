@@ -189,7 +189,7 @@ with torch.no_grad():
     text_features = model.encode_text(text_tokens)
     text_features /= text_features.norm(dim=-1, keepdim=True)
 
-# Similarity matrix (10 images × 3 texts)
+# Similarity matrix (10 images x 3 texts)
 similarities = image_features @ text_features.T
 print(similarities.shape)  # (10, 3)
 ```
@@ -227,7 +227,7 @@ results = collection.query(
 3. **Batch processing** - More efficient
 4. **Cache embeddings** - Expensive to recompute
 5. **Use descriptive labels** - Better zero-shot performance
-6. **GPU recommended** - 10-50× faster
+6. **GPU recommended** - 10-50x faster
 7. **Preprocess images** - Use provided preprocess function
 
 ## Performance

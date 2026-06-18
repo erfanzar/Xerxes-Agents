@@ -188,9 +188,9 @@ See [api-reference.md](api-reference.md) for the full endpoint spec.
 └─────────────────────────────────────────────────┘
 
 ┌─ test (matrix) ────────────────────────────────┐
-│ ubuntu-latest   × python 3.11/3.12/3.13   │
-│ macos-latest    × python 3.11/3.12/3.13   │
-│ windows-latest  × python 3.11/3.12        │
+│ ubuntu-latest   x python 3.11/3.12/3.13   │
+│ macos-latest    x python 3.11/3.12/3.13   │
+│ windows-latest  x python 3.11/3.12        │
 │                                                │
 │ pytest tests/ --cov=src/python/xerxes          │
 └────────────────────────────────────────────────┘

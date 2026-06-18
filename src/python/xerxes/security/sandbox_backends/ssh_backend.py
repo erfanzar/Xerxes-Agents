@@ -20,10 +20,10 @@ are out of scope; this backend is for "run this on the build box"."""
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shlex
 import subprocess
-import dataclasses
 from dataclasses import dataclass
 from typing import Any
 

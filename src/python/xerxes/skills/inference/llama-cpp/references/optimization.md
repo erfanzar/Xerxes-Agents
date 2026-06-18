@@ -20,7 +20,7 @@ Maximize llama.cpp inference speed and efficiency.
 # OpenBLAS (faster matrix ops)
 make LLAMA_OPENBLAS=1
 
-# BLAS gives 2-3× speedup
+# BLAS gives 2-3x speedup
 ```
 
 ## GPU Offloading

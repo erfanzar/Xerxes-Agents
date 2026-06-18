@@ -101,11 +101,7 @@ def test_steer_with_no_session_is_a_noop(daemon):
     rec = _Recorder()
     _run(daemon._slash_steer("oops", rec))
 
-    bodies = [
-        p.get("body", "")
-        for (et, p) in rec.events
-        if et == "notification" and p.get("category") == "slash"
-    ]
+    bodies = [p.get("body", "") for (et, p) in rec.events if et == "notification" and p.get("category") == "slash"]
     assert any("no active session" in b.lower() for b in bodies)
 
 

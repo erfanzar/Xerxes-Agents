@@ -141,6 +141,27 @@ ignore = ["F722", "B008", "UP015", "A005", "E501", "B010"]
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
 
+
+[tool.pytest.ini_options]
+# The ``eval`` marker covers the real-LLM playground eval harnesses
+# (playground/eval.py, playground/eval_hard.py). They spawn an isolated daemon
+# and bill real tokens, so playground/conftest.py auto-skips any ``eval``-marked
+# test when no provider API key is configured. Opt in explicitly, e.g.::
+#
+#     uv run pytest -m eval
+#
+# By default the eval tests are deselected so the standard suite stays fast
+# and free — ``addopts = ["-m", "not eval"]`` means you have to opt in
+# with ``-m eval`` (or ``-m ""`` to run everything).
+addopts = ["-m", "not eval"]
+markers = [
+    "eval: scored end-to-end playground eval against the real agent (spawns an isolated daemon + bills tokens; auto-skipped without API credentials)",
+]
+# The eval harness rebuilds these dirs every run and leaves agent-generated
+# fixture files (e.g. ``test_roman.py``) inside them — never collect from there.
+norecursedirs = [".eval_home", "workspace", "workspace_hard"]
+
+
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true

@@ -123,7 +123,7 @@ sweep_config = {
     }
 }
 
-# Total runs: 3 × 3 × 2 = 18 runs
+# Total runs: 3 x 3 x 2 = 18 runs
 ```
 
 **Pros:**

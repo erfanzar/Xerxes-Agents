@@ -608,7 +608,7 @@ Unsloth model catalog for all our [Dynamic](https://docs.unsloth.ai/basics/unslo
 
 ### Mistral models:
 
-<table><thead><tr><th width="174">Model</th><th>Variant</th><th>GGUF</th><th>Instruct (4-bit)</th></tr></thead><tbody><tr><td><strong>Mistral Small</strong></td><td>3.2-24 B (2506)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>3.1-24 B (2503)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>3-24 B (2501)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-24B-Instruct-2501-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-24B-Instruct-2501-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Magistral</strong></td><td>Small-24 B (2506)</td><td><a href="https://huggingface.co/unsloth/Magistral-Small-2506-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Magistral-Small-2506-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Devstral</strong></td><td>Small-24 B (2507)</td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2507-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2507-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>Small-24 B (2505)</td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2505-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2505-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Pixtral</strong></td><td>12 B (2409)</td><td>—</td><td><a href="https://huggingface.co/unsloth/Pixtral-12B-2409-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>Small</strong></td><td>2409-22 B</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-Instruct-2409-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>NeMo</strong></td><td>12 B (2407)</td><td><a href="https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>Large</strong></td><td>2407</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mistral-Large-Instruct-2407-bnb-4bit">link</a></td></tr><tr><td><strong>Mistral 7 B</strong></td><td>v0.3</td><td>—</td><td><a href="https://huggingface.co/unsloth/mistral-7b-instruct-v0.3-bnb-4bit">link</a></td></tr><tr><td></td><td>v0.2</td><td>—</td><td><a href="https://huggingface.co/unsloth/mistral-7b-instruct-v0.2-bnb-4bit">link</a></td></tr><tr><td><strong>Mixtral</strong></td><td>8 × 7 B</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mixtral-8x7B-Instruct-v0.1-unsloth-bnb-4bit">link</a></td></tr></tbody></table>
+<table><thead><tr><th width="174">Model</th><th>Variant</th><th>GGUF</th><th>Instruct (4-bit)</th></tr></thead><tbody><tr><td><strong>Mistral Small</strong></td><td>3.2-24 B (2506)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>3.1-24 B (2503)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-3.1-24B-Instruct-2503-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>3-24 B (2501)</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-24B-Instruct-2501-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Small-24B-Instruct-2501-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Magistral</strong></td><td>Small-24 B (2506)</td><td><a href="https://huggingface.co/unsloth/Magistral-Small-2506-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Magistral-Small-2506-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Devstral</strong></td><td>Small-24 B (2507)</td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2507-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2507-unsloth-bnb-4bit">link</a></td></tr><tr><td></td><td>Small-24 B (2505)</td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2505-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Devstral-Small-2505-unsloth-bnb-4bit">link</a></td></tr><tr><td><strong>Pixtral</strong></td><td>12 B (2409)</td><td>—</td><td><a href="https://huggingface.co/unsloth/Pixtral-12B-2409-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>Small</strong></td><td>2409-22 B</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mistral-Small-Instruct-2409-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>NeMo</strong></td><td>12 B (2407)</td><td><a href="https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407-GGUF">link</a></td><td><a href="https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit">link</a></td></tr><tr><td>Mistral <strong>Large</strong></td><td>2407</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mistral-Large-Instruct-2407-bnb-4bit">link</a></td></tr><tr><td><strong>Mistral 7 B</strong></td><td>v0.3</td><td>—</td><td><a href="https://huggingface.co/unsloth/mistral-7b-instruct-v0.3-bnb-4bit">link</a></td></tr><tr><td></td><td>v0.2</td><td>—</td><td><a href="https://huggingface.co/unsloth/mistral-7b-instruct-v0.2-bnb-4bit">link</a></td></tr><tr><td><strong>Mixtral</strong></td><td>8 x 7 B</td><td>—</td><td><a href="https://huggingface.co/unsloth/Mixtral-8x7B-Instruct-v0.1-unsloth-bnb-4bit">link</a></td></tr></tbody></table>
 
 ### Phi models:
 
@@ -775,7 +775,7 @@ Unsloth model catalog for all our [Dynamic](https://docs.unsloth.ai/basics/unslo
 | **Mistral**      | 7B v0.3        | [link](https://huggingface.co/unsloth/mistral-7b-instruct-v0.3)    |
 | **Mistral**      | 7B v0.2        | [link](https://huggingface.co/unsloth/mistral-7b-instruct-v0.2)    |
 | **Pixtral**      | 12B 2409       | [link](https://huggingface.co/unsloth/Pixtral-12B-2409)            |
-| **Mixtral**      | 8×7B           | [link](https://huggingface.co/unsloth/Mixtral-8x7B-Instruct-v0.1)  |
+| **Mixtral**      | 8x7B           | [link](https://huggingface.co/unsloth/Mixtral-8x7B-Instruct-v0.1)  |
 | **Mistral NeMo** | 12B 2407       | [link](https://huggingface.co/unsloth/Mistral-Nemo-Instruct-2407)  |
 | **Devstral**     | Small 2505     | [link](https://huggingface.co/unsloth/Devstral-Small-2505)         |
 
@@ -1792,9 +1792,9 @@ We recommend starting with **Instruct models**, as they allow direct fine-tuning
 
 There are other settings which you can toggle:
 
-* **`max_seq_length = 2048`** – Controls context length. While Llama-3 supports 8192, we recommend 2048 for testing. Unsloth enables 4× longer context fine-tuning.
+* **`max_seq_length = 2048`** – Controls context length. While Llama-3 supports 8192, we recommend 2048 for testing. Unsloth enables 4x longer context fine-tuning.
 * **`dtype = None`** – Defaults to None; use `torch.float16` or `torch.bfloat16` for newer GPUs.
-* **`load_in_4bit = True`** – Enables 4-bit quantization, reducing memory use 4× for fine-tuning. Disabling it enables LoRA 16-bit fine-tuning. You can also enable 16-bit LoRA with `load_in_16bit = True`
+* **`load_in_4bit = True`** – Enables 4-bit quantization, reducing memory use 4x for fine-tuning. Disabling it enables LoRA 16-bit fine-tuning. You can also enable 16-bit LoRA with `load_in_16bit = True`
 * To enable full fine-tuning (FFT), set `full_finetuning = True`. For 8-bit fine-tuning, set `load_in_8bit = True`.
 * **Note:** Only one training method can be set to `True` at a time.
 
@@ -2532,8 +2532,8 @@ The number of times the model sees the full training dataset.
 
 LoRA uses 16-bit precision, while QLoRA is a 4-bit fine-tuning method.
 
-* **LoRA:** 16-bit fine-tuning. It's slightly faster and slightly more accurate, but consumes significantly more VRAM (4× more than QLoRA). Recommended for 16-bit environments and scenarios where maximum accuracy is required.
-* **QLoRA:** 4-bit fine-tuning. Slightly slower and marginally less accurate, but uses much less VRAM (4× less). \
+* **LoRA:** 16-bit fine-tuning. It's slightly faster and slightly more accurate, but consumes significantly more VRAM (4x more than QLoRA). Recommended for 16-bit environments and scenarios where maximum accuracy is required.
+* **QLoRA:** 4-bit fine-tuning. Slightly slower and marginally less accurate, but uses much less VRAM (4x less). \
   :sloth: *70B LLaMA fits in <48GB VRAM with QLoRA in Unsloth -* [*more details here*](https://unsloth.ai/blog/llama3-3)*.*
 
 ### Hyperparameters & Recommendations:
@@ -2580,7 +2580,7 @@ Gradient accumulation and batch sizes <mark style="color:green;">**are now fully
 
 [Read our blog post](https://unsloth.ai/blog/gradient) for more details.
 
-Prior to our fixes, combinations of `batch_size` and `gradient_accumulation_steps` that yielded the same **Effective Batch Size** (i.e., `batch_size × gradient_accumulation_steps = 16`) did not result in equivalent training behavior. For example, configurations like `b1/g16`, `b2/g8`, `b4/g4`, `b8/g2`, and `b16/g1` all have an **Effective Batch Size** of 16, but as shown in the graph, the loss curves did not align when using standard gradient accumulation:
+Prior to our fixes, combinations of `batch_size` and `gradient_accumulation_steps` that yielded the same **Effective Batch Size** (i.e., `batch_size x gradient_accumulation_steps = 16`) did not result in equivalent training behavior. For example, configurations like `b1/g16`, `b2/g8`, `b4/g4`, `b8/g2`, and `b16/g1` all have an **Effective Batch Size** of 16, but as shown in the graph, the loss curves did not align when using standard gradient accumulation:
 
 <figure><img src="https://3215535692-files.gitbook.io/~/files/v0/b/gitbook-x-prod.appspot.com/o/spaces%2FxhOjnexMCB3dmuQFQ2Zq%2Fuploads%2FfbTkE4kv2tVwCIdyxWKe%2FBefore_-_Standard_gradient_accumulation_UQOFkUggudXuV9dzrh8MA.svg?alt=media&#x26;token=c3297fd4-a96b-45d0-9925-0010165d85c6" alt=""><figcaption><p>(Before - Standard Gradient Accumulation)</p></figcaption></figure>
 
@@ -4531,7 +4531,7 @@ Guide on how to run and fine-tune DeepSeek-OCR locally.
 
 **DeepSeek-OCR** is a 3B-parameter vision model for OCR and document understanding. It uses *context optical compression* to convert 2D layouts into vision tokens, enabling efficient long-context processing.
 
-Capable of handling tables, papers, and handwriting, DeepSeek-OCR achieves 97% precision while using 10× fewer vision tokens than text tokens - making it 10× more efficient than text-based LLMs.
+Capable of handling tables, papers, and handwriting, DeepSeek-OCR achieves 97% precision while using 10x fewer vision tokens than text tokens - making it 10x more efficient than text-based LLMs.
 
 You can fine-tune DeepSeek-OCR to enhance its vision or language performance. In our Unsloth [**free fine-tuning notebook**](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Deepseek_OCR_\(3B\).ipynb), we demonstrated a [88.26% improvement](#fine-tuning-deepseek-ocr) for language understanding.
 
@@ -4933,7 +4933,7 @@ docker run -d -e JUPYTER_PORT=8000 \
 
 Train Vision/multimodal models via GRPO and RL with Unsloth!
 
-Unsloth now supports vision/multimodal RL with [Qwen3-VL](https://docs.unsloth.ai/models/qwen3-vl-how-to-run-and-fine-tune), [Gemma 3](https://docs.unsloth.ai/models/gemma-3-how-to-run-and-fine-tune) and more. Due to Unsloth's unique [weight sharing](https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide#what-unsloth-offers-for-rl) and custom kernels, Unsloth makes VLM RL **1.5–2× faster,** uses **90% less VRAM**, and enables **15× longer context** lengths than FA2 setups, with no accuracy loss. This update also introduces Qwen's [GSPO](#gspo-rl) algorithm.
+Unsloth now supports vision/multimodal RL with [Qwen3-VL](https://docs.unsloth.ai/models/qwen3-vl-how-to-run-and-fine-tune), [Gemma 3](https://docs.unsloth.ai/models/gemma-3-how-to-run-and-fine-tune) and more. Due to Unsloth's unique [weight sharing](https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide#what-unsloth-offers-for-rl) and custom kernels, Unsloth makes VLM RL **1.5–2x faster,** uses **90% less VRAM**, and enables **15x longer context** lengths than FA2 setups, with no accuracy loss. This update also introduces Qwen's [GSPO](#gspo-rl) algorithm.
 
 Unsloth can train Qwen3-VL-8B with GSPO/GRPO on a free Colab T4 GPU. Other VLMs work too, but may need larger GPUs. Gemma requires newer GPUs than T4 because vLLM [restricts to Bfloat16](https://docs.unsloth.ai/models/gemma-3-how-to-run-and-fine-tune#unsloth-fine-tuning-fixes), thus we recommend NVIDIA L4 on Colab. Our notebooks solve numerical math problems involving images and diagrams:
 
@@ -6277,7 +6277,7 @@ OpenAI releases '**gpt-oss-120b'** and '**gpt-oss-20b'**, two SOTA open language
 {% hint style="success" %}
 [**Aug 28 update**](https://docs.unsloth.ai/models/long-context-gpt-oss-training#new-saving-to-gguf-vllm-after-gpt-oss-training)**:** You can now export/save your QLoRA fine-tuned gpt-oss model to llama.cpp, vLLM, HF etc.
 
-We also introduced [Unsloth Flex Attention](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support) which enables **>8× longer context lengths**, **>50% less VRAM usage** and **>1.5× faster training** vs. all implementations. [Read more here](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support)
+We also introduced [Unsloth Flex Attention](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support) which enables **>8x longer context lengths**, **>50% less VRAM usage** and **>1.5x faster training** vs. all implementations. [Read more here](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support)
 {% endhint %}
 
 > [**Fine-tune**](#fine-tuning-gpt-oss-with-unsloth) **gpt-oss-20b for free with our** [**Colab notebook**](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/gpt-oss-\(20B\)-Fine-tuning.ipynb)
@@ -6631,12 +6631,12 @@ In this guide with screenshots, you'll learn to fine-tune your own custom gpt-os
 {% hint style="success" %}
 [**Aug 28 update**](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support)**:** You can now export/save your QLoRA fine-tuned gpt-oss model to llama.cpp, vLLM, HF etc.
 
-We also introduced [Unsloth Flex Attention](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support) which enables **>8× longer context lengths**, **>50% less VRAM usage** and **>1.5× faster training** vs. all implementations. [Read more here](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support)
+We also introduced [Unsloth Flex Attention](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support) which enables **>8x longer context lengths**, **>50% less VRAM usage** and **>1.5x faster training** vs. all implementations. [Read more here](https://docs.unsloth.ai/models/long-context-gpt-oss-training#introducing-unsloth-flex-attention-support)
 {% endhint %}
 
 > **Quickstart:** Fine-tune gpt-oss-20b for free with our: [Colab notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/gpt-oss-\(20B\)-Fine-tuning.ipynb)
 
-Unsloth gpt-oss fine-tuning, when compared to all other FA2 implementations, achieves 1.5× faster training, 70% reduction in VRAM use, and 10x longer context lengths - with no accuracy loss.
+Unsloth gpt-oss fine-tuning, when compared to all other FA2 implementations, achieves 1.5x faster training, 70% reduction in VRAM use, and 10x longer context lengths - with no accuracy loss.
 
 * **QLoRA requirements:** gpt-oss-20b = 14GB VRAM • gpt-oss-120b = 65GB VRAM.
 * **BF16 LoRA requirements:** gpt-oss-20b = 44GB VRAM • gpt-oss-120b = 210GB VRAM.
@@ -7148,7 +7148,7 @@ Yes! Unsloth now supports RL for gpt-oss with GRPO/GSPO. We made it work on a fr
 
 # Long Context gpt-oss Training
 
-We’re excited to introduce Unsloth Flex Attention support for OpenAI gpt-oss training that enables **>8× longer context lengths**, **>50% less VRAM usage** and **>1.5× faster training (with no accuracy degradation)** vs. all implementations including those using Flash Attention 3 (FA3). Unsloth Flex Attention makes it possible to train with a **60K context length** on a 80GB VRAM H100 GPU for BF16 LoRA. Also:
+We’re excited to introduce Unsloth Flex Attention support for OpenAI gpt-oss training that enables **>8x longer context lengths**, **>50% less VRAM usage** and **>1.5x faster training (with no accuracy degradation)** vs. all implementations including those using Flash Attention 3 (FA3). Unsloth Flex Attention makes it possible to train with a **60K context length** on a 80GB VRAM H100 GPU for BF16 LoRA. Also:
 
 * You can [now export/save](#new-saving-to-gguf-vllm-after-gpt-oss-training) your QLoRA fine-tuned gpt-oss model to llama.cpp, vLLM, Ollama or HF
 * We [**fixed gpt-oss training**](#bug-fixes-for-gpt-oss) **losses going to infinity** on float16 GPUs (like T4 Colab)
@@ -7162,7 +7162,7 @@ With Unsloth's Flex Attention support, a single 80GB VRAM H100 can handle up to 
 
 In comparison, all other non-Unsloth implementations max out at 9K context length on an 80GB GPU, and can only reach 15K context with FA3. But, <mark style="background-color:$warning;">**FA3 is unsuitable for gpt-oss training since it lacks backward pass support for attention sinks**</mark>. So if you were previously using FA3 for gpt-oss training, we'd recommend you to **not use it** for now. Thus, the max context length you can get without Unsloth on 80GB VRAM is \~9K.
 
-Training with Unsloth Flex Attention delivers at least a 1.3× speedup, with gains growing as context length increases, reaching up to 2× faster. Because Flex Attention scales with context, longer sequences yield bigger savings in both VRAM and training time, as [described here](#unsloths-flex-attention-implementation).
+Training with Unsloth Flex Attention delivers at least a 1.3x speedup, with gains growing as context length increases, reaching up to 2x faster. Because Flex Attention scales with context, longer sequences yield bigger savings in both VRAM and training time, as [described here](#unsloths-flex-attention-implementation).
 
 A huge thank you to Rohan Pandey for his [Flex Attention implementation](https://x.com/khoomeik/status/1955693558914310608), which directly inspired the development of Unsloth's Flex Attention implementation.
 
@@ -9443,8 +9443,8 @@ To use the notebooks, just click Runtime, then Run all. You can change settings 
 
 There are other settings which you can toggle:
 
-* **`max_seq_length = 2048`** – Controls context length. While Qwen3 supports 40960, we recommend 2048 for testing. Unsloth enables 8× longer context fine-tuning.
-* **`load_in_4bit = True`** – Enables 4-bit quantization, reducing memory use 4× for fine-tuning on 16GB GPUs.
+* **`max_seq_length = 2048`** – Controls context length. While Qwen3 supports 40960, we recommend 2048 for testing. Unsloth enables 8x longer context fine-tuning.
+* **`load_in_4bit = True`** – Enables 4-bit quantization, reducing memory use 4x for fine-tuning on 16GB GPUs.
 * For **full-finetuning** - set `full_finetuning = True`  and **8-bit finetuning** - set `load_in_8bit = True`&#x20;
 
 If you'd like to read a full end-to-end guide on how to use Unsloth notebooks for fine-tuning or just learn about fine-tuning, creating [datasets](https://docs.unsloth.ai/get-started/fine-tuning-llms-guide/datasets-guide) etc., view our [complete guide here](https://docs.unsloth.ai/get-started/fine-tuning-llms-guide):
@@ -10199,7 +10199,7 @@ This reward function is also fully customizable, allowing you to adapt it for ot
 The best part about this whole reward function and notebook is you DO NOT need a language dataset to force your model to learn a specific language. The notebook has no Indonesian dataset.
 {% endhint %}
 
-Unsloth makes R1-Qwen3 distill fine-tuning 2× faster, uses 70% less VRAM, and support 8× longer context lengths.
+Unsloth makes R1-Qwen3 distill fine-tuning 2x faster, uses 70% less VRAM, and support 8x longer context lengths.
 
 
 # Magistral: How to Run & Fine-tune

@@ -22,6 +22,7 @@ submodules.
 """
 
 from ..operators.config import OperatorRuntimeConfig
+from .arg_validation import ValidationResult, validate_and_format_error, validate_tool_arguments
 from .bootstrap import BootstrapResult, BootstrapStage, bootstrap
 from .bridge import bootstrap_xerxes, build_tool_executor, create_query_engine, populate_registry
 from .cost_tracker import CostEvent, CostTracker
@@ -41,6 +42,7 @@ from .parity_audit import ModuleStatus, ParityAuditResult, run_parity_audit
 from .profiles import PromptProfile, PromptProfileConfig, get_profile_config
 from .query_engine import QueryEngine, QueryEngineConfig, TurnResult
 from .session import RuntimeContext, RuntimeSession
+from .tool_cache import ToolOutputCache
 from .tool_pool import ToolPool, assemble_tool_pool
 from .transcript import TranscriptEntry, TranscriptStore
 
@@ -73,6 +75,7 @@ __all__ = [
     "RuntimeFeaturesState",
     "RuntimeSession",
     "ToolLoopError",
+    "ToolOutputCache",
     "ToolPool",
     "TranscriptEntry",
     "TranscriptStore",

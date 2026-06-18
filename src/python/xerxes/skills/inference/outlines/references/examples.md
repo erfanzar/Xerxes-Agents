@@ -314,7 +314,7 @@ print(f"Invoice: {invoice.invoice_number}")
 print(f"From: {invoice.vendor} → To: {invoice.customer}")
 print(f"Items: {len(invoice.items)}")
 for item in invoice.items:
-    print(f"  - {item.description}: {item.quantity} × ${item.unit_price} = ${item.total}")
+    print(f"  - {item.description}: {item.quantity} x ${item.unit_price} = ${item.total}")
 print(f"Total: ${invoice.total}")
 ```
 

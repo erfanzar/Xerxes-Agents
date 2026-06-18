@@ -24,6 +24,7 @@ gated by the active :class:`PromptProfileConfig` so the same builder serves
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import typing as tp
@@ -37,6 +38,8 @@ if tp.TYPE_CHECKING:
     from ..extensions.plugins import PluginRegistry
     from ..extensions.skills import Skill, SkillRegistry
     from ..security.sandbox import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -120,6 +123,8 @@ class PromptContext:
     bootstrap_section: str = ""
     memory_section: str = ""
     user_profile_section: str = ""
+    repo_map_section: str = ""
+    git_section: str = ""
 
 
 def _resolve_profile_config(
@@ -227,6 +232,8 @@ class PromptContextBuilder:
         ctx.bootstrap_section = self._build_bootstrap(agent_id) if pcfg.include_bootstrap else ""
         ctx.memory_section = self._build_memory_section(agent_id, pcfg) if pcfg.include_relevant_memories else ""
         ctx.user_profile_section = self._build_user_profile_section(agent_id) if pcfg.include_user_profile else ""
+        ctx.repo_map_section = self._build_repo_map(pcfg) if pcfg.include_repo_map else ""
+        ctx.git_section = self._build_git_info() if pcfg.include_git_info else ""
         return ctx
 
     def build_compact_prefix(
@@ -281,6 +288,72 @@ class PromptContextBuilder:
     def _build_workspace(self, info: RuntimeInfo) -> str:
         """Render the ``[Workspace]`` section with the project root and name."""
         return f"[Workspace]\n  Directory: {info.working_directory}\n  Project: {info.workspace_name}\n"
+
+    def _build_repo_map(self, pcfg: PromptProfileConfig | None = None) -> str:
+        """Render the ``[Repo Map]`` section with ranked codebase symbols.
+
+        Scans the workspace root for source files, extracts function/class
+        signatures, ranks them by reference frequency, and includes the
+        top entries within a token budget. Gives the agent structural
+        awareness of the project without Read/Grep on every task.
+        """
+
+        if not self.workspace_root:
+            return ""
+        try:
+            from xerxes.context.repo_map import RepoMapConfig, RepoMapper
+
+            config = RepoMapConfig(token_budget=2048)
+            result = RepoMapper(config).build(self.workspace_root)
+            if not result.text or result.included_count == 0:
+                return ""
+            return f"[Repo Map — ranked by reference frequency]\n{result.text}\n"
+        except Exception:
+            logger.debug("Repo map build failed", exc_info=True)
+            return ""
+
+    def _build_git_info(self) -> str:
+        """Render the ``[Git Context]`` section with branch, dirty count, and recent commits.
+
+        Runs ``git`` commands via subprocess to capture the current branch,
+        number of uncommitted changes, and the last 3 commit subjects. Returns
+        an empty string when the workspace is not a git repository or git is
+        unavailable — never raises.
+        """
+
+        if not self.workspace_root:
+            return ""
+        try:
+            import subprocess
+
+            def _git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    capture_output=True,
+                    text=True,
+                    cwd=self.workspace_root,
+                    timeout=3,
+                ).stdout.strip()
+
+            branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+            if not branch:
+                return ""
+            status = _git("status", "--porcelain")
+            dirty_count = len([ln for ln in status.splitlines() if ln.strip()]) if status else 0
+            log = _git("log", "--oneline", "-3")
+            lines = ["[Git Context]", f"  Branch: {branch}"]
+            if dirty_count:
+                lines.append(f"  Uncommitted changes: {dirty_count} file(s)")
+            else:
+                lines.append("  Working tree: clean")
+            if log:
+                lines.append("  Recent commits:")
+                for entry in log.splitlines():
+                    lines.append(f"    {entry}")
+            return "\n".join(lines) + "\n"
+        except Exception:
+            logger.debug("Git context capture failed", exc_info=True)
+            return ""
 
     def _build_datetime(self, info: RuntimeInfo) -> str:
         """Render the ``[Current Date & Time]`` section."""
@@ -391,6 +464,7 @@ class PromptContextBuilder:
         try:
             snippets = self.memory_provider(agent_id, k)
         except Exception:
+            logger.debug("memory_provider raised for agent %s; omitting memories section", agent_id, exc_info=True)
             return ""
         if not snippets:
             return ""
@@ -409,6 +483,7 @@ class PromptContextBuilder:
         try:
             text = self.user_profile_provider(agent_id)
         except Exception:
+            logger.debug("user_profile_provider raised for agent %s; omitting profile section", agent_id, exc_info=True)
             return ""
         if not text or not text.strip():
             return ""
@@ -466,6 +541,8 @@ class PromptContextBuilder:
             self._build_skill_block(ctx),
             ctx.user_profile_section.rstrip() if ctx.user_profile_section else "",
             ctx.memory_section.rstrip() if ctx.memory_section else "",
+            ctx.repo_map_section.rstrip() if ctx.repo_map_section else "",
+            ctx.git_section.rstrip() if ctx.git_section else "",
             self._build_workspace_block(ctx),
             self._build_sandbox_block(ctx),
             self._build_runtime_block(ctx),

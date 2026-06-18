@@ -711,13 +711,15 @@ def _stream_openai_compat(
             try:
                 raw = delta.model_extra or {}
                 reasoning = raw.get("reasoning_content")
-            except Exception:
+            except (AttributeError, TypeError):
+                # Provider may omit model_extra; reasoning_content is non-standard/optional.
                 pass
         if reasoning is None:
             try:
                 raw_choice = chunk.model_extra or {}
                 reasoning = raw_choice.get("reasoning_content")
-            except Exception:
+            except (AttributeError, TypeError):
+                # Provider may omit model_extra; reasoning_content is non-standard/optional.
                 pass
         if reasoning:
             yield ThinkingChunk(reasoning)

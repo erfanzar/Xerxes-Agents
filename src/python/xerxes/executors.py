@@ -644,7 +644,9 @@ class FunctionExecutor:
                         try:
                             parsed = json.loads(result)
                             skill_name = parsed.get("skill_name", parsed.get("name", ""))
-                        except Exception:
+                        except (json.JSONDecodeError, TypeError, AttributeError):
+                            # Best-effort extraction of a skill name from a free-form tool
+                            # result string; non-JSON or unexpected shapes are expected.
                             pass
                     runtime_features_state.audit_emitter.emit_skill_used(
                         skill_name=skill_name,
@@ -791,7 +793,8 @@ class FunctionExecutor:
                     parsed = json.loads(value)
                     if isinstance(parsed, list):
                         coerced[param_name] = parsed
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
+                    # Best-effort coercion of LLM-supplied string args; leave as-is on failure.
                     pass
                 continue
 
@@ -800,7 +803,8 @@ class FunctionExecutor:
                     parsed = json.loads(value)
                     if isinstance(parsed, dict):
                         coerced[param_name] = parsed
-                except Exception:
+                except (json.JSONDecodeError, TypeError):
+                    # Best-effort coercion of LLM-supplied string args; leave as-is on failure.
                     pass
                 continue
 

@@ -198,6 +198,7 @@ class XerxesTUI:
         self._current_request_id: str | None = None
         self._queued_inputs: list[str] = []
         self._turn_task: asyncio.Task[None] | None = None
+        self._model_load_task: asyncio.Task[None] | None = None
         self._plan_mode = False
         self._activity_mode = "code"
         self._user_activity_mode: str | None = None
@@ -253,6 +254,8 @@ class XerxesTUI:
         self._prompt_task = prompt_task
 
         self._tasks = [consumer, prompt_task]
+        if self._model_load_task is not None:
+            self._tasks.append(self._model_load_task)
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -383,7 +386,7 @@ class XerxesTUI:
                 # session. Log and carry on instead.
                 try:
                     self._handle_event(event)
-                except Exception as exc:  # noqa: BLE001 — resilience: never let one event stop the stream
+                except Exception as exc:
                     logger.warning("event handler failed for %s: %s", type(event).__name__, exc)
                 # Repaint even when idle (no active turn): slash responses and
                 # status/model updates arrive between turns and must show up.
@@ -815,7 +818,8 @@ class XerxesTUI:
         # Populate the /model completion dropdown in the background so it's ready
         # by the time the user types "/model " (network fetch — don't block init).
         self._active_model = event.model or self._model
-        asyncio.create_task(self._load_models())
+        self._model_load_task = asyncio.create_task(self._load_models())
+        self._tasks.append(self._model_load_task)
 
         if self._banner_index >= 0 and event.session_id:
             cwd = event.cwd or self._banner_cwd

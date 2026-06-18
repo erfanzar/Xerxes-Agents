@@ -22,6 +22,7 @@ created.
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 import sys
@@ -31,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from .execution_registry import ExecutionRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -250,6 +253,8 @@ def _get_git_info(cwd: Path) -> str:
             parts.append(f"Recent commits:\n{log}")
         return "\n".join(parts)
     except Exception:
+        # Git is optional context; absence (not a repo / git missing) is not an error.
+        logger.debug("git context capture failed", exc_info=True)
         return ""
 
 
@@ -268,7 +273,8 @@ def _load_xerxes_md(cwd: Path) -> str:
             safe = scan_context_content(raw, filename="Global XERXES.md")
             parts.append(f"[Global XERXES.md]\n{safe}")
         except Exception:
-            pass
+            # Context file is non-essential; a read/scan failure must not abort bootstrap.
+            logger.debug("Failed to read global XERXES.md", exc_info=True)
 
     p = cwd
     for _ in range(10):
@@ -279,7 +285,8 @@ def _load_xerxes_md(cwd: Path) -> str:
                 safe = scan_context_content(raw, filename=f"Project XERXES.md: {candidate}")
                 parts.append(f"[Project XERXES.md: {candidate}]\n{safe}")
             except Exception:
-                pass
+                # Context file is non-essential; a read/scan failure must not abort bootstrap.
+                logger.debug("Failed to read project XERXES.md %s", candidate, exc_info=True)
             break
         parent = p.parent
         if parent == p:

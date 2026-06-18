@@ -258,4 +258,6 @@ def _guess_provider(base_url: str) -> str:
         return "kimi"
     if "minimax" in url or "minimaxi" in url:
         return "minimax"
+    if "z.ai" in url or "zhipu" in url or "bigmodel" in url:
+        return "zhipu"
     return "custom"

@@ -359,7 +359,7 @@ lm_eval --model vllm \
 
 **Step 3: Run evaluation**
 
-vLLM is 5-10× faster than standard HuggingFace:
+vLLM is 5-10x faster than standard HuggingFace:
 
 ```bash
 # Standard HF: ~2 hours for MMLU on 7B model

@@ -24,6 +24,7 @@ powering ``/sessions``, replay, and audit features.
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import sys
 from dataclasses import dataclass, field
@@ -35,6 +36,8 @@ from uuid import uuid4
 from .cost_tracker import CostTracker
 from .history import HistoryLog
 from .transcript import TranscriptStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,7 +81,8 @@ class RuntimeContext:
                 text=True,
             ).strip()
         except Exception:
-            pass
+            # Not a git repo or git unavailable — branch is purely informational.
+            logger.debug("git branch detection failed", exc_info=True)
 
         return cls(
             cwd=str(Path.cwd()),

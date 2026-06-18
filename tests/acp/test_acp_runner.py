@@ -108,7 +108,9 @@ class TestPermissionResolution:
             req = PermissionRequest(tool_name="write_file", description="write", inputs={"path": "x"})
             yield req
             captured["granted"] = req.granted
-            yield ToolEnd(name="write_file", result="ok" if req.granted else "denied", permitted=req.granted, tool_call_id="t1")
+            yield ToolEnd(
+                name="write_file", result="ok" if req.granted else "denied", permitted=req.granted, tool_call_id="t1"
+            )
             yield TurnDone(input_tokens=1, output_tokens=1, tool_calls_count=1, model="m")
 
         return events, captured

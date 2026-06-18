@@ -169,9 +169,9 @@ Before running experiments, estimate total cost and time:
 
 ```
 Compute Budget Checklist:
-- [ ] API costs: (model price per token) × (estimated tokens per run) × (number of runs)
-- [ ] GPU hours: (time per experiment) × (number of experiments) × (number of seeds)
-- [ ] Human evaluation costs: (annotators) × (hours) × (hourly rate)
+- [ ] API costs: (model price per token) x (estimated tokens per run) x (number of runs)
+- [ ] GPU hours: (time per experiment) x (number of experiments) x (number of seeds)
+- [ ] Human evaluation costs: (annotators) x (hours) x (hourly rate)
 - [ ] Total budget ceiling and contingency (add 30-50% for reruns)
 ```
 

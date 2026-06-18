@@ -55,8 +55,7 @@ class TestModelArgCompletion:
         c = _completer()
         doc = Document("/model ", len("/model "))
         metas = {
-            comp.text: "".join(seg for _, seg in comp.display_meta)
-            for comp in c.get_completions(doc, CompleteEvent())
+            comp.text: "".join(seg for _, seg in comp.display_meta) for comp in c.get_completions(doc, CompleteEvent())
         }
         assert metas["MiniMax-M2.7-highspeed"] == "active"
         assert metas["MiniMax-M2"] == "model"

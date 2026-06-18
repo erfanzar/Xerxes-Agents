@@ -1825,7 +1825,7 @@ def scene_complex(r, f, t, S):
 # pipe.stdin.write(canvas.tobytes())
 ```
 
-Vary the **value field combo**, **hue field**, **palette**, **blend modes**, **feedback config**, and **shader chain** per section for maximum visual variety. With 12 value fields × 8 hue fields × 14 palettes × 20 blend modes × 7 feedback transforms × 38 shaders, the combinations are effectively infinite.
+Vary the **value field combo**, **hue field**, **palette**, **blend modes**, **feedback config**, and **shader chain** per section for maximum visual variety. With 12 value fields x 8 hue fields x 14 palettes x 20 blend modes x 7 feedback transforms x 38 shaders, the combinations are effectively infinite.
 
 ---
 

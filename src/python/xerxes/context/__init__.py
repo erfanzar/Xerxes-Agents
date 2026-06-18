@@ -43,6 +43,7 @@ from .compressor import (
     Summarizer,
     naive_summarizer,
 )
+from .repo_map import RepoMapConfig, RepoMapper, RepoMapResult, Symbol, build_repo_map
 from .token_counter import SmartTokenCounter
 from .tool_result_pruner import (
     DEFAULT_HEAD_LINES,
@@ -64,12 +65,17 @@ __all__ = [
     "CompressionResult",
     "ContextCompressor",
     "PriorityBasedStrategy",
+    "RepoMapConfig",
+    "RepoMapResult",
+    "RepoMapper",
     "SlidingWindowStrategy",
     "SmartTokenCounter",
     "SummarizationStrategy",
     "Summarizer",
+    "Symbol",
     "ToolResultStorage",
     "TruncateStrategy",
+    "build_repo_map",
     "get_compaction_strategy",
     "naive_summarizer",
     "prune_messages",

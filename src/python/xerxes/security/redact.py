@@ -125,6 +125,8 @@ class LoggingFilter(logging.Filter):
                     redact_string(str(a), rules=self._rules) if isinstance(a, str) else a for a in record.args
                 )
         except Exception:
+            # Intentional: this IS the logging filter — logging here would recurse.
+            # Redaction failures degrade silently so the original record is still emitted.
             return True
         return True
 

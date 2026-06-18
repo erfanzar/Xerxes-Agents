@@ -23,9 +23,12 @@ whichever bridge or telemetry sink the host installs.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _config: dict[str, Any] = {}
@@ -101,4 +104,5 @@ def emit_event(event_type: str, data: dict[str, Any]) -> None:
         try:
             cb(event_type, data)
         except Exception:
-            pass
+            # Intentional: a misbehaving telemetry sink must never crash the agent loop.
+            logger.debug("event callback %r raised", event_type, exc_info=True)

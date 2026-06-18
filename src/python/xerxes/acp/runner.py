@@ -80,7 +80,7 @@ class AcpAgentRunner:
         if base_url:
             try:
                 models = profiles.fetch_models(base_url, str(cfg.get("api_key", "")))
-            except Exception as exc:  # noqa: BLE001 — offline / no /models endpoint
+            except Exception as exc:
                 logger.debug("fetch_models failed: %s", exc)
         if not models and self._runtime.model:
             models = [self._runtime.model]
@@ -136,7 +136,7 @@ class AcpAgentRunner:
                             "model": event.model,
                         }
                     )
-        except Exception as exc:  # noqa: BLE001 — report turn failures to the client, don't crash transport
+        except Exception as exc:
             logger.warning("ACP prompt failed for session %s: %s", session.session_id, exc)
             return {"ok": False, "error": str(exc)}
         finally:

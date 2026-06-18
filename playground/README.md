@@ -34,13 +34,13 @@ Example:
 
 | Task | Category | What it proves |
 |------|----------|----------------|
-| `reasoning` | reason | basic correctness (`17×23 = 391`) |
+| `reasoning` | reason | basic correctness (`17x23 = 391`) |
 | `file_read` | tools | reads a file and extracts a value |
 | `file_edit` | coding | edits code — **graded by executing** `greet()` |
 | `bug_fix` | coding | fixes a real bug — **graded by executing** `add(2,3)==5` |
 | `tool_search` | tools | finds content across files (uses Grep/Glob) |
 | `shell` | tools | runs a shell command and reports output |
-| `multiturn` | context | remembers within a session (fav number → ×6) |
+| `multiturn` | context | remembers within a session (fav number → x6) |
 | `memory_recall` | memory | **always-on memory**: a fact stated in one session is recalled by a brand-new session via the journal |
 
 Coding tasks are graded **behaviorally** (the harness executes the resulting

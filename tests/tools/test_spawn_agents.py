@@ -6,8 +6,8 @@ import time
 
 from xerxes.agents.definitions import get_agent_definition
 from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask, _filter_subagent_tools
-from xerxes.tools import claude_tools
 from xerxes.tools.claude_tools import AgentTool, SpawnAgents
+from xerxes.tools.claude_tools import agent_ops as claude_tools
 
 
 class _BlockingFuture:

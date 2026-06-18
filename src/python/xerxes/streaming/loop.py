@@ -217,6 +217,10 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_TURNS = 50
 
+# Default token budget when none is specified in config. Prevents runaway
+# agents from burning unlimited tokens on infinite tool-call loops.
+_DEFAULT_TOKEN_BUDGET = 500_000
+
 
 def _request_timeout(config: dict[str, Any]) -> float:
     """Return the provider request timeout in seconds."""
@@ -322,6 +326,21 @@ def run(
             # Surface the cancellation so the caller can render a "stopped"
             # marker instead of treating the silent return as a clean finish.
             yield TextChunk("\n[Cancelled]")
+            return
+
+        budget_limit = config.get("max_budget_tokens") or _DEFAULT_TOKEN_BUDGET
+        cumulative = state.total_input_tokens + state.total_output_tokens
+        if cumulative >= budget_limit:
+            yield TextChunk(
+                f"\n[Stopped: token budget ({budget_limit:,}) exhausted. "
+                f"Used {cumulative:,} tokens across {_turn} tool turns.]"
+            )
+            yield TurnDone(
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls_count=0,
+                model=model,
+            )
             return
 
         if steer_drain is not None:
@@ -501,6 +520,38 @@ def run(
             tc["id"] = tc_id
             tc_name = tc.get("name", "")
             tc_input = tc.get("input", {})
+
+            # Validate tool arguments against schema before execution. This
+            # catches common LLM mistakes (missing required params, wrong
+            # types) early and gives the model actionable feedback to retry.
+            _tool_schema = None
+            for ts in tool_schemas or []:
+                if ts.get("name") == tc_name:
+                    _tool_schema = ts.get("input_schema")
+                    break
+            if _tool_schema:
+                from xerxes.runtime.arg_validation import validate_and_format_error
+
+                _arg_error = validate_and_format_error(tc_name, tc_input, _tool_schema)
+                if _arg_error:
+                    yield ToolStart(name=tc_name, inputs=tc_input, tool_call_id=tc_id)
+                    yield ToolEnd(
+                        name=tc_name,
+                        result=f"Error: {_arg_error}",
+                        permitted=True,
+                        tool_call_id=tc_id,
+                        duration_ms=0.0,
+                    )
+                    state.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "name": tc_name,
+                            "content": f"Error: {_arg_error}",
+                            "is_error": True,
+                        }
+                    )
+                    continue
 
             yield ToolStart(name=tc_name, inputs=tc_input, tool_call_id=tc_id)
 
@@ -736,11 +787,14 @@ def _stream_anthropic(
         try:
             with open(debug_path, "w", encoding="utf-8") as f:
                 json.dump(debug_payload, f, indent=2, ensure_ascii=False, default=str)
-            print(
-                f"\n  [DEBUG] Request dumped to {debug_path} ({len(api_messages)} messages, {len(tool_schemas or [])} tools)"
+            logger.debug(
+                "Anthropic request dumped to %s (%d messages, %d tools)",
+                debug_path,
+                len(api_messages),
+                len(tool_schemas or []),
             )
         except Exception as e:
-            print(f"\n  [DEBUG] Failed to dump request: {e}")
+            logger.warning("Failed to dump debug request: %s", e)
 
     text = ""
     tool_calls: list[dict[str, Any]] = []
@@ -937,12 +991,14 @@ def _stream_openai_compat(
         try:
             with open(debug_path, "w", encoding="utf-8") as f:
                 json.dump(debug_payload, f, indent=2, ensure_ascii=False, default=str)
-            logger.info("DEBUG: request dumped to %s", debug_path)
-            print(
-                f"\n  [DEBUG] Request dumped to {debug_path} ({len(oai_messages)} messages, {len(kwargs.get('tools', []))} tools)"
+            logger.debug(
+                "OpenAI request dumped to %s (%d messages, %d tools)",
+                debug_path,
+                len(oai_messages),
+                len(kwargs.get("tools", [])),
             )
         except Exception as e:
-            print(f"\n  [DEBUG] Failed to dump request: {e}")
+            logger.warning("Failed to dump debug request: %s", e)
 
     text = ""
     tool_buf: dict[int, dict[str, Any]] = {}
@@ -972,13 +1028,15 @@ def _stream_openai_compat(
             try:
                 raw = delta.model_extra or {}
                 reasoning = raw.get("reasoning_content")
-            except Exception:
+            except (AttributeError, TypeError):
+                # Provider may omit model_extra; reasoning_content is non-standard/optional.
                 pass
         if reasoning is None:
             try:
                 raw_choice = chunk.model_extra or {}
                 reasoning = raw_choice.get("reasoning_content")
-            except Exception:
+            except (AttributeError, TypeError):
+                # Provider may omit model_extra; reasoning_content is non-standard/optional.
                 pass
         if reasoning:
             yield ThinkingChunk(reasoning)

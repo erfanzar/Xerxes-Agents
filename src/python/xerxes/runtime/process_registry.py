@@ -22,6 +22,7 @@ returns a process-wide singleton for tools that aren't dependency-injected.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import typing as tp
@@ -30,6 +31,8 @@ from dataclasses import dataclass, field
 
 if tp.TYPE_CHECKING:
     import subprocess
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -144,6 +147,8 @@ class ProcessRegistry:
         try:
             return proc.wait(timeout=timeout)
         except Exception:
+            # Documented to return None on timeout/unknown; never let wait() propagate.
+            logger.debug("proc.wait(%s) raised", proc_id, exc_info=True)
             return None
 
     def kill(self, proc_id: str, *, force: bool = False) -> bool:

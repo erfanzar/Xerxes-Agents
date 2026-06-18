@@ -221,7 +221,7 @@ model = whisper.load_model("turbo", device="cpu")
 # Force GPU
 model = whisper.load_model("turbo", device="cuda")
 
-# 10-20× faster on GPU
+# 10-20x faster on GPU
 ```
 
 ## Integration with other tools
@@ -265,12 +265,12 @@ whisper audio.wav
 1. **Use turbo model** - Best speed/quality for English
 2. **Specify language** - Faster than auto-detect
 3. **Add initial prompt** - Improves technical terms
-4. **Use GPU** - 10-20× faster
+4. **Use GPU** - 10-20x faster
 5. **Batch process** - More efficient
 6. **Convert to WAV** - Better compatibility
 7. **Split long audio** - <30 min chunks
 8. **Check language support** - Quality varies by language
-9. **Use faster-whisper** - 4× faster than openai-whisper
+9. **Use faster-whisper** - 4x faster than openai-whisper
 10. **Monitor VRAM** - Scale model size to hardware
 
 ## Performance
@@ -282,7 +282,7 @@ whisper audio.wav
 | turbo | ~0.08 | ~0.01 |
 | large | ~1.0 | ~0.05 |
 
-*Real-time factor: 0.1 = 10× faster than real-time*
+*Real-time factor: 0.1 = 10x faster than real-time*
 
 ## Language support
 

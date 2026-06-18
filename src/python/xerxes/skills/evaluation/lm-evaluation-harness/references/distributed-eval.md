@@ -28,9 +28,9 @@ accelerate launch --multi_gpu --num_processes 8 \
   --batch_size 16
 ```
 
-**Speedup**: Near-linear (8 GPUs = ~8× faster)
+**Speedup**: Near-linear (8 GPUs = ~8x faster)
 
-**Memory**: Each GPU needs full model (7B model ≈ 14GB × 8 = 112GB total)
+**Memory**: Each GPU needs full model (7B model ≈ 14GB x 8 = 112GB total)
 
 ### Tensor Parallelism (Model Sharding)
 
@@ -84,7 +84,7 @@ accelerate launch --multi_gpu --num_processes 2 \
   --batch_size 8
 ```
 
-**Result**: 2× speedup from data parallelism, 70B model fits via tensor parallelism
+**Result**: 2x speedup from data parallelism, 70B model fits via tensor parallelism
 
 ### Configuration with `accelerate config`
 
@@ -139,11 +139,11 @@ lm_eval --model vllm \
   --batch_size auto
 ```
 
-**Result**: 4 model replicas = 4× throughput
+**Result**: 4 model replicas = 4x throughput
 
 ### Combined Tensor + Data Parallelism
 
-**Example: 8 GPUs = 4 TP × 2 DP**:
+**Example: 8 GPUs = 4 TP x 2 DP**:
 ```bash
 lm_eval --model vllm \
   --model_args \
@@ -156,7 +156,7 @@ lm_eval --model vllm \
   --batch_size auto
 ```
 
-**Result**: 70B model fits (TP=4), 2× speedup (DP=2)
+**Result**: 70B model fits (TP=4), 2x speedup (DP=2)
 
 ### Multi-Node vLLM
 
@@ -190,7 +190,7 @@ torchrun --nproc-per-node=8 --no-python \
   --batch_size 32
 ```
 
-**Speedup**: Near-linear (8× faster)
+**Speedup**: Near-linear (8x faster)
 
 ### Tensor Parallelism
 
@@ -208,7 +208,7 @@ torchrun --nproc-per-node=4 --no-python \
 
 ### Pipeline Parallelism
 
-**2 TP × 2 PP on 4 GPUs**:
+**2 TP x 2 PP on 4 GPUs**:
 ```bash
 torchrun --nproc-per-node=4 --no-python \
   lm_eval --model nemo_lm \
@@ -221,7 +221,7 @@ torchrun --nproc-per-node=4 --no-python \
   --batch_size 8
 ```
 
-**Constraint**: `devices = TP × PP`
+**Constraint**: `devices = TP x PP`
 
 ### Multi-Node NeMo
 
@@ -270,10 +270,10 @@ lm_eval --model sglang \
 
 | Method | GPUs | Time | Speedup |
 |--------|------|------|---------|
-| HF (single) | 1 | 4 hours | 1× |
-| HF (DP=4) | 4 | 1 hour | 4× |
-| HF (DP=8) | 8 | 30 min | 8× |
-| vLLM (DP=8) | 8 | 15 min | 16× |
+| HF (single) | 1 | 4 hours | 1x |
+| HF (DP=4) | 4 | 1 hour | 4x |
+| HF (DP=8) | 8 | 30 min | 8x |
+| vLLM (DP=8) | 8 | 15 min | 16x |
 
 **Takeaway**: vLLM is significantly faster than HuggingFace for inference.
 
@@ -301,14 +301,14 @@ Model fits on single GPU?
 
 **Rule of thumb**:
 ```
-Memory (GB) = Parameters (B) × Precision (bytes) × 1.2 (overhead)
+Memory (GB) = Parameters (B) x Precision (bytes) x 1.2 (overhead)
 ```
 
 **Examples**:
-- 7B FP16: 7 × 2 × 1.2 = 16.8GB ✅ Fits A100 40GB
-- 13B FP16: 13 × 2 × 1.2 = 31.2GB ✅ Fits A100 40GB
-- 70B FP16: 70 × 2 × 1.2 = 168GB ❌ Need TP=4 or TP=8
-- 70B BF16: 70 × 2 × 1.2 = 168GB (same as FP16)
+- 7B FP16: 7 x 2 x 1.2 = 16.8GB ✅ Fits A100 40GB
+- 13B FP16: 13 x 2 x 1.2 = 31.2GB ✅ Fits A100 40GB
+- 70B FP16: 70 x 2 x 1.2 = 168GB ❌ Need TP=4 or TP=8
+- 70B BF16: 70 x 2 x 1.2 = 168GB (same as FP16)
 
 **With tensor parallelism**:
 ```

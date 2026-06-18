@@ -37,11 +37,15 @@ class PermissionMode(Enum):
         AUTO: Auto-approve known-safe tools; prompt for everything else.
         ACCEPT_ALL: Approve every tool call (use only in sandboxed runs).
         MANUAL: Deny every tool call until the user explicitly approves.
+        PLAN: Read-only mode — approve only tools in :data:`SAFE_TOOLS` and
+            safe read-only shell commands; deny all mutations and writes.
+            Used when the agent should investigate and plan before executing.
     """
 
     AUTO = "auto"
     ACCEPT_ALL = "accept-all"
     MANUAL = "manual"
+    PLAN = "plan"
 
 
 SAFE_TOOLS: frozenset[str] = frozenset(
@@ -139,6 +143,8 @@ def is_safe_bash(command: str) -> bool:
 def check_permission(
     tool_call: dict[str, Any],
     mode: PermissionMode = PermissionMode.AUTO,
+    policy_engine: Any = None,
+    agent_id: str | None = None,
 ) -> bool:
     """Decide whether a tool call may proceed without user prompting.
 
@@ -146,16 +152,37 @@ def check_permission(
     delegates bash/shell calls to :func:`is_safe_bash`, blocks Python code
     that touches the filesystem or shells out, and refuses all file-writing
     tools so they always escalate. ``ACCEPT_ALL`` and ``MANUAL`` short-circuit
-    to ``True`` / ``False`` respectively.
+    to ``True`` / ``False`` respectively. ``PLAN`` is a strict read-only mode:
+    only :data:`SAFE_TOOLS` and safe read-only shell commands are approved,
+    and everything else is hard-denied without prompting — the agent should
+    investigate and plan, not execute mutations.
+
+    When ``policy_engine`` is provided (a
+    :class:`~xerxes.security.policy.PolicyEngine`), it is consulted *first*;
+    a ``DENY`` from the policy engine overrides every other consideration.
+    This connects the coarse allow/deny policy system with the permission
+    gate so both fire in a single pass.
 
     Args:
         tool_call: ``{"name", "input"}`` dict as yielded by the loop.
         mode: Active permission mode.
+        policy_engine: Optional :class:`PolicyEngine` whose decision takes
+            precedence on ``DENY``. ``ALLOW`` falls through to the normal
+            mode-based checks below.
+        agent_id: Agent id forwarded to the policy engine for per-agent
+            policy overrides.
 
     Returns:
         ``True`` to skip prompting and execute immediately, ``False`` to
         emit a :class:`PermissionRequest`.
     """
+
+    if policy_engine is not None:
+        from xerxes.security.policy import PolicyAction
+
+        action = policy_engine.check(tool_call.get("name", ""), agent_id)
+        if action == PolicyAction.DENY:
+            return False
 
     if mode == PermissionMode.ACCEPT_ALL:
         return True
@@ -163,6 +190,14 @@ def check_permission(
         return False
 
     name = tool_call.get("name", "")
+
+    if mode == PermissionMode.PLAN:
+        if name in SAFE_TOOLS:
+            return True
+        if name in ("Bash", "ExecuteShell"):
+            cmd = tool_call.get("input", {}).get("command", "")
+            return is_safe_bash(cmd)
+        return False
 
     if name in SAFE_TOOLS:
         return True

@@ -27,10 +27,13 @@ Exports:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CopyFn = Callable[[Path, str], None]
 
@@ -84,6 +87,9 @@ def sync_pull(
             pull_fn(spec.local_path, spec.remote_path)
             out.append(spec)
         except Exception:
+            # Intentional: a single failed file transfer must not abort the whole pull,
+            # but it must be surfaced so the operator knows which artifacts are missing.
+            logger.warning("sync_pull: failed to pull %s -> %s", spec.remote_path, spec.local_path, exc_info=True)
             continue
     return out
 

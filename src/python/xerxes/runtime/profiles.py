@@ -74,6 +74,8 @@ class PromptProfileConfig:
     include_bootstrap: bool = True
     include_relevant_memories: bool = True
     include_user_profile: bool = True
+    include_repo_map: bool = True
+    include_git_info: bool = True
     max_skill_instructions_length: int | None = None
     max_tools_listed: int | None = None
     max_memories_injected: int = 5
@@ -100,6 +102,7 @@ def get_profile_config(profile: PromptProfile) -> PromptProfileConfig:
             include_tools_list=True,
             include_guardrails=True,
             include_bootstrap=False,
+            include_repo_map=False,
             max_skill_instructions_length=500,
             max_tools_listed=20,
         )
@@ -117,6 +120,7 @@ def get_profile_config(profile: PromptProfile) -> PromptProfileConfig:
             include_bootstrap=False,
             include_relevant_memories=False,
             include_user_profile=False,
+            include_repo_map=False,
             max_tools_listed=10,
         )
 
@@ -133,6 +137,7 @@ def get_profile_config(profile: PromptProfile) -> PromptProfileConfig:
             include_bootstrap=False,
             include_relevant_memories=False,
             include_user_profile=False,
+            include_repo_map=False,
         )
 
     raise ValueError(f"Unknown profile: {profile!r}")
