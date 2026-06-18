@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from xerxes.streaming.events import AgentState, TextChunk, ThinkingChunk, ToolEnd, ToolStart, TurnDone
-from xerxes.streaming.loop import run
+from xerxes.streaming.loop import _try_compact_messages, run
 
 
 def _run_loop(
@@ -149,6 +149,40 @@ class TestBudgetEnforcement:
         text = _text(events)
         # After two 70k-token turns (140k total), budget should trigger
         assert "budget" in text.lower() or "Done." in text
+
+    def test_budget_compaction_keeps_tool_call_parent_for_tail_tool_results(self):
+        tool_calls = [{"id": f"call_{idx}", "name": "TaskGetTool", "input": {"id": str(idx)}} for idx in range(8)]
+        state = AgentState(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "scan repository"},
+                {"role": "assistant", "content": "starting"},
+                {"role": "assistant", "content": "", "tool_calls": tool_calls},
+                *[
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"call_{idx}",
+                        "name": "TaskGetTool",
+                        "content": f"result {idx}",
+                    }
+                    for idx in range(8)
+                ],
+            ],
+            total_input_tokens=100_000,
+            total_output_tokens=100_000,
+        )
+
+        assert _try_compact_messages(state, budget_limit=100_000) is True
+
+        seen_tool_call_ids: set[str] = set()
+        for message in state.messages:
+            if message.get("role") == "assistant":
+                seen_tool_call_ids.update(tc["id"] for tc in message.get("tool_calls") or [])
+            if message.get("role") == "tool":
+                assert message["tool_call_id"] in seen_tool_call_ids
+
+        assert state.messages[-9]["role"] == "assistant"
+        assert len(state.messages[-9]["tool_calls"]) == 8
 
 
 class TestCancellation:

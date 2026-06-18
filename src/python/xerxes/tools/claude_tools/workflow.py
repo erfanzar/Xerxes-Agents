@@ -22,7 +22,6 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 
 from ...types import AgentBaseFn
 from .agent_ops import _get_agent_manager, _subagent_wait_timeout
@@ -371,19 +370,11 @@ class SkillTool(AgentBaseFn):
         """
         try:
             from ...core.paths import xerxes_subdir
-            from ...extensions.skills import SkillRegistry
+            from ...extensions.skills import SkillRegistry, default_skill_discovery_dirs
 
             registry = SkillRegistry()
             skills_dir = xerxes_subdir("skills")
-            project_skills = Path.cwd() / "skills"
-
-            import xerxes as _xerxes_pkg
-
-            _bundled = Path(_xerxes_pkg.__file__).parent / "skills"
-            discover_dirs = [str(skills_dir), str(project_skills)]
-            if _bundled.is_dir():
-                discover_dirs.insert(0, str(_bundled))
-            registry.discover(*discover_dirs)
+            registry.discover(*default_skill_discovery_dirs(user_skills_dir=skills_dir))
 
             skill = registry.get(skill_name)
             if skill is None:

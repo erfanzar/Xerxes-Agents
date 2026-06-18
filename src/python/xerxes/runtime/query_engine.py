@@ -51,8 +51,9 @@ class QueryEngineConfig:
             when compaction runs.
         model: LLM identifier passed to the streaming loop.
         system_prompt: System prompt injected ahead of every turn.
-        permission_mode: Permission policy forwarded to the streaming loop
-            (``"auto"``, ``"plan"``, ``"manual"``, etc.).
+        permission_mode: Permission policy forwarded to the streaming loop.
+            Defaults to ``"accept-all"``; set ``"auto"`` or ``"manual"`` for
+            approval-gated runs.
         max_tokens: Maximum tokens the LLM may emit per response.
         thinking: Whether to request reasoning content from the provider.
         thinking_budget: Reasoning-token budget when ``thinking`` is enabled.
@@ -64,7 +65,7 @@ class QueryEngineConfig:
     compact_keep_last: int = 10
     model: str = "gpt-4o"
     system_prompt: str = ""
-    permission_mode: str = "auto"
+    permission_mode: str = "accept-all"
     max_tokens: int = 8192
     thinking: bool = False
     thinking_budget: int = 10000

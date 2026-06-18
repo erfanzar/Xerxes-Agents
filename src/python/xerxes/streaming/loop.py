@@ -215,6 +215,41 @@ def _parse_thinking_tags(
 
 logger = logging.getLogger(__name__)
 
+
+def _tool_call_ids(message: dict[str, Any]) -> set[str]:
+    """Return provider tool-call ids declared by an assistant message."""
+    return {str(tc.get("id")) for tc in message.get("tool_calls") or [] if tc.get("id")}
+
+
+def _recent_start_preserving_tool_pairs(messages: list[dict[str, Any]], preserve_recent: int) -> int:
+    """Return a tail-window start that does not orphan leading tool results."""
+    start = max(0, len(messages) - preserve_recent)
+    if start == 0 or start >= len(messages):
+        return start
+
+    if messages[start].get("role") != "tool":
+        return start
+
+    tool_run_start = start
+    while tool_run_start > 0 and messages[tool_run_start - 1].get("role") == "tool":
+        tool_run_start -= 1
+
+    assistant_index = tool_run_start - 1
+    if assistant_index >= 0 and messages[assistant_index].get("role") == "assistant":
+        expected_ids = _tool_call_ids(messages[assistant_index])
+        leading_tool_ids = {
+            str(msg.get("tool_call_id"))
+            for msg in messages[tool_run_start:]
+            if msg.get("role") == "tool" and msg.get("tool_call_id")
+        }
+        if expected_ids & leading_tool_ids:
+            return assistant_index
+
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return start
+
+
 def _try_compact_messages(state: AgentState, budget_limit: int) -> bool:
     """Try to compact messages to free up token budget.
 
@@ -233,10 +268,16 @@ def _try_compact_messages(state: AgentState, budget_limit: int) -> bool:
     if len(conv_msgs) < 4:
         return False
 
-    # Keep last 4 conversation messages, compact older ones
+    # Keep the recent tail, expanding it backward when the raw cut lands in a
+    # tool-result batch. OpenAI-compatible providers reject a `tool` message if
+    # its matching assistant `tool_calls` entry was compacted away.
     preserve_recent = 4
-    older = conv_msgs[:-preserve_recent]
-    recent = conv_msgs[-preserve_recent:]
+    recent_start = _recent_start_preserving_tool_pairs(conv_msgs, preserve_recent)
+    older = conv_msgs[:recent_start]
+    recent = conv_msgs[recent_start:]
+
+    if not older or not recent:
+        return False
 
     # Summarize older messages into a single context message
     summary_parts = []
@@ -281,6 +322,7 @@ def _try_compact_messages(state: AgentState, budget_limit: int) -> bool:
     state.total_output_tokens = 0
 
     return True
+
 
 MAX_TOOL_TURNS = 50
 
@@ -378,7 +420,7 @@ def run(
     state.messages.append({"role": "user", "content": user_message})
     state.metadata["model"] = config.get("model", "")
 
-    perm_mode = PermissionMode(config.get("permission_mode", "auto"))
+    perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
     model = config.get("model", "")
     provider_name = detect_provider(model)
 
@@ -401,9 +443,7 @@ def run(
             # Try to compact context before giving up
             compacted = _try_compact_messages(state, budget_limit)
             if compacted:
-                yield TextChunk(
-                    "\n[Context compacted to free up tokens. Continuing...]"
-                )
+                yield TextChunk("\n[Context compacted to free up tokens. Continuing...]")
                 # Recalculate after compaction
                 cumulative = state.total_input_tokens + state.total_output_tokens
                 if cumulative < budget_limit:

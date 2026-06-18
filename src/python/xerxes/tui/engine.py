@@ -178,7 +178,7 @@ class BridgeClient:
         model: str = "",
         base_url: str = "",
         api_key: str = "",
-        permission_mode: str = "auto",
+        permission_mode: str = "accept-all",
         resume_session_id: str = "",
     ) -> None:
         """Send the ``initialize`` JSON-RPC and wait for the daemon ack.

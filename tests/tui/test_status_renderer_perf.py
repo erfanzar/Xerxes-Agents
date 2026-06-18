@@ -112,3 +112,26 @@ def test_setters_no_op_when_value_unchanged():
     r.set_queue_count(0)
     r.set_activity_mode("code")
     assert r._state_version == baseline
+
+
+def test_append_line_splits_multiline_rendered_blocks():
+    r = StatusRenderer()
+
+    r.append_line("\nfirst\nsecond\n\nthird\n")
+
+    assert list(r._content_lines) == ["first", "second", "", "third"]
+
+
+def test_visible_markup_slices_rendered_lines_and_keeps_input_rule():
+    r = StatusRenderer()
+    for i in range(12):
+        r.append_line(f"line {i}")
+
+    markup = r._markup(scroll_y=3, visible_rows=5)
+
+    assert "line 2" not in markup
+    assert "line 3" in markup
+    assert "line 6" in markup
+    assert "line 7" not in markup
+    assert "input" in markup
+    assert StatusRenderer._count_lines(markup)[0] == 5

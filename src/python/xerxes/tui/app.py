@@ -87,8 +87,8 @@ def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
     """Return a multi-line ANSI banner with the Xerxes logo + session metadata.
 
     Mutated in place once the daemon reports the real session id via the
-    ``InitDone`` event — :class:`XerxesTUI` stores ``_banner_index`` to
-    rewrite the slot rather than appending a second banner."""
+    ``InitDone`` event — :class:`XerxesTUI` stores the rendered banner range
+    to rewrite the slot rather than appending a second banner."""
 
     blue = "\x1b[34m"
     bold = "\x1b[1m"
@@ -142,7 +142,7 @@ class XerxesTUI:
         model: str = "",
         base_url: str = "",
         api_key: str = "",
-        permission_mode: str = "auto",
+        permission_mode: str = "accept-all",
         python_executable: str | None = None,
         resume_session_id: str = "",
     ) -> None:
@@ -152,8 +152,9 @@ class XerxesTUI:
             model: Default model id forwarded to ``initialize``.
             base_url: Provider base URL forwarded to ``initialize``.
             api_key: Provider API key forwarded to ``initialize``.
-            permission_mode: Initial permission mode (``"auto"`` /
-                ``"manual"`` / ``"accept-all"``).
+            permission_mode: Initial permission mode. Defaults to
+                ``"accept-all"``; pass ``"auto"`` or ``"manual"`` for
+                approval-gated runs.
             python_executable: Interpreter the bridge uses when it needs
                 to launch the daemon.
             resume_session_id: When non-empty, the daemon rehydrates
@@ -169,7 +170,8 @@ class XerxesTUI:
         self._session_id: str = ""
 
         self._banner_cwd: str = ""
-        self._banner_index: int = -1
+        self._banner_start: int = -1
+        self._banner_line_count: int = 0
 
         self._client: BridgeClient | None = None
         self._prompt: PersistentPrompt | None = None
@@ -231,15 +233,15 @@ class XerxesTUI:
             branch=provisional_branch,
         )
 
-        self._prompt.append_line(
-            _build_welcome_banner(
-                model=self._model,
-                session_id=provisional_session,
-                cwd=cwd,
-            )
+        banner = _build_welcome_banner(
+            model=self._model,
+            session_id=provisional_session,
+            cwd=cwd,
         )
+        self._banner_start = len(self._prompt._status._content_lines)
+        self._prompt.append_line(banner)
         self._banner_cwd = cwd
-        self._banner_index = len(self._prompt._status._content_lines) - 1
+        self._banner_line_count = len(self._prompt._status._content_lines) - self._banner_start
 
         consumer = asyncio.create_task(self._event_consumer())
 
@@ -822,16 +824,20 @@ class XerxesTUI:
         self._model_load_task = asyncio.create_task(self._load_models())
         self._tasks.append(self._model_load_task)
 
-        if self._banner_index >= 0 and event.session_id:
+        if self._banner_start >= 0 and self._banner_line_count > 0 and event.session_id:
             cwd = event.cwd or self._banner_cwd
             new_banner = _build_welcome_banner(
                 model=event.model or self._model,
                 session_id=event.session_id,
                 cwd=cwd,
             )
-            history = self._prompt._status._content_lines
-            if 0 <= self._banner_index < len(history):
-                history[self._banner_index] = new_banner
+            line_count = self._prompt._status.replace_lines(
+                self._banner_start,
+                self._banner_line_count,
+                new_banner,
+            )
+            if line_count:
+                self._banner_line_count = line_count
                 self._prompt._invalidate()
 
     async def _load_models(self) -> None:
@@ -1027,7 +1033,7 @@ class XerxesTUI:
         subcmd = parts[1].strip().lower() if len(parts) > 1 else ""
 
         if subcmd.startswith("add "):
-            item = text[len("/todo add "):].strip()
+            item = text[len("/todo add ") :].strip()
             if item:
                 self._todo_items.append(item)
                 if self._prompt:

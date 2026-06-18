@@ -358,6 +358,47 @@ class SkillRegistry:
         return "\n".join(lines)
 
 
+def default_skill_discovery_dirs(
+    *,
+    user_skills_dir: str | Path | None = None,
+    cwd: str | Path | None = None,
+) -> list[Path]:
+    """Return bundled, user, shared-agent, and project skill roots.
+
+    The Xerxes user-skill directory is always included. ``~/.agents/skills`` is
+    included as an additional shared directory when it exists, so it does not
+    replace ``$XERXES_HOME/skills``.
+    """
+
+    import xerxes as _xerxes_pkg
+    from xerxes.core.paths import agents_subdir, xerxes_subdir
+
+    roots: list[Path] = []
+    bundled = Path(_xerxes_pkg.__file__).parent / "skills"
+    if bundled.is_dir():
+        roots.append(bundled)
+
+    primary = Path(user_skills_dir).expanduser() if user_skills_dir is not None else xerxes_subdir("skills")
+    roots.append(primary)
+
+    shared_agents = agents_subdir("skills")
+    if shared_agents.is_dir():
+        roots.append(shared_agents)
+
+    project_root = Path.cwd() if cwd is None else Path(cwd).expanduser()
+    roots.append(project_root / "skills")
+
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        resolved = root.resolve() if root.exists() else root.absolute()
+        if resolved in seen:
+            continue
+        ordered.append(root)
+        seen.add(resolved)
+    return ordered
+
+
 def skill_matches_platform(skill: Skill, current_platform: str | None = None) -> bool:
     """Return whether ``skill`` is compatible with ``current_platform``.
 

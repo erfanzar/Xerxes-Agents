@@ -245,10 +245,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--permission-mode",
-        default="auto",
+        default="accept-all",
         choices=("accept-all", "auto", "manual"),
         help=(
-            "Default tool-approval mode for ACP sessions (default: auto). "
+            "Default tool-approval mode for ACP sessions (default: accept-all). "
             "'auto' routes risky ops to the client, 'manual' routes every tool, "
             "'accept-all' bypasses approval."
         ),
