@@ -227,7 +227,7 @@ def run(
     state.messages.append({"role": "user", "content": user_message})
     state.metadata["model"] = config.get("model", "")
 
-    perm_mode = PermissionMode(config.get("permission_mode", "auto"))
+    perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
     model = config.get("model", "")
     provider_name = detect_provider(model)
 

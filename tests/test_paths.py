@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from xerxes.core.paths import XERXES_HOME_ENV, xerxes_home, xerxes_subdir
+from xerxes.core.paths import XERXES_HOME_ENV, agents_home, agents_subdir, xerxes_home, xerxes_subdir
 
 
 class TestXerxesHome:
@@ -50,6 +50,14 @@ class TestXerxesHome:
     def test_subdir_with_no_args_returns_home(self, monkeypatch, tmp_path):
         monkeypatch.setenv(XERXES_HOME_ENV, str(tmp_path))
         assert xerxes_subdir() == tmp_path
+
+    def test_agents_home_is_separate_from_xerxes_home(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv(XERXES_HOME_ENV, str(tmp_path / "custom-xerxes"))
+
+        assert xerxes_home() == tmp_path / "custom-xerxes"
+        assert agents_home() == tmp_path / ".agents"
+        assert agents_subdir("skills") == tmp_path / ".agents" / "skills"
 
     def test_xerxes_home_is_not_created_on_disk(self, monkeypatch, tmp_path):
         target = tmp_path / "fresh"

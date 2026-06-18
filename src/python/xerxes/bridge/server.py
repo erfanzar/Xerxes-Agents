@@ -40,12 +40,11 @@ import queue
 import sys
 import threading
 import uuid
-from pathlib import Path
 from typing import Any
 
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
-from ..extensions.skills import SkillRegistry
+from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
 from ..llms.registry import calc_cost, detect_provider, get_context_limit
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
@@ -96,6 +95,7 @@ def _agent_name_for_mode(mode: str) -> str:
     if mode == "researcher":
         return "researcher"
     return "coder"
+
 
 class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
     """Stdio JSON-RPC server hosting one in-process agent session.
@@ -149,14 +149,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         self._skills_dir = xerxes_subdir("skills")
         self._skills_dir.mkdir(parents=True, exist_ok=True)
 
-        import xerxes as _xerxes_pkg
-
-        _bundled_skills_dir = Path(_xerxes_pkg.__file__).parent / "skills"
-        discover_dirs = [str(self._skills_dir), str(Path.cwd() / "skills")]
-        if _bundled_skills_dir.is_dir():
-            discover_dirs.insert(0, str(_bundled_skills_dir))
-
-        self._skill_registry.discover(*discover_dirs)
+        self._skill_registry.discover(*default_skill_discovery_dirs(user_skills_dir=self._skills_dir))
         set_skill_registry(self._skill_registry)
 
         self._pending_skill_name: str = ""
@@ -323,6 +316,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         # Inject agent self-knowledge from persistent memory
         try:
             from ..memory.agent_memory import get_agent_memory
+
             agent_id = getattr(self, "agent_id", "default")
             memory = get_agent_memory(agent_id)
             memory_addendum = memory.get_system_prompt_addendum()
@@ -340,6 +334,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         """
         try:
             from ..memory.agent_memory import get_agent_memory
+
             agent_id = getattr(self, "agent_id", "default")
             memory = get_agent_memory(agent_id)
 
@@ -348,11 +343,14 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 try:
                     content = memory.read(key)
                     if content:
-                        self._emit("memory_context", {
-                            "key": key,
-                            "content": content[:2000],  # Truncate to avoid flooding
-                            "scope": memory.scope,
-                        })
+                        self._emit(
+                            "memory_context",
+                            {
+                                "key": key,
+                                "content": content[:2000],  # Truncate to avoid flooding
+                                "scope": memory.scope,
+                            },
+                        )
                 except Exception:
                     pass
         except Exception:

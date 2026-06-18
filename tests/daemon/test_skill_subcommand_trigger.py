@@ -41,6 +41,16 @@ def _write_skill(skills_dir: Path, name: str, *, subcommands: list[str] | None =
     return sk
 
 
+def test_runtime_discovers_shared_agents_skills(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    agents_skills = tmp_path / ".agents" / "skills"
+    _write_skill(agents_skills, "shared_agent_skill")
+
+    runtime = RuntimeManager(DaemonConfig())
+
+    assert "shared_agent_skill" in runtime.discover_skills()
+
+
 def _make_server(tmp_path) -> DaemonServer:
     server = DaemonServer.__new__(DaemonServer)
     cfg = DaemonConfig(project_dir=str(tmp_path))

@@ -50,6 +50,11 @@ class TestRuntimeManagerPermissions:
         rm = self._rm("manual")
         assert rm.set_permission_mode("nuke-everything") == "auto"
 
+    def test_missing_runtime_config_defaults_to_accept_all(self):
+        rm = RuntimeManager(DaemonConfig())
+        assert rm.permission_mode == "accept-all"
+        assert rm.status()["permission_mode"] == "accept-all"
+
     def test_toggle_flag_round_trip(self):
         rm = self._rm()
         assert rm.toggle_flag("debug") is True

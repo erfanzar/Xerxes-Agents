@@ -60,7 +60,12 @@ class _ScrollableFormattedTextControl(FormattedTextControl):
     there's nothing extra to scroll to.
     """
 
-    def __init__(self, renderer: StatusRenderer, scroll_y_accessor: Callable[[], int | None]):
+    def __init__(
+        self,
+        renderer: StatusRenderer,
+        scroll_y_accessor: Callable[[], int | None],
+        visible_rows_setter: Callable[[int], None],
+    ):
         super().__init__(
             text="",
             focusable=False,
@@ -68,13 +73,17 @@ class _ScrollableFormattedTextControl(FormattedTextControl):
         )
         self._renderer = renderer
         self._scroll_y_accessor = scroll_y_accessor
+        self._visible_rows_setter = visible_rows_setter
 
     def create_content(self, width: int, height: int | None) -> UIContent:
         """Return only the visible slice of content."""
         from prompt_toolkit.formatted_text.utils import fragment_list_width, split_lines
 
         scroll_y = self._scroll_y_accessor()
-        markup = self._renderer._markup(scroll_y)
+        visible_rows = height if height is not None and height > 0 else None
+        if visible_rows is not None:
+            self._visible_rows_setter(visible_rows)
+        markup = self._renderer._markup(scroll_y, visible_rows=visible_rows)
 
         # Parse the markup into fragments
         fragments = to_formatted_text(ANSI(markup))
@@ -287,7 +296,7 @@ class StatusRenderer:
         # full ANSI rebuild.
         self._state_version: int = 0
         self._cached_markup: str | None = None
-        self._cached_markup_key: tuple[int, int, int, int] | None = None
+        self._cached_markup_key: tuple[int, int, int, int, int | None, int | None] | None = None
         # ``_streaming_text`` is exposed as a property to existing callers
         # that read it directly (legacy API). The setter funnels through
         # ``set_streaming_text`` to keep the parts buffer consistent.
@@ -373,13 +382,28 @@ class StatusRenderer:
         line = self._strip_blank_edges(line)
         if not line:
             return
-        self._content_lines.append(line)
+        self._content_lines.extend(self._split_render_lines(line))
         self._mark_dirty()
 
     def clear_content(self) -> None:
         """Drop every committed history line."""
         self._content_lines.clear()
         self._mark_dirty()
+
+    def replace_lines(self, start: int, count: int, text: str) -> int:
+        """Replace a committed rendered-line range with ``text`` split into rows."""
+        if start < 0 or count <= 0:
+            return 0
+        lines = list(self._content_lines)
+        if start >= len(lines):
+            return 0
+        replacement = self._split_render_lines(self._strip_blank_edges(text))
+        end = min(len(lines), start + count)
+        lines[start:end] = replacement
+        self._content_lines.clear()
+        self._content_lines.extend(lines)
+        self._mark_dirty()
+        return len(replacement)
 
     def set_active_panel(self, text: str) -> None:
         """Pin ``text`` as the active modal panel (approval / question)."""
@@ -415,7 +439,7 @@ class StatusRenderer:
         self._streaming_parts = []
         self._streaming_chars = 0
         if text:
-            self._content_lines.append(text)
+            self._content_lines.extend(self._split_render_lines(text))
         self._mark_dirty()
 
     def clear_streaming(self) -> None:
@@ -461,6 +485,16 @@ class StatusRenderer:
         if not text:
             return ""
         return re.sub(r"(?:\n[ \t]*)+\Z", "", re.sub(r"\A(?:[ \t]*\n)+", "", text))
+
+    @staticmethod
+    def _split_render_lines(text: str) -> list[str]:
+        """Split rendered ANSI text into display rows while preserving internal blanks."""
+        if not text:
+            return []
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return lines
 
     def set_active_tool(self, tool_call_id: str, render_fn: Callable[[], str]) -> None:
         """Register an ongoing tool call; ``render_fn`` is called every redraw."""
@@ -538,89 +572,58 @@ class StatusRenderer:
         except Exception:
             return 24
 
-    def _markup(self, scroll_y: int | None = None) -> str:
-        """Compose the ANSI markup string, optionally sliced by ``scroll_y``.
-
-        When ``scroll_y`` is ``None`` (default) the view follows the tail
-        (live mode).  When ``scroll_y >= 0`` the view is pinned to that line
-        offset, allowing the user to scroll back through history.
-
-        Caching: the result is keyed by ``(_state_version, columns, rows,
-        spinner_tick, scroll_y)`` so unchanged frames re-use the cached string.
-        """
-        columns = self._terminal_columns()
-        rows = self._terminal_rows()
-        spinner_tick = self._current_spinner_tick()
-        key = (self._state_version, columns, rows, spinner_tick, scroll_y)
-        if self._cached_markup is not None and self._cached_markup_key == key:
-            return self._cached_markup
-
-        parts: list[str] = []
-        budget = max(20, rows * 2)
-        history_len = len(self._content_lines)
-
-        if scroll_y is not None:
-            # Scrolled-back mode: show a fixed window starting at scroll_y.
-            start = max(0, scroll_y)
-            end = min(history_len, scroll_y + budget)
-        else:
-            # Live tail-follow mode: show the last ``budget`` lines.
-            start = max(0, history_len - budget)
-            end = history_len
-
-        for i in range(start, end):
-            line = self._content_lines[i]
-            parts.append(line)
-            if line and not line.endswith("\n"):
-                parts.append("\n")
-
-        # Thinking/reasoning traces are intentionally not shown in the TUI.
-        # Only tool calls and assistant responses are displayed.
+    def _body_lines(self, spinner_tick: int) -> list[str]:
+        """Return the scrollable status body as rendered lines without the input rule."""
+        lines = list(self._content_lines)
 
         for render_fn in self._active_tools.values():
             try:
                 tool_text = render_fn()
             except Exception:
                 continue
-            parts.append(tool_text)
-            if not tool_text.endswith("\n"):
-                parts.append("\n")
+            lines.extend(self._split_render_lines(tool_text))
+
+        if self._thinking_text:
+            lines.extend(self._split_render_lines(self._thinking_text))
 
         if self._subagent_previews:
             spin_frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
             for preview in list(self._subagent_previews.values())[-self.SUBAGENT_PREVIEW_LINES :]:
-                parts.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m\n")
+                lines.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m")
 
         streaming = self._streaming_text
         if streaming:
-            parts.append(streaming)
-            if not streaming.endswith("\n"):
-                parts.append("\n")
+            lines.extend(self._split_render_lines(streaming))
 
         if self._active_panel:
-            parts.append(self._active_panel)
-            if not self._active_panel.endswith("\n"):
-                parts.append("\n")
+            lines.extend(self._split_render_lines(self._active_panel))
 
         if self._todo_items:
-            parts.append("\x1b[1;33mTODO:\x1b[0m\n")
+            lines.append("\x1b[1;33mTODO:\x1b[0m")
             for _i, item in enumerate(self._todo_items[:10], 1):
                 prefix = "☐" if not item.startswith("✓") else "✓"
                 text = item[1:].strip() if item.startswith("✓") else item
-                parts.append(f"  \x1b[33m{prefix}\x1b[0m {text}\n")
+                lines.append(f"  \x1b[33m{prefix}\x1b[0m {text}")
             if len(self._todo_items) > 10:
-                parts.append(f"  \x1b[2m... and {len(self._todo_items) - 10} more\x1b[0m\n")
+                lines.append(f"  \x1b[2m... and {len(self._todo_items) - 10} more\x1b[0m")
 
         if self._running:
             frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
             elapsed = int(time.monotonic() - self._spinner_started_at) if self._spinner_started_at else 0
             queued = f"  ·  {self._queue_count} queued" if self._queue_count else ""
-            spinner_line = (
+            lines.append(
                 f"\x1b[36m{frame}\x1b[0m \x1b[1m{self._spinner_label}…\x1b[0m  "
                 f"\x1b[2m{elapsed}s{queued}  ·  esc to interrupt\x1b[0m"
             )
-            parts.append(spinner_line + "\n")
 
+        return lines
+
+    def body_line_count(self) -> int:
+        """Return the number of rendered body lines available for scrolling."""
+        return len(self._body_lines(self._current_spinner_tick()))
+
+    def _input_rule(self, columns: int) -> str:
+        """Return the fixed input separator line shown below the scrollable body."""
         title_parts = ["input"]
         if self._plan_mode:
             title_parts.append("plan")
@@ -632,9 +635,48 @@ class StatusRenderer:
         dash = "╌" if self._plan_mode else "─"
         border = f"{dash}{dash}{title}{dash * max(0, columns - len(title) - 2)}"
         border_style = _mode_style(self._plan_mode, self._activity_mode)
-        parts.append(f"{border_style}{border}\x1b[0m\n")
+        return f"{border_style}{border}\x1b[0m"
 
-        markup = "".join(parts)
+    def _markup(self, scroll_y: int | None = None, *, visible_rows: int | None = None) -> str:
+        """Compose the ANSI markup string, optionally sliced by ``scroll_y``.
+
+        When ``scroll_y`` is ``None`` (default) the view follows the tail
+        (live mode).  When ``scroll_y >= 0`` the view is pinned to that rendered
+        line offset, allowing the user to scroll back through history.
+
+        Caching: the result is keyed by ``(_state_version, columns, rows,
+        spinner_tick, scroll_y, visible_rows)`` so unchanged frames re-use the cached string.
+        """
+        columns = self._terminal_columns()
+        rows = self._terminal_rows()
+        spinner_tick = self._current_spinner_tick()
+        key = (self._state_version, columns, rows, spinner_tick, scroll_y, visible_rows)
+        if self._cached_markup is not None and self._cached_markup_key == key:
+            return self._cached_markup
+
+        # The app keeps provider reasoning hidden by default by not forwarding
+        # think chunks here; callers that explicitly use ``append_thinking`` get
+        # the bounded preview promised by this renderer.
+        body_lines = self._body_lines(spinner_tick)
+        body_line_count = len(body_lines)
+        if visible_rows is None:
+            body_budget = max(20, rows * 2)
+        else:
+            # Leave one row for the fixed input separator.
+            body_budget = max(0, visible_rows - 1)
+
+        if body_budget <= 0:
+            selected_body: list[str] = []
+        elif scroll_y is None:
+            start = max(0, body_line_count - body_budget)
+            selected_body = body_lines[start:]
+        else:
+            max_start = max(0, body_line_count - body_budget)
+            start = min(max(0, scroll_y), max_start)
+            selected_body = body_lines[start : start + body_budget]
+
+        parts = [*selected_body, self._input_rule(columns)]
+        markup = "\n".join(parts)
         self._last_render_line_count, self._last_render_last_line_width = self._count_lines(markup)
         self._cached_markup = markup
         self._cached_markup_key = key
@@ -887,6 +929,7 @@ class PersistentPrompt:
         self._active_approval: Any = None
 
         self._scroll_y: int | None = None
+        self._status_visible_rows = 20
         self._kb = self._build_key_bindings()
         self._on_slash = on_slash
         self._on_submit = on_submit
@@ -902,6 +945,7 @@ class PersistentPrompt:
         self._status_control = _ScrollableFormattedTextControl(
             renderer=self._status,
             scroll_y_accessor=lambda: self._scroll_y,
+            visible_rows_setter=self._set_status_visible_rows,
         )
 
         self._status_window = Window(
@@ -955,18 +999,28 @@ class PersistentPrompt:
         self._app: Application[None] | None = None
 
     def _status_total_lines(self) -> int:
-        """Total printable lines in the *full* content history (not just rendered)."""
-        return max(0, len(self._status._content_lines))
+        """Total printable lines in the full rendered status body."""
+        return max(0, self._status.body_line_count())
+
+    def _set_status_visible_rows(self, rows: int) -> None:
+        """Remember the status-window height for PageUp/PageDown clamping."""
+        self._status_visible_rows = max(1, rows)
 
     def _scroll_by(self, delta: int) -> None:
         """Adjust the scroll offset by ``delta`` lines; ``None`` means tracking bottom.
 
-        The scroll offset is measured in raw content lines (entries in
-        ``_content_lines``), not rendered lines."""
+        The scroll offset is measured in rendered body lines, not message
+        blocks, so long assistant responses can be paged through line by line."""
         total = self._status_total_lines()
-        current = self._scroll_y if self._scroll_y is not None else total
+        visible_body_lines = max(1, self._status_visible_rows - 1)
+        max_start = max(0, total - visible_body_lines)
+        if max_start == 0:
+            self._scroll_y = None
+            self._invalidate()
+            return
+        current = max_start if self._scroll_y is None else min(self._scroll_y, max_start)
         new = current + delta
-        if new >= total:
+        if new >= max_start:
             self._scroll_y = None
         else:
             self._scroll_y = max(0, new)
@@ -1408,8 +1462,8 @@ class PersistentPrompt:
     async def run(self) -> Application[None]:
         """Run the prompt_toolkit application until it exits; returns it for inspection.
 
-        Set ``XERXES_MOUSE=1`` to enable mouse support (off by default
-        so it doesn't fight the host terminal's text-selection).
+        Set ``XERXES_MOUSE=0`` to disable mouse support if wheel events
+        should stay with the host terminal instead of scrolling the TUI.
 
         ``refresh_interval`` is bumped to 500ms — prompt_toolkit only
         needs the periodic refresh to advance time-based UI (the spinner
@@ -1421,7 +1475,7 @@ class PersistentPrompt:
             self._layout,
             key_bindings=self._kb,
             erase_when_done=True,
-            mouse_support=os.environ.get("XERXES_MOUSE", "0") == "1",
+            mouse_support=os.environ.get("XERXES_MOUSE", "1").lower() not in {"0", "false", "no", "off"},
             full_screen=True,
             refresh_interval=0.5,
         )

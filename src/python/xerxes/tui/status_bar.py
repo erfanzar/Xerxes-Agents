@@ -56,7 +56,7 @@ class StatusSnapshot:
     context_window: int = 200_000
     cost_usd: float = 0.0
     duration_sec: float = 0.0
-    permission_mode: str = "auto"
+    permission_mode: str = "accept-all"
     queue_depth: int = 0
     active_skill: str = ""
 

@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 from ..bridge import profiles
-from ..extensions.skills import activate_skill
+from ..extensions.skills import activate_skill, default_skill_discovery_dirs
 from ..llms.registry import calc_cost, detect_provider
 from ..runtime.bridge import populate_registry
 from ..runtime.config_context import set_config as set_global_config
@@ -159,7 +158,7 @@ class SlashHandlerMixin:
 
         if cmd == "permissions":
             modes = ["auto", "accept-all", "manual"]
-            current = self.config.get("permission_mode", "auto")
+            current = self.config.get("permission_mode", "accept-all")
             idx = modes.index(current) if current in modes else 0
             new_mode = modes[(idx + 1) % len(modes)]
             self.config["permission_mode"] = new_mode
@@ -167,7 +166,7 @@ class SlashHandlerMixin:
             return f"Permission mode: {new_mode}"
 
         if cmd == "yolo":
-            current = self.config.get("permission_mode", "auto")
+            current = self.config.get("permission_mode", "accept-all")
             if current == "accept-all":
                 self.config["permission_mode"] = "auto"
             else:
@@ -630,13 +629,7 @@ class SlashHandlerMixin:
 
     def _handle_skills_list(self) -> str:
         """Re-scan the skill directories and render the ``/skills`` output."""
-        import xerxes as _xerxes_pkg
-
-        _bundled = Path(_xerxes_pkg.__file__).parent / "skills"
-        discover_dirs = [str(self._skills_dir), str(Path.cwd() / "skills")]
-        if _bundled.is_dir():
-            discover_dirs.insert(0, str(_bundled))
-        self._skill_registry.discover(*discover_dirs)
+        self._skill_registry.discover(*default_skill_discovery_dirs(user_skills_dir=self._skills_dir))
         skills = self._skill_registry.get_all()
         if not skills:
             return f"No skills found.\n  Skills directory: {self._skills_dir}\n  Create one with /skill-create"

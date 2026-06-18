@@ -47,7 +47,7 @@ class AcpAgentRunner:
     per-session :class:`AgentState`. ``permission_board`` is wired by the
     server so interactive approvals can block until the client responds."""
 
-    def __init__(self, *, default_permission_mode: str = "auto") -> None:
+    def __init__(self, *, default_permission_mode: str = "accept-all") -> None:
         """Bootstrap the runtime once (provider/tools/skills) from the active profile."""
         from ..daemon.config import load_config
         from ..daemon.runtime import RuntimeManager

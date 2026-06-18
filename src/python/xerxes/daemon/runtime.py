@@ -31,7 +31,7 @@ from typing import Any, ClassVar
 from ..bridge import profiles
 from ..channels.workspace import MarkdownAgentWorkspace
 from ..core.paths import xerxes_subdir
-from ..extensions.skills import SkillRegistry, get_active_skills
+from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs, get_active_skills
 from ..runtime.agent_memory import AgentMemory
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
@@ -178,7 +178,7 @@ class RuntimeManager:
             "ok": bool(self.model),
             "model": self.model,
             "base_url": self.runtime_config.get("base_url", ""),
-            "permission_mode": self.runtime_config.get("permission_mode", "auto"),
+            "permission_mode": self.runtime_config.get("permission_mode", "accept-all"),
             "tools": len(self.tool_schemas),
             "skills": len(self.skill_registry.skill_names),
             "reasoning_effort": self.reasoning_state()["effort"],
@@ -187,7 +187,7 @@ class RuntimeManager:
     @property
     def permission_mode(self) -> str:
         """Current permission strategy (``auto`` | ``manual`` | ``accept-all``)."""
-        return str(self.runtime_config.get("permission_mode", "auto"))
+        return str(self.runtime_config.get("permission_mode", "accept-all"))
 
     def set_permission_mode(self, mode: str) -> str:
         """Set the active permission mode and re-publish the global config.
@@ -262,13 +262,7 @@ class RuntimeManager:
         forms for skills that declare sub-commands.
         """
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        import xerxes as _xerxes_pkg
-
-        bundled = Path(_xerxes_pkg.__file__).parent / "skills"
-        discover_dirs = [str(self.skills_dir), str(Path.cwd() / "skills")]
-        if bundled.is_dir():
-            discover_dirs.insert(0, str(bundled))
-        self.skill_registry.discover(*discover_dirs)
+        self.skill_registry.discover(*default_skill_discovery_dirs(user_skills_dir=self.skills_dir))
         return sorted(self.skill_names_with_subs())
 
     def skill_names_with_subs(self) -> list[str]:

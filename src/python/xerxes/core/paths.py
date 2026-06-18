@@ -28,6 +28,7 @@ from pathlib import Path
 
 XERXES_HOME_ENV = "XERXES_HOME"
 _DEFAULT_DIR_NAME = ".xerxes"
+_AGENTS_DIR_NAME = ".agents"
 
 
 def xerxes_home() -> Path:
@@ -41,3 +42,13 @@ def xerxes_home() -> Path:
 def xerxes_subdir(*parts: str) -> Path:
     """Join ``parts`` under :func:`xerxes_home` without creating the directory."""
     return xerxes_home().joinpath(*parts)
+
+
+def agents_home() -> Path:
+    """Return the shared agents home directory (``~/.agents``)."""
+    return Path.home() / _AGENTS_DIR_NAME
+
+
+def agents_subdir(*parts: str) -> Path:
+    """Join ``parts`` under :func:`agents_home` without creating the directory."""
+    return agents_home().joinpath(*parts)

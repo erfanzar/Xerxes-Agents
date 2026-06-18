@@ -925,13 +925,14 @@ class InitializeParams:
         model: Model identifier.
         base_url: Override base URL for the LLM provider.
         api_key: Explicit API key (overrides env vars).
-        permission_mode: Default permission mode (``"auto"``, ``"manual"``, …).
+        permission_mode: Default permission mode. Defaults to ``"accept-all"``;
+            set ``"auto"`` or ``"manual"`` for approval-gated runs.
     """
 
     model: str = ""
     base_url: str = ""
     api_key: str = ""
-    permission_mode: str = "auto"
+    permission_mode: str = "accept-all"
 
 
 @dataclass(frozen=True)

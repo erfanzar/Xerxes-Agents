@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from xerxes.streaming.wire_events import StatusUpdate
-from xerxes.tui.app import XerxesTUI
+from xerxes.streaming.wire_events import InitDone, StatusUpdate
+from xerxes.tui.app import XerxesTUI, _build_welcome_banner
 from xerxes.tui.prompt import FooterRenderer, PersistentPrompt, StatusRenderer
 
 
@@ -56,6 +56,10 @@ class _PromptStub:
 
     def clear_active_approval(self) -> None:
         pass
+
+
+def test_tui_defaults_to_accept_all_permissions() -> None:
+    assert XerxesTUI()._permission_mode == "accept-all"
 
 
 @pytest.mark.asyncio
@@ -273,3 +277,47 @@ def test_status_cursor_uses_current_render_metrics_for_dynamic_content() -> None
     assert content.cursor_position is not None
     assert content.cursor_position.y < content.line_count
     assert calls == 1
+
+
+def test_prompt_scroll_uses_rendered_lines_and_visible_height() -> None:
+    prompt = PersistentPrompt()
+    prompt._set_status_visible_rows(6)
+    for idx in range(30):
+        prompt.append_line(f"line {idx}")
+
+    prompt._scroll_by(-10)
+
+    assert prompt._scroll_y == 15
+
+    markup = prompt._status._markup(prompt._scroll_y, visible_rows=prompt._status_visible_rows)
+    assert "line 15" in markup
+    assert "line 19" in markup
+    assert "line 20" not in markup
+
+    prompt._scroll_by(10)
+
+    assert prompt._scroll_y is None
+
+
+@pytest.mark.asyncio
+async def test_init_done_replaces_full_split_banner_range() -> None:
+    tui = XerxesTUI()
+    prompt = PersistentPrompt()
+    cwd = "/tmp/xerxes"
+    provisional_banner = _build_welcome_banner(model="", session_id="provisional", cwd=cwd)
+
+    tui._prompt = prompt
+    tui._banner_cwd = cwd
+    tui._banner_start = len(prompt._status._content_lines)
+    prompt.append_line(provisional_banner)
+    tui._banner_line_count = len(prompt._status._content_lines) - tui._banner_start
+
+    tui._on_init_done(InitDone(model="glm-5.2", session_id="real-session", cwd=cwd))
+    if tui._model_load_task is not None:
+        await tui._model_load_task
+
+    history = "\n".join(prompt._status._content_lines)
+    assert history.count("Welcome to Xerxes!") == 1
+    assert "provisional" not in history
+    assert "real-session" in history
+    assert "glm-5.2" in history

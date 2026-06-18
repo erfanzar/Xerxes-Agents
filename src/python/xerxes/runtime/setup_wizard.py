@@ -68,8 +68,8 @@ DEFAULT_STEPS: tuple[SetupStep, ...] = (
     ),
     SetupStep(
         key="permission_mode",
-        prompt="Permission mode [auto/manual/accept-all]",
-        default="auto",
+        prompt="Permission mode [accept-all/auto/manual]",
+        default="accept-all",
     ),
     SetupStep(
         key="enable_voice",
