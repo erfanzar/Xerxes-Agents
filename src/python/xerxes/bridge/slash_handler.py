@@ -106,8 +106,15 @@ class SlashHandlerMixin:
             return f"Verbose: {self.config['verbose']}"
 
         if cmd == "thinking":
-            self.config["thinking"] = not self.config.get("thinking", False)
-            return f"Thinking: {self.config['thinking']}"
+            target = args.strip().lower()
+            if not target:
+                effort = self.config.get("reasoning_effort", "off")
+                return f"Thinking: {effort}  (levels: off | low | medium | high)"
+            if target not in {"off", "low", "medium", "high"}:
+                return f"Unknown thinking level: {target}. Use off|low|medium|high."
+            self.config["reasoning_effort"] = target
+            self.config["thinking"] = target != "off"
+            return f"Thinking effort set to: {target}"
 
         if cmd == "sampling":
             return self._handle_sampling(args)

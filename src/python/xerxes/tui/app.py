@@ -202,6 +202,7 @@ class XerxesTUI:
         self._plan_mode = False
         self._activity_mode = "code"
         self._user_activity_mode: str | None = None
+        self._todo_items: list[str] = []
 
     async def run(self) -> XerxesTUI:
         """Spawn the bridge, build the prompt, paint the banner, and start loops.
@@ -536,12 +537,12 @@ class XerxesTUI:
             self._prompt.append_streaming(text)
 
     def _on_think_chunk(self, think: str) -> None:
-        """Append a streaming reasoning fragment to the thinking pane."""
-        if self._active_thinking:
-            self._active_thinking.append(think)
+        """Discard reasoning fragments — only tool calls and responses are shown."""
+        # Reasoning is intentionally hidden from the TUI to reduce noise.
+        # The spinner label still indicates "Thinking" so the user knows
+        # the model is working, but the trace itself is not rendered.
         if self._prompt:
             self._prompt.set_spinner_label("Thinking")
-            self._prompt.append_thinking(think)
 
     def _on_tool_call(self, tool_call_id: str, name: str, arguments: str | None) -> None:
         """Open a new :class:`_ToolCallBlock` and wire it into the live status area."""
@@ -866,9 +867,14 @@ class XerxesTUI:
             self._prompt.append_line("[dim]Compacting context...[/dim]")
 
     def _on_compaction_end(self) -> None:
-        """Announce the end of a context compaction pass."""
+        """Clear the TUI conversation history after context compaction.
+
+        The daemon has already compacted its message history; the TUI
+        should also refresh so the visual history matches the new state.
+        Resets scroll to tail-follow so the user sees the fresh state."""
         if self._prompt:
-            self._prompt.append_line("[dim]Context compaction done.[/dim]")
+            self._prompt.clear_content()
+            self._prompt.append_line("[dim]Context compacted — conversation refreshed.[/dim]")
 
     async def _handle_submit(self, text: str) -> None:
         """prompt_toolkit submit callback: forward ``text`` into :meth:`_start_turn`."""
@@ -891,8 +897,11 @@ class XerxesTUI:
     async def _run_turns(self, text: str) -> None:
         """Drive turns serially, draining the queued inputs FIFO after each one.
 
-        Each turn waits up to 900 s on ``_turn_done_event``; a timeout
-        triggers a cancel + visible error so the TUI never wedges."""
+        Waits indefinitely for ``_turn_done_event`` — the daemon manages its
+        own provider timeouts, and the user can interrupt at any time via
+        Esc or Ctrl+C. A hard TUI-side timeout was removed because long
+        model operations (deep reasoning, large code generation) routinely
+        exceed 15 minutes and should not be artificially aborted."""
         if self._client is None:
             return
 
@@ -912,16 +921,7 @@ class XerxesTUI:
                     plan_mode=turn_plan_mode,
                     mode=self._current_interaction_mode(),
                 )
-                await asyncio.wait_for(self._turn_done_event.wait(), timeout=900)
-            except TimeoutError:
-                await self._client.cancel()
-                self._approval_panel = None
-                self._current_request_id = None
-                self._pending_approval_request_id = None
-                if self._prompt:
-                    self._prompt.clear_active_approval()
-                    self._prompt.set_running(False)
-                    self._prompt.append_line("\x1b[31mTurn timed out after 900s.\x1b[0m")
+                await self._turn_done_event.wait()
             except Exception as exc:
                 self._approval_panel = None
                 self._current_request_id = None
@@ -1003,11 +1003,76 @@ class XerxesTUI:
             await self._set_plan_mode(not self._plan_mode if not content else True)
             if content:
                 await self._client.steer(f"/plan {content}")
+        elif cmd == "/todo":
+            await self._handle_todo(text)
+        elif cmd == "/clear":
+            if self._prompt:
+                self._prompt.clear_content()
+                self._prompt.append_line("[dim]Conversation cleared.[/dim]")
+            await self._client._send_jsonrpc(
+                method="slash",
+                params={"command": text},
+            )
         else:
             await self._client._send_jsonrpc(
                 method="slash",
                 params={"command": text},
             )
+
+    async def _handle_todo(self, text: str) -> None:
+        """Handle ``/todo`` commands: show, add, remove, clear, toggle."""
+        parts = text.split(None, 1)
+        subcmd = parts[1].strip().lower() if len(parts) > 1 else ""
+
+        if subcmd.startswith("add "):
+            item = text[len("/todo add "):].strip()
+            if item:
+                self._todo_items.append(item)
+                if self._prompt:
+                    self._prompt.set_todo_items(list(self._todo_items))
+                    self._prompt.append_line(f"\x1b[33mAdded: {item}\x1b[0m")
+            return
+
+        if subcmd.startswith("done ") or subcmd.startswith("check "):
+            idx_str = (text.split(None, 2)[2] if len(text.split(None, 2)) > 2 else "").strip()
+            if idx_str.isdigit():
+                idx = int(idx_str) - 1
+                if 0 <= idx < len(self._todo_items):
+                    item = self._todo_items[idx]
+                    if item.startswith("✓"):
+                        self._todo_items[idx] = item[1:].strip()
+                    else:
+                        self._todo_items[idx] = f"✓ {item}"
+                    if self._prompt:
+                        self._prompt.set_todo_items(list(self._todo_items))
+            return
+
+        if subcmd == "clear":
+            self._todo_items.clear()
+            if self._prompt:
+                self._prompt.clear_todo_items()
+                self._prompt.append_line("\x1b[33mTODO list cleared.\x1b[0m")
+            return
+
+        if subcmd.startswith("remove ") or subcmd.startswith("rm "):
+            idx_str = (text.split(None, 2)[2] if len(text.split(None, 2)) > 2 else "").strip()
+            if idx_str.isdigit():
+                idx = int(idx_str) - 1
+                if 0 <= idx < len(self._todo_items):
+                    removed = self._todo_items.pop(idx)
+                    if self._prompt:
+                        self._prompt.set_todo_items(list(self._todo_items))
+                        self._prompt.append_line(f"\x1b[33mRemoved: {removed}\x1b[0m")
+            return
+
+        # Default: show the list
+        if not self._todo_items:
+            if self._prompt:
+                self._prompt.append_line("\x1b[2mTODO list is empty. Use /todo add <item>.\x1b[0m")
+            return
+
+        if self._prompt:
+            self._prompt.set_todo_items(list(self._todo_items))
 
     async def _toggle_plan_mode(self) -> None:
         """Flip ``_plan_mode`` and inform the daemon."""

@@ -66,7 +66,7 @@ cd docs && make html
 
 ## Repository Layout
 
-```
+```md
 src/python/xerxes/
 ├── __main__.py          # CLI entry — dispatches telegram / one-shot / TUI
 ├── xerxes.py            # Xerxes facade — ties LLM + agents + memory + runtime

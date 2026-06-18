@@ -375,7 +375,7 @@ class _SubToolCall:
         self.status = "done"
 
     def compose(self) -> str:
-        """Render one bullet line: status icon, tool name, key argument, timing."""
+        """Render one compact sub-call line: status, name, key arg, timing."""
         from .console import _prompt_text_to_ansi
 
         icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self.status, "·")
@@ -397,8 +397,9 @@ class _ToolCallBlock:
         MAX_SUBAGENT_TOOL_LINES: Tail length for the sub-call list.
     """
 
-    MAX_RESULT_LINES = 5
+    MAX_RESULT_LINES = 1
     MAX_SUBAGENT_TOOL_LINES = 5
+    MAX_RESULT_CHARS = 40  # single-line cap for tool output; collapsed + truncated with "..."
 
     def __init__(self, block_id: str, tool_call_id: str, name: str, arguments: str | None) -> None:
         """Start a running block; ``arguments`` is fed into the incremental lexer."""
@@ -457,37 +458,46 @@ class _ToolCallBlock:
         self._subagent_type = subagent_type
 
     def compose(self) -> str:
-        """Render the full block (status header, sub-call lines, truncated result)."""
+        """Render an ultra-compact single-line tool call.
+
+        Format::
+
+            called {name} ({key_arg}) — {truncated_result} — {duration}
+
+        Examples::
+
+            called ReadFile (src/foo.py) — import os; import sys; from... — 12ms
+            called WriteFile (out.txt) — done — 5ms
+            called ExecuteShell (ls -la) — file1.txt file2.txt dir1/... — 45ms
+        """
         from .console import _prompt_text_to_ansi
 
         elapsed_s = int(time.monotonic() - self._started_at)
         duration = f"{elapsed_s}s" if self._status == "running" else f"{self._duration_ms:.0f}ms"
-        icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self._status, "·")
-        status_word = "Using" if self._status == "running" else "Used"
         name = _markup_safe(self.name)
         key_arg = _markup_safe(self.key_arg)
 
-        lines = [f"{icon} [bold cyan]{status_word} {name}[/bold cyan] ([dim]{key_arg}[/dim]) — {duration}"]
+        line = f"called [cyan]{name}[/cyan] ([dim]{key_arg}[/dim])"
+
+        if self._status == "done" and self._result:
+            collapsed = _markup_safe(self._result).replace("\n", " ").strip()
+            while "  " in collapsed:
+                collapsed = collapsed.replace("  ", " ")
+            if len(collapsed) > self.MAX_RESULT_CHARS:
+                collapsed = collapsed[: self.MAX_RESULT_CHARS - 3] + "..."
+            line += f" — [dim]{collapsed}[/dim]"
+        elif self._status == "running":
+            line += " — [dim]...[/dim]"
+
+        line += f" — {duration}"
 
         sub_lines: list[str] = []
         for sub in self._sub_tool_calls[-self.MAX_SUBAGENT_TOOL_LINES :]:
             sub_lines.append(sub.compose())
 
-        if self._status == "done" and self._result:
-            result_lines = _markup_safe(self._result).strip().split("\n")[: self.MAX_RESULT_LINES]
-            result_text = "\n".join(result_lines)
-            if len(result_lines) == self.MAX_RESULT_LINES:
-                result_text += "\n  [dim](truncated)[/dim]"
-            lines.append(f"  [dim]{result_text}[/dim]")
-
-        rendered = _prompt_text_to_ansi("\n".join(lines))
+        rendered = _prompt_text_to_ansi(line)
         if sub_lines:
-            rendered = (
-                rendered.split("\n", 1)[0]
-                + "\n"
-                + "\n".join(sub_lines)
-                + (("\n" + rendered.split("\n", 1)[1]) if "\n" in rendered else "")
-            )
+            rendered = rendered + "\n" + "\n".join(sub_lines)
         return rendered
 
 
