@@ -197,7 +197,7 @@ for img1, img2 in image_pairs:
 3. **Batch processing** - Process multiple images/texts together
 4. **Cache embeddings** - Expensive to recompute
 5. **Set appropriate thresholds** - Test on validation data
-6. **Use GPU** - 10-50× faster than CPU
+6. **Use GPU** - 10-50x faster than CPU
 7. **Consider model size** - ViT-B/32 good default, ViT-L/14 for best quality
 
 ## Resources

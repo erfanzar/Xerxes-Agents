@@ -1,0 +1,1119 @@
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Slash command handlers — all interactive /command implementations.
+
+Extracted from daemon/server.py as a mixin. Each ``_slash_*`` method handles
+one command, dispatched from :meth:`SlashCommandsMixin._handle_slash`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import uuid
+from typing import Any
+
+from ..bridge import profiles
+from .gateway import EmitFn
+from .runtime import DaemonSession
+
+logger = logging.getLogger(__name__)
+
+
+class SlashCommandsMixin:
+    """All ``/``-prefixed slash command handlers for :class:`DaemonServer`.
+
+    The main router is :meth:`_handle_slash` which dispatches to individual
+    ``_slash_*`` methods based on the command name.
+    """
+
+    async def _slash_soul(self, args: str, emit: EmitFn) -> None:
+        """Show the path to the workspace's SOUL.md (or memory soul file)."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        path = session.workspace.path / "SOUL.md"
+        if not path.exists():
+            await self._emit_slash(emit, f"`SOUL.md` not found at `{path}`.")
+            return
+        await self._emit_slash(emit, f"Soul / values file: `{path}`\nEdit then `/reload` to pick up changes.")
+
+    async def _slash_feedback(self, args: str, emit: EmitFn) -> None:
+        """Show where to file feedback / report bugs."""
+        await self._emit_slash(
+            emit,
+            "Feedback / issues:\n"
+            "  • GitHub: https://github.com/erfanzar/Xerxes/issues\n"
+            "  • Anything urgent? Mention it in the daemon log first (`~/.xerxes/daemon.log`).",
+        )
+
+    async def _slash_cost(self, args: str, emit: EmitFn) -> None:
+        """Show the running USD cost for the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        try:
+            cost = session.state.cost
+        except Exception:
+            cost = 0.0
+        await self._emit_slash(emit, f"Estimated cost: `${cost:.4f}` (model: `{self.runtime.model}`).")
+
+    async def _slash_fast(self, args: str, emit: EmitFn) -> None:
+        """Toggle fast-mode (cheaper auxiliary model for summaries/titles/etc.)."""
+        cur = bool(self.runtime.runtime_config.get("fast_mode", False))
+        action = args.strip().lower()
+        if action == "on":
+            new_value = True
+        elif action == "off":
+            new_value = False
+        else:
+            new_value = not cur
+        self.runtime.runtime_config["fast_mode"] = new_value
+        await self._emit_slash(emit, f"Fast mode: {'ON' if new_value else 'OFF'}.")
+
+    async def _slash_restart(self, args: str, emit: EmitFn) -> None:
+        """Schedule a daemon shutdown so the TUI respawns a fresh process on next launch."""
+        await self._emit_slash(emit, "Restarting daemon — re-run `xerxes` after this shuts down.")
+        self._track_task(self.shutdown())
+
+    async def _slash_save(self, args: str, emit: EmitFn) -> None:
+        """Force-persist the active session to disk right now."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to save.")
+            return
+        self.sessions.save(session)
+        path = self.sessions._session_path(session.id)
+        await self._emit_slash(emit, f"Saved session `{session.id}` to `{path}`.")
+
+    async def _slash_plugins(self, args: str, emit: EmitFn) -> None:
+        """List loaded plugins and their slash registrations."""
+        try:
+            from ..extensions.plugins import list_loaded_plugins
+        except Exception:
+            list_loaded_plugins = None  # type: ignore[assignment]
+        try:
+            from ..extensions.slash_plugins import registered_slashes
+        except Exception:
+            registered_slashes = None  # type: ignore[assignment]
+
+        lines = ["Plugins:"]
+        plugins = list_loaded_plugins() if list_loaded_plugins else []
+        if plugins:
+            for p in plugins:
+                name = getattr(p, "name", str(p))
+                lines.append(f"  `{name}`")
+        else:
+            lines.append("  (no plugins loaded)")
+        slashes = registered_slashes() if registered_slashes else []
+        if slashes:
+            lines.append("")
+            lines.append("Plugin slash commands:")
+            for s in slashes:
+                lines.append(f"  `/{s.name}` — {getattr(s, 'description', '')}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    def _help_text(self) -> str:
+        """Render the ``/help`` output grouped by command category."""
+        from ..bridge.commands import CATEGORIES, COMMAND_REGISTRY
+
+        # Group by category for readable help output.
+        by_cat: dict[str, list[Any]] = {c: [] for c in CATEGORIES}
+        for cmd in COMMAND_REGISTRY:
+            by_cat.setdefault(cmd.category, []).append(cmd)
+        lines = ["Slash commands (run `/commands` for the flat list):"]
+        for cat in CATEGORIES:
+            cmds = by_cat.get(cat, [])
+            if not cmds:
+                continue
+            lines.append(f"\n  [{cat}]")
+            for c in cmds:
+                # Wrap each ``/cmd <hint>`` in a backtick code span so the
+                # Markdown renderer the TUI applies to slash notifications
+                # doesn't silently strip angle-bracketed placeholders as
+                # HTML tags.
+                hint = f" {c.args_hint}" if c.args_hint else ""
+                lines.append(f"    `/{c.name}{hint}`  — {c.description}")
+        return "\n".join(lines)
+
+    async def _slash_config(self, args: str, emit: EmitFn) -> None:
+        """Dump non-underscore runtime config keys, with secrets redacted."""
+        cfg = self.runtime.runtime_config
+        redact_keys = {"api_key", "auth_token", "token", "secret"}
+        lines = ["Runtime config:"]
+        for key in sorted(cfg):
+            if key.startswith("_"):
+                continue
+            value = cfg[key]
+            if any(s in key.lower() for s in redact_keys) and value:
+                value = "***redacted***"
+            lines.append(f"  `{key}` = `{value}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_budget(self, args: str, emit: EmitFn) -> None:
+        """Show context-window usage and remaining headroom."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        from ..llms.registry import get_context_limit
+
+        model = self.runtime.model or ""
+        limit = get_context_limit(model) if model else 0
+        used = session.state.total_input_tokens + session.state.total_output_tokens
+        remaining = max(0, limit - used)
+        pct = (used / limit * 100) if limit else 0.0
+        await self._emit_slash(
+            emit,
+            f"Context window: `{limit or '?'}` tokens for `{model or '(unknown)'}`\n"
+            f"Used: {used} ({pct:.1f}%) · Remaining: {remaining}",
+        )
+
+    async def _slash_statusbar(self, args: str, emit: EmitFn) -> None:
+        """Statusbar is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Statusbar visibility is a TUI-side setting.")
+
+    async def _slash_compact(self, args: str, emit: EmitFn) -> None:
+        """Compact the conversation by handing it to the agent with a brief.
+
+        We don't run a local summariser — the model can do it cleanly inside a
+        normal turn. The synthetic prompt asks the agent to summarise the
+        thread and then continue with whatever comes next.
+        """
+        prompt = (
+            "Please compact this conversation: summarise the relevant context so far "
+            "in 3-6 bullet points (decisions made, open questions, key file paths) "
+            "and then wait for the user's next instruction. Be terse."
+        )
+        await self._submit_turn({"text": prompt, "_internal_slash": True}, emit)
+        await self._emit_slash(emit, "Compaction turn queued.")
+
+    async def _slash_update(self, args: str, emit: EmitFn) -> None:
+        """Show the installed Xerxes version and an update hint."""
+        try:
+            from importlib.metadata import version
+
+            ver = version("xerxes")
+        except Exception:
+            ver = "(unknown — running from source)"
+        await self._emit_slash(
+            emit,
+            f"Xerxes `{ver}`\nUpdate with: `uv pip install -U xerxes` (or your package manager).",
+        )
+
+    async def _slash_resume(self, args: str, emit: EmitFn) -> None:
+        """List recent saved sessions; resuming requires re-launching with ``-r``."""
+        records = self.sessions.list()
+        if not records:
+            await self._emit_slash(emit, "No saved sessions found.")
+            return
+        lines = ["Recent sessions:"]
+        for r in records[:10]:
+            sid = r.get("session_id", "?")
+            updated = r.get("updated_at", "")
+            turns = r.get("turn_count", 0)
+            lines.append(f"  `{sid}` — {turns} turn(s), updated {updated}")
+        lines.append("")
+        lines.append("Resume from a fresh terminal: `xerxes -r <id>`.")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_memory(self, args: str, emit: EmitFn) -> None:
+        """Show where the agent's memory files live + their sizes."""
+        from ..runtime.agent_memory import default_global_memory_dir, project_memory_dir_for
+
+        global_dir = default_global_memory_dir()
+        try:
+            project_dir = project_memory_dir_for(self.config.project_dir or os.getcwd())
+        except Exception:
+            project_dir = None
+
+        def _sz(path):
+            try:
+                return path.stat().st_size if path.exists() else 0
+            except OSError:
+                return 0
+
+        lines = ["Memory:"]
+        lines.append(f"  Global scope: `{global_dir}`")
+        for name in ("SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md", "KNOWLEDGE.md", "INSIGHTS.md", "EXPERIENCES.md"):
+            path = global_dir / name
+            lines.append(f"    `{name}` — {_sz(path)} bytes" + ("" if path.exists() else "  (missing)"))
+        if project_dir is not None:
+            lines.append(f"  Project scope: `{project_dir}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_insights(self, args: str, emit: EmitFn) -> None:
+        """Show top tools by call count from the session's execution log."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        counts: dict[str, int] = {}
+        for ex in session.state.tool_executions:
+            name = ex.get("name", "(unknown)")
+            counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            await self._emit_slash(emit, "No tools invoked in this session yet.")
+            return
+        top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        lines = ["Top tools this session:"]
+        for name, n in top:
+            lines.append(f"  `{name}` — {n} call{'s' if n != 1 else ''}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_branch(self, args: str, emit: EmitFn) -> None:
+        """Branch / fork the current session — saves a copy under a new id."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to branch.")
+            return
+        import copy
+
+        new_id = uuid.uuid4().hex[:12]
+        clone = DaemonSession(
+            id=new_id,
+            key=new_id,
+            agent_id=session.agent_id,
+            workspace=session.workspace,
+        )
+        clone.state.messages = copy.deepcopy(session.state.messages)
+        clone.state.turn_count = session.state.turn_count
+        self.sessions._sessions[new_id] = clone
+        self.sessions.save(clone)
+        await self._emit_slash(
+            emit,
+            f"Branched to new session `{new_id}` ({len(clone.state.messages)} messages).\n"
+            f"Open in a new terminal with `xerxes -r {new_id}`.",
+        )
+
+    async def _slash_retry(self, args: str, emit: EmitFn) -> None:
+        """Resend the most recent user message after dropping the failed reply."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None or not session.state.messages:
+            await self._emit_slash(emit, "Nothing to retry.")
+            return
+        msgs = session.state.messages
+        last_user_text = ""
+        for msg in reversed(msgs):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                last_user_text = content if isinstance(content, str) else str(content)
+                break
+        if not last_user_text:
+            await self._emit_slash(emit, "No prior user message to retry.")
+            return
+        # Drop everything after the last user message so the model retries cleanly.
+        while msgs and msgs[-1].get("role") != "user":
+            msgs.pop()
+        if msgs:
+            msgs.pop()  # remove the user message too — _submit_turn re-appends it
+        await self._emit_slash(emit, "Retrying the last prompt…")
+        await self._submit_turn({"text": last_user_text, "_internal_slash": True}, emit)
+
+    async def _slash_undo(self, args: str, emit: EmitFn) -> None:
+        """Drop the last user/assistant turn pair from the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None or not session.state.messages:
+            await self._emit_slash(emit, "Nothing to undo.")
+            return
+        msgs = session.state.messages
+        # Pop assistant + matching user (and any intervening tool messages).
+        dropped = 0
+        while msgs and msgs[-1].get("role") != "user":
+            msgs.pop()
+            dropped += 1
+        if msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+            dropped += 1
+        session.state.turn_count = max(0, session.state.turn_count - 1)
+        self.sessions.save(session)
+        await self._emit_slash(emit, f"Undone — dropped {dropped} message(s) from the conversation.")
+
+    async def _slash_cancel_all(self, args: str, emit: EmitFn) -> None:
+        """Cancel every running turn across every session."""
+        count = self.sessions.cancel_all()
+        await self._emit_slash(emit, f"Cancelled {count} running turn{'s' if count != 1 else ''}.")
+
+    async def _slash_personality(self, args: str, emit: EmitFn) -> None:
+        """Show the path to the workspace's persona file."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        path = session.workspace.path / "AGENTS.md"
+        if not path.exists():
+            await self._emit_slash(emit, f"`AGENTS.md` not found at `{path}`. Run any session prompt to seed it.")
+            return
+        await self._emit_slash(emit, f"Persona / instructions file: `{path}`\nEdit with your `$EDITOR`, then `/reload`.")
+
+    async def _handle_slash(self, command: str, emit: EmitFn) -> None:
+        """Dispatch a ``/cmd`` string to plugins, built-ins, or skill shorthand.
+
+        Resolution order: slash-plugin registry, built-in commands (``/help``,
+        ``/skills``, ``/yolo``, ``/permissions``, ``/context``, ...), then the
+        skill registry treating ``cmd`` (or ``cmd:sub``) as a skill name.
+        """
+        stripped = command.strip()
+        if not stripped.startswith("/"):
+            return
+        raw = stripped[1:]
+        cmd, _, args = raw.partition(" ")
+        cmd = cmd.strip().lower()
+        args = args.strip()
+
+        # Resolve aliases against the canonical registry so /q, /quit, /reset, etc. all work.
+        from ..bridge.commands import resolve_command
+        from ..extensions.slash_plugins import resolve_slash
+
+        original_cmd = cmd  # preserve typed name for user-facing responses
+        resolved = resolve_command(cmd)
+        if resolved is not None and resolved.name != cmd:
+            cmd = resolved.name
+
+        # Plugin-registered slash commands.
+        plugin = resolve_slash(cmd)
+        if plugin is not None:
+            try:
+                out = plugin.handler(args) if args else plugin.handler()
+            except Exception as exc:
+                await self._emit_slash(emit, f"Plugin /{cmd} failed: {exc}")
+                return
+            await self._emit_slash(emit, str(out) if out is not None else f"Plugin /{cmd} ran.")
+            return
+
+        if cmd == "skills":
+            await self._emit_slash(emit, self.runtime.skills_list_text())
+            await emit("init_done", {"skills": self.runtime.discover_skills()})
+            return
+
+        if cmd == "skill":
+            await self._slash_skill(args, emit)
+            return
+
+        if cmd == "skill-create":
+            await self._slash_skill_create(args, emit)
+            return
+
+        # ---- permission / mode toggles -----------------------------------
+
+        if cmd == "yolo":
+            new_mode = self.runtime.toggle_yolo()
+            label = "ON (accept-all)" if new_mode == "accept-all" else "OFF (auto)"
+            await self._emit_slash(emit, f"YOLO mode {label}")
+            return
+
+        if cmd == "permissions":
+            if args:
+                new_mode = self.runtime.set_permission_mode(args)
+                await self._emit_slash(emit, f"Permission mode: {new_mode}")
+            else:
+                # Cycle through valid modes (matches bridge/server behavior).
+                modes = ["auto", "accept-all", "manual"]
+                current = self.runtime.permission_mode
+                idx = modes.index(current) if current in modes else 0
+                new_mode = self.runtime.set_permission_mode(modes[(idx + 1) % len(modes)])
+                await self._emit_slash(emit, f"Permission mode: {new_mode}")
+            return
+
+        # ``/thinking`` (alias ``/reasoning``) shows/sets the reasoning effort level.
+        if cmd in {"thinking", "reasoning"}:
+            await self._slash_thinking(args, emit)
+            return
+
+        if cmd in {"verbose", "debug"}:
+            new_value = self.runtime.toggle_flag(cmd)
+            await self._emit_slash(emit, f"{original_cmd.title()}: {new_value}")
+            return
+
+        # ---- info commands ------------------------------------------------
+
+        if cmd == "help":
+            await self._emit_slash(emit, self._help_text())
+            return
+
+        if cmd == "commands":
+            from ..bridge.commands import COMMAND_REGISTRY
+
+            lines = [f"  /{c.name:<14} {c.description}" for c in COMMAND_REGISTRY]
+            await self._emit_slash(emit, "Commands:\n" + "\n".join(lines))
+            return
+
+        if cmd == "context":
+            status = self.runtime.status()
+            await self._emit_slash(
+                emit,
+                "\n".join(
+                    [
+                        f"Model:           {status['model']}",
+                        f"Permission mode: {status['permission_mode']}",
+                        f"Tools:           {status['tools']}",
+                        f"Skills:          {status['skills']}",
+                        f"Workspace:       {self.config.project_dir or os.getcwd()}",
+                    ]
+                ),
+            )
+            return
+
+        if cmd == "status":
+            await self._emit_slash(emit, json.dumps(self.runtime.status(), indent=2))
+            return
+
+        if cmd == "provider":
+            await self._slash_provider(args, emit)
+            return
+
+        if cmd in {"exit", "quit", "q"}:
+            await self._emit_slash(emit, "(use Ctrl+D or close the terminal to exit)")
+            return
+
+        if cmd == "clear":
+            # Clear is a per-session concern; the TUI handles its own scrollback,
+            # so we just acknowledge.
+            await self._emit_slash(emit, "Cleared.")
+            return
+
+        # ---- omnibus handler for the rest of COMMAND_REGISTRY ----------------
+        # Dispatched via ``_BULK_SLASH_HANDLERS`` so adding a command means one
+        # line in the registry + one line in the dispatch table below.
+        handler = _BULK_SLASH_HANDLERS.get(cmd)
+        if handler is not None:
+            await handler(self, args, emit)
+            return
+
+        # ---- skill-name shorthand (supports ``/skill:sub``) --------------
+
+        # ``/autoresearch:fix`` should resolve to the autoresearch skill with
+        # the ``fix`` subcommand. We split before looking up the skill so a
+        # skill named "autoresearch" handles "fix" as a sub-command, not the
+        # whole token.
+        skill_name = cmd
+        subcommand = ""
+        if ":" in cmd:
+            skill_name, subcommand = cmd.split(":", 1)
+
+        skill = self.runtime.skill_registry.get(skill_name)
+        if skill is not None:
+            # Validate subcommand against the skill's declared sub-commands.
+            declared_subs = skill.metadata.subcommands
+            if subcommand and declared_subs and subcommand not in declared_subs:
+                await self._emit_slash(
+                    emit,
+                    f"Skill /{skill_name} has no sub-command '{subcommand}'. "
+                    f"Available: {', '.join('/' + skill_name + ':' + s for s in declared_subs)}",
+                )
+                return
+            # Build the args string the existing dispatcher understands:
+            #   "<name>"            — no subcommand, no args
+            #   "<name>:<sub>"      — subcommand only
+            #   "<name>:<sub> <a>"  — subcommand + free-form args
+            if subcommand and args:
+                composed = f"{skill_name}:{subcommand} {args}"
+            elif subcommand:
+                composed = f"{skill_name}:{subcommand}"
+            elif args:
+                composed = f"{skill_name}:{args}"
+            else:
+                composed = skill_name
+            await self._slash_skill(composed, emit, run_now=True)
+            return
+
+        # If the command is in the registry but slipped through every branch
+        # above, fail honestly so the gap can be caught by a grep rather than
+        # disguised as "unknown command".
+        if resolved is not None:
+            await self._emit_slash(
+                emit,
+                f"`/{cmd}` is registered but not yet wired in the daemon. "
+                "Open an issue with the command name and what you expected.",
+            )
+            return
+        await self._emit_slash(emit, f"Unknown command: /{cmd} (type /help)")
+
+    async def _slash_sampling(self, args: str, emit: EmitFn) -> None:
+        """Show or update sampling params (temperature, top_p, max_tokens)."""
+        if not args.strip():
+            cfg = self.runtime.runtime_config
+            lines = ["Sampling:"]
+            for key in ("temperature", "top_p", "top_k", "max_tokens", "presence_penalty", "frequency_penalty"):
+                if key in cfg:
+                    lines.append(f"  `{key}` = `{cfg[key]}`")
+            if len(lines) == 1:
+                lines.append("  (provider defaults — no overrides set)")
+            lines.append("\nUpdate with `/sampling <key> <value>` (e.g. `/sampling temperature 0.7`).")
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            await self._emit_slash(emit, "Usage: `/sampling <key> <value>`")
+            return
+        key, raw = parts[0].strip(), parts[1].strip()
+        # Coerce numerics; non-numeric values are stored as strings.
+        value: Any = raw
+        try:
+            value = float(raw) if "." in raw else int(raw)
+        except ValueError:
+            pass
+        self.runtime.runtime_config[key] = value
+        await self._emit_slash(emit, f"Set sampling `{key}` = `{value}`.")
+
+    async def _slash_toolsets(self, args: str, emit: EmitFn) -> None:
+        """List subagent / toolset definitions discovered on disk."""
+        try:
+            from ..agents.definitions import list_agent_definitions
+        except Exception:
+            await self._emit_slash(emit, "Toolset listing unavailable in this build.")
+            return
+        defs = list_agent_definitions()
+        if not defs:
+            await self._emit_slash(emit, "No agent toolsets configured.")
+            return
+        lines = [f"Agent toolsets ({len(defs)}):"]
+        for d in defs:
+            name = getattr(d, "name", str(d))
+            descr = getattr(d, "description", "") or ""
+            lines.append(f"  `{name}` — {descr[:80]}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_model(self, args: str, emit: EmitFn) -> None:
+        """Show the active model or switch to a new one.
+
+        ``/model`` lists the active model + provider. ``/model <id>`` rebinds
+        the runtime to that id (full path or short alias). Profiles are
+        managed separately via ``/provider``.
+        """
+        target = args.strip()
+        if not target:
+            cfg = self.runtime.runtime_config
+            base_url = str(cfg.get("base_url", ""))
+            api_key = str(cfg.get("api_key", ""))
+            active = self.runtime.model or "(none)"
+            lines = [
+                f"Active model: `{active}`",
+                f"Base URL:     `{base_url or '(provider default)'}`",
+            ]
+            models: list[str] = []
+            if base_url:
+                try:
+                    models = await asyncio.to_thread(profiles.fetch_models, base_url, api_key)
+                except Exception as exc:
+                    lines.append(f"\n(could not fetch model list from provider: {exc})")
+            if models:
+                lines.append("\nAvailable models from provider:")
+                lines.extend(f"  {'● ' if m == active else '  '}{m}" for m in models)
+            lines.append("\nSwitch with `/model <id>` or pick a profile with `/provider`.")
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+        # Validate against the provider's catalogue (best-effort): reject an
+        # unknown id rather than silently binding a model that 404s at call time.
+        # If the catalogue can't be fetched, we skip validation and allow it.
+        base_url = str(self.runtime.runtime_config.get("base_url", ""))
+        if base_url:
+            from ..llms.registry import bare_model
+
+            try:
+                available = await asyncio.to_thread(
+                    profiles.fetch_models, base_url, str(self.runtime.runtime_config.get("api_key", ""))
+                )
+            except Exception:
+                available = []
+            if available and not ({target, bare_model(target)} & set(available)):
+                preview = ", ".join(available[:8]) + (" …" if len(available) > 8 else "")
+                await self._emit_slash(
+                    emit,
+                    f"Unknown model `{target}` for this provider.\n"
+                    f"Available: {preview}\n"
+                    f"Run `/model` for the full list, or `/provider` to switch profiles.",
+                )
+                return
+        try:
+            self.runtime.reload({"model": target})
+        except Exception as exc:
+            await self._emit_slash(emit, f"Failed to switch model: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Model set to `{self.runtime.model}`.")
+        await self._emit_init_done(emit)
+
+    async def _slash_reload(self, args: str, emit: EmitFn) -> None:
+        """Reload tools + skills from disk without restarting the daemon."""
+        try:
+            self.runtime.reload({})
+        except Exception as exc:
+            await self._emit_slash(emit, f"Reload failed: `{exc}`")
+            return
+        skills = self.runtime.discover_skills()
+        await emit("init_done", {"skills": skills})
+        await self._emit_slash(
+            emit,
+            f"Reloaded. Tools: {len(self.runtime.tool_schemas)} · Skills: {len(skills)}.",
+        )
+
+    async def _slash_usage(self, args: str, emit: EmitFn) -> None:
+        """Show token usage for the active session (alias-ish for /context)."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        st = session.state
+        total = st.total_input_tokens + st.total_output_tokens
+        lines = [
+            f"Input tokens:        {st.total_input_tokens}",
+            f"Output tokens:       {st.total_output_tokens}",
+            f"Total tokens:        {total}",
+            f"Cache read tokens:   {st.total_cache_read_tokens}",
+            f"Cache create tokens: {st.total_cache_creation_tokens}",
+        ]
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_nudge(self, args: str, emit: EmitFn) -> None:
+        """Toggle Honcho-style background nudges."""
+        cur = bool(self.runtime.runtime_config.get("nudge", True))
+        action = args.strip().lower()
+        if action == "on":
+            new_value = True
+        elif action == "off":
+            new_value = False
+        else:
+            new_value = not cur
+        self.runtime.runtime_config["nudge"] = new_value
+        await self._emit_slash(emit, f"Nudge: {'ON' if new_value else 'OFF'}.")
+
+    async def _slash_reload_mcp(self, args: str, emit: EmitFn) -> None:
+        """Reload MCP server connections."""
+        try:
+            from ..mcp.manager import reload_mcp_servers
+        except Exception:
+            await self._emit_slash(emit, "MCP support not available in this build.")
+            return
+        try:
+            count = reload_mcp_servers()
+        except Exception as exc:
+            await self._emit_slash(emit, f"MCP reload failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Reloaded {count} MCP server connection(s).")
+
+    async def _slash_history(self, args: str, emit: EmitFn) -> None:
+        """Show message and turn counts for the active session."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet.")
+            return
+        st = session.state
+        await self._emit_slash(
+            emit,
+            f"Messages: {len(st.messages)}\nTurns: {st.turn_count}\n"
+            f"Input tokens: {st.total_input_tokens}\nOutput tokens: {st.total_output_tokens}",
+        )
+
+    async def _slash_stop(self, args: str, emit: EmitFn) -> None:
+        """Cancel the currently in-flight tool / turn in this session."""
+        cancelled = self.sessions.cancel(self._current_session_key)
+        await self._emit_slash(emit, "Cancelled." if cancelled else "Nothing running to cancel.")
+
+    async def _slash_new(self, args: str, emit: EmitFn) -> None:
+        """Drop the cached session and start fresh — like a clean re-launch."""
+        self.sessions.evict(self._current_session_key)
+        session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
+        await self._emit_slash(emit, f"New session `{session.id}` started. Scrollback cleared on TUI side.")
+
+    async def _slash_steer(self, args: str, emit: EmitFn) -> None:
+        """Inject a steering hint into the active turn (``/btw`` and ``/steer``).
+
+        Mid-turn the content is queued on the active session; the streaming
+        loop drains it between tool iterations and prepends it as a synthetic
+        user message before the next LLM request. With no active turn the
+        steer lands directly in ``state.messages`` so the next turn sees it.
+        ``steer_input`` is still emitted so the TUI can render the injection.
+        """
+        content = args.strip()
+        if not content:
+            await self._emit_slash(emit, "Usage: `/steer <hint>` (also `/btw`). Anything after the command is injected.")
+            return
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session to steer.")
+            return
+        await emit("steer_input", {"content": content})
+        if session.active_turn_id:
+            session.pending_steers.put(content)
+            await self._emit_slash(emit, "Steer queued — will land before the next tool round.")
+        else:
+            session.state.messages.append({"role": "user", "content": f"[steer from user]\n{content}"})
+            await self._emit_slash(emit, "Steer injected — will land on the next turn.")
+
+    async def _slash_paste(self, args: str, emit: EmitFn) -> None:
+        """Paste is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Paste is handled in the TUI via `Ctrl+V` / `Alt+V`.")
+
+    async def _slash_doctor(self, args: str, emit: EmitFn) -> None:
+        """Run a quick self-check: provider configured, tools loaded, skills found."""
+        lines = ["Diagnostics:"]
+        ok = True
+        if not self.runtime.model:
+            lines.append("  ✗ No model configured — run `/provider` or set `XERXES_MODEL`.")
+            ok = False
+        else:
+            lines.append(f"  ✓ Model: `{self.runtime.model}`")
+        tools = len(self.runtime.tool_schemas)
+        lines.append(f"  {'✓' if tools else '✗'} Tools loaded: {tools}")
+        skills = len(self.runtime.discover_skills())
+        lines.append(f"  ✓ Skills discovered: {skills}")
+        sessions = len(self.sessions.list())
+        lines.append(f"  ✓ Saved sessions on disk: {sessions}")
+        lines.append("")
+        lines.append("All good." if ok else "Something needs attention — see above.")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_title(self, args: str, emit: EmitFn) -> None:
+        """Set or clear the current session's title."""
+        session = self.sessions.get(self._current_session_key)
+        if session is None:
+            await self._emit_slash(emit, "No active session yet — start chatting first.")
+            return
+        title = args.strip()
+        if not hasattr(session.state, "metadata") or session.state.metadata is None:
+            session.state.metadata = {}
+        if title:
+            session.state.metadata["title"] = title
+            await self._emit_slash(emit, f"Session title set to `{title}`.")
+        else:
+            current = session.state.metadata.get("title", "")
+            await self._emit_slash(emit, f"Session title: `{current or '(unset)'}`.")
+
+    async def _slash_thinking(self, args: str, emit: EmitFn) -> None:
+        """Show or set the reasoning ('thinking') effort level.
+
+        ``/thinking`` shows the current effort and how it maps to the active
+        provider; ``/thinking <off|low|medium|high>`` sets it.
+        """
+        from ..llms.registry import detect_provider
+
+        target = args.strip().lower()
+        if not target:
+            state = self.runtime.reasoning_state()
+            provider = detect_provider(self.runtime.model or "") or "?"
+            if state["effort"] == "off":
+                mapping = "reasoning disabled"
+            elif provider in {"anthropic", "claude"}:
+                mapping = f"{provider} → budget_tokens={state['budget_tokens']}"
+            else:
+                mapping = f"{provider} → reasoning_effort={state['effort']}"
+            await self._emit_slash(
+                emit,
+                f"Thinking: {state['effort']}  ({mapping})\n"
+                f"Levels: off | low | medium | high\n"
+                f"Set with `/thinking <level>`.",
+            )
+            return
+        try:
+            state = self.runtime.set_reasoning_effort(target)
+        except ValueError as exc:
+            await self._emit_slash(emit, str(exc))
+            return
+        await self._emit_slash(emit, f"Thinking effort set to: {state['effort']}.")
+        # Refresh the status bar so the new effort shows immediately. Guarded so
+        # the minimally-wired test fixture (no session manager) doesn't trip.
+        if getattr(self, "sessions", None) is not None:
+            await self._emit_status(emit)
+
+    async def _slash_skin(self, args: str, emit: EmitFn) -> None:
+        """Skin is a pure TUI concern; ack and tell the user to use the TUI command."""
+        await self._emit_slash(emit, "Skin is a TUI-side setting. Use the TUI's `Ctrl+T` or the `xerxes-skin` CLI.")
+
+    async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
+        """Show the current project directory and the agent workspace path."""
+        session = self.sessions.get(self._current_session_key)
+        ws_path = str(session.workspace.path) if session is not None else "(no session)"
+        lines = [
+            f"Project dir:    `{self.config.project_dir or os.getcwd()}`",
+            f"Agent workspace: `{ws_path}`",
+            f"Agent id:        `{(session.agent_id if session else self.workspaces.default_agent_id)}`",
+        ]
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_background(self, args: str, emit: EmitFn) -> None:
+        """List in-flight daemon background tasks (turn runners + post-turn hooks)."""
+        active = [t for t in self._background_tasks if not t.done()]
+        if not active:
+            await self._emit_slash(emit, "No background tasks running.")
+            return
+        lines = [f"Background tasks ({len(active)}):"]
+        for t in active:
+            lines.append(f"  `{t.get_name()}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_rollback(self, args: str, emit: EmitFn) -> None:
+        """Roll the working tree back to a snapshot (use ``/snapshots`` to find ids)."""
+        target = args.strip()
+        if not target:
+            await self._emit_slash(emit, "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.")
+            return
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            mgr.rollback(target)
+        except Exception as exc:
+            await self._emit_slash(emit, f"Rollback failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Rolled back to snapshot `{target}`.")
+
+    # ----- bulk dispatch table for the rest of COMMAND_REGISTRY ------------------
+    # Mapping cmd name → bound-method-style callable so a single
+    # ``handler(self, args, emit)`` line in ``_handle_slash`` covers everything.
+    # Aliases are duplicated here so resolving the canonical name still hits the
+    # right handler (``resolve_command`` already canonicalises before lookup).
+
+    async def _slash_snapshot(self, args: str, emit: EmitFn) -> None:
+        """Take a filesystem snapshot of the project working tree."""
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            record = mgr.snapshot(label=args.strip() or "manual")
+        except Exception as exc:
+            await self._emit_slash(emit, f"Snapshot failed: `{exc}`")
+            return
+        await self._emit_slash(emit, f"Snapshot `{getattr(record, 'id', '?')}` saved.")
+
+    async def _slash_agents(self, args: str, emit: EmitFn) -> None:
+        """List agent definitions and any running subagent tasks."""
+        try:
+            from ..agents.definitions import list_agent_definitions
+        except Exception:
+            list_agent_definitions = None  # type: ignore[assignment]
+        defs = list_agent_definitions() if list_agent_definitions else []
+        lines = [f"Agents ({len(defs)}):"]
+        for d in defs:
+            name = getattr(d, "name", str(d))
+            descr = getattr(d, "description", "") or ""
+            lines.append(f"  `{name}` — {descr[:80]}")
+        # Running subagent tasks, if the runtime exposes them.
+        try:
+            mgr = self.runtime.subagent_manager  # may not exist
+            tasks = [t for t in mgr.tasks.values() if t.status in {"pending", "running"}]
+        except Exception:
+            tasks = []
+        if tasks:
+            lines.append("")
+            lines.append(f"Running subagent tasks ({len(tasks)}):")
+            for t in tasks:
+                lines.append(f"  `{t.id}` — `{t.name or t.agent_def_name}` ({t.status})")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_queue(self, args: str, emit: EmitFn) -> None:
+        """The TUI manages its own input queue; ack and tell the user."""
+        await self._emit_slash(
+            emit, "Pending input queue is TUI-side. The footer shows the count when items are queued."
+        )
+
+    async def _slash_branches(self, args: str, emit: EmitFn) -> None:
+        """List every saved session id grouped by who their last update was."""
+        records = self.sessions.list()
+        if not records:
+            await self._emit_slash(emit, "No branches / saved sessions.")
+            return
+        lines = [f"Branches / saved sessions ({len(records)}):"]
+        for r in records[:20]:
+            sid = r.get("session_id", "?")
+            turns = r.get("turn_count", 0)
+            updated = r.get("updated_at", "")
+            lines.append(f"  `{sid}` — {turns} turn(s), updated {updated}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_voice(self, args: str, emit: EmitFn) -> None:
+        """Voice mode is TUI-side; ack with a hint."""
+        await self._emit_slash(emit, "Voice mode is TUI-side. Use the `xerxes-voice` CLI or the TUI's voice key.")
+
+    async def _slash_snapshots(self, args: str, emit: EmitFn) -> None:
+        """List recent filesystem snapshots."""
+        try:
+            from ..session.snapshots import SnapshotManager
+        except Exception:
+            await self._emit_slash(emit, "Snapshot support not available in this build.")
+            return
+        try:
+            mgr = SnapshotManager(self.config.project_dir or os.getcwd())
+            items = mgr.list()
+        except Exception as exc:
+            await self._emit_slash(emit, f"Snapshot list failed: `{exc}`")
+            return
+        if not items:
+            await self._emit_slash(emit, "No snapshots yet. Take one with `/snapshot [label]`.")
+            return
+        lines = [f"Snapshots ({len(items)}):"]
+        for s in items[:20]:
+            sid = getattr(s, "id", "?")
+            label = getattr(s, "label", "") or ""
+            when = getattr(s, "created_at", "") or ""
+            lines.append(f"  `{sid}` — `{label}` @ {when}")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_platforms(self, args: str, emit: EmitFn) -> None:
+        """List configured messaging channel platforms and their state."""
+        lines = ["Channel platforms:"]
+        for name, ch in self.channels.channels.items():
+            enabled = "on " if ch.enabled else "off"
+            ready = "ready" if ch.instance is not None else "not-started"
+            lines.append(f"  [{enabled}] `{name}` — {ready}")
+        if len(lines) == 1:
+            lines.append("  (none configured)")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_cron(self, args: str, emit: EmitFn) -> None:
+        """List cron jobs (sub-commands ``add``/``remove``/``run`` deferred to JSON-RPC)."""
+        try:
+            from ..cron import jobs as cron_jobs
+        except Exception:
+            await self._emit_slash(emit, "Cron support not available in this build.")
+            return
+        sub = args.strip().split(maxsplit=1)
+        action = sub[0].lower() if sub else "list"
+        if action in ("", "list"):
+            try:
+                items = cron_jobs.list_jobs()
+            except Exception as exc:
+                await self._emit_slash(emit, f"Cron list failed: `{exc}`")
+                return
+            if not items:
+                await self._emit_slash(emit, "No cron jobs scheduled.")
+                return
+            lines = [f"Cron jobs ({len(items)}):"]
+            for j in items:
+                lines.append(
+                    f"  `{getattr(j, 'id', '?')}` — `{getattr(j, 'schedule', '')}` "
+                    f"({'paused' if getattr(j, 'paused', False) else 'active'})"
+                )
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+        await self._emit_slash(
+            emit,
+            f"`/cron {action}` is not yet wired in the daemon. "
+            "Use the corresponding JSON-RPC method, or `/cron list` to view jobs.",
+        )
+
+    async def _slash_browser(self, args: str, emit: EmitFn) -> None:
+        """List browser sessions managed by the operator subsystem."""
+        sessions = []
+        for sess in self.sessions._sessions.values():
+            ops = getattr(sess, "operator_state", None)
+            if ops is None:
+                continue
+            mgr = getattr(ops, "browser_manager", None)
+            if mgr is None:
+                continue
+            try:
+                sessions.extend(mgr.list_sessions())
+            except Exception:
+                continue
+        if not sessions:
+            await self._emit_slash(emit, "No browser sessions open. Use the `start_browser` tool to create one.")
+            return
+        lines = [f"Browser sessions ({len(sessions)}):"]
+        for s in sessions:
+            lines.append(f"  `{getattr(s, 'id', '?')}` — `{getattr(s, 'url', '')}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_tools(self, args: str, emit: EmitFn) -> None:
+        """List the tool names the runtime has registered."""
+        names = sorted(t.get("function", {}).get("name", "") for t in self.runtime.tool_schemas)
+        names = [n for n in names if n]
+        if not names:
+            await self._emit_slash(emit, "No tools loaded.")
+            return
+        lines = [f"Tools ({len(names)}):"]
+        for name in names:
+            lines.append(f"  `{name}`")
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_image(self, args: str, emit: EmitFn) -> None:
+        """Generate an image from a prompt via the image-generation tool."""
+        prompt = args.strip()
+        if not prompt:
+            await self._emit_slash(emit, "Usage: `/image <prompt>`")
+            return
+        # Defer to the agent — it has access to the image generation tool and
+        # can pick a provider + model on its own.
+        synthetic = (
+            f"Generate an image matching this brief and report the saved path:\n\n{prompt}\n\n"
+            "Use the `generate_image` tool. Do not write any code; one tool call is enough."
+        )
+        await self._submit_turn({"text": synthetic, "_internal_slash": True}, emit)
+        await self._emit_slash(emit, "Image-generation turn queued.")
+
+
+_BULK_SLASH_HANDLERS: dict[str, Any] = {
+    "new": SlashCommandsMixin._slash_new,
+    "reset": SlashCommandsMixin._slash_new,
+    "stop": SlashCommandsMixin._slash_stop,
+    "cancel": SlashCommandsMixin._slash_stop,
+    "cancel-all": SlashCommandsMixin._slash_cancel_all,
+    "compact": SlashCommandsMixin._slash_compact,
+    "compress": SlashCommandsMixin._slash_compact,
+    "btw": SlashCommandsMixin._slash_steer,
+    "steer": SlashCommandsMixin._slash_steer,
+    "model": SlashCommandsMixin._slash_model,
+    "sampling": SlashCommandsMixin._slash_sampling,
+    "config": SlashCommandsMixin._slash_config,
+    "title": SlashCommandsMixin._slash_title,
+    "workspace": SlashCommandsMixin._slash_workspace,
+    "save": SlashCommandsMixin._slash_save,
+    "personality": SlashCommandsMixin._slash_personality,
+    "soul": SlashCommandsMixin._slash_soul,
+    "tools": SlashCommandsMixin._slash_tools,
+    "toolsets": SlashCommandsMixin._slash_toolsets,
+    "agents": SlashCommandsMixin._slash_agents,
+    "reload": SlashCommandsMixin._slash_reload,
+    "reload-mcp": SlashCommandsMixin._slash_reload_mcp,
+    "memory": SlashCommandsMixin._slash_memory,
+    "history": SlashCommandsMixin._slash_history,
+    "usage": SlashCommandsMixin._slash_usage,
+    "cost": SlashCommandsMixin._slash_cost,
+    "insights": SlashCommandsMixin._slash_insights,
+    "budget": SlashCommandsMixin._slash_budget,
+    "doctor": SlashCommandsMixin._slash_doctor,
+    "update": SlashCommandsMixin._slash_update,
+    "nudge": SlashCommandsMixin._slash_nudge,
+    "feedback": SlashCommandsMixin._slash_feedback,
+    "plugins": SlashCommandsMixin._slash_plugins,
+    "platforms": SlashCommandsMixin._slash_platforms,
+    "browser": SlashCommandsMixin._slash_browser,
+    "image": SlashCommandsMixin._slash_image,
+    "cron": SlashCommandsMixin._slash_cron,
+    "fast": SlashCommandsMixin._slash_fast,
+    "skin": SlashCommandsMixin._slash_skin,
+    "statusbar": SlashCommandsMixin._slash_statusbar,
+    "paste": SlashCommandsMixin._slash_paste,
+    "voice": SlashCommandsMixin._slash_voice,
+    "queue": SlashCommandsMixin._slash_queue,
+    "background": SlashCommandsMixin._slash_background,
+    "resume": SlashCommandsMixin._slash_resume,
+    "restart": SlashCommandsMixin._slash_restart,
+    "undo": SlashCommandsMixin._slash_undo,
+    "retry": SlashCommandsMixin._slash_retry,
+    "branch": SlashCommandsMixin._slash_branch,
+    "branches": SlashCommandsMixin._slash_branches,
+    "snapshot": SlashCommandsMixin._slash_snapshot,
+    "snapshots": SlashCommandsMixin._slash_snapshots,
+    "rollback": SlashCommandsMixin._slash_rollback,
+}

@@ -374,7 +374,7 @@ Load: `references/learn-workflow.md` for full protocol.
 - Project-type-adaptive — creates deployment-guide.md only if deployment config exists
 - Validation-fix loop capped at 3 retries — escalates to user if unresolved
 - Scale-aware scouting — adjusts parallelism for 5k+ file codebases
-- Composite metric: `learn_score = validation%×0.5 + coverage%×0.3 + size_compliance%×0.2`
+- Composite metric: `learn_score = validation%x0.5 + coverage%x0.3 + size_compliance%x0.2`
 - Creates `learn/{YYMMDD}-{HHMM}-{slug}/` with: `learn-results.tsv`, `summary.md`, `validation-report.md`, `scout-context.md`
 
 **Flags:**

@@ -19,10 +19,10 @@ pres.writeFile({ fileName: "Presentation.pptx" });
 ## Layout Dimensions
 
 Slide dimensions (coordinates in inches):
-- `LAYOUT_16x9`: 10" × 5.625" (default)
-- `LAYOUT_16x10`: 10" × 6.25"
-- `LAYOUT_4x3`: 10" × 7.5"
-- `LAYOUT_WIDE`: 13.3" × 7.5"
+- `LAYOUT_16x9`: 10" x 5.625" (default)
+- `LAYOUT_16x10`: 10" x 6.25"
+- `LAYOUT_4x3`: 10" x 7.5"
+- `LAYOUT_WIDE`: 13.3" x 7.5"
 
 ---
 
@@ -415,6 +415,6 @@ titleSlide.addText("My Title", { placeholder: "title" });
 
 - **Shapes**: RECTANGLE, OVAL, LINE, ROUNDED_RECTANGLE
 - **Charts**: BAR, LINE, PIE, DOUGHNUT, SCATTER, BUBBLE, RADAR
-- **Layouts**: LAYOUT_16x9 (10"×5.625"), LAYOUT_16x10, LAYOUT_4x3, LAYOUT_WIDE
+- **Layouts**: LAYOUT_16x9 (10"x5.625"), LAYOUT_16x10, LAYOUT_4x3, LAYOUT_WIDE
 - **Alignment**: "left", "center", "right"
 - **Chart data labels**: "outEnd", "inEnd", "center"

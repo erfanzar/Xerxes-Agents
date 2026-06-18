@@ -64,7 +64,7 @@ Each sorted dark-to-bright, each a different visual texture. Validated against t
 | Stars | ` ·✧✦✩✨★✶` | Sparkle, celestial |
 | Half-fills | ` ◔◑◕◐◒◓◖◗◙` | Directional fill progression |
 | Crosshatch | ` ▣▤▥▦▧▨▩` | Hatched density ramp |
-| Math | ` ·∘∙•°±×÷≈≠≡∞∫∑Ω` | Scientific, abstract |
+| Math | ` ·∘∙•°±x÷≈≠≡∞∫∑Ω` | Scientific, abstract |
 | Box drawing | ` ─│┌┐└┘├┤┬┴┼` | Structural, circuit-like |
 | Katakana | ` ·ｦｧｨｩｪｫｬｭ...` | Matrix rain |
 | Greek | ` αβγδεζηθ...ω` | Classical, academic |
@@ -283,7 +283,7 @@ Auto-detects CPU count, RAM, platform, ffmpeg. Adapts worker count, resolution, 
 
 ## Projects built with this
 
-✦ 85-second highlight reel. 15 scenes (14×5s + 15s crescendo finale), randomized order, directional parameter arcs, layer hierarchy composition. Showcases the full effect vocabulary: fBM, voronoi fragmentation, reaction-diffusion, cellular automata, dual counter-rotating spirals, wave collision, domain warping, tunnel descent, kaleidoscope symmetry, boid flocking, fire simulation, glitch corruption, and a 7-layer crescendo buildup.
+✦ 85-second highlight reel. 15 scenes (14x5s + 15s crescendo finale), randomized order, directional parameter arcs, layer hierarchy composition. Showcases the full effect vocabulary: fBM, voronoi fragmentation, reaction-diffusion, cellular automata, dual counter-rotating spirals, wave collision, domain warping, tunnel descent, kaleidoscope symmetry, boid flocking, fire simulation, glitch corruption, and a 7-layer crescendo buildup.
 
 ✦ Audio-reactive music visualizer. 3.5 min, 8 sections with distinct effects, beat-triggered particles and glitch, cycling palettes.
 

@@ -61,7 +61,7 @@ Text("Code", font=MONO, font_size=18)
 
 ### The coordinate budget
 
-The visible frame is approximately 14.2 wide × 8.0 tall (default 16:9). With mandatory margins:
+The visible frame is approximately 14.2 wide x 8.0 tall (default 16:9). With mandatory margins:
 
 ```
 Usable area: x ∈ [-6.5, 6.5], y ∈ [-3.5, 3.5]

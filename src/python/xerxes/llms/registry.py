@@ -155,14 +155,18 @@ PROVIDERS: dict[str, ProviderConfig] = {
         name="zhipu",
         type="openai",
         api_key_env="ZHIPU_API_KEY",
-        base_url="https://open.bigmodel.cn/api/paas/v4/",
+        base_url="https://api.z.ai/api/coding/paas/v4",
         context_limit=128_000,
         models=[
-            "glm-4-plus",
-            "glm-4",
-            "glm-4-flash",
-            "glm-4-air",
-            "glm-z1-flash",
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5v-turbo",
+            "glm-5-turbo",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.6",
+            "glm-4.5",
+            "glm-4.5-air",
         ],
     ),
     "deepseek": ProviderConfig(
@@ -279,10 +283,15 @@ COSTS: dict[str, tuple[float, float]] = {
     "MiniMax-M2.7-flashspeed": (0.0, 0.0),
     "MiniMax-Text-01": (0.0, 0.0),
     "MiniMax-Text-01-MiniApp": (0.0, 0.0),
-    "glm-4-plus": (0.7, 0.7),
-    "glm-4": (0.7, 0.7),
-    "glm-4-flash": (0.0, 0.0),
-    "glm-4-air": (0.14, 0.14),
+    "glm-5.2": (0.6, 2.2),
+    "glm-5.1": (0.6, 2.2),
+    "glm-5v-turbo": (0.3, 1.1),
+    "glm-5-turbo": (0.3, 1.1),
+    "glm-5": (0.6, 2.2),
+    "glm-4.7": (0.5, 0.5),
+    "glm-4.6": (0.5, 0.5),
+    "glm-4.5": (0.3, 1.1),
+    "glm-4.5-air": (0.07, 0.07),
 }
 
 _PREFIX_MAP: list[tuple[str, str]] = sorted(
@@ -420,6 +429,7 @@ _MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "MiniMax-M2.7-flashspeed": 1_024_000,
     "MiniMax-Text-01": 256_000,
     "MiniMax-Text-01-MiniApp": 256_000,
+    "glm-5.2": 1_048_576,
 }
 
 

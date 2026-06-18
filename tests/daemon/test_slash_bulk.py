@@ -51,16 +51,20 @@ class _Recorder:
 
 def _direct_handler_names() -> set[str]:
     """Parse cmd == "..." / cmd in {...} branches out of the daemon source."""
-    src = open(daemon_server.__file__).read()
+    import pathlib
+
     out: set[str] = set()
-    for match in re.finditer(r'cmd == "([\w-]+)"|cmd in \{([^}]+)\}', src):
-        if match.group(1):
-            out.add(match.group(1))
-        else:
-            for tok in match.group(2).split(","):
-                tok = tok.strip().strip('"').strip("'")
-                if tok:
-                    out.add(tok)
+    daemon_dir = pathlib.Path(daemon_server.__file__).parent
+    for source_file in [daemon_server.__file__, daemon_dir / "slash_commands.py"]:
+        src = open(source_file).read()
+        for match in re.finditer(r'cmd == "([\w-]+)"|cmd in \{([^}]+)\}', src):
+            if match.group(1):
+                out.add(match.group(1))
+            else:
+                for tok in match.group(2).split(","):
+                    tok = tok.strip().strip('"').strip("'")
+                    if tok:
+                        out.add(tok)
     return out
 
 

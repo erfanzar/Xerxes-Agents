@@ -24,6 +24,7 @@ from xerxes.streaming.messages import (
     messages_from_anthropic,
     messages_to_anthropic,
 )
+from xerxes.streaming.parsers.common import parse_tool_call_blocks
 
 
 def test_bound_tool_result_passthrough_small():
@@ -101,3 +102,16 @@ def test_anthropic_roundtrip_preserves_is_error_and_thinking():
     assert asst["thinking_signature"] == "sig"
     tool = neutral[1]
     assert tool["is_error"] is True
+
+
+def test_tool_call_parser_requires_close_tag():
+    text = '<tool_call>{"name": "ReadFile", "arguments": {"file_path": "x.py"}}'
+    assert parse_tool_call_blocks(text, open_tag="<tool_call>", close_tag="</tool_call>") == []
+
+
+def test_tool_call_parser_accepts_closed_json_payload():
+    text = '<tool_call>{"name": "ReadFile", "arguments": {"file_path": "x.py"}}</tool_call>'
+    calls = parse_tool_call_blocks(text, open_tag="<tool_call>", close_tag="</tool_call>")
+    assert len(calls) == 1
+    assert calls[0].name == "ReadFile"
+    assert calls[0].arguments == {"file_path": "x.py"}

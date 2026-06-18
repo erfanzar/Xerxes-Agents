@@ -34,8 +34,8 @@ flowchart TB
     end
 
     subgraph Plugins["Extensibility"]
-        LLMs["BaseLLM × 12<br/>(OpenAI / Anthropic / …)"]
-        Tools["AgentBaseFn × 150<br/>(tools/)"]
+        LLMs["BaseLLM x 12<br/>(OpenAI / Anthropic / …)"]
+        Tools["AgentBaseFn x 150<br/>(tools/)"]
         Memory["MemoryStore<br/>(short/long/entity/user)"]
         MCP["MCPManager<br/>(stdio/SSE/HTTP)"]
     end

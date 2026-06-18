@@ -306,7 +306,9 @@ class AnthropicLLM(BaseLLM):
             event_type = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
 
             if event_type == "content_block_start":
-                block = event.get("content_block", {}) if isinstance(event, dict) else getattr(event, "content_block", {})
+                block = (
+                    event.get("content_block", {}) if isinstance(event, dict) else getattr(event, "content_block", {})
+                )
                 block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
                 if block_type == "tool_use":
                     index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)

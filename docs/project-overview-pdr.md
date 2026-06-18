@@ -47,7 +47,7 @@ Every LLM response is an async iterator over typed events (`TextChunk`, `Thinkin
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Rust TUI   FastAPI /v1    Daemon (WS+Unix)   Channels×14  │
+│  Rust TUI   FastAPI /v1    Daemon (WS+Unix)   Channelsx14  │
 │     │            │               │                 │       │
 │     ▼            ▼               ▼                 ▼       │
 │  ┌─ bridge.py (JSON-RPC) ───┐  ┌─ channels/base.Channel ─┐ │
@@ -62,7 +62,7 @@ Every LLM response is an async iterator over typed events (`TextChunk`, `Thinkin
 │           │          │            │           │             │
 │           ▼          ▼            ▼           ▼             │
 │       BaseLLM   MemoryStore  Extensions   RuntimeFeatures  │
-│       (×12)    (SQLite/RAG)  (plugins/    (policy/sandbox/ │
+│       (x12)    (SQLite/RAG)  (plugins/    (policy/sandbox/ │
 │                              hooks/skills) audit/session)  │
 └─────────────────────────────────────────────────────────────┘
 ```

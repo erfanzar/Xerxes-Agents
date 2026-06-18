@@ -427,7 +427,7 @@ masks, scores, _ = predictor.predict(
 ```python
 # SamAutomaticMaskGenerator output
 {
-    "segmentation": np.ndarray,  # H×W binary mask
+    "segmentation": np.ndarray,  # HxW binary mask
     "bbox": [x, y, w, h],        # Bounding box
     "area": int,                 # Pixel count
     "predicted_iou": float,      # 0-1 quality score

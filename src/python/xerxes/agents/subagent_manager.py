@@ -174,11 +174,7 @@ class SubAgentTask:
             "current_tool": self.current_tool,
             "tool_calls_count": self.tool_calls_count,
             "recent_output": self.recent_output_text(),
-            "idle_seconds": (
-                round(time.monotonic() - self.last_activity_ts, 2)
-                if self.last_activity_ts
-                else None
-            ),
+            "idle_seconds": (round(time.monotonic() - self.last_activity_ts, 2) if self.last_activity_ts else None),
         }
 
 
@@ -844,11 +840,7 @@ class SubAgentManager:
 
         spec = task.spawn_spec
         prompt = new_prompt.strip() or spec["prompt"]
-        agent_def = (
-            get_agent_definition(spec["agent_def_name"])
-            if spec.get("agent_def_name")
-            else None
-        )
+        agent_def = get_agent_definition(spec["agent_def_name"]) if spec.get("agent_def_name") else None
         # Strip the worktree banner from the original prompt to avoid double
         # appending when ``spawn`` re-prepends it for the new worktree.
         if "[Note: You are working in an isolated git worktree" in prompt:
@@ -914,7 +906,7 @@ def _run_streaming_loop(
     task: SubAgentTask,
     tool_executor: Any = None,
     tool_schemas: list[dict[str, Any]] | None = None,
-    manager: "SubAgentManager | None" = None,
+    manager: SubAgentManager | None = None,
 ) -> str:
     """Drive :func:`xerxes.streaming.loop.run` for one subagent prompt.
 

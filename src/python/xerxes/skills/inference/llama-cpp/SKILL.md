@@ -1,6 +1,6 @@
 ---
 name: llama-cpp
-description: Runs LLM inference on CPU, Apple Silicon, and consumer GPUs without NVIDIA hardware. Use for edge deployment, M1/M2/M3 Macs, AMD/Intel GPUs, or when CUDA is unavailable. Supports GGUF quantization (1.5-8 bit) for reduced memory and 4-10× speedup vs PyTorch on CPU.
+description: Runs LLM inference on CPU, Apple Silicon, and consumer GPUs without NVIDIA hardware. Use for edge deployment, M1/M2/M3 Macs, AMD/Intel GPUs, or when CUDA is unavailable. Supports GGUF quantization (1.5-8 bit) for reduced memory and 4-10x speedup vs PyTorch on CPU.
 version: 1.0.0
 author: Orchestra Research
 license: MIT
@@ -223,9 +223,9 @@ cat prompts.txt | ./llama-cli \
 
 | GPU | Speed | vs CPU | Cost |
 |-----|-------|--------|------|
-| NVIDIA RTX 4090 | 120 tok/s | 3-4× | $0 (local) |
-| NVIDIA A10 | 80 tok/s | 2-3× | $1.00/hour |
-| AMD MI250 | 70 tok/s | 2× | $2.00/hour |
+| NVIDIA RTX 4090 | 120 tok/s | 3-4x | $0 (local) |
+| NVIDIA A10 | 80 tok/s | 2-3x | $1.00/hour |
+| AMD MI250 | 70 tok/s | 2x | $2.00/hour |
 | Apple M3 Max (Metal) | 50 tok/s | ~Same | $0 (local) |
 
 ## Supported models

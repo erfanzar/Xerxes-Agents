@@ -35,7 +35,7 @@ def test_append_is_o1_per_chunk():
 def test_raw_buffer_capped_after_long_run():
     block = _ThinkingBlock(block_id="t")
     cap = _ThinkingBlock.RAW_BUFFER_CHAR_LIMIT
-    # 4× the cap; the compaction inside ``append`` must keep it bounded.
+    # 4x the cap; the compaction inside ``append`` must keep it bounded.
     for _ in range(cap // 10 * 4):
         block.append("0123456789")
     materialised = block.raw_text

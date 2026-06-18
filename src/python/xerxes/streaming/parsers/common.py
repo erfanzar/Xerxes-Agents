@@ -79,6 +79,13 @@ def parse_tool_call_blocks(text: str, *, open_tag: str, close_tag: str) -> list[
             # and keep scanning for the next opener.
             pos = start + len(open_tag)
             continue
+        skip = end
+        while skip < n and text[skip].isspace():
+            skip += 1
+        if not text.startswith(close_tag, skip):
+            pos = start + len(open_tag)
+            continue
+
         if isinstance(payload, dict):
             name = payload.get("name") or payload.get("function") or payload.get("tool")
             args = payload.get("arguments") or payload.get("input") or payload.get("parameters") or {}
@@ -86,14 +93,7 @@ def parse_tool_call_blocks(text: str, *, open_tag: str, close_tag: str) -> list[
                 args = {}
             if name:
                 out.append(ParsedToolCall(name=str(name), arguments=args))
-        # Resume scanning after the consumed JSON value, stepping past the
-        # close tag when it immediately follows (allowing intervening space).
-        pos = end
-        skip = end
-        while skip < n and text[skip].isspace():
-            skip += 1
-        if text.startswith(close_tag, skip):
-            pos = skip + len(close_tag)
+        pos = skip + len(close_tag)
     return out
 
 

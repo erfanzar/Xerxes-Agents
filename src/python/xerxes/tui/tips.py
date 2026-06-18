@@ -143,7 +143,7 @@ TIPS: tuple[str, ...] = (
     "Pre-pruner converts binary blobs into [N bytes elided] placeholders.",
     "Iterative summary merging means /compact twice in a row doesn't waste tokens.",
     "context_window is a per-model constant; pricing table tracks it for 39+ models.",
-    "Cache pricing: cache_read ≈ 0.1× input; cache_write ≈ 1.25× input (Anthropic).",  # noqa: RUF001 — U+00D7 multiplication sign
+    "Cache pricing: cache_read ≈ 0.1x input; cache_write ≈ 1.25x input (Anthropic).",
     "Cache savings show up as a positive delta in /insights.",
     "Stream → markdown → ANSI happens incrementally; long answers feel fluid.",
     "12 tool-call parsers cover Llama, Mistral, Qwen, DeepSeek, GLM, Kimi, LongCat and more.",

@@ -3341,7 +3341,7 @@ Accumulated gradient for the weight w1 (considering all GPUs):
 Total gradient for w1 = e1 + e2 + e3 + e4 + e5 + e6
 
 Weight update for w1:
-w1_new = w1_old - learning rate × (Total gradient for w1 / 6)
+w1_new = w1_old - learning rate x (Total gradient for w1 / 6)
 ```
 
 ---

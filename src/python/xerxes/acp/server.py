@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         server, runner = build_server(default_permission_mode=args.permission_mode)
-    except Exception as exc:  # noqa: BLE001 — surface a clear startup error on stderr
+    except Exception as exc:
         raise SystemExit(
             f"xerxes-acp: failed to initialise runtime: {exc}\n"
             "Ensure a provider profile is configured (run `xerxes` and use /provider)."

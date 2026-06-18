@@ -77,7 +77,7 @@ class ReadFile(AgentBaseFn):
 
 
 class WriteFile(AgentBaseFn):
-    """Write content to a file, creating parent directories as needed.
+    """Write text to a file, creating parent directories as needed.
 
     Creates files with support for atomic writes and parent directory creation.
 
@@ -93,7 +93,7 @@ class WriteFile(AgentBaseFn):
         encoding: str = "utf-8",
         **context_variables,
     ) -> str:
-        """Write content to a file.
+        """Write text to a file.
 
         Args:
             file_path: Path to the file to write.

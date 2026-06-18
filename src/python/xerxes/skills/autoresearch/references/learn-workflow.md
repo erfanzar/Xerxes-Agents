@@ -96,7 +96,7 @@ Detect project state for smart defaults:
 4. Activate `ck:scout` skill for parallel codebase exploration
 5. **Scout validation:** After scouts return, verify reports contain meaningful data. If all scouts return empty/minimal: STOP → warn: "Scout found minimal code. Verify project has source files or adjust scope with `--scope`."
 6. **Monorepo detection:** Check for `workspaces` in package.json, `lerna.json`, `pnpm-workspace.yaml`, `Cargo.toml` with `[workspace]`. If detected → note workspace structure in context.
-7. Merge scout reports. Estimate token count: `total_report_lines × 5`. If >100K estimated tokens → summarize merged reports before passing downstream.
+7. Merge scout reports. Estimate token count: `total_report_lines x 5`. If >100K estimated tokens → summarize merged reports before passing downstream.
 
 **Incremental scouting (planned):**
 - If `learn/` output directory exists from a previous run, read `scout-context.md` for cached context
@@ -273,7 +273,7 @@ Output: `✓ Phase 4: Generated — [N] docs created/updated`
 ### Calculate Metric
 
 ```
-validation_score = (docs_passing_all_checks / total_docs) × 100
+validation_score = (docs_passing_all_checks / total_docs) x 100
 ```
 
 **Decision:**
@@ -410,14 +410,14 @@ Write `summary.md` to output directory:
 ## Composite Metric
 
 ```
-learn_score = (validation_score% × 0.5)
-            + (docs_coverage% × 0.3)
-            + (size_compliance% × 0.2)
+learn_score = (validation_score% x 0.5)
+            + (docs_coverage% x 0.3)
+            + (size_compliance% x 0.2)
 
 Where:
-  validation_score = passing_docs / total_docs × 100
-  docs_coverage = existing_core_docs / expected_core_docs × 100
-  size_compliance = docs_under_limit / total_docs × 100
+  validation_score = passing_docs / total_docs x 100
+  docs_coverage = existing_core_docs / expected_core_docs x 100
+  size_compliance = docs_under_limit / total_docs x 100
 ```
 
 | Score | Rating |

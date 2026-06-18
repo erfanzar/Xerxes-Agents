@@ -191,6 +191,7 @@ class FileStorage(MemoryStorage):
             self._save_index()
             return True
         except Exception:
+            logger.warning("SimpleStorage.save failed for key=%s", key, exc_info=True)
             return False
 
     def load(self, key: str) -> Any | None:
@@ -303,6 +304,7 @@ class SQLiteStorage(MemoryStorage):
                 conn.commit()
             return True
         except Exception:
+            logger.warning("SQLiteStorage.save failed for key=%s", key, exc_info=True)
             return False
 
     def load(self, key: str) -> Any | None:
@@ -519,6 +521,8 @@ class RAGStorage(MemoryStorage):
             response = client.embeddings.create(input=text, model=model)
             return response.data[0].embedding
         except Exception:
+            # OpenAI embedding unavailable; fall back to the local TF-IDF embedder.
+            logger.debug("OpenAI embedding failed; using TF-IDF fallback", exc_info=True)
             return self._compute_tfidf_embedding(text)
 
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
@@ -571,7 +575,7 @@ class RAGStorage(MemoryStorage):
         try:
             self.backend.delete(self.EMBEDDING_KEY_PREFIX + key)
         except Exception:
-            pass
+            logger.debug("Failed to delete embedding row for key=%s", key, exc_info=True)
         return self.backend.delete(key)
 
     def _restore_embeddings(self) -> None:
@@ -593,6 +597,7 @@ class RAGStorage(MemoryStorage):
             try:
                 vec = self.backend.load(full_key)
             except Exception:
+                logger.debug("Failed to restore embedding for key=%s", data_key, exc_info=True)
                 continue
             if isinstance(vec, list) and vec and isinstance(vec[0], int | float):
                 self.embeddings[data_key] = [float(v) for v in vec]
@@ -619,7 +624,7 @@ class RAGStorage(MemoryStorage):
             for k in list(self.backend.list_keys(self.EMBEDDING_KEY_PREFIX)):
                 self.backend.delete(k)
         except Exception:
-            pass
+            logger.debug("Failed to clear embedding rows", exc_info=True)
         return self.backend.clear()
 
     def supports_semantic_search(self) -> bool:

@@ -44,7 +44,7 @@ from xerxes.tools.claude_tools import (
 def mgr(monkeypatch):
     """Return a fresh global manager so tests do not share state."""
     m = SubAgentManager(max_concurrent=4, max_depth=5)
-    monkeypatch.setattr("xerxes.tools.claude_tools._agent_manager", m)
+    monkeypatch.setattr("xerxes.tools.claude_tools.agent_ops._agent_manager", m)
     return m
 
 
@@ -159,6 +159,7 @@ def test_await_agents_times_out_when_no_agents(mgr):
 
 def test_await_agents_wake_on_all_waits_for_everyone(mgr):
     fast = _spawn_stub(mgr, name="fast", runtime_seconds=0.05)
+
     # Re-spawn with a longer runner so the second task lags.
     def _slow(prompt, config, system, depth, cancel_check):
         end = time.monotonic() + 0.4
@@ -197,6 +198,7 @@ def test_await_agents_wakes_on_user_input(mgr):
     session = _FakeSession()
     set_active_session(session)
     try:
+
         def _post_steer():
             time.sleep(0.05)
             session.pending_steers.put("hey")
@@ -222,6 +224,7 @@ def test_await_agents_wakes_on_cancel(mgr):
     session = _FakeSession()
     set_active_session(session)
     try:
+
         def _trip():
             time.sleep(0.05)
             session.cancel_requested = True

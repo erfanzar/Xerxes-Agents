@@ -113,7 +113,7 @@ config = SFTConfig(
 )
 ```
 
-**Benefits**: 2-3× faster training
+**Benefits**: 2-3x faster training
 **Trade-off**: Slightly more complex batching
 
 ## Multi-GPU Training

@@ -24,6 +24,7 @@ banners.
 from __future__ import annotations
 
 import enum
+import logging
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class InstallMode(enum.Enum):
@@ -74,6 +77,8 @@ def _installed_version() -> str:
 
         return version("xerxes-agent")
     except Exception:
+        # Package metadata unavailable (not installed / running from source) — not an error.
+        logger.debug("xerxes-agent version lookup failed; defaulting to 0.0.0", exc_info=True)
         return "0.0.0"
 
 
@@ -104,7 +109,8 @@ def detect_install_mode() -> InstallMode:
             if "src/python/xerxes" in module_path.replace("\\", "/"):
                 return InstallMode.EDITABLE
     except Exception:
-        pass
+        # Heuristic probing of distribution metadata; failure just falls through.
+        logger.debug("install-mode heuristic (editable) failed", exc_info=True)
     # Pip-user vs pip-system: user-site contains os.path.expanduser("~").
     try:
         import site
@@ -114,6 +120,8 @@ def detect_install_mode() -> InstallMode:
             return InstallMode.PIP_USER
         return InstallMode.PIP_SYSTEM
     except Exception:
+        # Site module probing failed; cannot classify further.
+        logger.debug("install-mode heuristic (pip site) failed", exc_info=True)
         return InstallMode.UNKNOWN
 
 

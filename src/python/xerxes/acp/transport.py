@@ -73,6 +73,8 @@ class StdioJsonRpcServer:
             self._stdout.flush()
 
     def _result(self, req_id: Any, result: Any) -> None:
+        if req_id is None:
+            return
         self._send({"jsonrpc": "2.0", "id": req_id, "result": result})
 
     def _error(self, req_id: Any, code: int, message: str) -> None:
@@ -114,7 +116,7 @@ class StdioJsonRpcServer:
             return
         try:
             self._dispatch(req_id, method, params)
-        except Exception as exc:  # noqa: BLE001 — one bad call must not kill the server
+        except Exception as exc:
             logger.warning("ACP dispatch error for %s: %s", method, exc)
             if req_id is not None:
                 self._error(req_id, _INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
@@ -133,7 +135,9 @@ class StdioJsonRpcServer:
         elif m in ("open_session", "session_new", "session_open"):
             self._result(
                 req_id,
-                srv.open_session(str(params.get("cwd", "")), model=params.get("model"), title=str(params.get("title", ""))),
+                srv.open_session(
+                    str(params.get("cwd", "")), model=params.get("model"), title=str(params.get("title", ""))
+                ),
             )
         elif m in ("list_sessions", "session_list"):
             self._result(req_id, srv.list_sessions())
@@ -144,14 +148,18 @@ class StdioJsonRpcServer:
         elif m in ("close_session", "session_close"):
             self._result(req_id, srv.close_session(str(params.get("session_id", ""))))
         elif m in ("respond_permission", "permission_respond"):
-            self._result(req_id, srv.respond_permission(str(params.get("permission_id", "")), bool(params.get("allow", False))))
+            self._result(
+                req_id, srv.respond_permission(str(params.get("permission_id", "")), bool(params.get("allow", False)))
+            )
         elif m in ("pending_permissions", "permission_pending"):
             self._result(req_id, srv.pending_permissions())
         elif m in ("respond_question", "question_respond", "respond_input", "input_respond"):
             if self._runner is None:
                 self._result(req_id, {"ok": False})
             else:
-                self._result(req_id, self._runner.respond_question(str(params.get("input_id", "")), str(params.get("answer", ""))))
+                self._result(
+                    req_id, self._runner.respond_question(str(params.get("input_id", "")), str(params.get("answer", "")))
+                )
         elif m in ("pending_questions", "question_pending", "pending_inputs"):
             self._result(req_id, self._runner.pending_questions() if self._runner else [])
         elif m in ("prompt", "session_prompt"):
@@ -184,7 +192,7 @@ class StdioJsonRpcServer:
             try:
                 summary = self._runner.run_prompt(session=session, text=text, emit=emit)
                 self._result(req_id, summary)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("ACP prompt worker failed: %s", exc)
                 self._error(req_id, _INTERNAL_ERROR, f"{type(exc).__name__}: {exc}")
             finally:

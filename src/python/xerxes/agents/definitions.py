@@ -93,6 +93,11 @@ def _load_builtin_agents() -> dict[str, AgentDefinition]:
                 logger.debug("Failed to load built-in agent spec %s: %s", yaml_path, exc)
 
     if not defs:
+        logger.warning(
+            "Built-in agent specs failed to load from %s; falling back to "
+            "minimal hardcoded set. Check YAML syntax and agentspec loader.",
+            BUILTIN_AGENTS_DIR,
+        )
         defs = _HARDCODED_BUILTIN_AGENTS
     return defs
 

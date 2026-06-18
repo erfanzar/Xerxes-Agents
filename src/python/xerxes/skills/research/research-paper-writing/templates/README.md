@@ -31,7 +31,7 @@ This directory contains official LaTeX templates for major machine learning and 
   "latex-workshop.view.pdf.viewer": "tab",
   "latex-workshop.latex.recipes": [
     {
-      "name": "pdflatex → bibtex → pdflatex × 2",
+      "name": "pdflatex → bibtex → pdflatex x 2",
       "tools": ["pdflatex", "bibtex", "pdflatex", "pdflatex"]
     }
   ]

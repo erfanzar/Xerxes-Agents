@@ -900,7 +900,7 @@ security/{YYMMDD}-{HHMM}-{audit-type-slug}/
 Contains the full STRIDE analysis generated in the Setup Phase:
 - Asset inventory table
 - Trust boundary diagram
-- STRIDE threat matrix (per asset × boundary)
+- STRIDE threat matrix (per asset x boundary)
 - Risk ratings per threat
 
 #### attack-surface-map.md

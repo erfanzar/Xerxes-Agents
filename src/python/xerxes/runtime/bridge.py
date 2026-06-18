@@ -136,7 +136,8 @@ def _coerce_argument_types(
                 parsed = json.loads(value)
                 if isinstance(parsed, list):
                     coerced[param_name] = parsed
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
+                # Best-effort coercion of LLM-supplied string args; leave as-is on failure.
                 pass
             continue
         if origin is dict and len(args_tuple) == 2:
@@ -144,7 +145,8 @@ def _coerce_argument_types(
                 parsed = json.loads(value)
                 if isinstance(parsed, dict):
                     coerced[param_name] = parsed
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
+                # Best-effort coercion of LLM-supplied string args; leave as-is on failure.
                 pass
             continue
 

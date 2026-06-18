@@ -87,16 +87,16 @@ class TestHandshakeAndLists:
 
 class TestSessionLifecycle:
     def test_open_list_setmodel_close(self):
-        server, resp, _ = _drive(
+        _server, resp, _ = _drive(
             [
                 _req("open_session", {"cwd": "/tmp/x"}, rid=1),
             ]
         )
-        sid = resp[0]["result"]["session_id"]
+        resp[0]["result"]["session_id"]
         assert resp[0]["result"]["cwd"] == "/tmp/x"
         # Drive follow-ups against the SAME server via a second run is not possible
         # (separate server); instead exercise them together using the pre-created id.
-        server2, resp2, _ = _drive(
+        _server2, resp2, _ = _drive(
             [
                 _req("open_session", {"cwd": "/tmp/y", "model": "m2", "title": "t"}, rid=1),
                 _req("list_sessions", rid=2),
@@ -129,7 +129,7 @@ class TestPrompt:
         stdin = io.StringIO(json.dumps(_req("prompt", {"session_id": sid, "text": "world"})) + "\n")
         stdout = io.StringIO()
         StdioJsonRpcServer(server, runner, stdin=stdin, stdout=stdout).serve_forever()
-        lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
         updates = [m for m in lines if m.get("method") == "session/update"]
         results = [m for m in lines if "result" in m]
         texts = [u["params"]["event"]["text"] for u in updates if u["params"]["event"]["kind"] == "text_delta"]
@@ -152,7 +152,7 @@ class TestPrompt:
         stdin = io.StringIO(json.dumps(_req("session/prompt", {"session_id": sid, "text": "z"})) + "\n")
         stdout = io.StringIO()
         StdioJsonRpcServer(server, runner, stdin=stdin, stdout=stdout).serve_forever()
-        lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
         assert any(m.get("result", {}).get("echo") == "z" for m in lines if "result" in m)
 
 
@@ -180,7 +180,7 @@ class TestErrorsAndFraming:
         stdin = io.StringIO("{not json}\n" + json.dumps(_req("initialize")) + "\n")
         stdout = io.StringIO()
         StdioJsonRpcServer(server, runner, stdin=stdin, stdout=stdout).serve_forever()
-        lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
         assert any(m.get("error", {}).get("code") == -32700 for m in lines)
         # ...and the server kept going (processed the next valid request)
         assert any("result" in m and m["result"].get("server_name") == "xerxes" for m in lines)
@@ -191,7 +191,11 @@ class TestErrorsAndFraming:
 
     def test_notification_without_id_no_response(self):
         # A request missing "id" is a notification — unknown method yields no error reply.
-        _, resp, notifs = _drive([{"jsonrpc": "2.0", "method": "does_not_exist", "params": {}}])
+        _, resp, _notifs = _drive([{"jsonrpc": "2.0", "method": "does_not_exist", "params": {}}])
+        assert resp == []
+
+    def test_known_notification_without_id_no_response(self):
+        _, resp, _notifs = _drive([{"jsonrpc": "2.0", "method": "initialize", "params": {}}])
         assert resp == []
 
     def test_invalid_request_shape(self):
@@ -200,5 +204,5 @@ class TestErrorsAndFraming:
         stdin = io.StringIO(json.dumps({"foo": "bar"}) + "\n")
         stdout = io.StringIO()
         StdioJsonRpcServer(server, runner, stdin=stdin, stdout=stdout).serve_forever()
-        lines = [json.loads(l) for l in stdout.getvalue().splitlines() if l.strip()]
+        lines = [json.loads(line) for line in stdout.getvalue().splitlines() if line.strip()]
         assert any(m.get("error", {}).get("code") == -32600 for m in lines)
