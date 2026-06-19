@@ -107,7 +107,7 @@ def daemon(tmp_path, monkeypatch):
     ]
     # Avoid touching the real filesystem skills tree.
     monkeypatch.setattr(server.runtime, "discover_skills", lambda: ["test-skill"])
-    monkeypatch.setattr(update, "installed_version", lambda: "0.2.2")
+    monkeypatch.setattr(update, "installed_version", lambda: "0.2.3")
     monkeypatch.setattr(update, "check_for_update", lambda: None)
     monkeypatch.setattr(update, "git_update_status", lambda *, fetch, timeout: update.GitUpdateStatus(is_git=False))
     server.runtime.skills_dir = tmp_path / "skills"

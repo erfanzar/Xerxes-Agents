@@ -20,11 +20,11 @@ from xerxes.runtime import update
 
 
 def test_update_cli_check_reports_package_and_git_status(monkeypatch, capsys):
-    monkeypatch.setattr(update, "installed_version", lambda: "0.2.2")
+    monkeypatch.setattr(update, "installed_version", lambda: "0.2.3")
     monkeypatch.setattr(
         update,
         "check_for_update",
-        lambda: update.UpdateAvailable("0.2.2", "0.2.3", update.InstallMode.PIP_SYSTEM),
+        lambda: update.UpdateAvailable("0.2.3", "0.2.4", update.InstallMode.PIP_SYSTEM),
     )
     monkeypatch.setattr(
         update,
@@ -42,13 +42,13 @@ def test_update_cli_check_reports_package_and_git_status(monkeypatch, capsys):
     __main__.main(["update", "--check", "--no-fetch"])
 
     out = capsys.readouterr().out
-    assert "Xerxes 0.2.2" in out
-    assert "0.2.3 available" in out
+    assert "Xerxes 0.2.3" in out
+    assert "0.2.4 available" in out
     assert "2 ahead available (origin/main def5678; HEAD abc1234)" in out
 
 
 def test_update_cli_dry_run_reports_command(monkeypatch, capsys):
-    monkeypatch.setattr(update, "installed_version", lambda: "0.2.2")
+    monkeypatch.setattr(update, "installed_version", lambda: "0.2.3")
     monkeypatch.setattr(update, "check_for_update", lambda: None)
     monkeypatch.setattr(update, "git_update_status", lambda *, fetch, timeout: update.GitUpdateStatus(is_git=False))
     monkeypatch.setattr(
@@ -71,7 +71,7 @@ def test_update_cli_dry_run_reports_command(monkeypatch, capsys):
 
 
 def test_update_cli_does_not_apply_when_current(monkeypatch, capsys):
-    monkeypatch.setattr(update, "installed_version", lambda: "0.2.2")
+    monkeypatch.setattr(update, "installed_version", lambda: "0.2.3")
     monkeypatch.setattr(update, "check_for_update", lambda: None)
     monkeypatch.setattr(
         update,

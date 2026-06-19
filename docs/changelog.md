@@ -6,7 +6,12 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.2 — 2026-06-19 (current)
+## 0.2.3 — 2026-06-19 (current)
+
+- Fixed bare `/provider` with zero saved profiles so it opens the add-profile picker instead of returning dead-end text.
+- Bumped the package/runtime version to 0.2.3.
+
+## 0.2.2 — 2026-06-19
 
 - Added the managed `~/.xerxes-venv` installer flow and terminal alias setup.
 - Updated `xerxes update --force` to target the managed venv when present.

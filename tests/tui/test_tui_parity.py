@@ -698,7 +698,7 @@ class TestBackgroundSessions:
 class TestBanner:
     def test_full_banner_includes_logo(self):
         data = BannerData(
-            version="0.2.2",
+            version="0.2.3",
             model="claude-opus-4-7",
             session_id="abcd1234ef",
             workspace="/proj",

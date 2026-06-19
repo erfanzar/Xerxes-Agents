@@ -614,20 +614,6 @@ class ProviderFlowMixin:
             await self._emit_init_done(emit)
             return
 
-        # No profiles + bare /provider — fall back to env-var guidance instead
-        # of popping an empty panel.
-        if not plist:
-            await self._emit_slash(
-                emit,
-                "No provider profiles configured.\n"
-                "Set `XERXES_BASE_URL`, `XERXES_API_KEY`, and `XERXES_MODEL` in the "
-                "environment to start, or run `/provider` again after adding one via "
-                "the `provider_save` JSON-RPC method.\n"
-                "(An add-profile flow inside the panel is also available — type "
-                "`/provider` once at least one profile exists.)",
-            )
-            return
-
         await self._emit_provider_main_panel(emit)
 
     async def _emit_provider_custom_model_panel(
