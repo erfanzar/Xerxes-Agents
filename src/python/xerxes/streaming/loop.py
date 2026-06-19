@@ -221,6 +221,8 @@ def _parse_thinking_tags(
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_CONTEXT_LIMIT = 128_000
+
 
 def _compaction_provisioner(
     *,
@@ -230,7 +232,7 @@ def _compaction_provisioner(
 ) -> CompactionProvisioner:
     """Build the shared compaction provisioner for the streaming loop."""
     context_limit = int(
-        config.get("max_context_tokens") or get_context_limit(model) or budget_limit or _DEFAULT_TOKEN_BUDGET
+        config.get("max_context_tokens") or get_context_limit(model) or budget_limit or _DEFAULT_CONTEXT_LIMIT
     )
     threshold_tokens = config.get("compaction_threshold_tokens")
     if threshold_tokens is None and budget_limit is not None:
@@ -360,10 +362,16 @@ def _provision_context_window(
 
 MAX_TOOL_TURNS = 50
 
-# Default token budget when none is specified in config. Prevents runaway
-# agents from burning unlimited tokens on infinite tool-call loops.
-_DEFAULT_TOKEN_BUDGET = 500_000
 _DEFAULT_TOOL_RESULT_SPILL_CHARS = 30_000
+
+
+def _session_token_budget(config: dict[str, Any]) -> int | None:
+    """Return an explicit cumulative token budget, or ``None`` when uncapped."""
+    value = config.get("max_budget_tokens")
+    if value in (None, "", 0):
+        return None
+    budget = int(value)
+    return budget if budget > 0 else None
 
 
 def _safe_tool_result_name(name: str) -> str:
@@ -570,30 +578,6 @@ def run(
             yield TextChunk("\n[Cancelled]")
             return
 
-        budget_limit = config.get("max_budget_tokens") or _DEFAULT_TOKEN_BUDGET
-        cumulative = state.total_input_tokens + state.total_output_tokens
-        if cumulative >= budget_limit:
-            # Try to compact context before giving up
-            compacted = _try_compact_messages(state, budget_limit, config=config, model=model)
-            if compacted:
-                yield TextChunk("\n[Context compacted to free up tokens. Continuing...]")
-                # Recalculate after compaction
-                cumulative = state.total_input_tokens + state.total_output_tokens
-                if cumulative < budget_limit:
-                    continue  # Retry the turn with compacted context
-
-            yield TextChunk(
-                f"\n[Stopped: token budget ({budget_limit:,}) exhausted. "
-                f"Used {cumulative:,} tokens across {_turn} tool turns.]"
-            )
-            yield TurnDone(
-                input_tokens=0,
-                output_tokens=0,
-                tool_calls_count=0,
-                model=model,
-            )
-            return
-
         context_provision = _provision_context_window(state, config=config, model=model)
         if context_provision["compacted"]:
             yield TextChunk(
@@ -608,6 +592,21 @@ def run(
                 "\n[Stopped: context window "
                 f"({context_provision['tokens_before']:,}/{context_provision['max_context_tokens']:,} tokens) "
                 f"exceeded and compaction could not reduce it: {reason}{suffix}.]"
+            )
+            yield TurnDone(
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls_count=0,
+                model=model,
+            )
+            return
+
+        budget_limit = _session_token_budget(config)
+        cumulative = state.total_input_tokens + state.total_output_tokens
+        if budget_limit is not None and cumulative >= budget_limit:
+            yield TextChunk(
+                f"\n[Stopped: session token budget ({budget_limit:,}) exhausted. "
+                f"Used {cumulative:,} cumulative API tokens across {_turn} tool turns.]"
             )
             yield TurnDone(
                 input_tokens=0,

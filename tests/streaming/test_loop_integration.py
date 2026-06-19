@@ -162,8 +162,7 @@ class TestBudgetEnforcement:
         assert not pending
 
     def test_budget_exhausted_mid_turn(self, fake_llm):
-        fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, in_tokens=60000, out_tokens=10000)
-        fake_llm.add_tool_call("ReadFile", {"file_path": "b.py"}, in_tokens=60000, out_tokens=10000)
+        fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, in_tokens=110000, out_tokens=10000)
         fake_llm.add_text("Done.")
 
         def executor(name: str, inp: dict) -> str:
@@ -172,8 +171,22 @@ class TestBudgetEnforcement:
         config = {"model": "gpt-4o", "permission_mode": "accept-all", "max_budget_tokens": 100000}
         events = _run_loop(fake_llm, "Read", tool_executor=executor, config=config)
         text = _text(events)
-        # After two 70k-token turns (140k total), budget should trigger
-        assert "budget" in text.lower() or "Done." in text
+        assert "session token budget" in text.lower()
+        assert "Done." not in text
+        assert fake_llm.call_count == 1
+
+    def test_default_session_token_budget_is_uncapped(self, fake_llm):
+        fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, in_tokens=540000, out_tokens=20000)
+        fake_llm.add_text("Done.")
+
+        def executor(name: str, inp: dict) -> str:
+            return "ok"
+
+        events = _run_loop(fake_llm, "Read", tool_executor=executor)
+        text = _text(events)
+        assert "session token budget" not in text.lower()
+        assert "Done." in text
+        assert fake_llm.call_count == 2
 
     def test_budget_compaction_keeps_tool_call_parent_for_tail_tool_results(self):
         tool_calls = [{"id": f"call_{idx}", "name": "TaskGetTool", "input": {"id": str(idx)}} for idx in range(8)]

@@ -27,6 +27,7 @@ import uuid
 from typing import Any
 
 from ..bridge import profiles
+from ..context.window_usage import estimate_context_tokens
 from .gateway import EmitFn
 from .runtime import DaemonSession
 
@@ -178,7 +179,7 @@ class SlashCommandsMixin:
 
         model = self.runtime.model or ""
         limit = get_context_limit(model) if model else 0
-        used = session.state.total_input_tokens + session.state.total_output_tokens
+        used = estimate_context_tokens(session.state.messages, model=model)
         remaining = max(0, limit - used)
         pct = (used / limit * 100) if limit else 0.0
         await self._emit_slash(

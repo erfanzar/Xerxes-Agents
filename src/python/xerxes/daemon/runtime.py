@@ -30,6 +30,7 @@ from typing import Any, ClassVar
 
 from ..bridge import profiles
 from ..channels.workspace import MarkdownAgentWorkspace
+from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
 from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs, get_active_skills
 from ..runtime.agent_memory import AgentMemory
@@ -1242,7 +1243,10 @@ class TurnRunner:
                 push(
                     "status_update",
                     {
-                        "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
+                        "context_tokens": estimate_context_tokens(
+                            session.state.messages,
+                            model=self.runtime.model or str(self.runtime.runtime_config.get("model", "")),
+                        ),
                         "max_context": self._resolve_context_limit(),
                         "mcp_status": {},
                         "plan_mode": plan_mode,
@@ -1473,7 +1477,10 @@ class TurnRunner:
     def _status_payload(self, session: DaemonSession, *, mode: str, plan_mode: bool) -> dict[str, Any]:
         """Build the ``status_update`` payload for ``session``."""
         return {
-            "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
+            "context_tokens": estimate_context_tokens(
+                session.state.messages,
+                model=self.runtime.model or str(self.runtime.runtime_config.get("model", "")),
+            ),
             "max_context": self._resolve_context_limit(),
             "mcp_status": {},
             "plan_mode": plan_mode,

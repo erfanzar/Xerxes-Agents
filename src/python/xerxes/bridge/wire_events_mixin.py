@@ -23,6 +23,7 @@ import os
 import uuid
 from typing import Any
 
+from ..context.window_usage import estimate_context_tokens
 from ..llms.registry import get_context_limit
 from ..streaming.wire_events import to_kimi_event_name
 
@@ -308,11 +309,11 @@ class WireEventMixin:
         """Emit a ``status_update`` summarising token usage and the active mode."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
-        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
+        context_tokens = estimate_context_tokens(self.state.messages, model=model)
         self._emit_wire_event(
             "status_update",
             {
-                "context_tokens": total_tokens,
+                "context_tokens": context_tokens,
                 "max_context": context_limit,
                 "mcp_status": {},
                 "plan_mode": self.config.get("plan_mode", False),

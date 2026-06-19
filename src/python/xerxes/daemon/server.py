@@ -27,6 +27,7 @@ from typing import Any
 
 from ..bridge import profiles
 from ..channels.types import ChannelMessage, MessageDirection
+from ..context.window_usage import estimate_context_tokens
 from ..runtime.config_context import get_event_callback, set_event_callback
 from . import slash_commands as _slash_commands
 from .channels import ChannelManager, ChannelWebhookServer
@@ -556,7 +557,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         await emit(
             "status_update",
             {
-                "context_tokens": session.state.total_input_tokens + session.state.total_output_tokens,
+                "context_tokens": estimate_context_tokens(session.state.messages, model=self.runtime.model),
                 "max_context": self._resolve_context_limit(),
                 "mcp_status": {},
                 "plan_mode": self._current_plan_mode,
