@@ -17,7 +17,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from xerxes.context.compaction_provisioner import CompactionProvisioner, repair_tool_message_sequence
+from xerxes.context.compaction_provisioner import (
+    CompactionProvisioner,
+    ProviderCompactionAgent,
+    repair_tool_message_sequence,
+)
 
 
 def _messages() -> list[dict[str, Any]]:
@@ -107,3 +111,30 @@ def test_repair_tool_message_sequence_drops_orphans_and_backfills_missing_result
     tool_messages = [message for message in repaired if message.get("role") == "tool"]
     assert tool_messages[0]["tool_call_id"] == "missing"
     assert tool_messages[0]["is_error"] is True
+
+
+def test_provider_compaction_agent_resolves_kimi_code_saved_profile(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_call_openai_compatible(
+        self: ProviderCompactionAgent,
+        provider_name: str,
+        model_name: str,
+        prompt: str,
+    ) -> str:
+        captured["provider_name"] = provider_name
+        captured["model_name"] = model_name
+        captured["prompt"] = prompt
+        return "summary"
+
+    monkeypatch.setattr(ProviderCompactionAgent, "_call_openai_compatible", fake_call_openai_compatible)
+
+    agent = ProviderCompactionAgent(
+        model="kimi/kimi-for-coding",
+        config={"base_url": "https://api.kimi.com/coding/v1"},
+    )
+
+    assert agent([{"role": "user", "content": "old context"}]) == "summary"
+    assert captured["provider_name"] == "kimi-code"
+    assert captured["model_name"] == "kimi-for-coding"
+    assert "old context" in captured["prompt"]

@@ -73,6 +73,7 @@ class TestUpdate:
 
     def test_semver_gt_basic(self):
         assert update._semver_gt("0.2.4", "0.2.3") is True
+        assert update._semver_gt("0.2.4.1", "0.2.4") is True
         assert update._semver_gt("0.2.3", "0.2.3") is False
         assert update._semver_gt("0.2.2", "0.2.3") is False
 
@@ -154,6 +155,68 @@ class TestUpdate:
 
         assert out["mode"] == "managed_venv"
         assert out["argv"] == ["uv", "pip", "install", "--python", str(python), "--upgrade", source]
+
+    def test_apply_update_git_overrides_managed_venv_source(self, tmp_path, monkeypatch):
+        venv = tmp_path / ".xerxes-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text("", encoding="utf-8")
+        (venv / ".xerxes-source").write_text("xerxes-agent==0.2.4", encoding="utf-8")
+        monkeypatch.setenv("XERXES_VENV", str(venv))
+        monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+        out = update.apply_update(dry_run=True, git=True)
+
+        assert out["mode"] == "managed_venv"
+        assert out["argv"] == [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--upgrade",
+            "--reinstall-package",
+            "xerxes-agent",
+            "--refresh-package",
+            "xerxes-agent",
+            update.DEFAULT_UPDATE_SPEC,
+        ]
+
+    def test_apply_update_git_uv_tool_reinstalls_from_git(self, monkeypatch):
+        monkeypatch.setattr(update, "managed_venv_python", lambda: None)
+        monkeypatch.setattr(update, "detect_install_mode", lambda: update.InstallMode.UV_TOOL)
+        monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+        out = update.apply_update(dry_run=True, git=True)
+
+        assert out["mode"] == "uv_tool"
+        assert out["argv"] == [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            "--refresh-package",
+            "xerxes-agent",
+            update.DEFAULT_UPDATE_SPEC,
+        ]
+
+    def test_apply_update_git_pip_install_uses_direct_git_requirement(self, monkeypatch):
+        monkeypatch.setattr(update, "managed_venv_python", lambda: None)
+        monkeypatch.setattr(update, "detect_install_mode", lambda: update.InstallMode.PIP_SYSTEM)
+
+        out = update.apply_update(dry_run=True, git=True)
+
+        assert out["mode"] == "pip_system"
+        assert out["argv"] == [
+            update.sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            "--force-reinstall",
+            update.DEFAULT_UPDATE_SPEC,
+        ]
 
     def test_git_update_status_counts_upstream_commits_ahead(self, monkeypatch):
         responses = {

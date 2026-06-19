@@ -31,6 +31,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+DEFAULT_READ_LINE_LIMIT = 400
+
 
 def read_file(
     file_path: str, start_line: int = 1, end_line: int | None = None, context_variables: dict | None = None
@@ -40,7 +42,8 @@ def read_file(
     Args:
         file_path: Path to the file to read.
         start_line: First line to include (1-indexed). Defaults to 1.
-        end_line: Last line to include (inclusive). Defaults to None (end of file).
+        end_line: Last line to include (inclusive). Defaults to 400 lines from
+            ``start_line``. Pass ``-1`` to read the whole file intentionally.
         context_variables: Additional context for downstream processing.
 
     Returns:
@@ -60,7 +63,10 @@ def read_file(
         if start_line < 1:
             start_line = 1
 
+        full_file = end_line == -1
         if end_line is None:
+            end_line = min(start_line + DEFAULT_READ_LINE_LIMIT - 1, len(lines))
+        elif full_file:
             end_line = len(lines)
         else:
             end_line = min(end_line, len(lines))
@@ -71,7 +77,14 @@ def read_file(
         for i, line in enumerate(selected_lines, start=start_line):
             result.append(f"{i:6d} | {line.rstrip()}")
 
-        return "\n".join(result) if result else "No content in specified range"
+        output = "\n".join(result) if result else "No content in specified range"
+        if not full_file and end_line < len(lines):
+            output += (
+                f"\n\n[read_file] Showing lines {start_line}-{end_line} of {len(lines)}. "
+                f"Continue with start_line={end_line + 1}. "
+                "Pass end_line=-1 only when the whole file is intentionally required."
+            )
+        return output
 
     except Exception as e:
         return f"Error reading file: {e!s}"

@@ -23,7 +23,7 @@ import sys
 
 from ..bridge import profiles
 from ..extensions.skills import activate_skill, default_skill_discovery_dirs
-from ..llms.registry import calc_cost, detect_provider
+from ..llms.registry import calc_cost, resolve_provider
 from ..runtime.bridge import populate_registry
 from ..runtime.config_context import set_config as set_global_config
 
@@ -140,7 +140,7 @@ class SlashHandlerMixin:
 
         if cmd == "context":
             model = self.config.get("model", "")
-            provider = detect_provider(model)
+            provider = resolve_provider(model, self.config)
             cost = calc_cost(model, self.state.total_input_tokens, self.state.total_output_tokens)
             return (
                 f"CWD: {os.getcwd()}\n"
@@ -347,9 +347,9 @@ class SlashHandlerMixin:
         try:
             from openai import OpenAI
 
-            from ...llms.registry import PROVIDERS, get_api_key
+            from ..llms.registry import PROVIDERS, bare_model, get_api_key, provider_default_headers
 
-            provider_name = detect_provider(model)
+            provider_name = resolve_provider(model, self.config)
             api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
             prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
             base_url = (
@@ -358,10 +358,14 @@ class SlashHandlerMixin:
                 or (prov.base_url if prov else None)
                 or "https://api.openai.com/v1"
             )
-            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
+            client = OpenAI(
+                api_key=api_key or "dummy",
+                base_url=base_url,
+                default_headers=provider_default_headers(provider_name) or None,
+            )
 
             response = client.chat.completions.create(
-                model=model,
+                model=bare_model(model),
                 messages=[
                     {
                         "role": "system",

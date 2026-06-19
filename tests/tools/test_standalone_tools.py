@@ -38,18 +38,31 @@ class TestReadFile:
         assert len(result) < 200
         assert "truncated" in result
 
-    def test_read_large_file_not_truncated_by_default(self, tmp_path):
+    def test_read_large_file_chunked_by_default(self, tmp_path):
         f = tmp_path / "big.txt"
-        content = "x" * 10000
+        content = "".join(f"payload-{i}\n" for i in range(1000))
         f.write_text(content)
         result = ReadFile.static_call(str(f))
-        assert result == content
+        assert "payload-0" in result
+        assert "payload-399" in result
+        assert "payload-400" not in result
+        assert "Continue with offset=400, limit=400" in result
 
-    def test_read_no_truncation(self, tmp_path):
-        f = tmp_path / "small.txt"
-        f.write_text("hello")
-        result = ReadFile.static_call(str(f), max_chars=None)
-        assert result == "hello"
+    def test_read_next_chunk(self, tmp_path):
+        f = tmp_path / "big.txt"
+        f.write_text("".join(f"payload-{i}\n" for i in range(1000)))
+        result = ReadFile.static_call(str(f), offset=400, limit=100)
+        assert "payload-400" in result
+        assert "payload-499" in result
+        assert "payload-500" not in result
+        assert "Continue with offset=500, limit=100" in result
+
+    def test_read_full_file_with_limit_minus_one(self, tmp_path):
+        f = tmp_path / "big.txt"
+        content = "".join(f"payload-{i}\n" for i in range(1000))
+        f.write_text(content)
+        result = ReadFile.static_call(str(f), limit=-1)
+        assert result == content
 
     def test_read_nonexistent(self):
         with pytest.raises(FileNotFoundError):

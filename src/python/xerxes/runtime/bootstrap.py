@@ -309,7 +309,7 @@ def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
         "",
         "# How to decide",
         "1. Can you answer from knowledge alone? → Reply directly.",
-        "2. Need to read a file? → ReadFile(file_path=...)",
+        "2. Need to read a file? → ReadFile(file_path=..., offset=0, limit=400). Continue with the returned next offset; use limit=-1 only for intentional full-file reads.",
         "3. Need to write a file? → WriteFile(file_path=..., content=...)",
         "4. Need to edit a file? → FileEditTool(file_path=..., old_string=..., new_string=...)",
         "5. Need to run a command? → ExecuteShell(command=...)",

@@ -343,6 +343,25 @@ def detect_provider(model: str) -> str:
     return "openai"
 
 
+def resolve_provider(model: str, extra_config: dict | None = None) -> str:
+    """Return the effective provider after applying endpoint-specific overrides.
+
+    ``detect_provider`` honors explicit ``provider/model`` notation, but saved
+    profiles can outlive provider taxonomy changes. Kimi Code is the sharp edge:
+    older profiles may be named ``kimi`` while pointing at
+    ``https://api.kimi.com/coding/v1`` or using ``kimi/kimi-for-coding``. Those
+    requests still need the ``kimi-code`` headers/key selection or Kimi returns
+    its "Coding Agents only" 403.
+    """
+    provider_name = detect_provider(model)
+    cfg = extra_config or {}
+    base_url = str(cfg.get("base_url") or cfg.get("custom_base_url") or "").lower()
+    model_name = bare_model(model).lower()
+    if "kimi.com/coding" in base_url or model_name.startswith("kimi-for-"):
+        return "kimi-code"
+    return provider_name
+
+
 def bare_model(model: str) -> str:
     """Strip any ``provider/`` prefix from ``model``."""
 
@@ -467,7 +486,7 @@ def get_context_limit(model: str) -> int:
             return pricing.context_window
     except Exception:
         pass
-    provider_name = detect_provider(model)
+    provider_name = resolve_provider(model)
     prov = PROVIDERS.get(provider_name)
     return prov.context_limit if prov else 128_000
 
@@ -484,4 +503,5 @@ __all__ = [
     "get_provider_config",
     "list_all_models",
     "provider_default_headers",
+    "resolve_provider",
 ]

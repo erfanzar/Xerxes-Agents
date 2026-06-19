@@ -154,9 +154,9 @@ class ProviderCompactionAgent:
 
     def __call__(self, messages: list[dict[str, Any]], previous_summary: str | None = None) -> str:
         """Ask the configured provider to rewrite compactable messages."""
-        from ..llms.registry import bare_model, detect_provider, get_provider_config
+        from ..llms.registry import bare_model, get_provider_config, resolve_provider
 
-        provider_name = detect_provider(self.model)
+        provider_name = resolve_provider(self.model, self.config)
         provider_config = get_provider_config(provider_name)
         model_name = bare_model(self.model)
         prompt = self._build_prompt(messages, previous_summary)
@@ -257,9 +257,9 @@ def compaction_summary_agent_from_config(
     if not model:
         return None
 
-    from ..llms.registry import PROVIDERS, detect_provider, get_api_key
+    from ..llms.registry import PROVIDERS, get_api_key, resolve_provider
 
-    provider_name = detect_provider(model)
+    provider_name = resolve_provider(model, config)
     provider = PROVIDERS.get(provider_name)
     explicit_base_url = bool(config.get("base_url") or config.get("custom_base_url"))
     api_key = config.get("api_key") or get_api_key(provider_name, config)

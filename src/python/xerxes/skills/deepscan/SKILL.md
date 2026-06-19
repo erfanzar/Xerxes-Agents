@@ -4,7 +4,7 @@ description: >-
   Spawns a swarm of specialized agents to deeply analyze the current project
   and compile comprehensive findings into project-scoped agent memory.
   ALWAYS runs agents in parallel — sequential analysis is unacceptable.
-version: "2.1"
+version: "2.2"
 tags: [analysis, swarm, project, deepscan, multi-agent, parallel]
 ---
 
@@ -25,13 +25,14 @@ DeepScan output is project-specific memory, not a workspace temp artifact.
 
 Before spawning agents, call `agent_memory_status()` and confirm project memory is available. If project memory is unavailable or any memory write fails, stop and report the memory error. **Do not fall back to `tmp-files`, repo-local report files, or shell-created scratch files.**
 
-## Subagent Budget and Return Contract
+## Subagent Context and Return Contract
 
 Each subagent must preserve detailed findings in project memory and keep its final response small.
 
-- Hard cap: target **15 tool calls or fewer** per subagent, in batches of **5 calls or fewer** before summarizing progress.
-- Use inventory commands (`rg --files`, `find ... -maxdepth`, `wc -l`) and representative reads. Do not read massive source files, lockfiles, generated files, or full glob output unless the prompt specifically requires it.
-- If token pressure, timeout risk, or uncertainty appears: write current findings to the assigned memory path immediately, mark the report partial, and return the path plus what remains unknown.
+- There is **no artificial tool-call cap** for DeepScan subagents. Use as many tool calls as needed to produce a useful project analysis.
+- Do not dump full files by default. Use inventory commands (`rg --files`, `find ... -maxdepth`, `wc -l`) and chunked file reads (`ReadFile(file_path=..., offset=..., limit=...)`). Continue with the next offset when more context is needed. Use `limit=-1` only when the whole file is intentionally required.
+- Do not read massive source files, lockfiles, generated files, or full glob output unless the prompt specifically requires it.
+- If token pressure, timeout risk, or uncertainty appears: compact current findings into the assigned memory path immediately, then continue from memory or mark the report partial and return the path plus what remains unknown.
 - The subagent's final response must be **latest agent content only**:
   - `memory_path: deepscan/findings/<agent-name>.md`
   - `status: complete|partial`
@@ -68,42 +69,42 @@ Use `SpawnAgents` with `wait=true`. Every agent gets the `researcher` subtype. E
 SpawnAgents(
   agents=[
     {
-      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep using bounded inventory commands and sampled reads. Document tree, key dirs, config files, module structure. Write full findings to project memory at `deepscan/findings/structure-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep using inventory commands and chunked reads. Document tree, key dirs, config files, module structure. Write full findings to project memory at `deepscan/findings/structure-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "structure-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers using config files and representative manifests. Write full findings to project memory at `deepscan/findings/tech-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers using config files and representative manifests with chunked reads. Write full findings to project memory at `deepscan/findings/tech-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "tech-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns using targeted grep and representative file samples. Write full findings to project memory at `deepscan/findings/arch-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns using targeted grep and chunked representative file reads. Write full findings to project memory at `deepscan/findings/arch-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "arch-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs using bounded file discovery and sampled reads. Write full findings to project memory at `deepscan/findings/config-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs using file discovery and chunked reads. Write full findings to project memory at `deepscan/findings/config-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "config-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs using manifests, config files, and sampled tests. Write full findings to project memory at `deepscan/findings/quality-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs using manifests, config files, and chunked representative tests. Write full findings to project memory at `deepscan/findings/quality-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "quality-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE using bounded discovery and sampled docs. Write full findings to project memory at `deepscan/findings/docs-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE using discovery and chunked docs reads. Write full findings to project memory at `deepscan/findings/docs-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "docs-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerability signals, encryption usage using targeted searches and sampled reads. Write full findings to project memory at `deepscan/findings/security-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerability signals, encryption usage using targeted searches and chunked reads. Write full findings to project memory at `deepscan/findings/security-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "security-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching using bounded searches and representative reads. Write full findings to project memory at `deepscan/findings/data-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching using searches and chunked representative reads. Write full findings to project memory at `deepscan/findings/data-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. No artificial tool-call cap: use as many tool calls as needed, but use `ReadFile(offset=..., limit=...)` by default and `limit=-1` only for intentional full-file reads. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "data-analyzer",
       "subagent_type": "researcher"
     }

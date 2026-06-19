@@ -48,7 +48,7 @@ from .google_search import (
     configure_google_search,
     set_google_search_client,
 )
-from .standalone import AppendFile, ExecuteShell, ListDir, ReadFile, WriteFile
+from .standalone import AppendFile, ExecutePythonCode, ExecuteShell, ListDir, ReadFile, WriteFile
 
 try:
     from .web_tools import APIClient, RSSReader, URLAnalyzer, WebScraper
@@ -212,6 +212,7 @@ __all__ = [
     "EnterPlanModeTool",
     "EnterWorktreeTool",
     "EntityExtractor",
+    "ExecutePythonCode",
     "ExecuteShell",
     "ExitPlanModeTool",
     "ExitWorktreeTool",
@@ -374,7 +375,7 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
         "FileSystemTools",
         "TempFileManager",
     ],
-    "execution": ["ExecuteShell", "ProcessManager"],
+    "execution": ["ExecuteShell", "ExecutePythonCode", "ProcessManager"],
     "web": ["DuckDuckGoSearch", "APIClient", "RSSReader", "URLAnalyzer"],
     "data": ["JSONProcessor", "CSVProcessor", "TextProcessor", "DataConverter", "DateTimeProcessor"],
     "ai": ["TextEmbedder", "TextSimilarity", "TextClassifier", "TextSummarizer", "EntityExtractor"],

@@ -18,35 +18,44 @@ external dependencies. These tools are always available for basic file operation
 
 Example:
     >>> from xerxes.tools.standalone import ReadFile, WriteFile, ExecuteShell
-    >>> ReadFile.static_call(file_path="config.json")
+    >>> ReadFile.static_call(file_path="config.json", offset=0, limit=400)
     >>> ExecuteShell.static_call(command="ls -la")
 """
 
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from ..types import AgentBaseFn
 
+DEFAULT_READ_LINE_LIMIT = 400
+
 
 class ReadFile(AgentBaseFn):
     """Read the contents of a file from the file system.
 
-    Provides simple file reading with optional character limit truncation.
+    Reads files in line chunks by default. Pass ``limit=-1`` only when the
+    entire file is intentionally needed.
 
     Example:
         >>> ReadFile.static_call(file_path="README.md")
-        >>> ReadFile.static_call(file_path="large_file.txt", max_chars=1000)
+        >>> ReadFile.static_call(file_path="large_file.txt", offset=400, limit=400)
+        >>> ReadFile.static_call(file_path="small_file.txt", limit=-1)
     """
 
     @staticmethod
     def get_schema() -> dict[str, Any]:
         return {
             "name": "ReadFile",
-            "description": "Read the contents of a file from the file system. Use 'file_path' parameter (not 'path').",
+            "description": (
+                "Read a file in line chunks. Defaults to the first 400 lines; pass offset to continue. "
+                "Use limit=-1 only when the whole file is intentionally required. Use 'file_path' parameter "
+                "(not 'path')."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -54,9 +63,27 @@ class ReadFile(AgentBaseFn):
                         "type": "string",
                         "description": "Path to the file to read. Use this parameter name, not 'path'.",
                     },
+                    "offset": {
+                        "type": "integer",
+                        "description": (
+                            "Zero-based line offset to start reading from. Defaults to 0. "
+                            "Use the next offset reported by the previous result to continue."
+                        ),
+                        "default": 0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of lines to return. Defaults to 400. "
+                            "Pass -1 to read the whole file intentionally."
+                        ),
+                        "default": DEFAULT_READ_LINE_LIMIT,
+                    },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Optional maximum characters to return. Truncates with '...' if exceeded.",
+                        "description": (
+                            "Optional legacy character cap for the selected chunk. Pass -1 for no character cap."
+                        ),
                     },
                     "encoding": {
                         "type": "string",
@@ -72,6 +99,8 @@ class ReadFile(AgentBaseFn):
     def static_call(
         file_path: str,
         max_chars: int | None = None,
+        offset: int = 0,
+        limit: int = DEFAULT_READ_LINE_LIMIT,
         encoding: str = "utf-8",
         errors: str = "ignore",
         **context_variables,
@@ -80,7 +109,11 @@ class ReadFile(AgentBaseFn):
 
         Args:
             file_path: Path to the file to read.
-            max_chars: Optional maximum characters to return. Truncates with "..." if exceeded.
+            max_chars: Optional legacy maximum characters for the selected chunk.
+                ``-1`` disables the character cap.
+            offset: Zero-based line offset for chunked reads. Defaults to 0.
+            limit: Maximum lines to return. Defaults to 400. ``-1`` reads the
+                whole file intentionally.
             encoding: Text encoding. Defaults to 'utf-8'.
             errors: How to handle encoding errors ('ignore', 'replace', etc.).
             **context_variables: Additional context passed through to downstream calls.
@@ -96,9 +129,35 @@ class ReadFile(AgentBaseFn):
             raise FileNotFoundError(f"File '{p}' does not exist")
 
         text = p.read_text(encoding=encoding, errors=errors)
-        if max_chars and len(text) > max_chars:
-            text = text[:max_chars] + "\n\n…[truncated]…"
-        return text
+        if limit == -1:
+            selected = text
+            chunk_notice = ""
+        else:
+            if limit < 1:
+                raise ValueError("limit must be a positive integer, or -1 to read the whole file")
+            if offset < 0:
+                raise ValueError("offset must be >= 0")
+
+            lines = text.splitlines(keepends=True)
+            total_lines = len(lines)
+            if offset >= total_lines and total_lines:
+                return f"[ReadFile] Offset {offset} is past end of file ({total_lines} lines)."
+
+            end_offset = min(offset + limit, total_lines)
+            selected = "".join(lines[offset:end_offset])
+            if end_offset < total_lines:
+                chunk_notice = (
+                    f"\n\n[ReadFile] Showing lines {offset + 1}-{end_offset} of {total_lines}. "
+                    f"Continue with offset={end_offset}, limit={limit}. "
+                    "Use limit=-1 only when the whole file is intentionally required."
+                )
+            else:
+                chunk_notice = ""
+
+        if max_chars is not None and max_chars != -1 and len(selected) > max_chars:
+            selected = selected[:max_chars]
+            chunk_notice = (chunk_notice + "\n\n" if chunk_notice else "\n\n") + "…[truncated by max_chars]…"
+        return selected + chunk_notice
 
 
 class WriteFile(AgentBaseFn):
@@ -185,6 +244,59 @@ class ListDir(AgentBaseFn):
             else:
                 entries.append(f.name)
         return sorted(entries)
+
+
+class ExecutePythonCode(AgentBaseFn):
+    """Execute Python code in a subprocess and return captured output."""
+
+    DEFAULT_TIMEOUT_SECS: float = 30.0
+
+    @staticmethod
+    def static_call(
+        code: str,
+        timeout: float | None = None,
+        **context_variables,
+    ) -> dict[str, str]:
+        """Execute Python code with the current interpreter.
+
+        Args:
+            code: Python source to execute.
+            timeout: Timeout in seconds. Defaults to 30 seconds. Set to 0 for no timeout.
+            **context_variables: Additional context passed through to downstream calls.
+
+        Returns:
+            Dictionary with ``stdout``, ``stderr``, and ``returncode``.
+        """
+        if timeout is None:
+            effective = ExecutePythonCode.DEFAULT_TIMEOUT_SECS
+        else:
+            try:
+                parsed = float(timeout)
+            except (TypeError, ValueError):
+                parsed = ExecutePythonCode.DEFAULT_TIMEOUT_SECS
+            effective = None if parsed <= 0 else parsed
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=effective,
+            )
+            return {
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "returncode": str(proc.returncode),
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            cap = f"{effective:.0f}s" if effective is not None else "no-cap"
+            return {
+                "stdout": stdout,
+                "stderr": (stderr + f"\n[ExecutePythonCode] code timed out after {cap}").strip(),
+                "returncode": "124",
+            }
 
 
 class ExecuteShell(AgentBaseFn):
@@ -297,6 +409,7 @@ class AppendFile(AgentBaseFn):
 
 __all__ = (
     "AppendFile",
+    "ExecutePythonCode",
     "ExecuteShell",
     "ListDir",
     "ReadFile",
