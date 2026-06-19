@@ -154,8 +154,13 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
-        await self._gateway.start(self._handle_rpc)
         await self._socket.start(self._handle_rpc)
+        gateway_started = True
+        try:
+            await self._gateway.start(self._handle_rpc)
+        except OSError as exc:
+            gateway_started = False
+            self.logger.error("WebSocket gateway unavailable; continuing with Unix socket", error=str(exc))
         await self.channels.start_all(self._handle_channel_message)
         if self._has_enabled_webhook_channels():
             self._webhooks = ChannelWebhookServer(
@@ -167,7 +172,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
 
         self.logger.info(
             "Daemon running",
-            ws=f"ws://{self.config.ws_host}:{self.config.ws_port}",
+            ws=f"ws://{self.config.ws_host}:{self.config.ws_port}" if gateway_started else "disabled",
             socket=self.config.socket_path,
             model=self.runtime.model,
         )
@@ -395,10 +400,10 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if session.state.messages:
             await self._replay_session_history(session, emit)
         return {
+            **self.runtime.status(),
             "ok": True,
             "session": session.status(),
             "daemon_protocol": DAEMON_PROTOCOL_VERSION,
-            **self.runtime.status(),
         }
 
     def _connection_session_key(self, emit: EmitFn) -> str:
@@ -479,6 +484,8 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         # No active intercept — a normal chat turn requires non-empty text.
         if not text:
             return {"ok": False, "error": "Empty prompt"}
+        if not self.runtime.model:
+            return {"ok": False, "error": "No model configured. Run /provider first or set XERXES_MODEL."}
         agent_id = str(params.get("agent_id") or self.workspaces.default_agent_id)
         mode = str(params.get("mode") or self._current_mode or "code")
         plan_mode = bool(params.get("plan_mode", self._current_plan_mode or mode == "plan"))
@@ -870,14 +877,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Xerxes daemon")
     parser.add_argument("--project-dir", default="", help="Working directory")
     parser.add_argument("--host", default="", help="WebSocket host")
-    parser.add_argument("--port", type=int, default=0, help="WebSocket port")
+    parser.add_argument("--port", type=int, default=None, help="WebSocket port")
     parser.add_argument("--socket", default="", help="Unix socket path")
     args = parser.parse_args()
 
     config = load_config(project_dir=args.project_dir)
     if args.host:
         config.ws_host = args.host
-    if args.port:
+    if args.port is not None:
         config.ws_port = args.port
     if args.socket:
         config.socket_path = args.socket

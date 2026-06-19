@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import httpx
 import pytest
 from xerxes.runtime import doctor, setup_wizard, update
@@ -69,9 +72,9 @@ class TestUpdate:
         assert isinstance(m, update.InstallMode)
 
     def test_semver_gt_basic(self):
-        assert update._semver_gt("0.2.2", "0.2.1") is True
-        assert update._semver_gt("0.2.1", "0.2.1") is False
-        assert update._semver_gt("0.2.0", "0.2.1") is False
+        assert update._semver_gt("0.2.3", "0.2.2") is True
+        assert update._semver_gt("0.2.2", "0.2.2") is False
+        assert update._semver_gt("0.2.1", "0.2.2") is False
 
     def test_latest_pypi_version_parses_response(self):
         def handler(req):
@@ -95,7 +98,7 @@ class TestUpdate:
 
         c = httpx.Client(transport=httpx.MockTransport(handler))
         out = update.check_for_update(client=c)
-        # Installed is 0.2.1 in pyproject; latest mocked to 0.0.1 → no update.
+        # Installed is 0.2.2 in pyproject; latest mocked to 0.0.1 -> no update.
         assert out is None
         c.close()
 
@@ -113,6 +116,78 @@ class TestUpdate:
         out = update.apply_update(dry_run=True)
         assert out["dry_run"] is True
         assert "argv" in out
+
+    def test_apply_update_editable_prefers_uv_pip(self, monkeypatch):
+        monkeypatch.setattr(update, "detect_install_mode", lambda: update.InstallMode.EDITABLE)
+        monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+        out = update.apply_update(dry_run=True)
+
+        assert out["argv"] == ["uv", "pip", "install", "-e", "."]
+
+    def test_apply_update_missing_executable_returns_error(self, monkeypatch):
+        monkeypatch.setattr(update, "detect_install_mode", lambda: update.InstallMode.UV_TOOL)
+        monkeypatch.setattr(update.shutil, "which", lambda name: "/missing/uv" if name == "uv" else None)
+        monkeypatch.setattr(
+            update.subprocess,
+            "run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("missing uv")),
+        )
+
+        out = update.apply_update()
+
+        assert out["ok"] is False
+        assert "missing uv" in str(out["error"])
+
+    def test_apply_update_prefers_managed_venv(self, tmp_path, monkeypatch):
+        venv = tmp_path / ".xerxes-venv"
+        bin_dir = venv / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text("", encoding="utf-8")
+        source = "xerxes-agent @ git+https://example.test/Xerxes-Agents.git"
+        (venv / ".xerxes-source").write_text(source, encoding="utf-8")
+        monkeypatch.setenv("XERXES_VENV", str(venv))
+        monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
+
+        out = update.apply_update(dry_run=True)
+
+        assert out["mode"] == "managed_venv"
+        assert out["argv"] == ["uv", "pip", "install", "--python", str(python), "--upgrade", source]
+
+    def test_git_update_status_counts_upstream_commits_ahead(self, monkeypatch):
+        responses = {
+            ("rev-parse", "--is-inside-work-tree"): "true",
+            ("rev-parse", "--abbrev-ref", "HEAD"): "main",
+            ("rev-parse", "--short=12", "HEAD"): "abc1234",
+            ("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"): "origin/main",
+            ("rev-list", "--left-right", "--count", "HEAD...origin/main"): "0 3",
+            ("rev-parse", "--short=12", "origin/main"): "def5678",
+        }
+
+        def fake_git_output(args, *, cwd, timeout):
+            assert cwd == Path("/repo")
+            return responses[tuple(args)]
+
+        monkeypatch.setattr(update, "_git_output", fake_git_output)
+
+        status = update.git_update_status(cwd="/repo")
+
+        assert status.head_hash == "abc1234"
+        assert status.upstream_hash == "def5678"
+        assert status.updates_ahead_available == 3
+        assert update.format_git_update_status(status) == "3 ahead available (origin/main def5678; HEAD abc1234)"
+
+    def test_git_update_status_handles_non_git_checkout(self, monkeypatch):
+        def fake_git_output(args, *, cwd, timeout):
+            raise subprocess.CalledProcessError(128, ["git", *args])
+
+        monkeypatch.setattr(update, "_git_output", fake_git_output)
+
+        status = update.git_update_status(cwd="/repo")
+
+        assert status.is_git is False
+        assert update.format_git_update_status(status) == "not a git checkout"
 
 
 # ---------------------------- setup wizard ---------------------------------

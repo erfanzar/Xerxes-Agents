@@ -43,14 +43,22 @@ class BannerData:
         session_id: Daemon-assigned session id; "(new)" before init.
         tip: Optional tip-of-the-day line shown beneath the box.
         update_available: Newer version string, or "" when up to date.
+        head_hash: Short git HEAD hash for the running checkout.
+        upstream: Upstream ref used for update comparison.
+        upstream_hash: Short upstream ref hash when available.
+        updates_ahead_available: Number of upstream commits ahead of HEAD.
     """
 
-    version: str = "0.2.1"
+    version: str = "0.2.2"
     model: str = ""
     workspace: str = ""
     session_id: str = ""
     tip: str = ""
     update_available: str = ""  # "" or e.g. "0.3.0"
+    head_hash: str = ""
+    upstream: str = ""
+    upstream_hash: str = ""
+    updates_ahead_available: int = 0
 
 
 def _terminal_width(default: int = 100) -> int:
@@ -75,11 +83,20 @@ def render_banner(data: BannerData, *, terminal_width: int | None = None) -> str
 def _full(data: BannerData) -> str:
     """Render the full ASCII banner with session info box and optional tip."""
     box_width = max(64, len(FULL_LOGO.splitlines()[0]))
+    upstream = data.upstream or "upstream"
+    upstream_hash = f" {data.upstream_hash}" if data.upstream_hash else ""
+    update_line = "updates:   unknown"
+    if data.updates_ahead_available > 0:
+        update_line = f"updates:   {data.updates_ahead_available} ahead available ({upstream}{upstream_hash})"
+    elif data.head_hash:
+        update_line = "updates:   current"
     info_lines = [
         f"Xerxes (v{data.version}){'  ↑ update ' + data.update_available if data.update_available else ''}",
         f"model:     {data.model or '(unset — run /provider)'}",
         f"workspace: {data.workspace or '(none)'}",
         f"session:   {data.session_id or '(new)'}",
+        f"head:      {data.head_hash or '(unknown)'}",
+        update_line,
     ]
     box = []
     inner_w = max(48, box_width - 4)
@@ -106,6 +123,10 @@ def _compact(data: BannerData) -> str:
         line2_parts.append(f"session={data.session_id[:8]}")
     if data.workspace:
         line2_parts.append(f"ws={data.workspace}")
+    if data.head_hash:
+        line2_parts.append(f"head={data.head_hash}")
+    if data.updates_ahead_available > 0:
+        line2_parts.append(f"updates={data.updates_ahead_available}")
     line2 = " ".join(line2_parts)
     pieces = [line1]
     if line2:

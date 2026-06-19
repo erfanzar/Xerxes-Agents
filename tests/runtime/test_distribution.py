@@ -44,8 +44,8 @@ class TestPlatformInfo:
 class TestHomebrewFormula:
     def test_renders(self):
         out = render_homebrew_formula(
-            version="0.2.1",
-            tarball_url="https://example.test/xerxes-agent-0.2.1.tar.gz",
+            version="0.2.2",
+            tarball_url="https://example.test/xerxes-agent-0.2.2.tar.gz",
             sha256="deadbeef",
         )
         assert "class XerxesAgent < Formula" in out
@@ -68,7 +68,11 @@ class TestTermuxFilter:
 
 class TestInstallSnippets:
     def test_shell_snippet_has_uv(self):
-        assert "uv tool install xerxes-agent" in SHELL_INSTALL_SNIPPET
+        assert "$HOME/.xerxes-venv" in SHELL_INSTALL_SNIPPET
+        assert "uv venv" in SHELL_INSTALL_SNIPPET
+        assert "uv pip install" in SHELL_INSTALL_SNIPPET
+        assert ".xerxes-source" in SHELL_INSTALL_SNIPPET
+        assert "alias xerxes=" in SHELL_INSTALL_SNIPPET
 
     def test_ps_snippet_has_uv(self):
         assert "uv tool install xerxes-agent" in POWERSHELL_INSTALL_SNIPPET

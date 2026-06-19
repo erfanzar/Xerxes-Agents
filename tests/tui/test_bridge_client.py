@@ -24,6 +24,17 @@ def test_bridge_client_drains_stderr_and_keeps_tail() -> None:
     assert tail[-1] == "line 204"
 
 
+def test_bridge_client_ready_error_includes_stderr_tail() -> None:
+    client = BridgeClient()
+    with client._stderr_lock:
+        client._stderr_lines.extend(["line 1", "fatal daemon error"])
+
+    message = client._daemon_ready_error()
+
+    assert "did not become ready" in message
+    assert "fatal daemon error" in message
+
+
 @pytest.mark.asyncio
 async def test_bridge_client_preserves_notification_subtype() -> None:
     client = BridgeClient()

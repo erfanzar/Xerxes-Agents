@@ -6,7 +6,13 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.1 — 2026-06-19 (current)
+## 0.2.2 — 2026-06-19 (current)
+
+- Added the managed `~/.xerxes-venv` installer flow and terminal alias setup.
+- Updated `xerxes update --force` to target the managed venv when present.
+- Bumped the package/runtime version to 0.2.2.
+
+## 0.2.1 — 2026-06-19
 
 - Bumped the package/runtime version to 0.2.1.
 

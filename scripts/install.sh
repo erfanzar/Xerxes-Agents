@@ -16,6 +16,8 @@ set -eu
 
 REPO_URL="https://github.com/erfanzar/Xerxes-Agents"
 RAW_URL="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main"
+XERXES_VENV="${XERXES_VENV:-$HOME/.xerxes-venv}"
+XERXES_SOURCE_FILE="$XERXES_VENV/.xerxes-source"
 
 RED=""
 GREEN=""
@@ -133,27 +135,28 @@ install_xerxes() {
         esac
     fi
 
-    info "installing $spec via uv tool"
-    # --force lets re-runs upgrade in place; uv tool sandboxes into ~/.local/share/uv/tools.
-    if ! uv tool install --force --python ">=3.11,<3.14" "$spec"; then
-        die "uv tool install failed"
+    info "creating managed venv at $XERXES_VENV"
+    if ! uv venv --python ">=3.11,<3.14" "$XERXES_VENV"; then
+        die "uv venv failed"
     fi
-    ok "xerxes installed"
+
+    venv_python="$XERXES_VENV/bin/python"
+    [ -x "$venv_python" ] || die "managed venv Python not found: $venv_python"
+
+    info "installing $spec into $XERXES_VENV"
+    if ! uv pip install --python "$venv_python" --upgrade "$spec"; then
+        die "uv pip install failed"
+    fi
+    printf '%s\n' "$spec" > "$XERXES_SOURCE_FILE"
+    ok "xerxes installed in $XERXES_VENV"
 }
 
-modify_path() {
+install_alias() {
     if [ "${XERXES_NO_MODIFY_PATH:-0}" = "1" ]; then
         return 0
     fi
-    bin_dir=""
-    for candidate in "$HOME/.local/bin"; do
-        [ -d "$candidate" ] || continue
-        case ":$PATH:" in
-            *":$candidate:"*) ;;
-            *) bin_dir="$candidate"; break ;;
-        esac
-    done
-    [ -z "$bin_dir" ] && return 0
+    xerxes_bin="$XERXES_VENV/bin/xerxes"
+    [ -x "$xerxes_bin" ] || die "xerxes executable not found: $xerxes_bin"
 
     # Figure out which rc file the user's shell reads.
     rc_file=""
@@ -164,32 +167,41 @@ modify_path() {
     esac
     [ -z "$rc_file" ] && rc_file="$HOME/.profile"
 
-    line="export PATH=\"$bin_dir:\$PATH\""
+    line="alias xerxes=\"$xerxes_bin\""
     case "$rc_file" in
-        *config.fish) line="set -gx PATH $bin_dir \$PATH" ;;
+        *config.fish) line="function xerxes; \"$xerxes_bin\" \$argv; end" ;;
     esac
 
-    if [ -f "$rc_file" ] && grep -Fq "$bin_dir" "$rc_file"; then
-        return 0
-    fi
     mkdir -p "$(dirname "$rc_file")"
+    [ -f "$rc_file" ] || : > "$rc_file"
+
+    tmp_file="${rc_file}.xerxes-tmp.$$"
+    awk '
+        $0 == "# >>> xerxes installer >>>" { skip = 1; next }
+        $0 == "# <<< xerxes installer <<<" { skip = 0; next }
+        skip != 1 { print }
+    ' "$rc_file" > "$tmp_file"
+    mv "$tmp_file" "$rc_file"
+
     {
-        printf '\n# Added by Xerxes installer\n'
+        printf '\n# >>> xerxes installer >>>\n'
         printf '%s\n' "$line"
+        printf '# <<< xerxes installer <<<\n'
     } >> "$rc_file"
-    ok "added $bin_dir to PATH in $rc_file"
+    ok "added xerxes alias to $rc_file"
     warn "restart your shell or run: source $rc_file"
 }
 
 verify() {
-    if ! command -v xerxes >/dev/null 2>&1; then
-        warn "xerxes binary not on PATH yet — restart your shell or source your rc file."
+    xerxes_bin="$XERXES_VENV/bin/xerxes"
+    if [ ! -x "$xerxes_bin" ]; then
+        warn "xerxes binary not found in managed venv: $xerxes_bin"
         return 0
     fi
-    if xerxes --version >/dev/null 2>&1; then
-        ok "xerxes --version => $(xerxes --version 2>&1 | head -n1)"
+    if "$xerxes_bin" --help >/dev/null 2>&1; then
+        ok "xerxes is available at $xerxes_bin"
     else
-        warn "xerxes found but --version failed; the install may still be functional."
+        warn "xerxes found but --help failed; the install may still be functional."
     fi
 }
 
@@ -213,10 +225,11 @@ main() {
     ensure_build_prereqs
     install_uv
     install_xerxes
-    modify_path
+    install_alias
     verify
     printf '\n'
-    ok "done. Run xerxes --help to get started." "$BOLD" "$RESET"
+    ok "done. Restart your terminal, then run: xerxes"
+    printf '   direct: %s/bin/xerxes\n' "$XERXES_VENV"
     printf '   docs:  %s\n' "https://erfanzar.github.io/Xerxes-Agents"
     printf '   issues: %s/issues\n' "$REPO_URL"
 }

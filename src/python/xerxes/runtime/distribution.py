@@ -155,13 +155,17 @@ def termux_filter_extras(extras: dict[str, list[str]]) -> dict[str, list[str]]:
 SHELL_INSTALL_SNIPPET = """\
 #!/usr/bin/env bash
 set -euo pipefail
+XERXES_VENV="${XERXES_VENV:-$HOME/.xerxes-venv}"
 if ! command -v uv >/dev/null 2>&1; then
   echo "Installing uv..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
-uv tool install xerxes-agent
-echo "✓ xerxes installed. Run 'xerxes' to start."
+uv venv --python ">=3.11,<3.14" "$XERXES_VENV"
+uv pip install --python "$XERXES_VENV/bin/python" --upgrade "xerxes-agent @ git+https://github.com/erfanzar/Xerxes-Agents.git"
+printf '%s\\n' "xerxes-agent @ git+https://github.com/erfanzar/Xerxes-Agents.git" > "$XERXES_VENV/.xerxes-source"
+printf '%s\\n' 'alias xerxes="'"$XERXES_VENV"'/bin/xerxes"' >> "$HOME/.profile"
+echo "✓ xerxes installed in $XERXES_VENV. Restart your shell, then run 'xerxes'."
 """
 
 

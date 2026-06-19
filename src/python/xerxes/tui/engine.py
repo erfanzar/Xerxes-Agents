@@ -104,18 +104,19 @@ class BridgeClient:
                 [self._python, "-m", "xerxes.daemon"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=0,
                 start_new_session=True,
             )
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and self._daemon_protocol(socket_path) < required_protocol:
                 if self._proc.poll() is not None:
+                    self._collect_exited_daemon_stderr()
                     break
                 time.sleep(0.1)
             self._connect_socket(socket_path)
             if self._sock is None:
-                raise RuntimeError("Xerxes daemon did not become ready on the Unix socket")
+                raise RuntimeError(self._daemon_ready_error())
 
         self._running = True
 
@@ -173,6 +174,31 @@ class BridgeClient:
         """Snapshot the last ~200 stderr lines captured from the daemon subprocess."""
         with self._stderr_lock:
             return list(self._stderr_lines)
+
+    def _daemon_ready_error(self) -> str:
+        """Return a startup failure message with captured daemon stderr."""
+        lines = self.stderr_tail()
+        if not lines:
+            return "Xerxes daemon did not become ready on the Unix socket"
+        tail = "\n".join(lines[-20:])
+        return f"Xerxes daemon did not become ready on the Unix socket.\nDaemon stderr:\n{tail}"
+
+    def _collect_exited_daemon_stderr(self) -> None:
+        """Drain stderr from a daemon process that exited during startup."""
+        proc = self._proc
+        if proc is None or proc.stderr is None or proc.poll() is None:
+            return
+        try:
+            data = proc.stderr.read()
+        except Exception:
+            return
+        if not data:
+            return
+        text = data.decode("utf-8", errors="replace")
+        with self._stderr_lock:
+            for line in text.splitlines():
+                if line:
+                    self._stderr_lines.append(line)
 
     async def initialize(
         self,

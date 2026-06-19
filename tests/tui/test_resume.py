@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from xerxes.runtime.update import GitUpdateStatus
 from xerxes.streaming.wire_events import Notification
 from xerxes.tui.app import XerxesTUI, _build_welcome_banner
 from xerxes.tui.blocks import ResumeSessionPanel
@@ -105,6 +106,29 @@ def test_resume_begin_preserves_welcome_banner() -> None:
     assert "old chat line" not in history
     assert tui._banner_start == 0
     assert tui._banner_line_count == len(prompt._status._content_lines)
+
+
+def test_welcome_banner_includes_version_head_and_updates() -> None:
+    banner = _build_welcome_banner(
+        model="kimi-for-coding",
+        session_id="session-1",
+        cwd="/tmp/xerxes",
+        version="0.2.2",
+        git_status=GitUpdateStatus(
+            is_git=True,
+            branch="main",
+            upstream="origin/main",
+            head_hash="abc1234",
+            upstream_hash="def5678",
+            behind_count=4,
+        ),
+    )
+
+    assert "Version:" in banner
+    assert "v0.2.2" in banner
+    assert "HEAD:" in banner
+    assert "abc1234" in banner
+    assert "4 ahead available (origin/main def5678)" in banner
 
 
 def test_resume_choices_open_interactive_picker() -> None:

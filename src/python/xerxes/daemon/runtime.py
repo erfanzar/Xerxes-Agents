@@ -147,9 +147,6 @@ class RuntimeManager:
             for _k, _v in profile.get("sampling", {}).items():
                 runtime.setdefault(_k, _v)
 
-        if not runtime.get("model"):
-            raise RuntimeError("No provider profile or daemon runtime model configured.")
-
         runtime.setdefault("permission_mode", "accept-all")
         set_global_config(runtime)
 

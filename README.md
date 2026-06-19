@@ -17,7 +17,7 @@ A coding agent that runs in your terminal. Pure-Python runtime with a `prompt_to
 › xerxes
 
 ╭────────────────────────────────────────────────────────╮
-│ Xerxes (v0.2.1)                                       │
+│ Xerxes (v0.2.2)                                       │
 ├────────────────────────────────────────────────────────┤
 │ model:  claude-opus-4-7                               │
 │ dir:    ~/Projects/myapp                               │
@@ -37,7 +37,7 @@ This is a Python web application using FastAPI...
 Requires Python 3.11+. The installer uses [uv](https://docs.astral.sh/uv/) — no Node.js, no npm.
 
 ```bash
-# One-line install (installs uv if missing, then `xerxes` as a uv tool)
+# One-line install (installs uv if missing, creates ~/.xerxes-venv, then adds a shell alias)
 curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
 ```
 

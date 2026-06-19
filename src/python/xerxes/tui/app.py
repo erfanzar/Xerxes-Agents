@@ -32,6 +32,7 @@ import sys
 import uuid
 from typing import Any
 
+from ..runtime.update import GitUpdateStatus, git_update_status, installed_version
 from .blocks import (
     ApprovalRequestPanel,
     QuestionRequestPanel,
@@ -72,6 +73,22 @@ def _shorten_home(path: str) -> str:
     if path.startswith(home + os.sep):
         return "~" + path[len(home) :]
     return path
+
+
+def _banner_updates_text(status: GitUpdateStatus) -> str:
+    """Format git update status for the welcome banner metadata column."""
+    if not status.is_git:
+        return "not a git checkout"
+    if status.updates_ahead_available > 0:
+        upstream_hash = f" {status.upstream_hash}" if status.upstream_hash else ""
+        upstream = status.upstream or "upstream"
+        return f"{status.updates_ahead_available} ahead available ({upstream}{upstream_hash})"
+    if status.ahead_count > 0:
+        upstream = status.upstream or "upstream"
+        return f"current; local {status.ahead_count} ahead of {upstream}"
+    if status.error:
+        return f"unknown ({status.error})"
+    return "current"
 
 
 _XERXES_LOGO = [
@@ -129,7 +146,14 @@ def _logo_gradient(base_hex: str, rows: int) -> list[str]:
     return out
 
 
-def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
+def _build_welcome_banner(
+    model: str,
+    session_id: str,
+    cwd: str,
+    *,
+    version: str | None = None,
+    git_status: GitUpdateStatus | None = None,
+) -> str:
     """Return a multi-line ANSI banner: the stacked gradient XERXES-AGENTS logo on
     top, then a full-width box with the Derafsh-e Kavian emblem on the left and
     the session metadata + welcome on the right.
@@ -155,10 +179,19 @@ def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
 
     # 2) Box: Derafsh emblem on the left, session metadata + welcome on the
     #    right. The box is padded to the full terminal width.
+    resolved_version = version or installed_version()
+    status = git_status if git_status is not None else git_update_status(cwd=cwd, fetch=False, timeout=0.5)
+    head_text = status.head_hash if status.head_hash else "(unknown)"
+    if not status.is_git:
+        head_text = "(not a git checkout)"
+
     pairs = [
         ("Directory:", _shorten_home(cwd)),
+        ("Version:", f"v{resolved_version}"),
         ("Session:", session_id),
         ("Model:", model or "(not set — pick one with /provider)"),
+        ("HEAD:", head_text),
+        ("Updates:", _banner_updates_text(status)),
     ]
     label_w = max(len(label) for label, _ in pairs)
     info_plain = [f"{label:<{label_w}}  {value}" for label, value in pairs]
