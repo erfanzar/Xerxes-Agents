@@ -43,8 +43,8 @@ class QueryEngineConfig:
     Attributes:
         max_turns: Hard cap on user → assistant turns before the engine refuses
             new prompts with ``stop_reason="max_turns"``.
-        max_budget_tokens: Combined input+output token ceiling enforced across
-            the whole session.
+        max_budget_tokens: Optional combined input+output token ceiling enforced
+            across the whole session. ``None`` disables the cumulative cap.
         model: LLM identifier passed to the streaming loop.
         system_prompt: System prompt injected ahead of every turn.
         permission_mode: Permission policy forwarded to the streaming loop.
@@ -56,7 +56,7 @@ class QueryEngineConfig:
     """
 
     max_turns: int = 50
-    max_budget_tokens: int = 500_000
+    max_budget_tokens: int | None = None
     model: str = "gpt-4o"
     system_prompt: str = ""
     permission_mode: str = "accept-all"
@@ -163,10 +163,13 @@ class QueryEngine:
                 output=f"Max turns ({self.config.max_turns}) reached.",
                 stop_reason="max_turns",
             )
-        if self._total_in_tokens + self._total_out_tokens >= self.config.max_budget_tokens:
+        if (
+            self.config.max_budget_tokens is not None
+            and self._total_in_tokens + self._total_out_tokens >= self.config.max_budget_tokens
+        ):
             return TurnResult(
                 prompt=prompt,
-                output=f"Token budget ({self.config.max_budget_tokens:,}) exhausted.",
+                output=f"Session token budget ({self.config.max_budget_tokens:,}) exhausted.",
                 stop_reason="budget_exhausted",
             )
 
@@ -181,6 +184,7 @@ class QueryEngine:
             "max_tokens": self.config.max_tokens,
             "thinking": self.config.thinking,
             "thinking_budget": self.config.thinking_budget,
+            "max_budget_tokens": self.config.max_budget_tokens,
         }
 
         output_parts: list[str] = []
@@ -253,6 +257,16 @@ class QueryEngine:
         if self._turn_count >= self.config.max_turns:
             result = TurnResult(prompt=prompt, output="Max turns reached.", stop_reason="max_turns")
             return result
+        if (
+            self.config.max_budget_tokens is not None
+            and self._total_in_tokens + self._total_out_tokens >= self.config.max_budget_tokens
+        ):
+            result = TurnResult(
+                prompt=prompt,
+                output=f"Session token budget ({self.config.max_budget_tokens:,}) exhausted.",
+                stop_reason="budget_exhausted",
+            )
+            return result
 
         self._turn_count += 1
 
@@ -261,6 +275,7 @@ class QueryEngine:
             "model": self.config.model,
             "permission_mode": self.config.permission_mode,
             "max_tokens": self.config.max_tokens,
+            "max_budget_tokens": self.config.max_budget_tokens,
         }
 
         output_parts: list[str] = []

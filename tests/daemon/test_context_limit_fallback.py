@@ -16,8 +16,11 @@ denominator always reflects something sensible.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager, TurnRunner
+from xerxes.streaming.events import AgentState
 
 
 def _make_runner(tmp_path, runtime_overrides: dict) -> TurnRunner:
@@ -40,8 +43,8 @@ def test_max_context_alias_honoured(tmp_path):
 
 def test_falls_back_to_registry_for_known_provider(tmp_path):
     runner = _make_runner(tmp_path, {"model": "kimi-for-coding"})
-    # Kimi-code provider's published window is 128k.
-    assert runner._resolve_context_limit() == 128_000
+    # Kimi-code provider's published window is 256k.
+    assert runner._resolve_context_limit() == 256_000
 
 
 def test_falls_back_to_anthropic_window(tmp_path):
@@ -53,3 +56,19 @@ def test_falls_back_to_anthropic_window(tmp_path):
 def test_returns_zero_when_no_model(tmp_path):
     runner = _make_runner(tmp_path, {})
     assert runner._resolve_context_limit() == 0
+
+
+def test_status_payload_reports_live_context_not_cumulative_usage(tmp_path):
+    runner = _make_runner(tmp_path, {"model": "gpt-4o", "context_limit": 100_000})
+    session = SimpleNamespace(
+        state=AgentState(
+            messages=[{"role": "user", "content": "short prompt"}],
+            total_input_tokens=554_000,
+            total_output_tokens=582,
+        )
+    )
+
+    payload = runner._status_payload(session, mode="plan", plan_mode=True)
+
+    assert payload["context_tokens"] < 100
+    assert payload["max_context"] == 100_000

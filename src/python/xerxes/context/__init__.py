@@ -61,6 +61,7 @@ from .tool_result_pruner import (
     prune_tool_result,
 )
 from .tool_result_storage import DEFAULT_INLINE_LIMIT_CHARS, ToolResultStorage
+from .window_usage import estimate_context_tokens
 
 __all__ = [
     "COMPACTION_REFERENCE_PREFIX",
@@ -88,6 +89,7 @@ __all__ = [
     "TruncateStrategy",
     "build_repo_map",
     "compaction_summary_agent_from_config",
+    "estimate_context_tokens",
     "get_compaction_strategy",
     "naive_summarizer",
     "prune_messages",

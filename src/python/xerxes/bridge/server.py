@@ -46,6 +46,7 @@ from ..context.compaction_provisioner import (
     CompactionProvisioner,
     compaction_summary_agent_from_config,
 )
+from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
@@ -216,8 +217,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         """Emit a legacy ``state`` event summarising tokens, cost, and message count."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
-        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
-        remaining = max(0, context_limit - total_tokens)
+        context_tokens = estimate_context_tokens(self.state.messages, model=model)
+        remaining = max(0, context_limit - context_tokens)
         self._emit(
             "state",
             {
@@ -228,7 +229,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 "tool_execution_count": len(self.state.tool_executions),
                 "context_limit": context_limit,
                 "remaining_context": remaining,
-                "used_context": total_tokens,
+                "used_context": context_tokens,
                 "cost_usd": calc_cost(
                     model,
                     self.state.total_input_tokens,
