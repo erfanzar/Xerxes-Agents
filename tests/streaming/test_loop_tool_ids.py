@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import time
 
+from xerxes.runtime.agent_memory import AgentMemory
 from xerxes.streaming import loop
 from xerxes.streaming.events import TextChunk, ToolEnd, ToolStart
+from xerxes.tools.agent_memory_tool import active_memory, set_active_memory
 
 
 def test_run_assigns_tool_id_when_provider_omits_one() -> None:
@@ -96,6 +98,76 @@ def test_run_preserves_full_tool_result_for_model_context() -> None:
 
     assert ends[0].result == long_result
     assert tool_messages[0]["content"] == long_result
+
+
+def test_run_spills_large_tool_result_to_project_memory(tmp_path) -> None:
+    original = loop._stream_llm
+    previous_memory = active_memory()
+    memory = AgentMemory(project_root=tmp_path)
+    large_result = "FULL-RESULT-LINE\n" * 500
+    calls = {"n": 0}
+    seen_provider_messages: list[list[dict]] = []
+    summary_inputs: dict[str, str] = {}
+    state = loop.AgentState()
+
+    def summary_agent(messages, _previous_summary):
+        summary_inputs["content"] = messages[0]["content"]
+        return "compact summary with the important facts"
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        seen_provider_messages.append(list(kwargs["messages"]))
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {
+                        "id": "call_large",
+                        "name": "ExecuteShell",
+                        "input": {"command": "make noisy"},
+                    }
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("done")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    set_active_memory(memory)
+    try:
+        events = list(
+            loop.run(
+                user_message="run noisy command",
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "tool_result_spill_chars": 100,
+                    "compaction_summary_agent": summary_agent,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: large_result,
+                tool_schemas=[],
+            )
+        )
+    finally:
+        set_active_memory(previous_memory)
+        loop._stream_llm = original
+
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+    tool_messages = [msg for msg in state.messages if msg.get("role") == "tool"]
+    files = [entry for entry in memory.list_files("project") if entry.relative.startswith("tool-results/")]
+
+    assert len(files) == 1
+    assert memory.read("project", files[0].relative) == large_result
+    assert summary_inputs["content"] == large_result
+    assert "[Large tool result stored outside model context]" in ends[0].result
+    assert "agent_memory_read" in ends[0].result
+    assert "compact summary with the important facts" in ends[0].result
+    assert large_result not in ends[0].result
+    assert tool_messages[0]["content"] == ends[0].result
+    assert large_result not in seen_provider_messages[1][-1]["content"]
 
 
 def test_steer_drain_injects_user_message_between_tool_iterations() -> None:

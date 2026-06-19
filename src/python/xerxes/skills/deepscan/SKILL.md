@@ -19,11 +19,25 @@ Spawns a coordinated swarm of 8 specialized agents to perform comprehensive anal
 DeepScan output is project-specific memory, not a workspace temp artifact.
 
 - Final report: `agent_memory_write("project", "deepscan/AGENT_NOTES.md", report)`
-- Optional raw findings: `agent_memory_write("project", "deepscan/findings/<agent-name>.md", findings)`
+- Required per-agent findings: `agent_memory_write("project", "deepscan/findings/<agent-name>.md", findings)`
 - Discovery index: append a short pointer to project `MEMORY.md` so future agents know the report exists.
 - Journal: add a one-line project journal entry after saving the report.
 
 Before spawning agents, call `agent_memory_status()` and confirm project memory is available. If project memory is unavailable or any memory write fails, stop and report the memory error. **Do not fall back to `tmp-files`, repo-local report files, or shell-created scratch files.**
+
+## Subagent Budget and Return Contract
+
+Each subagent must preserve detailed findings in project memory and keep its final response small.
+
+- Hard cap: target **15 tool calls or fewer** per subagent, in batches of **5 calls or fewer** before summarizing progress.
+- Use inventory commands (`rg --files`, `find ... -maxdepth`, `wc -l`) and representative reads. Do not read massive source files, lockfiles, generated files, or full glob output unless the prompt specifically requires it.
+- If token pressure, timeout risk, or uncertainty appears: write current findings to the assigned memory path immediately, mark the report partial, and return the path plus what remains unknown.
+- The subagent's final response must be **latest agent content only**:
+  - `memory_path: deepscan/findings/<agent-name>.md`
+  - `status: complete|partial`
+  - 5-8 concise bullets with key findings and gaps
+  - basic stats such as files sampled, commands used, confidence
+- Do **not** return raw tool logs, chain-of-thought, file dumps, huge command output, or the full findings body. The parent reads the full report from project memory when compiling.
 
 ## Execution Rule
 
@@ -48,48 +62,48 @@ The status must show project memory availability. Use the returned `project_dir`
 
 ## Swarm Architecture — ALL 8 AGENTS IN PARALLEL
 
-Use `SpawnAgents` with `wait=true`. Every agent gets the `researcher` subtype and returns findings in its final response. Subagents must not write to `tmp-files` or workspace files.
+Use `SpawnAgents` with `wait=true`. Every agent gets the `researcher` subtype. Each subagent writes full findings to its assigned project-memory path and returns only the compact contract above. Subagents must not write to `tmp-files` or workspace files.
 
 ```
 SpawnAgents(
   agents=[
     {
-      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep. Document tree, key dirs, config files, module structure. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep using bounded inventory commands and sampled reads. Document tree, key dirs, config files, module structure. Write full findings to project memory at `deepscan/findings/structure-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "structure-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers using config files and representative manifests. Write full findings to project memory at `deepscan/findings/tech-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "tech-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns using targeted grep and representative file samples. Write full findings to project memory at `deepscan/findings/arch-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "arch-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs using bounded file discovery and sampled reads. Write full findings to project memory at `deepscan/findings/config-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "config-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs using manifests, config files, and sampled tests. Write full findings to project memory at `deepscan/findings/quality-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "quality-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE using bounded discovery and sampled docs. Write full findings to project memory at `deepscan/findings/docs-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "docs-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerabilities, encryption usage. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerability signals, encryption usage using targeted searches and sampled reads. Write full findings to project memory at `deepscan/findings/security-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "security-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
+      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching using bounded searches and representative reads. Write full findings to project memory at `deepscan/findings/data-analyzer.md`, then return only `memory_path`, `status`, 5-8 concise bullets, stats, confidence, and gaps. Stay within <=15 tool calls in batches of <=5. Do not return raw tool logs, reasoning, file dumps, or large command output. Do not write tmp-files or workspace files.",
       "name": "data-analyzer",
       "subagent_type": "researcher"
     }
@@ -100,7 +114,7 @@ SpawnAgents(
 
 ## Step 3: Compile Final Report
 
-After all agents complete, compile their returned results into a single report using this structure:
+After all agents complete, parse the returned `memory_path` values and read each full finding with `agent_memory_read("project", path)`. Compile those memory files, not raw tool output or subagent logs, into a single report using this structure:
 
 ```markdown
 # Project DeepScan Analysis Report
@@ -166,9 +180,11 @@ agent_memory_append(
 agent_memory_journal("project", "DeepScan report updated at deepscan/AGENT_NOTES.md")
 ```
 
-If you save raw agent findings too, write them under `deepscan/findings/` in project memory after the final report is saved. Do not require raw findings for success.
+The final chat response should not paste the full report. Return the saved report path, a brief key-finding summary, and any partial agent statuses.
 
 ## Output Format for Each Agent
+
+Full findings saved at `deepscan/findings/<agent-name>.md`:
 
 ```markdown
 ## [Agent Name]: [Focus Area]
@@ -184,6 +200,17 @@ If you save raw agent findings too, write them under `deepscan/findings/` in pro
 
 ### Recommendations
 - [Actionable recommendation 1]
+```
+
+Final subagent response returned to the parent:
+
+```markdown
+memory_path: deepscan/findings/<agent-name>.md
+status: complete|partial
+- [Key finding]
+- [Key finding]
+- [Gap or risk]
+stats: files_sampled=[n], commands_used=[n], confidence=[low|medium|high]
 ```
 
 ## Verification Checklist

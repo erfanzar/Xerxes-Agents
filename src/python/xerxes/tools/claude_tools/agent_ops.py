@@ -503,20 +503,36 @@ class TaskGetTool(AgentBaseFn):
 
     @staticmethod
     def static_call(task_id: str, **context_variables) -> str:
-        """Get task status and snapshot.
+        """Get task status and the latest agent-visible content.
 
         Args:
             task_id: ID or name of the task to query.
             **context_variables: Additional context passed through to downstream calls.
 
         Returns:
-            JSON snapshot of task status and result.
+            JSON task status with completed output or compact running progress.
         """
         mgr = _get_agent_manager()
         task = mgr.tasks.get(task_id) or mgr.get_by_name(task_id)
         if not task:
             return f"Error: task '{task_id}' not found."
-        return json.dumps(task.snapshot(), indent=2)
+        payload: dict[str, Any] = {
+            "id": task.id,
+            "name": task.name,
+            "status": task.status,
+        }
+        if task.status == "completed":
+            payload["result"] = task.result or ""
+        elif task.status == "failed":
+            payload["error"] = task.error or task.result or "Agent failed."
+        elif task.status == "cancelled":
+            payload["result"] = task.result or "[Sub-agent was cancelled.]"
+        else:
+            payload["current_tool"] = task.current_tool
+            payload["recent_output"] = task.recent_output_text()
+            payload["tool_calls_count"] = task.tool_calls_count
+            payload["note"] = "Agent is still running; use TaskOutputTool after it completes."
+        return json.dumps(payload, indent=2)
 
 
 class TaskListTool(AgentBaseFn):

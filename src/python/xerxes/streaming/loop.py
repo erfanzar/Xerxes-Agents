@@ -29,6 +29,7 @@ parsing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -54,7 +55,7 @@ from .events import (
     ToolStart,
     TurnDone,
 )
-from .messages import bound_tool_result, messages_to_anthropic, messages_to_openai
+from .messages import messages_to_anthropic, messages_to_openai
 from .permissions import (
     PermissionMode,
     check_permission,
@@ -299,11 +300,158 @@ def _compact_before_append(
     return True
 
 
+def _provision_context_window(
+    state: AgentState,
+    *,
+    config: dict[str, Any],
+    model: str,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Compact current messages before the next provider request when needed.
+
+    Unlike the cumulative spend budget, this checks the actual request window
+    that will be sent to the provider. If compaction cannot reduce a context
+    that is already over the model limit, callers must stop before making the
+    next provider request.
+    """
+    provisioner = _compaction_provisioner(config=config, model=model)
+    tokens_before = provisioner.count_tokens(state.messages)
+    if not force and tokens_before < provisioner.threshold_tokens:
+        return {
+            "compacted": False,
+            "blocked": False,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_before,
+            "max_context_tokens": provisioner.max_context_tokens,
+            "reason": "below_threshold",
+        }
+
+    provision = provisioner.compact(state.messages, force=force)
+    if provision.compacted:
+        state.messages = provision.messages
+        state.total_input_tokens = 0
+        state.total_output_tokens = 0
+        state.metadata["last_compaction"] = {
+            "tokens_before": provision.tokens_before,
+            "tokens_after": provision.tokens_after,
+            "summarized_count": provision.summarized_count,
+            "kept_count": provision.kept_count,
+            "max_context_tokens": provisioner.max_context_tokens,
+        }
+        return {
+            "compacted": True,
+            "blocked": False,
+            "tokens_before": provision.tokens_before,
+            "tokens_after": provision.tokens_after,
+            "max_context_tokens": provisioner.max_context_tokens,
+            "reason": provision.reason,
+        }
+
+    return {
+        "compacted": False,
+        "blocked": tokens_before >= provisioner.max_context_tokens,
+        "tokens_before": tokens_before,
+        "tokens_after": provision.tokens_after,
+        "max_context_tokens": provisioner.max_context_tokens,
+        "reason": provision.reason,
+        "error": provision.error,
+    }
+
+
 MAX_TOOL_TURNS = 50
 
 # Default token budget when none is specified in config. Prevents runaway
 # agents from burning unlimited tokens on infinite tool-call loops.
 _DEFAULT_TOKEN_BUDGET = 500_000
+_DEFAULT_TOOL_RESULT_SPILL_CHARS = 30_000
+
+
+def _safe_tool_result_name(name: str) -> str:
+    """Return a filesystem-safe tool-result path component."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip())[:48].strip("-")
+    return safe or "tool"
+
+
+def _spill_tool_result_to_project_memory(
+    result: str,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    config: dict[str, Any],
+    model: str,
+) -> str:
+    """Save an oversized tool result and return a compact pointer for context.
+
+    The full result is preserved in project agent memory. The message returned
+    to the provider contains a memory path and, when available, an agent-written
+    summary instead of a lossy head/tail clamp.
+    """
+    limit = int(config.get("tool_result_spill_chars") or _DEFAULT_TOOL_RESULT_SPILL_CHARS)
+    if not isinstance(result, str) or len(result) <= limit:
+        return result
+
+    digest = hashlib.sha256(result.encode("utf-8", errors="replace")).hexdigest()[:12]
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    safe_tool = _safe_tool_result_name(tool_name)
+    safe_call = _safe_tool_result_name(tool_call_id)[:32]
+    memory_path = f"tool-results/{stamp}-{safe_tool}-{safe_call}-{digest}.txt"
+    saved = False
+    save_error = ""
+    try:
+        from ..tools.agent_memory_tool import active_memory
+
+        memory = active_memory()
+        if memory is not None:
+            memory.write("project", memory_path, result)
+            saved = True
+        else:
+            save_error = "project agent memory is not configured"
+    except Exception as exc:
+        save_error = str(exc)
+
+    summary = ""
+    summary_error = ""
+    summary_agent = compaction_summary_agent_from_config(model, config)
+    if summary_agent is not None:
+        try:
+            summary = summary_agent(
+                [
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "content": result,
+                    }
+                ],
+                (
+                    "Summarize this oversized tool result for the next model turn. "
+                    "Preserve concrete findings, paths, errors, counts, and next actions. "
+                    "Do not quote long raw output."
+                ),
+            ).strip()
+        except Exception as exc:
+            summary_error = str(exc)
+
+    lines = [
+        "[Large tool result stored outside model context]",
+        f"- Tool: `{tool_name}`",
+        f"- Tool call id: `{tool_call_id}`",
+        f"- Original size: {len(result):,} characters",
+    ]
+    if saved:
+        lines.append(f"- Full result: project agent memory `{memory_path}`")
+        lines.append(f'- Read it with: `agent_memory_read("project", "{memory_path}")`')
+    else:
+        lines.append(
+            f"- Full result was not inserted into context because {save_error or 'project memory unavailable'}."
+        )
+    if summary:
+        lines.extend(["", "## Agent-written compact summary", summary])
+    elif summary_error:
+        lines.append(f"- Summary unavailable: {summary_error}")
+    else:
+        lines.append("- Summary unavailable: no compaction agent configured.")
+    return "\n".join(lines)
 
 
 def _request_timeout(config: dict[str, Any]) -> float:
@@ -437,6 +585,29 @@ def run(
             yield TextChunk(
                 f"\n[Stopped: token budget ({budget_limit:,}) exhausted. "
                 f"Used {cumulative:,} tokens across {_turn} tool turns.]"
+            )
+            yield TurnDone(
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls_count=0,
+                model=model,
+            )
+            return
+
+        context_provision = _provision_context_window(state, config=config, model=model)
+        if context_provision["compacted"]:
+            yield TextChunk(
+                "\n[Context compacted before the next provider request "
+                f"({context_provision['tokens_before']:,} → {context_provision['tokens_after']:,} tokens).]\n"
+            )
+        elif context_provision["blocked"]:
+            reason = str(context_provision.get("reason") or "compaction_unavailable")
+            detail = str(context_provision.get("error") or "")
+            suffix = f" ({detail})" if detail else ""
+            yield TextChunk(
+                "\n[Stopped: context window "
+                f"({context_provision['tokens_before']:,}/{context_provision['max_context_tokens']:,} tokens) "
+                f"exceeded and compaction could not reduce it: {reason}{suffix}.]"
             )
             yield TurnDone(
                 input_tokens=0,
@@ -708,8 +879,13 @@ def run(
                     result = f"Tool '{tc_name}' executed (no executor configured)."
                 duration_ms = (time.monotonic() - t0) * 1000
 
-            # Clamp oversized output so one tool can't poison the whole window.
-            result = bound_tool_result(result)
+            result = _spill_tool_result_to_project_memory(
+                result,
+                tool_name=tc_name,
+                tool_call_id=tc_id,
+                config=config,
+                model=model,
+            )
             # A tool-level failure surfaced as an "Error:" string (FileEdit no-match,
             # non-zero shell, etc.) should also be flagged so the model recovers.
             if not is_error and isinstance(result, str) and result.lstrip()[:6].lower() == "error:":
@@ -742,6 +918,29 @@ def run(
                     "is_error": is_error,
                 }
             )
+
+        post_tool_context = _provision_context_window(state, config=config, model=model)
+        if post_tool_context["compacted"]:
+            yield TextChunk(
+                "\n[Context compacted after tool results "
+                f"({post_tool_context['tokens_before']:,} → {post_tool_context['tokens_after']:,} tokens).]\n"
+            )
+        elif post_tool_context["blocked"]:
+            reason = str(post_tool_context.get("reason") or "compaction_unavailable")
+            detail = str(post_tool_context.get("error") or "")
+            suffix = f" ({detail})" if detail else ""
+            yield TextChunk(
+                "\n[Stopped: context window "
+                f"({post_tool_context['tokens_before']:,}/{post_tool_context['max_context_tokens']:,} tokens) "
+                f"exceeded after tool results and compaction could not reduce it: {reason}{suffix}.]"
+            )
+            yield TurnDone(
+                input_tokens=0,
+                output_tokens=0,
+                tool_calls_count=0,
+                model=model,
+            )
+            return
     else:
         # The for-else fires when we exhausted MAX_TOOL_TURNS without ever
         # hitting the ``break`` that fires on "no more tool calls". Without

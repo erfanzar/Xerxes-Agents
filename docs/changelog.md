@@ -6,7 +6,14 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.3 — 2026-06-19 (current)
+## 0.2.4 — 2026-06-19 (current)
+
+- Replaced static/clamped tool-result handling with project-memory spillover plus agent-written summaries.
+- Added context-window provisioning before provider calls and after tool batches.
+- Tightened DeepScan so subagents save full findings to project memory and return only compact pointers.
+- Bumped the package/runtime version to 0.2.4.
+
+## 0.2.3 — 2026-06-19
 
 - Fixed bare `/provider` with zero saved profiles so it opens the add-profile picker instead of returning dead-end text.
 - Bumped the package/runtime version to 0.2.3.

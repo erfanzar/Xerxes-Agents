@@ -98,7 +98,7 @@ class TestUpdate:
 
         c = httpx.Client(transport=httpx.MockTransport(handler))
         out = update.check_for_update(client=c)
-        # Installed is 0.2.3 in pyproject; latest mocked to 0.0.1 -> no update.
+        # Installed is the pyproject version; latest mocked to 0.0.1 -> no update.
         assert out is None
         c.close()
 

@@ -6,7 +6,7 @@ import time
 
 from xerxes.agents.definitions import get_agent_definition
 from xerxes.agents.subagent_manager import SubAgentManager, SubAgentTask, _filter_subagent_tools
-from xerxes.tools.claude_tools import AgentTool, SpawnAgents
+from xerxes.tools.claude_tools import AgentTool, SpawnAgents, TaskGetTool
 from xerxes.tools.claude_tools import agent_ops as claude_tools
 
 
@@ -71,6 +71,34 @@ def test_agent_tool_bounded_wait_returns_running_snapshot(monkeypatch):
     assert row["name"] == "slow"
     assert row["status"] in {"pending", "running"}
     assert "still running" in row["note"]
+
+    mgr.shutdown()
+
+
+def test_task_get_returns_latest_agent_content_without_snapshot_noise(monkeypatch):
+    mgr = SubAgentManager()
+    task = SubAgentTask(
+        id="done",
+        name="deep",
+        prompt="scan " * 100,
+        status="completed",
+        result="memory_path: deepscan/findings/deep.md\nsummary",
+        worktree_path="/tmp/not-for-context",
+        worktree_branch="branch-not-for-context",
+    )
+    task._done_event.set()
+    mgr.tasks[task.id] = task
+    mgr._by_name[task.name] = task.id
+    monkeypatch.setattr(claude_tools, "_agent_manager", mgr)
+
+    payload = json.loads(TaskGetTool.static_call("deep"))
+
+    assert payload == {
+        "id": "done",
+        "name": "deep",
+        "status": "completed",
+        "result": "memory_path: deepscan/findings/deep.md\nsummary",
+    }
 
     mgr.shutdown()
 
