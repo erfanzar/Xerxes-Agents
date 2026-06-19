@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from xerxes.streaming.wire_events import Notification
 from xerxes.tui.engine import BridgeClient
 
 
@@ -19,6 +22,35 @@ def test_bridge_client_drains_stderr_and_keeps_tail() -> None:
     assert len(tail) == 200
     assert tail[0] == "line 5"
     assert tail[-1] == "line 204"
+
+
+@pytest.mark.asyncio
+async def test_bridge_client_preserves_notification_subtype() -> None:
+    client = BridgeClient()
+    client._loop = asyncio.get_running_loop()
+    frame = {
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "notification",
+            "payload": {
+                "id": "resume-list",
+                "category": "history",
+                "type": "resume_choices",
+                "severity": "info",
+                "title": "Resume session",
+                "body": "Choose a saved session.",
+                "payload": {"sessions": [{"session_id": "abcd1234", "title": "first prompt"}]},
+            },
+        },
+    }
+
+    client._handle_inbound_line(json.dumps(frame))
+    event = await asyncio.wait_for(client._event_queue.get(), timeout=1)
+
+    assert isinstance(event, Notification)
+    assert event.type == "resume_choices"
+    assert event.payload["sessions"][0]["session_id"] == "abcd1234"
 
 
 @pytest.mark.asyncio

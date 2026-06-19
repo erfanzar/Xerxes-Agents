@@ -170,8 +170,8 @@ class UniversalAgent(CortexAgent):
                 analyze_code_structure,
                 name="analyze_code_structure",
                 description="Analyze code file structure (classes, functions, imports)",
-                ),
-                ]
+            ),
+        ]
 
         if additional_tools:
             tools.extend(additional_tools)

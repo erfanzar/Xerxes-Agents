@@ -45,7 +45,7 @@ class BannerData:
         update_available: Newer version string, or "" when up to date.
     """
 
-    version: str = "0.2.0"
+    version: str = "0.2.1"
     model: str = ""
     workspace: str = ""
     session_id: str = ""

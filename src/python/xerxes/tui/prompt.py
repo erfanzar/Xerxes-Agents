@@ -44,8 +44,16 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.styles import Style
+
+from .skin_engine import active_fg, get_active_skin
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+# Reset only the foreground color (leaves bold/dim/bg intact), per the skin
+# contract. Use this to close an ``active_fg(role)`` run that carried no other
+# SGR attributes; use ``\x1b[0m`` to fully reset a run that combined bold/dim.
+_FG_RESET = "\x1b[39m"
 
 
 class _ScrollableFormattedTextControl(FormattedTextControl):
@@ -116,13 +124,15 @@ class _ScrollableFormattedTextControl(FormattedTextControl):
 def _mode_style(plan_mode: bool, activity_mode: str) -> str:
     """Return the ANSI escape that tints prompt chrome for the current mode.
 
-    Plan mode renders magenta; researcher mode renders cyan; everything
-    else falls back to the dim default."""
+    Routed through the active skin: plan mode -> ``system`` role, researcher
+    mode -> ``accent`` role, everything else falls back to the dim ``muted``
+    role. Shared by both the input rule and the footer so the tint stays
+    consistent across prompt chrome."""
     if plan_mode:
-        return "\x1b[35m"
+        return active_fg("system")
     if (activity_mode or "").lower() == "researcher":
-        return "\x1b[36m"
-    return "\x1b[2m"
+        return active_fg("accent")
+    return "\x1b[2m" + active_fg("muted")
 
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
@@ -147,13 +157,18 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/yolo", "Toggle accept-all permission mode"),
     ("/config", "Show config"),
     ("/history", "Show message count"),
+    ("/resume", "Resume a saved session"),
     ("/btw", "Send a side question while running"),
     ("/steer", "Inject mid-turn guidance"),
     ("/cancel", "Cancel the current turn"),
     ("/cancel-all", "Cancel all running turns"),
     ("/todo", "Show or edit the TODO list"),
+    ("/skin", "List or switch the TUI skin"),
     ("/exit", "Exit Xerxes"),
 ]
+
+# Max rows the input box grows to before it starts scrolling internally.
+_INPUT_MAX_ROWS = 10
 
 
 class SlashCompleter(Completer):
@@ -588,8 +603,9 @@ class StatusRenderer:
 
         if self._subagent_previews:
             spin_frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
+            tool_fg = active_fg("tool_name")
             for preview in list(self._subagent_previews.values())[-self.SUBAGENT_PREVIEW_LINES :]:
-                lines.append(f"\x1b[36m{spin_frame}\x1b[0m \x1b[2;36m↳ {preview}\x1b[0m")
+                lines.append(f"{tool_fg}{spin_frame}{_FG_RESET} \x1b[2m{tool_fg}↳ {preview}\x1b[0m")
 
         streaming = self._streaming_text
         if streaming:
@@ -599,20 +615,24 @@ class StatusRenderer:
             lines.extend(self._split_render_lines(self._active_panel))
 
         if self._todo_items:
-            lines.append("\x1b[1;33mTODO:\x1b[0m")
+            warn_fg = active_fg("warn")
+            accent_fg = active_fg("accent")
+            lines.append(f"\x1b[1m{warn_fg}TODO:\x1b[0m")
             for _i, item in enumerate(self._todo_items[:10], 1):
-                prefix = "☐" if not item.startswith("✓") else "✓"
-                text = item[1:].strip() if item.startswith("✓") else item
-                lines.append(f"  \x1b[33m{prefix}\x1b[0m {text}")
+                done = item.startswith("✓")
+                prefix = "✓" if done else "☐"
+                text = item[1:].strip() if done else item
+                glyph_fg = accent_fg if done else warn_fg
+                lines.append(f"  {glyph_fg}{prefix}{_FG_RESET} {text}")
             if len(self._todo_items) > 10:
-                lines.append(f"  \x1b[2m... and {len(self._todo_items) - 10} more\x1b[0m")
+                lines.append(f"  \x1b[2m… and {len(self._todo_items) - 10} more\x1b[0m")
 
         if self._running:
             frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
             elapsed = int(time.monotonic() - self._spinner_started_at) if self._spinner_started_at else 0
             queued = f"  ·  {self._queue_count} queued" if self._queue_count else ""
             lines.append(
-                f"\x1b[36m{frame}\x1b[0m \x1b[1m{self._spinner_label}…\x1b[0m  "
+                f"{active_fg('accent')}{frame}{_FG_RESET} \x1b[1m{self._spinner_label}…\x1b[0m  "
                 f"\x1b[2m{elapsed}s{queued}  ·  esc to interrupt\x1b[0m"
             )
 
@@ -675,7 +695,14 @@ class StatusRenderer:
             start = min(max(0, scroll_y), max_start)
             selected_body = body_lines[start : start + body_budget]
 
-        parts = [*selected_body, self._input_rule(columns)]
+        # Pin the input separator to the bottom of the viewport (just above the
+        # input buffer) by padding between the body and the rule; otherwise a
+        # short body leaves the rule floating right under the banner.
+        if visible_rows is not None:
+            pad = max(0, visible_rows - len(selected_body) - 1)
+            parts = [*selected_body, *([""] * pad), self._input_rule(columns)]
+        else:
+            parts = [*selected_body, self._input_rule(columns)]
         markup = "\n".join(parts)
         self._last_render_line_count, self._last_render_last_line_width = self._count_lines(markup)
         self._cached_markup = markup
@@ -832,25 +859,45 @@ class FooterRenderer:
 
         Lays out left segments (agent/cwd/branch/mode/tip) against a
         right-aligned context badge, wrapping to a second line only
-        when both halves don't fit on one row."""
+        when both halves don't fit on one row. Per-segment color is
+        routed through skin roles (agent/model/mode -> system, the
+        activity dot/context badge -> accent, cwd/branch/think/tip ->
+        muted) while the row-wide ``_mode_style`` tint backs the
+        separators so width math (measured on the ANSI-stripped text)
+        stays identical to the plain layout."""
+        style = _mode_style(self._plan_mode, self._activity_mode)
+
+        def _seg(role: str, text: str) -> str:
+            """Tint ``text`` with ``role`` then restore the row's base tint."""
+            return f"{active_fg(role)}{text}{_FG_RESET}{style}"
+
         spinner = "●" if self._running else "○"
         model = self._model or "—"
-        agent = f"agent ({model} {spinner})"
+        agent = f"agent ({model} {_seg('accent', spinner)})"
         mode = f"mode: {'plan' if self._plan_mode else self._activity_mode}"
         think = f"think: {self._reasoning_effort}"
         columns = self._terminal_columns()
 
         cwd_max = max(20, columns // 3)
         cwd_short = self._truncate_path(self._cwd, cwd_max) if self._cwd else ""
-        left_segments = [agent]
+        left_segments = [_seg("system", agent)]
         if cwd_short:
-            left_segments.append(cwd_short)
+            left_segments.append(_seg("muted", cwd_short))
         if self._branch:
-            left_segments.append(self._branch)
-        left_segments.append(mode)
-        left_segments.append(think)
-        left_segments.append(self._tip)
+            left_segments.append(_seg("muted", self._branch))
+        left_segments.append(_seg("system", mode))
+        left_segments.append(_seg("muted", think))
+        left_segments.append(_seg("muted", self._tip))
         left = "  ".join(left_segments)
+        plain_left_segments = [
+            f"agent ({model} {spinner})",
+            *([cwd_short] if cwd_short else []),
+            *([self._branch] if self._branch else []),
+            mode,
+            think,
+            self._tip,
+        ]
+        plain_left = "  ".join(plain_left_segments)
 
         if self._context_max > 0:
             pct = (self._context_used / self._context_max) * 100
@@ -862,20 +909,19 @@ class FooterRenderer:
         else:
             ctx_text = "context: 0.0% (0/0)"
 
-        plain_left = _ANSI_RE.sub("", left)
-        plain_right = _ANSI_RE.sub("", ctx_text)
+        plain_right = ctx_text
+        ctx_render = _seg("accent", ctx_text)
 
-        style = _mode_style(self._plan_mode, self._activity_mode)
         rule = style + ("─" * columns) + "\x1b[0m"
 
         if len(plain_left) + len(plain_right) + 2 <= columns:
             gap = max(1, columns - len(plain_left) - len(plain_right))
-            row = f"{style}{left}{' ' * gap}{ctx_text}\x1b[0m"
+            row = f"{style}{left}{' ' * gap}{ctx_render}\x1b[0m"
             return rule + "\n" + row + "\n"
 
         right_pad = max(0, columns - len(plain_right))
         line1 = f"{style}{left}\x1b[0m"
-        line2 = f"{' ' * right_pad}{style}{ctx_text}\x1b[0m"
+        line2 = f"{' ' * right_pad}{style}{ctx_render}\x1b[0m"
         return rule + "\n" + line1 + "\n" + line2 + "\n"
 
     def __call__(self) -> AnyFormattedText:
@@ -927,6 +973,7 @@ class PersistentPrompt:
 
         self._active_question: Any = None
         self._active_approval: Any = None
+        self._active_resume: Any = None
 
         self._scroll_y: int | None = None
         self._status_visible_rows = 20
@@ -962,9 +1009,13 @@ class PersistentPrompt:
             focusable=True,
         )
 
+        # Input grows with its content (newlines via ctrl-j and wrapped long
+        # lines), from 1 row up to _INPUT_MAX_ROWS; beyond that it scrolls.
         self._buffer_window = Window(
             content=self._buffer_control,
-            height=1,
+            height=Dimension(min=1, max=_INPUT_MAX_ROWS),
+            dont_extend_height=True,
+            wrap_lines=True,
             get_line_prefix=self._input_prefix,
         )
 
@@ -1037,14 +1088,17 @@ class PersistentPrompt:
         return NotImplemented
 
     def _input_prefix(self, line_number: int, wrap_count: int) -> AnyFormattedText:
-        """Render the ``›`` input glyph; colored green when idle, dim while running."""  # noqa: RUF002
+        """Render the branded prompt glyph; accent when idle, dim while running."""
         if line_number == 0 and wrap_count == 0:
-            color = "2" if self._running else "1;32"
-            return ANSI(f"\x1b[{color}m›\x1b[0m ")  # noqa: RUF001
+            glyph = get_active_skin().label("prompt_symbol")
+            if self._running:
+                return ANSI(f"\x1b[2m{glyph}\x1b[0m ")
+            return ANSI(f"\x1b[1m{active_fg('accent')}{glyph}\x1b[0m ")
         return ""
 
     SELECT_SENTINEL = "\x00__select_active_question__\x00"
     APPROVAL_SENTINEL = "\x00__select_active_approval__\x00"
+    RESUME_SENTINEL = "\x00__select_active_resume__\x00"
     PLAN_TOGGLE_SENTINEL = "\x00__toggle_plan_mode__\x00"
 
     def set_active_approval(self, panel: Any) -> None:
@@ -1081,6 +1135,24 @@ class PersistentPrompt:
         """Re-render the active question panel after a cursor move."""
         if self._active_question is not None:
             self._status.set_active_panel(self._active_question.compose())
+            self._invalidate()
+
+    def set_active_resume(self, panel: Any) -> None:
+        """Pin ``panel`` as the active resume picker and invalidate the screen."""
+        self._active_resume = panel
+        self._status.set_active_panel(panel.compose() if panel else "")
+        self._invalidate()
+
+    def clear_active_resume(self) -> None:
+        """Dismiss the active resume picker."""
+        self._active_resume = None
+        self._status.clear_active_panel()
+        self._invalidate()
+
+    def refresh_active_resume(self) -> None:
+        """Re-render the active resume picker after a cursor move."""
+        if self._active_resume is not None:
+            self._status.set_active_panel(self._active_resume.compose())
             self._invalidate()
 
     def _build_key_bindings(self) -> KeyBindings:
@@ -1132,6 +1204,10 @@ class PersistentPrompt:
                 self._active_question.move_up()
                 self.refresh_active_question()
                 return
+            if self._active_resume is not None:
+                self._active_resume.move_cursor_up()
+                self.refresh_active_resume()
+                return
             if self._active_approval is not None:
                 self._active_approval.move_cursor_up()
                 self.refresh_active_approval()
@@ -1149,6 +1225,10 @@ class PersistentPrompt:
             if self._active_question is not None:
                 self._active_question.move_down()
                 self.refresh_active_question()
+                return
+            if self._active_resume is not None:
+                self._active_resume.move_cursor_down()
+                self.refresh_active_resume()
                 return
             if self._active_approval is not None:
                 self._active_approval.move_cursor_down()
@@ -1185,6 +1265,9 @@ class PersistentPrompt:
             if self._active_question is not None and not buffer.text.strip():
                 self._input_queue.put_nowait(self.SELECT_SENTINEL)
                 return
+            if self._active_resume is not None and not buffer.text.strip():
+                self._input_queue.put_nowait(self.RESUME_SENTINEL)
+                return
             if self._active_approval is not None and not buffer.text.strip():
                 self._input_queue.put_nowait(self.APPROVAL_SENTINEL)
                 return
@@ -1195,6 +1278,9 @@ class PersistentPrompt:
             """Esc: cancel an in-flight turn, otherwise close any open completion menu."""
             if self._running:
                 _queue_interrupt()
+                return
+            if self._active_resume is not None:
+                self._input_queue.put_nowait("/cancel")
                 return
             buffer = event.app.current_buffer
             if buffer.complete_state is not None:
@@ -1459,6 +1545,30 @@ class PersistentPrompt:
         self._last_invalidate_ts = time.monotonic()
         self._app.invalidate()
 
+    @staticmethod
+    def _completion_style() -> Style:
+        """Build the completion-menu ``Style`` from the active skin's palette.
+
+        prompt_toolkit's named style classes accept ``#rrggbb`` values, so we
+        source them straight from the skin's role hexes. Only the menu chrome is
+        branded (unselected/selected rows, the meta column, the scrollbar) so
+        the menu reads in-palette instead of falling back to library defaults."""
+        skin = get_active_skin()
+        primary = skin.color("primary")
+        accent = skin.color("accent")
+        muted = skin.color("muted")
+        tool_name = skin.color("tool_name")
+        return Style.from_dict(
+            {
+                "completion-menu.completion": f"bg:default {tool_name}",
+                "completion-menu.completion.current": f"bg:{primary} #0a0e14 bold",
+                "completion-menu.meta.completion": f"bg:default {muted}",
+                "completion-menu.meta.completion.current": f"bg:{accent} #0a0e14",
+                "scrollbar.background": f"bg:{muted}",
+                "scrollbar.button": f"bg:{primary}",
+            }
+        )
+
     async def run(self) -> Application[None]:
         """Run the prompt_toolkit application until it exits; returns it for inspection.
 
@@ -1474,6 +1584,7 @@ class PersistentPrompt:
         self._app = Application(
             self._layout,
             key_bindings=self._kb,
+            style=self._completion_style(),
             erase_when_done=True,
             mouse_support=os.environ.get("XERXES_MOUSE", "1").lower() not in {"0", "false", "no", "off"},
             full_screen=True,

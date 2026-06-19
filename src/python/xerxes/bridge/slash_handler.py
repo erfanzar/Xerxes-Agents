@@ -421,7 +421,7 @@ class SlashHandlerMixin:
         return f"Skill '{name}' generated and saved to {skill_dir}/SKILL.md\nUse /skill {name} to invoke it."
 
     def _handle_compact(self) -> str:
-        """Run ``/compact``: summarise older messages now via an LLM call."""
+        """Run ``/compact`` through the shared agent-backed provisioner."""
         messages = self.state.messages
         if len(messages) < 4:
             return "Nothing to compact (fewer than 4 messages)."
@@ -430,92 +430,19 @@ class SlashHandlerMixin:
         if not model:
             return "No model configured. Run /provider first."
 
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        conv_msgs = [m for m in messages if m.get("role") != "system"]
-
-        if len(conv_msgs) < 3:
-            return "Nothing to compact."
-
-        preserve_recent = 2
-        older = conv_msgs[:-preserve_recent]
-        recent = conv_msgs[-preserve_recent:]
-
-        conv_text = []
-        for msg in older:
-            role = msg.get("role", "unknown").upper()
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for p in content:
-                    if isinstance(p, dict):
-                        parts.append(p.get("text", str(p)))
-                    else:
-                        parts.append(str(p))
-                content = "\n".join(parts)
-            if len(content) > 500:
-                content = content[:500] + "..."
-            conv_text.append(f"[{role}]: {content}")
-
-        conversation = "\n\n".join(conv_text)
-
-        try:
-            from openai import OpenAI
-
-            from ...llms.registry import PROVIDERS, get_api_key
-
-            provider_name = detect_provider(model)
-            api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
-            prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
-            base_url = (
-                self.config.get("base_url")
-                or self.config.get("custom_base_url")
-                or (prov.base_url if prov else None)
-                or "https://api.openai.com/v1"
-            )
-            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
-
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a conversation summarizer. Summarize the following conversation "
-                            "into a concise summary that preserves all key information: decisions made, "
-                            "files discussed, code changes, tool results, and any important context. "
-                            "Be factual and specific. Output only the summary, no preamble."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
-                    },
-                ],
-                max_tokens=8192,
-                temperature=0.2,
-            )
-
-            summary = response.choices[0].message.content or ""
-            if not summary.strip():
-                return "Compaction failed: LLM returned empty summary."
-
-        except Exception as exc:
-            return f"Compaction failed: {exc}"
-
         original_count = len(self.state.messages)
-        self.state.messages = [
-            *system_msgs,
-            {
-                "role": "user",
-                "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}",
-            },
-            *recent,
-        ]
+        result = self._run_context_compaction(force=True)
+        if result is None:
+            return "Compaction failed: no compaction provisioner is available."
+        if not result.compacted:
+            detail = f" ({result.error})" if result.error else ""
+            return f"Compaction skipped: {result.reason or 'nothing_to_compact'}{detail}."
+
         new_count = len(self.state.messages)
 
         return (
-            f"Compacted {original_count} messages → {new_count} messages.\n"
-            f"Summarized {len(older)} older messages, kept {len(recent)} recent + {len(system_msgs)} system."
+            f"Compacted {original_count} messages -> {new_count} messages.\n"
+            f"Summarized {result.summarized_count} older messages, kept {result.kept_count} live messages."
         )
 
     def _handle_skill_invoke(self, args: str) -> None:

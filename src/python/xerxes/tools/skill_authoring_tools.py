@@ -82,6 +82,7 @@ def _validate_skill_md(content: str) -> tuple[bool, str]:
     metadata: dict[str, Any] = {}
     try:
         import yaml
+
         metadata = yaml.safe_load(fm_text) or {}
     except ImportError:
         # Fallback parsing
@@ -275,26 +276,31 @@ class skill_list:
             try:
                 content = skill_md.read_text()
                 skill = parse_skill_md(content, skill_md)
-                skills.append({
-                    "name": skill.name,
-                    "description": skill.metadata.description,
-                    "version": skill.metadata.version,
-                    "tags": skill.metadata.tags,
-                    "path": str(skill_md),
-                })
+                skills.append(
+                    {
+                        "name": skill.name,
+                        "description": skill.metadata.description,
+                        "version": skill.metadata.version,
+                        "tags": skill.metadata.tags,
+                        "path": str(skill_md),
+                    }
+                )
             except Exception as e:
-                skills.append({
-                    "name": subdir.name,
-                    "description": f"Parse error: {e}",
-                    "version": "?",
-                    "tags": [],
-                    "path": str(skill_md),
-                })
+                skills.append(
+                    {
+                        "name": subdir.name,
+                        "description": f"Parse error: {e}",
+                        "version": "?",
+                        "tags": [],
+                        "path": str(skill_md),
+                    }
+                )
 
         if not skills:
             return "No skills found."
 
         import json
+
         return json.dumps(skills, indent=2, ensure_ascii=False)
 
 
@@ -369,7 +375,9 @@ def _generate_skill_md(
         body_clean = "# When to use\n\n" + body_clean
 
     if "# How to use" not in body_clean:
-        body_clean += "\n\n# How to use\n\n1. Analyze the user's request\n2. Apply the appropriate tools\n3. Verify the result\n"
+        body_clean += (
+            "\n\n# How to use\n\n1. Analyze the user's request\n2. Apply the appropriate tools\n3. Verify the result\n"
+        )
 
     # Build frontmatter
     fm_lines = [

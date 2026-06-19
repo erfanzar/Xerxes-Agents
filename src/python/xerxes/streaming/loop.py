@@ -38,6 +38,11 @@ import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
 from typing import Any
 
+from ..context.compaction_provisioner import (
+    CompactionProvisioner,
+    compaction_summary_agent_from_config,
+)
+from ..llms.registry import get_context_limit
 from .events import (
     AgentState,
     PermissionRequest,
@@ -216,111 +221,81 @@ def _parse_thinking_tags(
 logger = logging.getLogger(__name__)
 
 
-def _tool_call_ids(message: dict[str, Any]) -> set[str]:
-    """Return provider tool-call ids declared by an assistant message."""
-    return {str(tc.get("id")) for tc in message.get("tool_calls") or [] if tc.get("id")}
+def _compaction_provisioner(
+    *,
+    config: dict[str, Any],
+    model: str,
+    budget_limit: int | None = None,
+) -> CompactionProvisioner:
+    """Build the shared compaction provisioner for the streaming loop."""
+    context_limit = int(
+        config.get("max_context_tokens") or get_context_limit(model) or budget_limit or _DEFAULT_TOKEN_BUDGET
+    )
+    threshold_tokens = config.get("compaction_threshold_tokens")
+    if threshold_tokens is None and budget_limit is not None:
+        threshold_tokens = min(int(budget_limit), int(context_limit * float(config.get("compaction_threshold", 0.75))))
+    target_tokens = config.get("compaction_target_tokens")
+    summary_agent = compaction_summary_agent_from_config(model, config)
+    return CompactionProvisioner(
+        model=model,
+        max_context_tokens=context_limit,
+        threshold_tokens=int(threshold_tokens) if threshold_tokens is not None else None,
+        target_tokens=int(target_tokens) if target_tokens is not None else None,
+        threshold_ratio=float(config.get("compaction_threshold", 0.75)),
+        target_ratio=float(config.get("compaction_target", 0.5)),
+        summary_agent=summary_agent,
+    )
 
 
-def _recent_start_preserving_tool_pairs(messages: list[dict[str, Any]], preserve_recent: int) -> int:
-    """Return a tail-window start that does not orphan leading tool results."""
-    start = max(0, len(messages) - preserve_recent)
-    if start == 0 or start >= len(messages):
-        return start
-
-    if messages[start].get("role") != "tool":
-        return start
-
-    tool_run_start = start
-    while tool_run_start > 0 and messages[tool_run_start - 1].get("role") == "tool":
-        tool_run_start -= 1
-
-    assistant_index = tool_run_start - 1
-    if assistant_index >= 0 and messages[assistant_index].get("role") == "assistant":
-        expected_ids = _tool_call_ids(messages[assistant_index])
-        leading_tool_ids = {
-            str(msg.get("tool_call_id"))
-            for msg in messages[tool_run_start:]
-            if msg.get("role") == "tool" and msg.get("tool_call_id")
-        }
-        if expected_ids & leading_tool_ids:
-            return assistant_index
-
-    while start < len(messages) and messages[start].get("role") == "tool":
-        start += 1
-    return start
-
-
-def _try_compact_messages(state: AgentState, budget_limit: int) -> bool:
-    """Try to compact messages to free up token budget.
-
-    Removes old tool results and subagent outputs, keeping only the most
-    recent messages and system messages.
-
-    Returns True if compaction was performed.
-    """
-    messages = state.messages
-    if len(messages) < 6:
+def _try_compact_messages(
+    state: AgentState,
+    budget_limit: int,
+    config: dict[str, Any] | None = None,
+    model: str | None = None,
+    *,
+    force: bool = True,
+) -> bool:
+    """Try to compact messages using an agent-written summary."""
+    cfg = config or {}
+    selected_model = model or str(cfg.get("model", ""))
+    provisioner = _compaction_provisioner(config=cfg, model=selected_model, budget_limit=budget_limit)
+    provision = provisioner.compact(state.messages, force=force)
+    if not provision.compacted:
         return False
 
-    system_msgs = [m for m in messages if m.get("role") == "system"]
-    conv_msgs = [m for m in messages if m.get("role") != "system"]
-
-    if len(conv_msgs) < 4:
-        return False
-
-    # Keep the recent tail, expanding it backward when the raw cut lands in a
-    # tool-result batch. OpenAI-compatible providers reject a `tool` message if
-    # its matching assistant `tool_calls` entry was compacted away.
-    preserve_recent = 4
-    recent_start = _recent_start_preserving_tool_pairs(conv_msgs, preserve_recent)
-    older = conv_msgs[:recent_start]
-    recent = conv_msgs[recent_start:]
-
-    if not older or not recent:
-        return False
-
-    # Summarize older messages into a single context message
-    summary_parts = []
-    for msg in older:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            text_parts = []
-            for p in content:
-                if isinstance(p, dict):
-                    text_parts.append(p.get("text", str(p)))
-                else:
-                    text_parts.append(str(p))
-            content = " | ".join(text_parts)
-        # Truncate very long content
-        if len(content) > 500:
-            content = content[:500] + "..."
-        summary_parts.append(f"{role}: {content}")
-
-    summary = "\n".join(summary_parts)
-    if len(summary) > 4000:
-        summary = summary[:4000] + "..."
-
-    compacted_msg = {
-        "role": "user",
-        "content": (
-            f"[Previous context summary ({len(older)} messages condensed):\n"
-            f"{summary}\n"
-            f"End of summary. Continuing from recent messages below.]"
-        ),
-    }
-
-    state.messages = [
-        *system_msgs,
-        compacted_msg,
-        *recent,
-    ]
-
-    # Reset token counts since we can't know exact counts without re-counting
-    # The next turn will recalculate
+    state.messages = provision.messages
     state.total_input_tokens = 0
     state.total_output_tokens = 0
+    state.metadata["last_compaction"] = {
+        "tokens_before": provision.tokens_before,
+        "tokens_after": provision.tokens_after,
+        "summarized_count": provision.summarized_count,
+        "kept_count": provision.kept_count,
+    }
+    return True
 
+
+def _compact_before_append(
+    state: AgentState,
+    messages: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    model: str,
+) -> bool:
+    """Compact existing context before appending ``messages`` when needed."""
+    provisioner = _compaction_provisioner(config=config, model=model)
+    provision = provisioner.compact_before_append(state.messages, messages)
+    if not provision.compacted:
+        return False
+    state.messages = provision.messages
+    state.total_input_tokens = 0
+    state.total_output_tokens = 0
+    state.metadata["last_compaction"] = {
+        "tokens_before": provision.tokens_before,
+        "tokens_after": provision.tokens_after,
+        "summarized_count": provision.summarized_count,
+        "kept_count": provision.kept_count,
+    }
     return True
 
 
@@ -417,7 +392,6 @@ def run(
 
     from xerxes.llms.registry import detect_provider, get_provider_config
 
-    state.messages.append({"role": "user", "content": user_message})
     state.metadata["model"] = config.get("model", "")
 
     perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
@@ -430,6 +404,17 @@ def run(
         provider_name = "openai"
         provider_cfg = get_provider_config("openai")
 
+    initial_user_message = {"role": "user", "content": user_message}
+    precompacted_initial = _compact_before_append(
+        state,
+        [initial_user_message],
+        config=config,
+        model=model,
+    )
+    if precompacted_initial:
+        yield TextChunk("\n[Context compacted before adding the new turn.]\n")
+    state.messages.append(initial_user_message)
+
     for _turn in range(MAX_TOOL_TURNS):
         if cancel_check and cancel_check():
             # Surface the cancellation so the caller can render a "stopped"
@@ -441,7 +426,7 @@ def run(
         cumulative = state.total_input_tokens + state.total_output_tokens
         if cumulative >= budget_limit:
             # Try to compact context before giving up
-            compacted = _try_compact_messages(state, budget_limit)
+            compacted = _try_compact_messages(state, budget_limit, config=config, model=model)
             if compacted:
                 yield TextChunk("\n[Context compacted to free up tokens. Continuing...]")
                 # Recalculate after compaction
@@ -465,23 +450,25 @@ def run(
             pending = steer_drain()
             if pending:
                 joined = "\n\n".join(pending)
-                state.messages.append(
-                    {
-                        "role": "user",
-                        "content": f"[mid-turn steer from user]\n{joined}",
-                    }
-                )
+                steer_message = {
+                    "role": "user",
+                    "content": f"[mid-turn steer from user]\n{joined}",
+                }
+                if _compact_before_append(state, [steer_message], config=config, model=model):
+                    yield TextChunk("\n[Context compacted before applying steer.]\n")
+                state.messages.append(steer_message)
                 yield TextChunk(f"\n[Steer applied: {pending[0][:80]}{'…' if len(pending[0]) > 80 else ''}]\n")
 
         if agent_event_drain is not None:
             agent_lines = agent_event_drain()
             if agent_lines:
-                state.messages.append(
-                    {
-                        "role": "user",
-                        "content": "[sub-agent events]\n" + "\n".join(agent_lines),
-                    }
-                )
+                agent_event_message = {
+                    "role": "user",
+                    "content": "[sub-agent events]\n" + "\n".join(agent_lines),
+                }
+                if _compact_before_append(state, [agent_event_message], config=config, model=model):
+                    yield TextChunk("\n[Context compacted before adding sub-agent events.]\n")
+                state.messages.append(agent_event_message)
 
         state.turn_count += 1
 

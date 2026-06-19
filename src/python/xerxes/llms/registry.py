@@ -461,6 +461,7 @@ def get_context_limit(model: str) -> int:
         return _MODEL_CONTEXT_LIMITS[name]
     try:
         from ..runtime.pricing import _PRICING
+
         pricing = _PRICING.get(name)
         if pricing:
             return pricing.context_window

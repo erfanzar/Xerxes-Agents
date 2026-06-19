@@ -30,6 +30,8 @@ from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax as RichSyntax
 from rich.theme import Theme as RichTheme
 
+from .skin_engine import ROLE_NAMES, get_active_skin
+
 
 def _ansi_color_map() -> dict[str, str]:
     """Return the name-to-ANSI-256 mapping used by the bracket-tag parser."""
@@ -118,13 +120,16 @@ def _resolve_tag(tag: str) -> str | None:
             if stem in _ANSI_STYLE_MAP:
                 close_key = "/" + stem
                 out.append(_ANSI_STYLE_MAP.get(close_key, "\x1b[22m"))
-            elif stem in color_map:
+            elif stem in color_map or stem in ROLE_NAMES:
                 out.append("\x1b[39m")
         return "".join(out) if out else None
 
     for p in parts:
         if p in _ANSI_STYLE_MAP:
             out.append(_ANSI_STYLE_MAP[p])
+        elif p in ROLE_NAMES:
+            # Skin role tag (e.g. [primary], [tool_name]) -> active skin 24-bit color.
+            out.append(get_active_skin().fg(p))
         elif p in color_map:
             idx = _css_to_ansi(p)
             if idx:
@@ -177,36 +182,57 @@ def text_to_ansi_escaped(text: str) -> str:
     return _prompt_text_to_ansi(text)
 
 
+def _skin_markdown_theme() -> RichTheme:
+    """Build the Markdown Rich theme from the active skin.
+
+    Headers and list bullets take the ``primary`` role, links the ``accent``
+    role, so assistant responses pick up the active palette. Code/quote styling
+    stays neutral (``dim``) to keep highlighted blocks legible."""
+    skin = get_active_skin()
+    primary = skin.color("primary")
+    accent = skin.color("accent")
+    return RichTheme(
+        {
+            "markdown.code": "dim",
+            "markdown.code_block": "dim",
+            "markdown.fence": "dim",
+            "markdown.link": f"{accent} underline",
+            "markdown.h1": f"bold {primary}",
+            "markdown.h2": f"bold {primary}",
+            "markdown.h3": f"bold {primary}",
+            "markdown.h4": f"bold {accent}",
+            "markdown.h5": f"bold {accent}",
+            "markdown.h6": f"bold {accent}",
+            "markdown.quote": "italic dim",
+            "markdown.list.bullet": primary,
+            "markdown.list.number": primary,
+            "markdown.em": "italic",
+            "markdown.strong": "bold",
+        }
+    )
+
+
 _rich_console: RichConsole | None = None
+
+
+def refresh_theme() -> None:
+    """Drop the cached Rich console so the Markdown theme rebuilds.
+
+    Call after the active skin changes so subsequent ``print_markdown`` /
+    ``print_syntax`` output picks up the new palette."""
+    global _rich_console
+    _rich_console = None
 
 
 def _get_rich_console() -> RichConsole:
     """Return a lazily-initialized process-wide :class:`RichConsole`.
 
-    Configured with a Markdown-tuned theme and the live terminal width.
+    Configured with a skin-driven Markdown theme and the live terminal width.
     Cached so theme construction happens once per process."""
     global _rich_console
     if _rich_console is None:
         _rich_console = RichConsole(
-            theme=RichTheme(
-                {
-                    "markdown.code": "dim",
-                    "markdown.code_block": "dim",
-                    "markdown.fence": "dim",
-                    "markdown.link": "cyan underline",
-                    "markdown.h1": "bold",
-                    "markdown.h2": "bold",
-                    "markdown.h3": "bold",
-                    "markdown.h4": "bold",
-                    "markdown.h5": "bold",
-                    "markdown.h6": "bold",
-                    "markdown.quote": "italic dim",
-                    "markdown.list.bullet": "cyan",
-                    "markdown.list.number": "cyan",
-                    "markdown.em": "italic",
-                    "markdown.strong": "bold",
-                }
-            ),
+            theme=_skin_markdown_theme(),
             force_terminal=True,
             width=shutil.get_terminal_size().columns,
         )
@@ -240,6 +266,7 @@ def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
         width=width,
         record=False,
         soft_wrap=True,
+        theme=_skin_markdown_theme(),
     )
     console.print(RichMarkdown(text, code_theme="monokai"))
 

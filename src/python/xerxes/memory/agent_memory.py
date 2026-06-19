@@ -259,13 +259,13 @@ class AgentMemory:
         if result:
             return (
                 "MEMORY INSTRUCTION: You have persistent memory. ALWAYS read from memory at the start "
-                "of each session and ALWAYS write important observations to memory.\n\n"
-                + result
+                "of each session and ALWAYS write important observations to memory.\n\n" + result
             )
         return ""
 
     def _now(self) -> str:
         from datetime import UTC, datetime
+
         return datetime.now(UTC).isoformat()
 
 

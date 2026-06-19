@@ -69,9 +69,9 @@ class TestUpdate:
         assert isinstance(m, update.InstallMode)
 
     def test_semver_gt_basic(self):
-        assert update._semver_gt("0.2.1", "0.2.0") is True
-        assert update._semver_gt("0.2.0", "0.2.0") is False
-        assert update._semver_gt("0.1.99", "0.2.0") is False
+        assert update._semver_gt("0.2.2", "0.2.1") is True
+        assert update._semver_gt("0.2.1", "0.2.1") is False
+        assert update._semver_gt("0.2.0", "0.2.1") is False
 
     def test_latest_pypi_version_parses_response(self):
         def handler(req):
@@ -95,7 +95,7 @@ class TestUpdate:
 
         c = httpx.Client(transport=httpx.MockTransport(handler))
         out = update.check_for_update(client=c)
-        # Installed is 0.2.0 in pyproject; latest mocked to 0.0.1 → no update.
+        # Installed is 0.2.1 in pyproject; latest mocked to 0.0.1 → no update.
         assert out is None
         c.close()
 

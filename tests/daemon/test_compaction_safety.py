@@ -5,13 +5,10 @@
 # You may obtain a copy of the License at
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
-"""Compaction + resume safety for the daemon session manager.
+"""Resume safety for the daemon session manager.
 
-* Compaction snaps the window start to a user-message boundary so a tail
-  slice can't begin on an orphan ``tool`` message (which would 400 the next
-  Anthropic request).
-* Evicted messages are archived to a sidecar so long sessions don't lose
-  history unrecoverably.
+* ``compact_if_needed`` no longer trims model messages; runtime compaction is
+  handled by the agent-backed provisioner before provider calls.
 * ``_repair_tool_pairs`` back-fills synthetic results for tool calls left
   orphaned by a mid-turn crash so ``xerxes -r`` rehydrates a valid history.
 """
@@ -46,11 +43,9 @@ def _mgr(tmp_path) -> SessionManager:
     return mgr
 
 
-def test_compaction_snaps_to_user_boundary(tmp_path):
+def test_compact_if_needed_preserves_model_messages(tmp_path):
     mgr = _mgr(tmp_path)
     s = _StubSession()
-    # keep=4, total=7 -> raw cut index 3 lands on a non-user message; the snap
-    # must advance to the next user message so no orphan tool_result leads.
     s.state.messages = [
         {"role": "user", "content": "u0"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "a", "name": "X", "input": {}}]},
@@ -60,17 +55,14 @@ def test_compaction_snaps_to_user_boundary(tmp_path):
         {"role": "assistant", "content": "", "tool_calls": [{"id": "b", "name": "Y", "input": {}}]},
         {"role": "tool", "tool_call_id": "b", "name": "Y", "content": "r2"},
     ]
-    assert mgr.compact_if_needed(s) is True
+    before = list(s.state.messages)
+    assert mgr.compact_if_needed(s) is False
+    assert s.state.messages == before
     assert s.state.messages[0]["role"] == "user"
-    # Converting must not raise and must start on a user message (no orphan).
-    out = messages_to_anthropic(s.state.messages)
-    assert out[0]["role"] == "user"
+    messages_to_anthropic(s.state.messages)
 
 
-def test_compaction_never_empties_window(tmp_path):
-    # Pathological: no user-message boundary in the tail (one assistant turn with
-    # a big parallel tool batch). The message trim must be skipped, not empty the
-    # window or leave a leading orphan tool_result.
+def test_compact_if_needed_never_empties_messages(tmp_path):
     mgr = _mgr(tmp_path)
     s = _StubSession()
     s.state.messages = [
@@ -82,19 +74,18 @@ def test_compaction_never_empties_window(tmp_path):
         *[{"role": "tool", "tool_call_id": f"c{i}", "name": "X", "content": "r"} for i in range(8)],
     ]
     before = list(s.state.messages)
-    mgr.compact_if_needed(s)
+    assert mgr.compact_if_needed(s) is False
     assert s.state.messages == before  # window preserved, not emptied
     assert len(s.state.messages) >= 1
 
 
-def test_compaction_archives_evicted(tmp_path):
+def test_compact_if_needed_does_not_archive_messages(tmp_path):
     mgr = _mgr(tmp_path)
     s = _StubSession()
     s.state.messages = [{"role": "user", "content": f"m{i}"} for i in range(10)]
-    assert mgr.compact_if_needed(s) is True
+    assert mgr.compact_if_needed(s) is False
     archive = tmp_path / "sess123.archive.jsonl"
-    assert archive.exists()
-    assert len(archive.read_text().strip().splitlines()) >= 1
+    assert not archive.exists()
 
 
 def test_repair_backfills_orphaned_tool_call():

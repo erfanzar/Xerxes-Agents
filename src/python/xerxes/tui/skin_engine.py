@@ -51,7 +51,34 @@ def hex_to_ansi_bg(hex_color: str) -> str:
     return f"\033[48;2;{r};{g};{b}m"
 
 
+# The shipped default palette is "Persepolis Lapis": a lapis-blue hero with a
+# gold-leaf rule, turquoise highlights, violet system voice and a slate neutral.
+# Tuned for legibility on a dark terminal (good contrast + colorblind separation).
 _DEFAULT_ROLES: dict[str, str] = {
+    "primary": "#4f86ff",  # lapis blue — the King's own authority
+    "accent": "#2fd4c4",  # faience turquoise — highlights / success
+    "warn": "#f0b429",  # gold leaf
+    "error": "#e0556b",  # carmine
+    "tool_name": "#a9c7ff",  # pale azure — tool-call labels
+    "system": "#c77dff",  # royal violet — system / meta voice
+    "muted": "#7b97b5",  # cool slate — de-emphasized text
+}
+
+_DEFAULT_BRANDING: dict[str, str] = {
+    "agent_name": "Xerxes-Agents",
+    # Kept short (<= the other banner info lines) so the side-by-side welcome
+    # banner does not widen past common terminal widths.
+    "welcome": "The court awaits your word.",
+    "goodbye": "The lamps are dimmed. Until the court reconvenes.",
+    "response_label": "xerxes",
+    "prompt_symbol": "❯",  # noqa: RUF001 — designed prompt glyph (U+276F), not a typo
+    "help_header": "Royal decrees",
+    "spinner_verbs": "inscribing,consulting,surveying,summoning,gilding,marshalling,decreeing,unrolling",
+}
+
+# The pre-reskin palette + branding, kept as a named skin so the classic Xerxes
+# look is recoverable via ``/skin classic`` or ``XERXES_SKIN=classic``.
+_CLASSIC_ROLES: dict[str, str] = {
     "primary": "#f7c948",
     "accent": "#3ddc97",
     "warn": "#ffb86c",
@@ -60,8 +87,7 @@ _DEFAULT_ROLES: dict[str, str] = {
     "system": "#a695e7",
     "muted": "#999999",
 }
-
-_DEFAULT_BRANDING: dict[str, str] = {
+_CLASSIC_BRANDING: dict[str, str] = {
     "agent_name": "Xerxes",
     "welcome": "Welcome to Xerxes",
     "goodbye": "see you next session",
@@ -73,6 +99,7 @@ _DEFAULT_BRANDING: dict[str, str] = {
 
 _BUILTIN_SKINS: dict[str, dict[str, str]] = {
     "default": dict(_DEFAULT_ROLES),
+    "classic": dict(_CLASSIC_ROLES),
     "high-contrast": {**_DEFAULT_ROLES, "primary": "#ffffff", "accent": "#00ffff", "muted": "#cccccc"},
     "dim": {**_DEFAULT_ROLES, "primary": "#bcbcbc", "accent": "#808080", "muted": "#444444"},
     "ares": {**_DEFAULT_ROLES, "primary": "#ff5e57", "accent": "#ff9f1a", "warn": "#feca57", "tool_name": "#ff7675"},
@@ -108,6 +135,7 @@ _BUILTIN_SKINS: dict[str, dict[str, str]] = {
 }
 
 _BUILTIN_BRANDING: dict[str, dict[str, str]] = {
+    "classic": dict(_CLASSIC_BRANDING),
     "ares": {
         **_DEFAULT_BRANDING,
         "agent_name": "Ares",
@@ -236,4 +264,55 @@ class SkinEngine:
         return self.load(self._active)
 
 
-__all__ = ["Skin", "SkinEngine", "hex_to_ansi_bg", "hex_to_ansi_fg", "hex_to_rgb"]
+# Canonical role names a renderer may request from the active skin. Kept here so
+# the console tag-parser and other consumers share one vocabulary.
+ROLE_NAMES: tuple[str, ...] = ("primary", "accent", "warn", "error", "tool_name", "system", "muted")
+
+_active_skin: Skin | None = None
+
+
+def get_active_skin() -> Skin:
+    """Return the process-wide active :class:`Skin`, loading it once on demand.
+
+    The first call resolves the skin named by ``$XERXES_SKIN`` (falling back to
+    ``default`` — the Persepolis Lapis palette) so the live TUI renders through
+    the skin engine without every call site threading a ``Skin`` around."""
+    global _active_skin
+    if _active_skin is None:
+        import os
+
+        name = os.environ.get("XERXES_SKIN", "").strip() or "default"
+        engine = SkinEngine()
+        try:
+            _active_skin = engine.load(name)
+        except KeyError:
+            _active_skin = engine.load("default")
+    return _active_skin
+
+
+def set_active_skin(skin: Skin | str) -> Skin:
+    """Set (and return) the process-wide active skin.
+
+    Accepts a :class:`Skin` or a skin name; unknown names raise ``KeyError``
+    via :meth:`SkinEngine.load`."""
+    global _active_skin
+    _active_skin = SkinEngine().load(skin) if isinstance(skin, str) else skin
+    return _active_skin
+
+
+def active_fg(role: str) -> str:
+    """Return the active skin's 24-bit foreground escape for ``role``."""
+    return get_active_skin().fg(role)
+
+
+__all__ = [
+    "ROLE_NAMES",
+    "Skin",
+    "SkinEngine",
+    "active_fg",
+    "get_active_skin",
+    "hex_to_ansi_bg",
+    "hex_to_ansi_fg",
+    "hex_to_rgb",
+    "set_active_skin",
+]

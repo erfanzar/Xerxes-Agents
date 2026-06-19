@@ -62,7 +62,7 @@ _CUA_DRIVER_ARGS = ["mcp"]  # stdio MCP transport
 # Regex to parse list_windows text output lines:
 #   "- AppName (pid 12345) "Title" [window_id: 67890]"
 _WINDOW_LINE_RE = re.compile(
-    r'^-\s+(.+?)\s+\(pid\s+(\d+)\)\s+.*\[window_id:\s+(\d+)\]',
+    r"^-\s+(.+?)\s+\(pid\s+(\d+)\)\s+.*\[window_id:\s+(\d+)\]",
     re.MULTILINE,
 )
 
@@ -77,7 +77,7 @@ _WINDOW_LINE_RE = re.compile(
 # Group 3: quoted label (classic format)
 # Group 4: id= label (new format)
 _ELEMENT_LINE_RE = re.compile(
-    r'^\s*(?:-\s+)?\[(\d+)\]\s+(\w+)(?:\s+"([^"]*)"|(?:\s+\(\d+\))?\s+id=([^\s\[\]]*))?' ,
+    r'^\s*(?:-\s+)?\[(\d+)\]\s+(\w+)(?:\s+"([^"]*)"|(?:\s+\(\d+\))?\s+id=([^\s\[\]]*))?',
     re.MULTILINE,
 )
 
@@ -85,6 +85,7 @@ _ELEMENT_LINE_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _is_macos() -> bool:
     return sys.platform == "darwin"
@@ -98,8 +99,8 @@ def cua_driver_binary_available() -> bool:
 def cua_driver_install_hint() -> str:
     return (
         "cua-driver is not installed. Install with:\n"
-        "  /bin/bash -c \"$(curl -fsSL "
-        "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)\"\n"
+        '  /bin/bash -c "$(curl -fsSL '
+        'https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh)"\n'
         "Or set XERXES_CUA_DRIVER_CMD to the binary path."
     )
 
@@ -108,11 +109,13 @@ def _parse_windows_from_text(text: str) -> list[dict[str, Any]]:
     """Parse window records from list_windows text output."""
     windows = []
     for m in _WINDOW_LINE_RE.finditer(text):
-        windows.append({
-            "app": m.group(1).strip(),
-            "pid": int(m.group(2)),
-            "window_id": int(m.group(3)),
-        })
+        windows.append(
+            {
+                "app": m.group(1).strip(),
+                "pid": int(m.group(2)),
+                "window_id": int(m.group(3)),
+            }
+        )
     return windows
 
 
@@ -134,6 +137,7 @@ def _b64_from_png_bytes(png_bytes: bytes) -> str:
 # ---------------------------------------------------------------------------
 # CuaBackend
 # ---------------------------------------------------------------------------
+
 
 class CuaBackend(ComputerUseBackend):
     """Sync wrapper around the async cua-driver MCP client.
@@ -192,9 +196,7 @@ class CuaBackend(ComputerUseBackend):
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
         except ImportError as exc:
-            raise RuntimeError(
-                "mcp SDK not installed. Run: uv pip install 'mcp>=1.0.0'"
-            ) from exc
+            raise RuntimeError("mcp SDK not installed. Run: uv pip install 'mcp>=1.0.0'") from exc
 
         server_params = StdioServerParameters(
             command=_CUA_DRIVER_CMD,

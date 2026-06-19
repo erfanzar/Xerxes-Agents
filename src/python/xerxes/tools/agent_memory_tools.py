@@ -47,7 +47,14 @@ class agent_memory_read:
                 "properties": {
                     "key": {
                         "type": "string",
-                        "enum": ["user_taste", "project_context", "skill_journal", "self_reflection", "tool_usage_patterns", "all"],
+                        "enum": [
+                            "user_taste",
+                            "project_context",
+                            "skill_journal",
+                            "self_reflection",
+                            "tool_usage_patterns",
+                            "all",
+                        ],
                         "description": "Which memory file to read. 'all' returns everything.",
                     },
                 },
@@ -80,7 +87,13 @@ class agent_memory_write:
                 "properties": {
                     "key": {
                         "type": "string",
-                        "enum": ["user_taste", "project_context", "skill_journal", "self_reflection", "tool_usage_patterns"],
+                        "enum": [
+                            "user_taste",
+                            "project_context",
+                            "skill_journal",
+                            "self_reflection",
+                            "tool_usage_patterns",
+                        ],
                     },
                     "content": {
                         "type": "string",

@@ -6,7 +6,11 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.0 — 2026-04-16 (current)
+## 0.2.1 — 2026-06-19 (current)
+
+- Bumped the package/runtime version to 0.2.1.
+
+## 0.2.0 — 2026-04-16
 
 ### Project rename and restructure
 

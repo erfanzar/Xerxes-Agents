@@ -53,6 +53,14 @@ def _make_session(active_turn: str = "") -> DaemonSession:
     return sess
 
 
+class _Sessions:
+    def __init__(self, sessions: dict[str, DaemonSession]) -> None:
+        self._sessions = sessions
+
+    def get(self, key: str) -> DaemonSession | None:
+        return self._sessions.get(key)
+
+
 @pytest.fixture
 def daemon(tmp_path):
     server = DaemonServer.__new__(DaemonServer)
@@ -78,6 +86,40 @@ def test_steer_with_active_turn_queues_to_session(daemon):
     assert drained == ["course-correct now"]
     assert sess.state.messages == []
     # Wire event emitted for the TUI to render.
+    assert any(et == "steer_input" for (et, _) in rec.events)
+
+
+def test_direct_steer_rpc_queues_to_connection_session(daemon):
+    current = _make_session(active_turn="wrong-turn")
+    current.key = "tui:default"
+    target = _make_session(active_turn="turn-abc")
+    target.key = "tui:target"
+    daemon.sessions = _Sessions({"tui:default": current, "tui:target": target})
+
+    rec = _Recorder()
+    daemon._connection_sessions = {rec: "tui:target"}
+    result = _run(daemon._handle_rpc("steer", {"content": "course-correct now"}, rec))
+
+    assert result == {"ok": True}
+    assert target.drain_steers() == ["course-correct now"]
+    assert current.drain_steers() == []
+    assert target.state.messages == []
+    assert any(et == "steer_input" for (et, _) in rec.events)
+
+
+def test_direct_steer_rpc_without_active_turn_lands_on_connection_session_messages(daemon):
+    target = _make_session(active_turn="")
+    target.key = "tui:target"
+    daemon.sessions = _Sessions({"tui:target": target})
+
+    rec = _Recorder()
+    daemon._connection_sessions = {rec: "tui:target"}
+    result = _run(daemon._handle_rpc("turn.steer", {"content": "use the simpler path"}, rec))
+
+    assert result == {"ok": True}
+    assert target.drain_steers() == []
+    assert len(target.state.messages) == 1
+    assert "use the simpler path" in target.state.messages[0]["content"]
     assert any(et == "steer_input" for (et, _) in rec.events)
 
 

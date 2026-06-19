@@ -216,9 +216,10 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
         target_tokens: int,
         model: str = "gpt-4",
         preserve_system: bool = True,
-        preserve_recent: int = 3,
+        live_tail_hint: int = 3,
         llm_client: Any | None = None,
         tail_token_budget: int | None = None,
+        **legacy_kwargs: Any,
     ):
         """Configure the strategy and compute the tail budget when omitted.
 
@@ -230,7 +231,8 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
             target_tokens=target_tokens,
             model=model,
             preserve_system=preserve_system,
-            preserve_recent=preserve_recent,
+            live_tail_hint=live_tail_hint,
+            **legacy_kwargs,
         )
         self.llm_client = llm_client
         self._previous_summary: str | None = None
@@ -289,7 +291,7 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
         # the model to answer.
         if not tail_msgs:
             tail_msgs = [pruned[-1]]
-            middle_msgs = pruned[:-1]
+            middle_msgs = pruned[: len(pruned) - len(tail_msgs)]
 
         stats["tail_messages"] = len(tail_msgs)
         stats["middle_messages"] = len(middle_msgs)
@@ -301,6 +303,11 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
             return result, stats
 
         summary = self._summarize(middle_msgs, self._previous_summary)
+        if not summary:
+            stats["compacted_count"] = len(messages)
+            stats["summary_created"] = False
+            stats["reason"] = "no_summary_agent"
+            return messages, stats
         self._previous_summary = summary
         self._compaction_count += 1
 
@@ -323,7 +330,7 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
         messages: list[dict[str, Any]],
         previous_summary: str | None,
     ) -> str:
-        """Summarize ``messages`` via the LLM, falling back to excerpts on failure."""
+        """Summarize ``messages`` via the LLM."""
         prompt = _build_summary_prompt(messages, previous_summary)
 
         if self.llm_client:
@@ -334,27 +341,7 @@ class AdvancedCompressionStrategy(BaseCompactionStrategy):
             except Exception as exc:
                 logger.warning("LLM summarization failed: %s", exc)
 
-        lines = ["[FALLBACK SUMMARY] Key points from earlier conversation:"]
-        for msg in messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")[:200]
-            if content:
-                lines.append(f"  {role}: {content}")
-        fallback = "\n".join(lines)
-
-        # The fallback can be larger than the content it replaces (it adds a
-        # "  role: " prefix per message while only truncating per-message at
-        # 200 chars). Cap it to the summary budget and never let it exceed the
-        # middle content it is meant to compress, so compaction always shrinks.
-        middle_chars = sum(len(m.get("content", "") or "") for m in messages)
-        budget_tokens = min(
-            _SUMMARY_TOKENS_CEILING,
-            max(_MIN_SUMMARY_TOKENS, int((middle_chars / _CHARS_PER_TOKEN) * _SUMMARY_RATIO)),
-        )
-        max_chars = min(budget_tokens * _CHARS_PER_TOKEN, middle_chars)
-        if len(fallback) > max_chars:
-            fallback = fallback[:max_chars]
-        return fallback
+        return ""
 
     def _call_llm(self, prompt: str) -> str | None:
         """Run ``generate_completion`` on the bound client; return text or ``None``."""

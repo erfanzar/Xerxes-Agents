@@ -136,6 +136,31 @@ class TestToolCalls:
 class TestBudgetEnforcement:
     """Token budget enforcement inside the streaming loop."""
 
+    @staticmethod
+    def _summary_agent(messages: list[dict[str, Any]], _previous_summary: str | None) -> str:
+        return "agent summary"
+
+    def _compaction_config(self) -> dict[str, Any]:
+        return {
+            "model": "gpt-4o",
+            "compaction_summary_agent": self._summary_agent,
+            "compaction_target_tokens": 80,
+        }
+
+    def _assert_valid_tool_sequence(self, messages: list[dict]) -> None:
+        pending: set[str] = set()
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant":
+                assert not pending
+                pending = {tc["id"] for tc in message.get("tool_calls") or []}
+            elif role == "tool":
+                assert message["tool_call_id"] in pending
+                pending.remove(message["tool_call_id"])
+            else:
+                assert not pending
+        assert not pending
+
     def test_budget_exhausted_mid_turn(self, fake_llm):
         fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, in_tokens=60000, out_tokens=10000)
         fake_llm.add_tool_call("ReadFile", {"file_path": "b.py"}, in_tokens=60000, out_tokens=10000)
@@ -155,8 +180,8 @@ class TestBudgetEnforcement:
         state = AgentState(
             messages=[
                 {"role": "system", "content": "system"},
-                {"role": "user", "content": "scan repository"},
-                {"role": "assistant", "content": "starting"},
+                {"role": "user", "content": "scan repository " * 200},
+                {"role": "assistant", "content": "starting " * 200},
                 {"role": "assistant", "content": "", "tool_calls": tool_calls},
                 *[
                     {
@@ -172,7 +197,7 @@ class TestBudgetEnforcement:
             total_output_tokens=100_000,
         )
 
-        assert _try_compact_messages(state, budget_limit=100_000) is True
+        assert _try_compact_messages(state, budget_limit=100_000, config=self._compaction_config()) is True
 
         seen_tool_call_ids: set[str] = set()
         for message in state.messages:
@@ -183,6 +208,56 @@ class TestBudgetEnforcement:
 
         assert state.messages[-9]["role"] == "assistant"
         assert len(state.messages[-9]["tool_calls"]) == 8
+        self._assert_valid_tool_sequence(state.messages)
+
+    def test_budget_compaction_drops_orphan_tool_results(self):
+        state = AgentState(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "old request " * 200},
+                {"role": "assistant", "content": "old answer " * 200},
+                {"role": "user", "content": "recent request"},
+                {"role": "assistant", "content": "recent answer"},
+                {"role": "user", "content": "tail request"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "missing-parent",
+                    "name": "TaskOutputTool",
+                    "content": "orphan result",
+                },
+            ],
+            total_input_tokens=100_000,
+            total_output_tokens=100_000,
+        )
+
+        assert _try_compact_messages(state, budget_limit=100_000, config=self._compaction_config()) is True
+
+        assert all(message.get("tool_call_id") != "missing-parent" for message in state.messages)
+        self._assert_valid_tool_sequence(state.messages)
+
+    def test_budget_compaction_backfills_missing_recent_tool_result(self):
+        state = AgentState(
+            messages=[
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "old request " * 200},
+                {"role": "assistant", "content": "old answer " * 200},
+                {"role": "user", "content": "recent request"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "call_missing", "name": "TaskOutputTool", "input": {"task_id": "t1"}}],
+                },
+                {"role": "user", "content": "next request"},
+            ],
+            total_input_tokens=100_000,
+            total_output_tokens=100_000,
+        )
+
+        assert _try_compact_messages(state, budget_limit=100_000, config=self._compaction_config()) is True
+
+        tool_messages = [message for message in state.messages if message.get("role") == "tool"]
+        assert any(message.get("tool_call_id") == "call_missing" for message in tool_messages)
+        self._assert_valid_tool_sequence(state.messages)
 
 
 class TestCancellation:

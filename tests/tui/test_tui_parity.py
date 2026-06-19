@@ -269,8 +269,8 @@ class TestSkinBranding:
     def test_default_branding_present(self):
         engine = SkinEngine()
         skin = engine.load("default")
-        assert skin.label("agent_name") == "Xerxes"
-        assert skin.label("prompt_symbol") == "›"  # noqa: RUF001 — designed glyph (U+203A)
+        assert skin.label("agent_name") == "Xerxes-Agents"
+        assert skin.label("prompt_symbol") == "❯"  # noqa: RUF001 — designed glyph (U+276F)
 
     def test_ares_brand_overrides(self):
         engine = SkinEngine()
@@ -697,7 +697,7 @@ class TestBackgroundSessions:
 
 class TestBanner:
     def test_full_banner_includes_logo(self):
-        data = BannerData(version="0.2.0", model="claude-opus-4-7", session_id="abcd1234ef", workspace="/proj")
+        data = BannerData(version="0.2.1", model="claude-opus-4-7", session_id="abcd1234ef", workspace="/proj")
         out = render_banner(data, terminal_width=120)
         assert FULL_LOGO.strip().splitlines()[0] in out
         assert "claude-opus-4-7" in out

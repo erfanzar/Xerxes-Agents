@@ -73,6 +73,67 @@ class TestPersistence:
         assert sess.state.turn_count == 1
         assert sess.state.total_input_tokens == 123
 
+    def test_metadata_persists_for_resume_titles(self, tmp_path, store):
+        sess = _seed_session(store, "abc12345", messages=[{"role": "user", "content": "named"}], turns=1)
+        sess.state.metadata["title"] = "release notes"
+        store.save(sess)
+
+        config = DaemonConfig()
+        config.workspace = {"root": str(tmp_path / "agents")}
+        sm2 = SessionManager(WorkspaceManager(config), store_dir=tmp_path / "sessions")
+
+        rehydrated = sm2.open("abc12345")
+        assert rehydrated.state.metadata["title"] == "release notes"
+        matches = sm2.find_saved("release notes")
+        assert len(matches) == 1
+        assert matches[0]["session_id"] == "abc12345"
+        assert matches[0]["title"] == "release notes"
+
+    def test_missing_title_uses_first_prompt_for_saved_listing(self, store):
+        sess = _seed_session(
+            store,
+            "abc12345",
+            messages=[
+                {"role": "user", "content": "scan the project and explain the compaction flow"},
+                {"role": "assistant", "content": "summary"},
+            ],
+            turns=1,
+        )
+        assert sess.state.metadata["title"] == "scan the project and explain the compaction flow"
+
+        records = store.list_saved()
+        assert records[0]["title"] == "scan the project and explain the compaction flow"
+        assert store.find_saved("scan the project")[0]["session_id"] == "abc12345"
+
+    def test_save_skips_empty_session(self, tmp_path, store):
+        sess = store.open("tui:default")
+
+        store.save(sess)
+
+        assert not (tmp_path / "sessions" / f"{sess.id}.json").exists()
+        assert store.list_saved() == []
+
+    def test_list_saved_filters_existing_empty_records(self, tmp_path, store):
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        (sessions_dir / "empty.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "empty",
+                    "key": "tui:default",
+                    "agent_id": "default",
+                    "updated_at": "2026-06-19T00:00:00Z",
+                    "messages": [],
+                    "turn_count": 0,
+                }
+            )
+        )
+        _seed_session(store, "abcd1234", messages=[{"role": "user", "content": "real chat"}], turns=1)
+
+        records = store.list_saved()
+
+        assert [record["session_id"] for record in records] == ["abcd1234"]
+
     def test_unknown_key_creates_fresh(self, store):
         sess = store.open("never-saved")
         assert sess.state.messages == []

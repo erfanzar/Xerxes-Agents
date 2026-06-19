@@ -24,9 +24,9 @@ Algorithm, in order:
 5. Support iterative merging — if a prior summary exists at the
    head/middle boundary, fold the new summary into it.
 
-The summarizer is a ``Callable[[list[message], int], str]`` so tests
-can substitute trivial implementations. :func:`naive_summarizer`
-ships as a fallback when no LLM is wired.
+The summarizer is a ``Callable[[list[message], int], str]``. When no
+summarizer is wired, the compressor may still prune oversized tool
+results but will not rewrite conversation messages locally.
 """
 
 from __future__ import annotations
@@ -44,13 +44,7 @@ Summarizer = Callable[[list[dict[str, Any]], int], str]
 
 
 def naive_summarizer(messages: list[dict[str, Any]], budget_tokens: int) -> str:
-    """Fallback summarizer that emits one ``role: first line`` per message.
-
-    Not a real summary — just enough text for tests and to keep the
-    pipeline producing valid output when no auxiliary LLM is wired.
-    ``budget_tokens`` is accepted for interface compatibility but
-    ignored.
-    """
+    """Test summarizer that emits one ``role: first line`` per message."""
 
     lines: list[str] = []
     for m in messages:
@@ -132,7 +126,7 @@ class ContextCompressor:
         self.summary_min_tokens = int(summary_min_tokens)
         self.summary_max_tokens = int(summary_max_tokens)
         self.summary_budget_ratio = float(summary_budget_ratio)
-        self._summarizer: Summarizer = summarizer or naive_summarizer
+        self._summarizer = summarizer
         self._token_counter = token_counter or SmartTokenCounter(model=model)
 
     # ---------------------------- token counting
@@ -234,13 +228,27 @@ class ContextCompressor:
                 metadata={"strategy": "no-middle"},
             )
 
+        if self._summarizer is None:
+            return CompressionResult(
+                messages=pruned,
+                compressed=pruned_count > 0,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after_prune,
+                protected_first=head_n,
+                protected_last=tail_n,
+                compressed_count=0,
+                pruned_tool_results=pruned_count,
+                summary_tokens=0,
+                metadata={"strategy": "no-summary-agent"},
+            )
+
         # Step 4: detect a prior summary; if present, merge with it.
         # Summaries usually sit right after the protected head (because
         # that's where the previous pass inserted one). Check both places.
         prior_summary: str | None = None
         if head and self._looks_like_prior_summary(head[-1].get("content")):
             prior_summary = head[-1].get("content")
-            head = head[:-1]
+            head = head[: len(head) - 1]
         elif middle and self._looks_like_prior_summary(middle[0].get("content")):
             prior_summary = middle[0].get("content")
             middle = middle[1:]

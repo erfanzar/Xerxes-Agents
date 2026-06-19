@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..context.compressor import CompressionResult, ContextCompressor, naive_summarizer
+from ..context.compressor import CompressionResult, ContextCompressor
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +87,7 @@ class TrajectoryCompressor:
         workers: int = 4,
     ) -> None:
         """Bind an inner :class:`ContextCompressor` and the worker count."""
-        self._compressor = compressor or ContextCompressor(
-            threshold=0.5, context_window=200_000, summarizer=naive_summarizer
-        )
+        self._compressor = compressor or ContextCompressor(threshold=0.5, context_window=200_000)
         self._workers = max(1, int(workers))
 
     @staticmethod

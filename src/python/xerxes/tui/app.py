@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 import os
-import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +35,7 @@ from typing import Any
 from .blocks import (
     ApprovalRequestPanel,
     QuestionRequestPanel,
+    ResumeSessionPanel,
     _ContentBlock,
     _NotificationBlock,
     _ThinkingBlock,
@@ -42,6 +43,7 @@ from .blocks import (
 )
 from .engine import BridgeClient
 from .prompt import PersistentPrompt
+from .skin_engine import active_fg, get_active_skin, hex_to_rgb
 
 # No handler is attached by default, so this never writes to the full-screen
 # TUI's stdout/stderr; it's captured only when file logging is configured.
@@ -73,59 +75,119 @@ def _shorten_home(path: str) -> str:
 
 
 _XERXES_LOGO = [
-    "██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗",
-    "╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝",
-    " ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗",
-    " ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║",
-    "██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║",
-    "╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝",
+    "██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗",
+    "╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝",
+    " ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗",
+    " ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║",
+    "██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║",
+    "╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝",
 ]
-_LOGO_WIDTH = 48
+_LOGO_WIDTH = 106
+
+# Derafsh-e Kavian (درفش کاویانی) — the Persian royal standard, in braille.
+# Shown on the left of the welcome box. Converted from a reference image to
+# braille (PIL warm-mask -> density shading; see tmp-files/); static art.
+_DERAFSH_EMBLEM = [
+    "⠀⠀⠀⠀⠀⠀⢀⠀⠀⠀⠀⣿⠀⠀⠀⢀⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠘⢿⣿⣷⣾⣿⣷⣿⣿⡿⠁⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠽⣿⢧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+    "⢴⣿⡀⠀⠀⠀⠀⠀⣀⠀⠐⠿⠀⠐⡀⠀⠀⠀⠀⠀⢰⣿⡦",
+    "⠀⢸⣟⣻⣿⡿⠿⢻⣿⣟⣻⣿⣿⣿⣿⡟⠿⢿⣿⣿⣿⡇⠀",
+    "⠀⢸⣿⡽⣏⣿⣶⣄⠀⠀⠀⠤⡄⠀⠀⣠⣶⣿⣹⢿⣿⡇⠀",
+    "⠀⢸⣿⡇⠹⣧⣬⣿⣷⡀⠀⠂⠁⢀⣾⣿⣤⣾⠏⢰⣿⡇⠀",
+    "⠀⢸⡷⡇⠀⠈⠻⣿⣍⣿⡄⣉⣠⣿⣹⣿⠟⠁⠀⣼⣿⡇⠀",
+    "⠀⢸⡿⢿⢠⣶⡄⢀⡉⢻⣿⠛⣿⡟⢩⡀⢠⣤⡄⠿⢿⡇⠀",
+    "⠀⢸⡿⡿⠈⠉⠁⣀⣤⣾⣿⣶⣿⣧⣤⣀⠈⠋⠁⢿⣿⡇⠀",
+    "⠀⢸⣿⡇⠀⣠⣾⣿⣤⡿⠁⠶⠈⢿⣼⣿⣷⣄⠀⢙⣿⡇⠀",
+    "⠀⢸⣯⡁⣼⣏⣩⣿⠟⠀⢠⠒⡄⠀⠻⣿⣉⣻⣧⢸⣿⡇⠀",
+    "⠀⢸⣿⣿⣧⠾⠋⣁⣀⡀⣀⣀⡀⢀⣀⡈⠛⢿⣿⣿⣿⡇⠀",
+    "⣠⣼⠷⠾⣿⡿⠿⠿⠿⠷⢾⣿⡷⠾⢿⡿⠿⠿⠿⠷⢾⣧⣄",
+    "⠙⠛⠀⠀⡾⠀⠀⠀⠀⠀⠀⣿⠀⠀⢸⡇⠀⠀⠀⠀⠈⠛⠃",
+    "⠀⠀⠀⣀⡴⠀⠀⠀⠀⠀⢀⣿⡀⠀⢸⡇⠀⠀⠀⠀⠀⠀⠀",
+    "⠀⠀⡾⠋⠀⠀⠀⠀⠀⠀⠈⣿⠀⠀⠀⠳⡄⠀⠀⠀⠀⠀⠀",
+    "⠀⢀⡴⠀⠀⠀⠀⠀⠀⠀⠀⣿⠀⠀⠀⢠⡇⠀⠀⠀⠀⠀⠀",
+    "⠀⠻⠁⠀⠀⠀⢀⡄⠀⠀⠀⣿⠀⠀⠰⡟⠀⠀⠀⠀⠰⡦⠀",
+    "⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣿⠀⠀⠀⠛⠀⠀⠀⠀⠀⠀⠀",
+]
+_EMBLEM_WIDTH = len(_DERAFSH_EMBLEM[0])
+
+
+def _logo_gradient(base_hex: str, rows: int) -> list[str]:
+    """Return ``rows`` ANSI 24-bit fg escapes shading ``base_hex`` top-bright to
+    bottom-deep, so the stacked logo reads as a lit metal/stone plaque.
+
+    Derived from the active skin's ``primary`` so the gradient follows the skin."""
+    r, g, b = hex_to_rgb(base_hex)
+    out: list[str] = []
+    span = max(1, rows - 1)
+    for i in range(rows):
+        factor = 1.22 - (0.60 * (i / span))  # 1.22 (lighter) -> 0.62 (darker)
+        rr = max(0, min(255, round(r * factor)))
+        gg = max(0, min(255, round(g * factor)))
+        bb = max(0, min(255, round(b * factor)))
+        out.append(f"\x1b[38;2;{rr};{gg};{bb}m")
+    return out
 
 
 def _build_welcome_banner(model: str, session_id: str, cwd: str) -> str:
-    """Return a multi-line ANSI banner with the Xerxes logo + session metadata.
+    """Return a multi-line ANSI banner: the stacked gradient XERXES-AGENTS logo on
+    top, then a full-width box with the Derafsh-e Kavian emblem on the left and
+    the session metadata + welcome on the right.
 
     Mutated in place once the daemon reports the real session id via the
-    ``InitDone`` event — :class:`XerxesTUI` stores the rendered banner range
-    to rewrite the slot rather than appending a second banner."""
+    ``InitDone`` event. All colors flow through the active skin."""
 
-    blue = "\x1b[34m"
-    bold = "\x1b[1m"
+    skin = get_active_skin()
+    shades = _logo_gradient(skin.color("primary"), len(_XERXES_LOGO))
+    gold = active_fg("warn")
+    system = active_fg("system")
+    muted = active_fg("muted")
     dim = "\x1b[2m"
-    reset = "\x1b[0m"
+    fg_reset = "\x1b[39m"
 
-    info = [
-        f"{bold}Welcome to Xerxes!{reset}",
-        f"{dim}Send /help for help information.{reset}",
-        "",
-        f"Directory: {_shorten_home(cwd)}",
-        f"Session:   {session_id}",
-        f"Model:     {model or '(not set — pick one with /provider)'}",
-    ]
+    indent = " "
+    lines: list[str] = []
 
-    ansi_re = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-
-    def visible_len(s: str) -> int:
-        """Return the printable-character length of ``s`` (ANSI escapes stripped)."""
-        return len(ansi_re.sub("", s))
-
-    gap = "  "
-    info_width = max((visible_len(line) for line in info), default=0)
-
-    inner = _LOGO_WIDTH + len(gap) + info_width
-
-    rows: list[str] = []
+    # 1) XERXES-AGENTS wordmark on top, with a vertical lapis gradient.
     for i, logo_row in enumerate(_XERXES_LOGO):
-        info_row = info[i] if i < len(info) else ""
-        right_pad = max(0, info_width - visible_len(info_row))
-        rows.append(f"{blue}{logo_row}{reset}{gap}{info_row}{' ' * right_pad}")
+        lines.append(f"{indent}{shades[i]}{logo_row}{fg_reset}")
+    lines.append("")
 
-    width = inner + 2
-    top = f"╭{'─' * width}╮"
-    bot = f"╰{'─' * width}╯"
-    mid = [f"│ {row} │" for row in rows]
-    return "\n".join([top, *mid, bot])
+    # 2) Box: Derafsh emblem on the left, session metadata + welcome on the
+    #    right. The box is padded to the full terminal width.
+    pairs = [
+        ("Directory:", _shorten_home(cwd)),
+        ("Session:", session_id),
+        ("Model:", model or "(not set — pick one with /provider)"),
+    ]
+    label_w = max(len(label) for label, _ in pairs)
+    info_plain = [f"{label:<{label_w}}  {value}" for label, value in pairs]
+    info_color = [f"{muted}{label:<{label_w}}{fg_reset}  {value}" for label, value in pairs]
+    welcome = skin.label("welcome")
+    info_plain += ["", welcome, "Send /help for help information."]
+    info_color += ["", f"{system}{welcome}{fg_reset}", f"{dim}Send /help for help information.{fg_reset}"]
+
+    info_w = max(len(p) for p in info_plain)
+    gap = "   "
+    rows_n = max(len(_DERAFSH_EMBLEM), len(info_plain))
+    top_pad = (rows_n - len(info_plain)) // 2  # vertically center the text beside the emblem
+    content_inner = _EMBLEM_WIDTH + len(gap) + info_w
+    term_w = shutil.get_terminal_size((100, 24)).columns
+    inner = max(content_inner, term_w - 6)  # fill the terminal width (leave a small margin)
+    blank_emblem = "⠀" * _EMBLEM_WIDTH
+
+    lines.append(f"{indent}{muted}╭{'─' * (inner + 2)}╮{fg_reset}")
+    for k in range(rows_n):
+        emblem_row = _DERAFSH_EMBLEM[k] if k < len(_DERAFSH_EMBLEM) else blank_emblem
+        j = k - top_pad
+        info_c = info_color[j] if 0 <= j < len(info_color) else ""
+        info_p = info_plain[j] if 0 <= j < len(info_plain) else ""
+        pad = " " * max(0, inner - (_EMBLEM_WIDTH + len(gap) + len(info_p)))
+        body = f"{gold}{emblem_row}{fg_reset}{gap}{info_c}{pad}"
+        lines.append(f"{indent}{muted}│{fg_reset} {body} {muted}│{fg_reset}")
+    lines.append(f"{indent}{muted}╰{'─' * (inner + 2)}╯{fg_reset}")
+
+    return "\n".join(lines)
 
 
 class XerxesTUI:
@@ -191,6 +253,7 @@ class XerxesTUI:
 
         self._approval_panel: ApprovalRequestPanel | None = None
         self._question_panel: QuestionRequestPanel | None = None
+        self._resume_panel: ResumeSessionPanel | None = None
         self._pending_approval_request_id: str | None = None
 
         self._pending_question_panel: QuestionRequestPanel | None = None
@@ -311,7 +374,7 @@ class XerxesTUI:
                 # panel may interpret it as "accept the suggested default"
                 # (the daemon's /provider Add flow uses this for base_url
                 # and model). Let the panel handler decide.
-                if self._pending_question_panel is None:
+                if self._pending_question_panel is None and self._resume_panel is None:
                     continue
 
             if raw_input == "/interrupt":
@@ -320,6 +383,17 @@ class XerxesTUI:
 
             if raw_input == self._prompt.PLAN_TOGGLE_SENTINEL:
                 await self._cycle_interaction_mode()
+                continue
+
+            if self._resume_panel is not None:
+                session_id = self._resolve_resume_input(raw_input)
+                if session_id is None:
+                    self._prompt.refresh_active_resume()
+                    continue
+                self._resume_panel = None
+                self._prompt.clear_active_resume()
+                if session_id:
+                    await self._handle_slash(f"/resume {session_id}")
                 continue
 
             if self._approval_panel is not None:
@@ -535,7 +609,7 @@ class XerxesTUI:
         if self._active_content:
             self._active_content.append(text)
         if self._prompt:
-            self._prompt.set_spinner_label("Generating")
+            self._prompt.set_spinner_label(self._spinner_verb(0))
             self._prompt.append_streaming(text)
 
     def _on_think_chunk(self, think: str) -> None:
@@ -544,7 +618,12 @@ class XerxesTUI:
         # The spinner label still indicates "Thinking" so the user knows
         # the model is working, but the trace itself is not rendered.
         if self._prompt:
-            self._prompt.set_spinner_label("Thinking")
+            self._prompt.set_spinner_label(self._spinner_verb(1))
+
+    def _spinner_verb(self, index: int) -> str:
+        """Return a title-cased spinner verb from the active skin, cycled by ``index``."""
+        verbs = get_active_skin().spinner_verbs()
+        return verbs[index % len(verbs)].capitalize()
 
     def _on_tool_call(self, tool_call_id: str, name: str, arguments: str | None) -> None:
         """Open a new :class:`_ToolCallBlock` and wire it into the live status area."""
@@ -580,7 +659,7 @@ class XerxesTUI:
             block.set_result(display_value, duration_ms=duration_ms)
             if self._prompt:
                 self._prompt.commit_active_tool(tool_call_id, block.compose())
-                self._prompt.set_spinner_label("Thinking")
+                self._prompt.set_spinner_label(self._spinner_verb(1))
 
     def _on_subagent_event(self, event: Any) -> None:
         """Attach a nested subagent ToolCall/ToolResult onto its parent block."""
@@ -654,7 +733,7 @@ class XerxesTUI:
         if stripped in {"down", "j"}:
             panel.move_cursor_down()
             return None
-        self._prompt.append_line("\x1b[31mApproval response must be Enter, A, or R.\x1b[0m")
+        self._prompt.append_line(f"{active_fg('error')}Approval response must be Enter, A, or R.\x1b[39m")
         return None
 
     def _wait_for_approval_response(self, panel: ApprovalRequestPanel) -> str:
@@ -726,7 +805,9 @@ class XerxesTUI:
                 panel.confirm_current()
             else:
                 if self._prompt:
-                    self._prompt.append_line(f"\x1b[31m(option {stripped} out of range; pick 1-{len(opts)})\x1b[0m")
+                    self._prompt.append_line(
+                        f"{active_fg('error')}(option {stripped} out of range; pick 1-{len(opts)})\x1b[39m"
+                    )
                 return None
         else:
             panel._free_text_mode = True
@@ -786,6 +867,24 @@ class XerxesTUI:
                 self._prompt.set_subagent_preview(task_id, label, body)
             return
 
+        if event.category == "history" and event.type == "resume_begin":
+            self._clear_visible_transcript()
+            return
+
+        if event.type == "resume_choices":
+            self._on_resume_choices(event)
+            return
+
+        if event.category == "history" and event.type in {"replay_user", "replay_assistant"}:
+            if self._prompt and event.body:
+                self._prompt.append_line(event.body)
+            return
+
+        if event.category == "history" and event.type == "resumed":
+            if self._prompt and event.body:
+                self._prompt.append_line(f"{active_fg('muted')}{event.body}\x1b[39m")
+            return
+
         block = _NotificationBlock(
             notification_id=event.id,
             category=event.category,
@@ -796,6 +895,87 @@ class XerxesTUI:
         self._notification_history.append(block)
         if self._prompt:
             self._prompt.append_line(block.compose())
+
+    def _clear_visible_transcript(self) -> None:
+        """Clear transcript blocks before replaying a different session."""
+        banner_lines = self._current_banner_lines()
+        self._content_blocks.clear()
+        self._thinking_blocks.clear()
+        self._tool_blocks.clear()
+        self._notification_history.clear()
+        self._active_content = None
+        self._active_thinking = None
+        self._active_tool = None
+        if self._prompt:
+            self._prompt.clear_content()
+            self._prompt.clear_streaming()
+            self._prompt.clear_thinking()
+            self._prompt.clear_active_tools()
+            self._prompt.clear_subagent_previews()
+            self._restore_banner_lines(banner_lines)
+
+    def _current_banner_lines(self) -> list[str]:
+        """Return the committed banner line range, if it is still present."""
+        if self._prompt is None or self._banner_start < 0 or self._banner_line_count <= 0:
+            return []
+        lines = list(self._prompt._status._content_lines)
+        if self._banner_start >= len(lines):
+            return []
+        end = min(len(lines), self._banner_start + self._banner_line_count)
+        return lines[self._banner_start : end]
+
+    def _restore_banner_lines(self, banner_lines: list[str]) -> None:
+        """Reinsert preserved banner lines after a transcript clear."""
+        if self._prompt is None or not banner_lines:
+            return
+        self._prompt._status._content_lines.extend(banner_lines)
+        self._prompt._status._mark_dirty()
+        self._banner_start = 0
+        self._banner_line_count = len(banner_lines)
+        self._prompt._invalidate()
+
+    def _on_resume_choices(self, event: Any) -> None:
+        """Show an interactive saved-session picker from a daemon notification."""
+        payload = getattr(event, "payload", {}) or {}
+        raw_sessions = payload.get("sessions", [])
+        sessions = [
+            record
+            for record in raw_sessions
+            if isinstance(record, dict) and str(record.get("session_id") or record.get("id") or "").strip()
+        ]
+        panel = ResumeSessionPanel(sessions)
+        self._resume_panel = panel
+        if self._prompt:
+            self._prompt.set_active_resume(panel)
+
+    def _resolve_resume_input(self, text: str) -> str | None:
+        """Map raw TUI input onto a resume target or keep the picker open."""
+        panel = self._resume_panel
+        if panel is None or self._prompt is None:
+            return None
+
+        stripped = text.strip()
+        lowered = stripped.lower()
+        if text == self._prompt.RESUME_SENTINEL or not stripped:
+            return panel.selected_session_id
+        if lowered in {"/cancel", "/abort", "cancel"}:
+            return ""
+        if lowered in {"up", "k"}:
+            panel.move_cursor_up()
+            return None
+        if lowered in {"down", "j"}:
+            panel.move_cursor_down()
+            return None
+        if stripped.isdigit():
+            index = int(stripped) - 1
+            if 0 <= index < len(panel.records):
+                record = panel.records[index]
+                return str(record.get("session_id") or record.get("id") or "")
+            self._prompt.append_line(
+                f"{active_fg('error')}(session {stripped} out of range; pick 1-{len(panel.records)})\x1b[39m"
+            )
+            return None
+        return stripped
 
     def _on_init_done(self, event: Any) -> None:
         """Apply daemon-confirmed session metadata to the prompt and welcome banner.
@@ -870,7 +1050,7 @@ class XerxesTUI:
     def _on_compaction_begin(self) -> None:
         """Announce the start of a context compaction pass in the prompt history."""
         if self._prompt:
-            self._prompt.append_line("[dim]Compacting context...[/dim]")
+            self._prompt.append_line(f"{active_fg('muted')}Compacting context...\x1b[39m")
 
     def _on_compaction_end(self) -> None:
         """Clear the TUI conversation history after context compaction.
@@ -880,7 +1060,7 @@ class XerxesTUI:
         Resets scroll to tail-follow so the user sees the fresh state."""
         if self._prompt:
             self._prompt.clear_content()
-            self._prompt.append_line("[dim]Context compacted — conversation refreshed.[/dim]")
+            self._prompt.append_line(f"{active_fg('muted')}Context compacted — conversation refreshed.\x1b[39m")
 
     async def _handle_submit(self, text: str) -> None:
         """prompt_toolkit submit callback: forward ``text`` into :meth:`_start_turn`."""
@@ -935,7 +1115,7 @@ class XerxesTUI:
                 if self._prompt:
                     self._prompt.clear_active_approval()
                     self._prompt.set_running(False)
-                    self._prompt.append_line(f"\x1b[31mTurn failed: {exc}\x1b[0m")
+                    self._prompt.append_line(f"{active_fg('error')}Turn failed: {exc}\x1b[39m")
                 break
 
             if turn_plan_mode and self._plan_mode:
@@ -960,7 +1140,7 @@ class XerxesTUI:
         except Exception as exc:
             if self._prompt:
                 self._prompt.set_running(False)
-                self._prompt.append_line(f"\x1b[31mTurn task failed: {exc}\x1b[0m")
+                self._prompt.append_line(f"{active_fg('error')}Turn task failed: {exc}\x1b[39m")
 
     async def _handle_running_input(self, text: str) -> None:
         """Route input that arrived while a turn is in flight (interrupt/steer/queue)."""
@@ -980,7 +1160,7 @@ class XerxesTUI:
                 await self._client.steer(content)
         elif text.startswith("/"):
             if self._prompt:
-                self._prompt.append_line(f"\x1b[2m{text} is not available during streaming\x1b[0m")
+                self._prompt.append_line(f"{active_fg('muted')}{text} is not available during streaming\x1b[39m")
         else:
             self._queued_inputs.append(text)
             if self._prompt:
@@ -993,7 +1173,8 @@ class XerxesTUI:
             return
 
         if self._prompt:
-            self._prompt.append_line(f"\x1b[2m› {text}\x1b[0m")  # noqa: RUF001
+            symbol = get_active_skin().label("prompt_symbol")
+            self._prompt.append_line(f"{active_fg('muted')}{symbol} {text}\x1b[39m")
 
         cmd = text.split()[0].lower() if text else ""
 
@@ -1014,18 +1195,50 @@ class XerxesTUI:
         elif cmd == "/clear":
             if self._prompt:
                 self._prompt.clear_content()
-                self._prompt.append_line("[dim]Conversation cleared.[/dim]")
+                self._prompt.append_line(f"{active_fg('muted')}Conversation cleared.\x1b[39m")
             await self._client._send_jsonrpc(
                 method="slash",
                 params={"command": text},
             )
         elif cmd == "/refresh":
             await self._handle_refresh()
+        elif cmd == "/skin":
+            self._handle_skin(text)
         else:
             await self._client._send_jsonrpc(
                 method="slash",
                 params={"command": text},
             )
+
+    def _handle_skin(self, text: str) -> None:
+        """List or switch the active TUI skin, live (local command).
+
+        ``/skin`` lists the active + available skins; ``/skin <name>`` switches.
+        Newly rendered output (responses, tool calls, footer, prompt) reads the
+        active skin per render so it updates immediately; already-committed
+        history and the completion-menu style keep the prior palette until the
+        next session."""
+        from . import console
+        from .skin_engine import SkinEngine, get_active_skin, set_active_skin
+
+        if not self._prompt:
+            return
+        name = text[len("/skin") :].strip()
+        engine = SkinEngine()
+        if not name:
+            active = get_active_skin().name
+            available = ", ".join(engine.available())
+            self._prompt.append_line(f"{active_fg('muted')}Active skin: {active}\x1b[39m")
+            self._prompt.append_line(f"{active_fg('muted')}Available: {available}\x1b[39m")
+            return
+        try:
+            skin = set_active_skin(name)
+        except KeyError:
+            self._prompt.append_line(f"{active_fg('error')}Unknown skin: {name}\x1b[39m")
+            return
+        console.refresh_theme()
+        glyph = skin.label("prompt_symbol")
+        self._prompt.append_line(f"{active_fg('accent')}{glyph} skin set to {skin.name}\x1b[39m")
 
     async def _handle_todo(self, text: str) -> None:
         """Handle ``/todo`` commands: show, add, remove, clear, toggle."""
@@ -1038,7 +1251,7 @@ class XerxesTUI:
                 self._todo_items.append(item)
                 if self._prompt:
                     self._prompt.set_todo_items(list(self._todo_items))
-                    self._prompt.append_line(f"\x1b[33mAdded: {item}\x1b[0m")
+                    self._prompt.append_line(f"{active_fg('warn')}Added: {item}\x1b[39m")
             return
 
         if subcmd.startswith("done ") or subcmd.startswith("check "):
@@ -1059,7 +1272,7 @@ class XerxesTUI:
             self._todo_items.clear()
             if self._prompt:
                 self._prompt.clear_todo_items()
-                self._prompt.append_line("\x1b[33mTODO list cleared.\x1b[0m")
+                self._prompt.append_line(f"{active_fg('warn')}TODO list cleared.\x1b[39m")
             return
 
         if subcmd.startswith("remove ") or subcmd.startswith("rm "):
@@ -1070,13 +1283,13 @@ class XerxesTUI:
                     removed = self._todo_items.pop(idx)
                     if self._prompt:
                         self._prompt.set_todo_items(list(self._todo_items))
-                        self._prompt.append_line(f"\x1b[33mRemoved: {removed}\x1b[0m")
+                        self._prompt.append_line(f"{active_fg('warn')}Removed: {removed}\x1b[39m")
             return
 
         # Default: show the list
         if not self._todo_items:
             if self._prompt:
-                self._prompt.append_line("\x1b[2mTODO list is empty. Use /todo add <item>.\x1b[0m")
+                self._prompt.append_line(f"{active_fg('muted')}TODO list is empty. Use /todo add <item>.\x1b[39m")
             return
 
         if self._prompt:
@@ -1085,7 +1298,7 @@ class XerxesTUI:
     async def _handle_refresh(self) -> None:
         """Kill the daemon, clear state, and respawn so code changes take effect."""
         if self._prompt:
-            self._prompt.append_line("\x1b[36m↻ Refreshing daemon…\x1b[0m")
+            self._prompt.append_line(f"{active_fg('accent')}↻ Refreshing daemon…\x1b[39m")
 
         if self._client:
             self._client.restart()
@@ -1102,10 +1315,10 @@ class XerxesTUI:
                     resume_session_id=self._session_id,
                 )
                 if self._prompt:
-                    self._prompt.append_line("\x1b[32m✓ Daemon refreshed.\x1b[0m")
+                    self._prompt.append_line(f"{active_fg('accent')}✓ Daemon refreshed.\x1b[39m")
             except Exception as exc:
                 if self._prompt:
-                    self._prompt.append_line(f"\x1b[31m✗ Refresh failed: {exc}\x1b[0m")
+                    self._prompt.append_line(f"{active_fg('error')}✗ Refresh failed: {exc}\x1b[39m")
 
     async def _toggle_plan_mode(self) -> None:
         """Flip ``_plan_mode`` and inform the daemon."""
@@ -1265,7 +1478,7 @@ class XerxesTUI:
             self._prompt.clear_subagent_previews()
             self._prompt.clear_thinking()
             self._prompt.set_running(False)
-            self._prompt.append_line("\x1b[2mInterrupted.\x1b[0m")
+            self._prompt.append_line(f"{active_fg('muted')}Interrupted.\x1b[39m")
 
         self._turn_done_event.set()
         await self._restart_bridge_after_interrupt()
@@ -1325,5 +1538,8 @@ class XerxesTUI:
             self._client.close()
 
         if self._session_id:
-            sys.stdout.write(f"\nTo resume this session: \x1b[1mxerxes -r {self._session_id}\x1b[0m\n")
+            goodbye = get_active_skin().label("goodbye")
+            primary = active_fg("primary")
+            sys.stdout.write(f"\n{primary}{goodbye}\x1b[39m\n")
+            sys.stdout.write(f"To resume this session: \x1b[1m{primary}xerxes -r {self._session_id}\x1b[0m\n")
             sys.stdout.flush()

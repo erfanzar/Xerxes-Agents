@@ -21,6 +21,11 @@ from xerxes.context.advanced_compressor import (
 )
 
 
+class _FakeLLM:
+    async def generate_completion(self, **_kwargs):
+        return "handoff summary"
+
+
 class TestSummarizeToolResult:
     """Tests for _summarize_tool_result."""
 
@@ -110,7 +115,12 @@ class TestAdvancedCompressionStrategy:
         assert "x" * 10 not in tool_msg["content"]  # Original content was pruned
 
     def test_summary_has_handoff_framing(self):
-        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
+        strategy = AdvancedCompressionStrategy(
+            target_tokens=1000,
+            preserve_recent=0,
+            tail_token_budget=10,
+            llm_client=_FakeLLM(),
+        )
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Question 1"},
@@ -128,7 +138,12 @@ class TestAdvancedCompressionStrategy:
         assert SUMMARY_PREFIX in summary_msg["content"]
 
     def test_iterative_compaction(self):
-        strategy = AdvancedCompressionStrategy(target_tokens=1000, preserve_recent=0, tail_token_budget=10)
+        strategy = AdvancedCompressionStrategy(
+            target_tokens=1000,
+            preserve_recent=0,
+            tail_token_budget=10,
+            llm_client=_FakeLLM(),
+        )
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Q1"},

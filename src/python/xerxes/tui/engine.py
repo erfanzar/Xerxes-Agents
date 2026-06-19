@@ -37,6 +37,7 @@ from typing import Any
 
 from ..daemon.config import load_config
 from ..streaming.wire_events import (
+    Notification,
     WireEvent,
     event_from_dict,
 )
@@ -543,9 +544,12 @@ class BridgeClient:
             payload = msg.get("params", {})
             event_type = payload.get("type", "")
             event_data = payload.get("payload", {}) or {}
-            event_data["type"] = event_type
             try:
-                wire_event = event_from_dict(event_data)
+                if event_type == "notification":
+                    wire_event = Notification(**event_data)
+                else:
+                    event_data["type"] = event_type
+                    wire_event = event_from_dict(event_data)
                 if self._loop is not None:
                     self._loop.call_soon_threadsafe(self._event_queue.put_nowait, wire_event)
             except Exception:
