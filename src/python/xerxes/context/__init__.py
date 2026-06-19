@@ -28,6 +28,14 @@ context:
 """
 
 from .advanced_compressor import AdvancedCompressionStrategy
+from .compaction_provisioner import (
+    CompactionProvision,
+    CompactionProvisioner,
+    ProviderCompactionAgent,
+    compaction_summary_agent_from_config,
+    render_messages_for_summary,
+    repair_tool_message_sequence,
+)
 from .compaction_strategies import (
     BaseCompactionStrategy,
     PriorityBasedStrategy,
@@ -62,9 +70,12 @@ __all__ = [
     "DEFAULT_TAIL_LINES",
     "AdvancedCompressionStrategy",
     "BaseCompactionStrategy",
+    "CompactionProvision",
+    "CompactionProvisioner",
     "CompressionResult",
     "ContextCompressor",
     "PriorityBasedStrategy",
+    "ProviderCompactionAgent",
     "RepoMapConfig",
     "RepoMapResult",
     "RepoMapper",
@@ -76,8 +87,11 @@ __all__ = [
     "ToolResultStorage",
     "TruncateStrategy",
     "build_repo_map",
+    "compaction_summary_agent_from_config",
     "get_compaction_strategy",
     "naive_summarizer",
     "prune_messages",
     "prune_tool_result",
+    "render_messages_for_summary",
+    "repair_tool_message_sequence",
 ]

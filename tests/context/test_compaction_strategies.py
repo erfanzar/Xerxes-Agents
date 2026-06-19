@@ -87,10 +87,9 @@ class TestTruncateStrategy:
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "x" * 2000},
         ]
-        compacted, _stats = strategy.compact(msgs)
-        for m in compacted:
-            if m["role"] == "user" and len(m["content"]) > 1100:
-                raise AssertionError("Should have been truncated")
+        compacted, stats = strategy.compact(msgs)
+        assert compacted == msgs
+        assert stats["reason"] == "no_summary_agent"
 
 
 class TestPriorityBasedStrategy:
@@ -156,27 +155,23 @@ class TestSummarizationStrategy:
         strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4", preserve_recent=2)
         msgs = make_messages(10)
         _compacted, stats = strategy.compact(msgs)
+        assert stats["summary_created"] is False
+        assert stats["reason"] == "no_summary_agent"
+
+    def test_compact_with_summary_agent(self):
+        def summary_agent(messages, _previous_summary):
+            return f"summary for {len(messages)}"
+
+        strategy = SummarizationStrategy(
+            llm_client=None,
+            target_tokens=50,
+            model="gpt-4",
+            summary_agent=summary_agent,
+        )
+        msgs = make_messages(10, content_len=200)
+        compacted, stats = strategy.compact(msgs)
         assert stats["summary_created"] is True
-
-    def test_format_conversation(self):
-        strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4")
-        msgs = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}]
-        result = strategy._format_conversation(msgs)
-        assert "User: Hello" in result
-        assert "Assistant: Hi" in result
-
-    def test_generate_summary_fallback_short(self):
-        strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4")
-        text = "Line 1\nLine 2\nLine 3"
-        result = strategy._generate_summary(text)
-        assert result == text
-
-    def test_generate_summary_fallback_long(self):
-        strategy = SummarizationStrategy(llm_client=None, target_tokens=10000, model="gpt-4")
-        lines = [f"Line {i}" for i in range(20)]
-        text = "\n".join(lines)
-        result = strategy._generate_summary(text)
-        assert "Earlier discussion covered:" in result
+        assert any("summary for" in m.get("content", "") for m in compacted)
 
 
 class TestSmartCompactionStrategy:
@@ -191,7 +186,7 @@ class TestSmartCompactionStrategy:
         strategy = SmartCompactionStrategy(llm_client=None, target_tokens=10, model="gpt-4")
         msgs = make_messages(20, content_len=200)
         _compacted, stats = strategy.compact(msgs)
-        assert stats["substrategy"] in ("truncate", "summarization", "truncate_light")
+        assert stats["substrategy"] == "no_summary_agent"
 
     def test_compact_medium_compression(self):
         strategy = SmartCompactionStrategy(llm_client=None, target_tokens=500, model="gpt-4")
@@ -223,23 +218,26 @@ class TestGetCompactionStrategy:
 
 
 class TestSeparateMessages:
-    def test_basic_separation(self):
+    def test_legacy_preserve_recent_kw_is_ignored_without_agent(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_recent=2)
         msgs = make_messages(5)
-        sys_msgs, preserved, compactable = strategy._separate_messages(msgs)
-        assert len(sys_msgs) == 1
-        assert len(preserved) == 2
-        assert len(compactable) == 3
+        compacted, stats = strategy.compact(msgs)
+        assert compacted == msgs
+        assert stats["reason"] == "no_summary_agent"
 
-    def test_no_system_message(self):
+    def test_preserve_system_kw_still_allows_no_agent_noop(self):
         strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_system=False, preserve_recent=2)
         msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        sys_msgs, _preserved, _compactable = strategy._separate_messages(msgs)
-        assert len(sys_msgs) == 0
+        compacted, stats = strategy.compact(msgs)
+        assert compacted == msgs
+        assert stats["reason"] == "no_summary_agent"
 
-    def test_few_messages(self):
-        strategy = SlidingWindowStrategy(target_tokens=10000, model="gpt-4", preserve_recent=5)
-        msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        _sys_msgs, preserved, compactable = strategy._separate_messages(msgs)
-        assert len(compactable) == 0
-        assert len(preserved) == 2
+    def test_sliding_window_with_agent_compacts(self):
+        def summary_agent(messages, _previous_summary):
+            return "agent summary"
+
+        strategy = SlidingWindowStrategy(target_tokens=50, model="gpt-4", summary_agent=summary_agent)
+        msgs = make_messages(8, content_len=200)
+        compacted, stats = strategy.compact(msgs)
+        assert stats["summary_created"] is True
+        assert len(compacted) < len(msgs)

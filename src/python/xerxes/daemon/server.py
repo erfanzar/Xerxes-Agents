@@ -234,16 +234,17 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if method == "session.list":
             return {"ok": True, "sessions": self.sessions.list()}
         if method == "session.status":
-            session = self.sessions.get(str(params.get("session_key") or self._current_session_key))
+            session = self.sessions.get(str(params.get("session_key") or self._connection_session_key(emit)))
             return {"ok": bool(session), "session": session.status() if session else None}
         if method == "turn.submit":
             return await self._submit_turn(params, emit)
         if method in {"turn.cancel", "cancel"}:
-            return {"ok": self.sessions.cancel(str(params.get("session_key") or self._current_session_key))}
+            return {"ok": self.sessions.cancel(str(params.get("session_key") or self._connection_session_key(emit)))}
         if method == "cancel_all":
             return {"ok": True, "cancelled": self.sessions.cancel_all()}
         if method == "turn.steer" or method == "steer":
-            await emit("steer_input", {"content": str(params.get("content", ""))})
+            session_key = str(params.get("session_key") or self._connection_session_key(emit))
+            await self._steer_session(session_key, str(params.get("content", "")), emit)
             return {"ok": True}
         if method == "runtime.status":
             return {
@@ -419,7 +420,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         # Enter to skip"). We re-strip per-branch below.
         raw_text = str(params.get("text") or params.get("prompt") or params.get("user_input") or "")
         text = raw_text.strip()
-        session_key = str(params.get("session_key") or self._current_session_key)
+        session_key = str(params.get("session_key") or self._connection_session_key(emit))
 
         # Skip interception for synthetic prompts the daemon itself submits
         # (otherwise we'd consume our own draft request as an interview answer).

@@ -42,6 +42,10 @@ import threading
 import uuid
 from typing import Any
 
+from ..context.compaction_provisioner import (
+    CompactionProvisioner,
+    compaction_summary_agent_from_config,
+)
 from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
@@ -776,228 +780,73 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         allowed -= set(getattr(agent_def, "exclude_tools", None) or [])
         return [schema for schema in tool_schemas if schema.get("name", "") in allowed]
 
-    def _maybe_compact_context(self) -> None:
-        """Auto-compact older messages via an LLM summary when usage exceeds 75% of the limit.
-
-        Legacy-protocol variant: emits a ``slash_result`` with the outcome.
-        Falls back silently when the summariser call fails.
-        """
+    def _context_compaction_provisioner(self) -> CompactionProvisioner | None:
+        """Return the bridge context compaction provisioner, if a model is configured."""
         model = self.config.get("model", "")
         if not model:
-            return
+            return None
         context_limit = get_context_limit(model)
         if context_limit <= 0:
-            return
-        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
-        threshold = int(context_limit * 0.75)
-        if total_tokens < threshold:
-            return
+            return None
+        return CompactionProvisioner(
+            model=model,
+            max_context_tokens=context_limit,
+            threshold_ratio=float(self.config.get("compaction_threshold", 0.75)),
+            target_ratio=float(self.config.get("compaction_target", 0.5)),
+            summary_agent=compaction_summary_agent_from_config(model, self.config),
+        )
 
-        messages = self.state.messages
-        if len(messages) < 4:
-            return
+    def _run_context_compaction(self, *, force: bool) -> Any:
+        """Run the shared provisioner and install compacted messages on success."""
+        provisioner = self._context_compaction_provisioner()
+        if provisioner is None:
+            return None
+        result = provisioner.compact(self.state.messages, force=force)
+        if result.compacted:
+            self.state.messages = result.messages
+        return result
 
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        conv_msgs = [m for m in messages if m.get("role") != "system"]
-        if len(conv_msgs) < 3:
-            return
-
-        preserve_recent = 2
-        older = conv_msgs[:-preserve_recent]
-        recent = conv_msgs[-preserve_recent:]
-
-        conv_text = []
-        for msg in older:
-            role = msg.get("role", "unknown").upper()
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for p in content:
-                    if isinstance(p, dict):
-                        parts.append(p.get("text", str(p)))
-                    else:
-                        parts.append(str(p))
-                content = "\n".join(parts)
-            if len(content) > 800:
-                content = content[:800] + "..."
-            conv_text.append(f"[{role}]: {content}")
-
-        conversation = "\n\n".join(conv_text)
-
-        try:
-            from openai import OpenAI
-
-            from ..llms.registry import PROVIDERS, get_api_key
-
-            provider_name = detect_provider(model)
-            api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
-            prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
-            base_url = (
-                self.config.get("base_url")
-                or self.config.get("custom_base_url")
-                or (prov.base_url if prov else None)
-                or "https://api.openai.com/v1"
-            )
-            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
-
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a conversation summarizer. Summarize the following conversation "
-                            "into a concise summary that preserves all key information: decisions made, "
-                            "files discussed, code changes, tool results, errors encountered and their "
-                            "solutions, and any important context. Be factual and specific. "
-                            "Output only the summary, no preamble."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
-                    },
-                ],
-                max_tokens=8192,
-                temperature=0.2,
-            )
-
-            summary = response.choices[0].message.content or ""
-            if not summary.strip():
-                return
-
-        except Exception:
-            logger.warning("Auto-compaction LLM call failed", exc_info=True)
+    def _maybe_compact_context(self) -> None:
+        """Auto-compact older messages via the shared agent-backed provisioner."""
+        provisioner = self._context_compaction_provisioner()
+        if provisioner is None or not provisioner.should_compact(self.state.messages):
             return
 
-        len(self.state.messages)
-        self.state.messages = [
-            *system_msgs,
-            {
-                "role": "user",
-                "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}",
-            },
-            *recent,
-        ]
-        new_count = len(self.state.messages)
+        result = self._run_context_compaction(force=False)
+        if result is None or not result.compacted:
+            if result is not None and result.error:
+                logger.warning("Auto-compaction failed: %s", result.error)
+            return
+
         self._emit(
             "slash_result",
             {
                 "output": (
-                    f"[Auto-compact] Context at {total_tokens:,}/{context_limit:,} tokens. "
-                    f"Summarized {len(older)} messages → kept {new_count} messages."
+                    f"[Auto-compact] Context at {result.tokens_before:,} tokens. "
+                    f"Summarized {result.summarized_count} messages; kept {len(self.state.messages)} messages."
                 ),
             },
         )
 
     def _maybe_compact_context_wire(self) -> None:
-        """Wire-protocol twin of :meth:`_maybe_compact_context` (emits ``compaction_*`` events)."""
-        model = self.config.get("model", "")
-        if not model:
-            return
-        context_limit = get_context_limit(model)
-        if context_limit <= 0:
-            return
-        total_tokens = self.state.total_input_tokens + self.state.total_output_tokens
-        threshold = int(context_limit * 0.75)
-        if total_tokens < threshold:
-            return
-        messages = self.state.messages
-        if len(messages) < 4:
-            return
-        system_msgs = [m for m in messages if m.get("role") == "system"]
-        conv_msgs = [m for m in messages if m.get("role") != "system"]
-        if len(conv_msgs) < 3:
+        """Wire-protocol twin of :meth:`_maybe_compact_context`."""
+        provisioner = self._context_compaction_provisioner()
+        if provisioner is None or not provisioner.should_compact(self.state.messages):
             return
 
         self._emit_wire_compaction_begin()
-
-        preserve_recent = 2
-        older = conv_msgs[:-preserve_recent]
-        recent = conv_msgs[-preserve_recent:]
-
-        conv_text = []
-        for msg in older:
-            role = msg.get("role", "unknown").upper()
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                parts = []
-                for p in content:
-                    if isinstance(p, dict):
-                        parts.append(p.get("text", str(p)))
-                    else:
-                        parts.append(str(p))
-                content = "\n".join(parts)
-            if len(content) > 800:
-                content = content[:800] + "..."
-            conv_text.append(f"[{role}]: {content}")
-
-        conversation = "\n\n".join(conv_text)
-
-        try:
-            from openai import OpenAI
-
-            from ..llms.registry import PROVIDERS, get_api_key
-
-            provider_name = detect_provider(model)
-            api_key = self.config.get("api_key") or get_api_key(provider_name, self.config)
-            prov = PROVIDERS.get(provider_name, PROVIDERS.get("openai"))
-            base_url = (
-                self.config.get("base_url")
-                or self.config.get("custom_base_url")
-                or (prov.base_url if prov else None)
-                or "https://api.openai.com/v1"
-            )
-            client = OpenAI(api_key=api_key or "dummy", base_url=base_url)
-
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a conversation summarizer. Summarize the following conversation "
-                            "into a concise summary that preserves all key information: decisions made, "
-                            "files discussed, code changes, tool results, errors encountered and their "
-                            "solutions, and any important context. Be factual and specific. "
-                            "Output only the summary, no preamble."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Summarize this conversation ({len(older)} messages):\n\n{conversation}",
-                    },
-                ],
-                max_tokens=8192,
-                temperature=0.2,
-            )
-
-            summary = response.choices[0].message.content or ""
-            if not summary.strip():
-                self._emit_wire_compaction_end()
-                return
-
-        except Exception:
-            self._emit_wire_compaction_end()
+        result = self._run_context_compaction(force=False)
+        self._emit_wire_compaction_end()
+        if result is None or not result.compacted:
             return
 
-        self.state.messages = [
-            *system_msgs,
-            {
-                "role": "user",
-                "content": f"[Previous conversation summary — {len(older)} messages compacted]\n\n{summary}",
-            },
-            *recent,
-        ]
-
-        self._emit_wire_compaction_end()
         self._emit_wire_notification(
             notification_id=str(uuid.uuid4()),
             category="context",
             type_="compacted",
             severity="info",
             title="Context compacted",
-            body=f"Summarized {len(older)} messages → kept {len(self.state.messages)} messages.",
+            body=f"Summarized {result.summarized_count} messages; kept {len(self.state.messages)} messages.",
         )
 
     @staticmethod

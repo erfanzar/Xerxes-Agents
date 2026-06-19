@@ -2,9 +2,9 @@
 name: deepscan
 description: >-
   Spawns a swarm of specialized agents to deeply analyze the current project
-  and compile comprehensive findings into tmp-files/AGENT_NOTES.md.
+  and compile comprehensive findings into project-scoped agent memory.
   ALWAYS runs agents in parallel — sequential analysis is unacceptable.
-version: "2.0"
+version: "2.1"
 tags: [analysis, swarm, project, deepscan, multi-agent, parallel]
 ---
 
@@ -12,74 +12,84 @@ tags: [analysis, swarm, project, deepscan, multi-agent, parallel]
 
 **PARALLEL IS MANDATORY.** DeepScan ALWAYS spawns all analysis agents simultaneously. Running them sequentially is a bug that wastes time and produces worse results.
 
-Spawns a coordinated swarm of 8 specialized agents to perform comprehensive analysis of the current project, then compiles all findings into a detailed report at `tmp-files/AGENT_NOTES.md`.
+Spawns a coordinated swarm of 8 specialized agents to perform comprehensive analysis of the current project, then compiles all findings into the project's persistent agent memory at `deepscan/AGENT_NOTES.md`.
+
+## Project Memory Contract
+
+DeepScan output is project-specific memory, not a workspace temp artifact.
+
+- Final report: `agent_memory_write("project", "deepscan/AGENT_NOTES.md", report)`
+- Optional raw findings: `agent_memory_write("project", "deepscan/findings/<agent-name>.md", findings)`
+- Discovery index: append a short pointer to project `MEMORY.md` so future agents know the report exists.
+- Journal: add a one-line project journal entry after saving the report.
+
+Before spawning agents, call `agent_memory_status()` and confirm project memory is available. If project memory is unavailable or any memory write fails, stop and report the memory error. **Do not fall back to `tmp-files`, repo-local report files, or shell-created scratch files.**
 
 ## Execution Rule
 
 **DO NOT** analyze the project yourself. **DO NOT** read files one by one. **DO NOT** write the report incrementally.
 
 Your ONLY job is to:
-1. Create `tmp-files/`
+1. Confirm project agent memory is available
 2. Spawn **all 8 agents in parallel** via `SpawnAgents`
 3. Wait for all results
 4. Compile the final report
+5. Save the report to project agent memory and index it
 
 If you find yourself reading source code or writing analysis paragraphs directly, you have FAILED this skill. Stop and spawn the agents.
 
 ## Prerequisites
 
-```bash
-mkdir -p tmp-files
-echo "=== DEEPSCAN INITIATED ===" > tmp-files/AGENT_NOTES.md
-echo "Timestamp: $(date)" >> tmp-files/AGENT_NOTES.md
-echo "Project: $(pwd)" >> tmp-files/AGENT_NOTES.md
-echo "" >> tmp-files/AGENT_NOTES.md
 ```
+agent_memory_status()
+```
+
+The status must show project memory availability. Use the returned `project_dir` in the report overview when present, but always address writes through the `agent_memory_*` tools with `scope="project"`.
 
 ## Swarm Architecture — ALL 8 AGENTS IN PARALLEL
 
-Use `SpawnAgents` with `wait=true`. Every agent gets a `coder` or `researcher` subtype depending on whether they need to write findings to disk.
+Use `SpawnAgents` with `wait=true`. Every agent gets the `researcher` subtype and returns findings in its final response. Subagents must not write to `tmp-files` or workspace files.
 
 ```
 SpawnAgents(
   agents=[
     {
-      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep. Document tree, key dirs, config files, module structure. Write findings to tmp-files/AGENT_N_structure_FINDINGS.md",
+      "prompt": "Analyze project structure. Scan all directories up to 4 levels deep. Document tree, key dirs, config files, module structure. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "structure-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers. Write findings to tmp-files/AGENT_N_tech_FINDINGS.md",
+      "prompt": "Analyze technology stack. Identify languages, frameworks, dependencies, build systems, type checkers. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "tech-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns. Write findings to tmp-files/AGENT_N_arch_FINDINGS.md",
+      "prompt": "Analyze code patterns and architecture. Identify design patterns, architectural style, module relationships, separation of concerns. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "arch-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs. Write findings to tmp-files/AGENT_N_config_FINDINGS.md",
+      "prompt": "Analyze configuration and environment. Document env files, Docker, CI/CD, deployment configs, database setup, security configs. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "config-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs. Write findings to tmp-files/AGENT_N_quality_FINDINGS.md",
+      "prompt": "Analyze testing and quality. Identify test frameworks, coverage, linting, formatting tools, quality configs. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "quality-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE. Write findings to tmp-files/AGENT_N_docs_FINDINGS.md",
+      "prompt": "Analyze documentation. Check README completeness, API docs, inline comments, CHANGELOG, LICENSE. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "docs-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerabilities, encryption usage. Write findings to tmp-files/AGENT_N_security_FINDINGS.md",
+      "prompt": "Analyze security. Check auth patterns, secrets exposure, .gitignore, dependency vulnerabilities, encryption usage. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "security-analyzer",
       "subagent_type": "researcher"
     },
     {
-      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching. Write findings to tmp-files/AGENT_N_data_FINDINGS.md",
+      "prompt": "Analyze data and APIs. Identify database types, ORMs, data models, API endpoints, external integrations, caching. Return findings in the required DeepScan agent output format. Do not write tmp-files or workspace files.",
       "name": "data-analyzer",
       "subagent_type": "researcher"
     }
@@ -90,7 +100,7 @@ SpawnAgents(
 
 ## Step 3: Compile Final Report
 
-After all agents complete, read all `tmp-files/AGENT_N_*_FINDINGS.md` files and compile into `tmp-files/AGENT_NOTES.md` using this structure:
+After all agents complete, compile their returned results into a single report using this structure:
 
 ```markdown
 # Project DeepScan Analysis Report
@@ -143,6 +153,21 @@ After all agents complete, read all `tmp-files/AGENT_N_*_FINDINGS.md` files and 
 *Report generated by DeepScan Agent Swarm*
 ```
 
+Then persist it:
+
+```
+agent_memory_write("project", "deepscan/AGENT_NOTES.md", report)
+agent_memory_append(
+  "project",
+  "MEMORY.md",
+  "- DeepScan report for this project lives at `deepscan/AGENT_NOTES.md`; use `agent_memory_read(\"project\", \"deepscan/AGENT_NOTES.md\")` for the full report.",
+  section="DeepScan index",
+)
+agent_memory_journal("project", "DeepScan report updated at deepscan/AGENT_NOTES.md")
+```
+
+If you save raw agent findings too, write them under `deepscan/findings/` in project memory after the final report is saved. Do not require raw findings for success.
+
 ## Output Format for Each Agent
 
 ```markdown
@@ -171,13 +196,13 @@ After compilation, verify:
 - [ ] Key insights section
 - [ ] Recommendations section
 - [ ] Timestamp and metadata
+- [ ] Final report saved with `agent_memory_write("project", "deepscan/AGENT_NOTES.md", ...)`
+- [ ] Project `MEMORY.md` includes the DeepScan index pointer
 
 ## Cleanup
 
-```bash
-rm -f tmp-files/AGENT_N_*_FINDINGS.md
-```
+No workspace cleanup is required. DeepScan must not create `tmp-files` or repo-local report files.
 
 ## Final Output Location
 
-`tmp-files/AGENT_NOTES.md` — Complete project analysis report
+Project agent memory: `deepscan/AGENT_NOTES.md` — complete project analysis report

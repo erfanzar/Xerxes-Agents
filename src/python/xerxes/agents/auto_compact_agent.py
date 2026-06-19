@@ -43,7 +43,7 @@ class AutoCompactAgent:
         max_context_tokens: int = 8000,
         compaction_strategy: str = "summarize",
         preserve_system_prompt: bool = True,
-        preserve_recent_messages: int = 5,
+        live_tail_hint: int = 5,
         **_kwargs: Any,
     ) -> None:
         """Initialize the auto-compaction agent.
@@ -60,7 +60,8 @@ class AutoCompactAgent:
                 threshold and target token counts.
             compaction_strategy: Strategy name (e.g., ``"summarize"``).
             preserve_system_prompt: Whether to keep system messages during compaction.
-            preserve_recent_messages: Number of recent messages to keep verbatim.
+            live_tail_hint: Legacy parameter retained for callers; the
+                provisioner now chooses the live tail dynamically by tokens.
             **_kwargs: Additional keyword arguments for extensibility (ignored).
         """
         self.llm_client = llm_client
@@ -71,7 +72,7 @@ class AutoCompactAgent:
         self.max_context_tokens = max_context_tokens
         self.compaction_strategy = compaction_strategy
         self.preserve_system_prompt = preserve_system_prompt
-        self.preserve_recent_messages = preserve_recent_messages
+        self.live_tail_hint = live_tail_hint
         self.token_counter = SmartTokenCounter(model=model)
         self.threshold_tokens = int(max_context_tokens * compact_threshold)
         self.target_tokens = int(max_context_tokens * compact_target)
@@ -111,9 +112,9 @@ class AutoCompactAgent:
         """
         from ..agents.compaction_agent import CompactionAgent
 
+        if self.llm_client is None:
+            return messages, {"summary_created": False, "reason": "no_summary_agent"}
+
         agent = CompactionAgent(llm_client=self.llm_client, target_length="concise")
-        compacted = agent.summarize_messages(
-            messages,
-            preserve_recent=self.preserve_recent_messages,
-        )
-        return compacted, {}
+        compacted = agent.summarize_messages(messages)
+        return compacted, {"summary_created": compacted != messages}

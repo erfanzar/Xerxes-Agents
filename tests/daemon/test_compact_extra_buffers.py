@@ -5,13 +5,7 @@
 # You may obtain a copy of the License at
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
-"""Verify ``compact_if_needed`` trims thinking_content + tool_executions.
-
-``messages`` was the only buffer being trimmed; ``thinking_content`` and
-``tool_executions`` accumulated forever and could account for the bulk of
-session-state memory after hundreds of turns. They now ride along on the
-same compaction path so a long session doesn't leak.
-"""
+"""Verify ``compact_if_needed`` trims thinking_content + tool_executions."""
 
 from __future__ import annotations
 

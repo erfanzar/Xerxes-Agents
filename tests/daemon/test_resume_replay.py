@@ -54,6 +54,10 @@ def _make_server(tmp_path) -> DaemonServer:
     from xerxes.daemon.runtime import SessionManager
 
     server.sessions = SessionManager(server.workspaces, store_dir=tmp_path / "sessions")
+    server._current_session_key = "tui:default"
+    server._connection_sessions = {}
+    server._current_mode = "code"
+    server._current_plan_mode = False
     return server
 
 
@@ -200,6 +204,88 @@ class TestInitializeReplaysWhenResuming:
         bodies = [h["body"] for h in recorder.histories() if h["type"].startswith("replay_")]
         assert any("first question" in b for b in bodies)
         assert any("first answer" in b for b in bodies)
+
+
+class TestSlashResume:
+    def test_resume_without_args_lists_saved_sessions(self, tmp_path):
+        server = _make_server(tmp_path)
+        sess = server.sessions.open("abcd1234")
+        sess.state.messages = [{"role": "user", "content": "saved question"}]
+        sess.state.turn_count = 1
+        server.sessions.save(sess)
+
+        recorder = _Recorder()
+        _run(server._slash_resume("", recorder))
+
+        choices = [
+            payload
+            for etype, payload in recorder.events
+            if etype == "notification" and payload.get("type") == "resume_choices"
+        ]
+        assert choices
+        sessions = choices[0]["payload"]["sessions"]
+        assert sessions[0]["session_id"] == "abcd1234"
+        assert sessions[0]["title"] == "saved question"
+        assert sessions[0]["messages"] == 1
+
+    def test_resume_switches_current_tui_connection_and_replays_history(self, tmp_path):
+        server = _make_server(tmp_path)
+        current = server.sessions.open("tui:default")
+        current.state.metadata["title"] = "current title"
+        current.state.messages = [{"role": "user", "content": "current unsaved"}]
+
+        saved = server.sessions.open("abcd1234")
+        saved.state.metadata["title"] = "old work"
+        saved.state.messages = [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ]
+        saved.state.turn_count = 1
+        server.sessions.save(saved)
+        server.sessions._sessions.pop("abcd1234")
+
+        server.runtime.runtime_config = {"permission_mode": "auto", "model": "claude-haiku-4-5"}
+        server.runtime.discover_skills = lambda: []
+        server._git_branch = lambda: ""
+        server._emit_status = _stub_async  # type: ignore[method-assign]
+
+        recorder = _Recorder()
+        _run(server._slash_resume("old work", recorder))
+
+        assert server._current_session_key == "abcd1234"
+        assert server._connection_sessions[recorder] == "abcd1234"
+        assert server.sessions.open("tui:default").state.metadata["title"] == "current title"
+
+        event_types = [(etype, payload.get("category"), payload.get("type")) for etype, payload in recorder.events]
+        assert ("notification", "history", "resume_begin") in event_types
+        assert any(etype == "init_done" and payload["session_id"] == "abcd1234" for etype, payload in recorder.events)
+
+        bodies = [h["body"] for h in recorder.histories()]
+        assert any("old question" in body for body in bodies)
+        assert any("old answer" in body for body in bodies)
+        assert any("resumed session abcd1234" in body for body in bodies)
+        assert not any("Resumed session `abcd1234`" in payload.get("body", "") for _, payload in recorder.events)
+
+    def test_resume_does_not_save_empty_current_placeholder(self, tmp_path):
+        server = _make_server(tmp_path)
+        current = server.sessions.open("tui:default")
+
+        saved = server.sessions.open("abcd1234")
+        saved.state.metadata["title"] = "old work"
+        saved.state.messages = [{"role": "user", "content": "old question"}]
+        saved.state.turn_count = 1
+        server.sessions.save(saved)
+        server.sessions._sessions.pop("abcd1234")
+
+        server.runtime.runtime_config = {"permission_mode": "auto", "model": "claude-haiku-4-5"}
+        server.runtime.discover_skills = lambda: []
+        server._git_branch = lambda: ""
+        server._emit_status = _stub_async  # type: ignore[method-assign]
+
+        recorder = _Recorder()
+        _run(server._slash_resume("old work", recorder))
+
+        assert not server.sessions._session_path(current.id).exists()
 
 
 async def _stub_async(*a, **kw) -> None:

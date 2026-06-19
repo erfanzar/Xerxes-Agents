@@ -196,34 +196,42 @@ def test_status_update_keeps_non_plan_activity_mode() -> None:
 
 
 def test_plan_mode_colors_footer_and_input_separator_purple() -> None:
+    from xerxes.tui.skin_engine import active_fg
+
+    plan_color = active_fg("system")  # plan mode tints via the skin "system" (violet) role
+
     footer = FooterRenderer()
     footer.set_plan_mode(True)
 
     footer_markup = footer._markup()
-    assert "\x1b[35m" in footer_markup
+    assert plan_color in footer_markup
     assert "mode: plan" in footer_markup
 
     status = StatusRenderer()
     status.set_plan_mode(True)
 
     status_markup = status._markup()
-    assert "\x1b[35m" in status_markup
+    assert plan_color in status_markup
     assert "input · plan" in status_markup
 
 
 def test_research_mode_colors_footer_and_input_separator_cyan() -> None:
+    from xerxes.tui.skin_engine import active_fg
+
+    research_color = active_fg("accent")  # researcher mode tints via the skin "accent" (turquoise) role
+
     footer = FooterRenderer()
     footer.set_activity_mode("researcher")
 
     footer_markup = footer._markup()
-    assert "\x1b[36m" in footer_markup
+    assert research_color in footer_markup
     assert "mode: researcher" in footer_markup
 
     status = StatusRenderer()
     status.set_activity_mode("researcher")
 
     status_markup = status._markup()
-    assert "\x1b[36m" in status_markup
+    assert research_color in status_markup
     assert "input · research" in status_markup
 
 
@@ -317,7 +325,10 @@ async def test_init_done_replaces_full_split_banner_range() -> None:
         await tui._model_load_task
 
     history = "\n".join(prompt._status._content_lines)
-    assert history.count("Welcome to Xerxes!") == 1
+    from xerxes.tui.skin_engine import get_active_skin
+
+    welcome = get_active_skin().label("welcome")
+    assert history.count(welcome) == 1
     assert "provisional" not in history
     assert "real-session" in history
     assert "glm-5.2" in history

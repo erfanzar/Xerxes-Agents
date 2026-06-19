@@ -97,6 +97,9 @@ class SlashCommandsMixin:
         if session is None:
             await self._emit_slash(emit, "No active session to save.")
             return
+        if hasattr(self.sessions, "_session_has_history") and not self.sessions._session_has_history(session):
+            await self._emit_slash(emit, "Nothing to save yet — this session has no messages.")
+            return
         self.sessions.save(session)
         path = self.sessions._session_path(session.id)
         await self._emit_slash(emit, f"Saved session `{session.id}` to `{path}`.")
@@ -217,20 +220,130 @@ class SlashCommandsMixin:
         )
 
     async def _slash_resume(self, args: str, emit: EmitFn) -> None:
-        """List recent saved sessions; resuming requires re-launching with ``-r``."""
-        records = self.sessions.list()
+        """List or switch this TUI connection to a saved session."""
+        target = args.strip()
+        if target:
+            matches = self._find_saved_sessions(target)
+            if not matches:
+                await self._emit_slash(emit, f"No saved session matches `{target}`. Run `/resume` to list sessions.")
+                return
+            if len(matches) > 1:
+                await self._emit_resume_choices(
+                    matches[:20],
+                    emit,
+                    body=f"Multiple sessions match `{target}`. Choose one, or type the full session id.",
+                )
+                return
+
+            current_key = self._connection_session_key(emit)
+            current = self.sessions.get(current_key)
+            if current is not None:
+                self.sessions.save(current)
+
+            session_id = str(matches[0].get("session_id") or matches[0].get("id") or "")
+            if not session_id:
+                await self._emit_slash(emit, f"Saved session `{target}` is missing a session id.")
+                return
+
+            self._current_session_key = session_id
+            conn_sessions = getattr(self, "_connection_sessions", None)
+            if conn_sessions is not None:
+                conn_sessions[emit] = session_id
+
+            session = self.sessions.open(session_id, self.workspaces.default_agent_id)
+            await emit(
+                "notification",
+                {
+                    "id": uuid.uuid4().hex[:12],
+                    "category": "history",
+                    "type": "resume_begin",
+                    "severity": "info",
+                    "title": "",
+                    "body": f"── switching to session {session.id} ──",
+                    "payload": {"session_id": session.id},
+                },
+            )
+            await emit(
+                "init_done",
+                {
+                    "model": self.runtime.model,
+                    "session_id": session.id,
+                    "cwd": str(self.config.project_dir or os.getcwd()),
+                    "git_branch": self._git_branch(),
+                    "context_limit": self._resolve_context_limit(),
+                    "agent_name": session.agent_id,
+                    "skills": self.runtime.discover_skills(),
+                },
+            )
+            await self._emit_status(emit)
+            await self._replay_session_history(session, emit)
+            return
+
+        records = self._saved_session_records()
         if not records:
             await self._emit_slash(emit, "No saved sessions found.")
             return
-        lines = ["Recent sessions:"]
-        for r in records[:10]:
-            sid = r.get("session_id", "?")
-            updated = r.get("updated_at", "")
-            turns = r.get("turn_count", 0)
-            lines.append(f"  `{sid}` — {turns} turn(s), updated {updated}")
-        lines.append("")
-        lines.append("Resume from a fresh terminal: `xerxes -r <id>`.")
-        await self._emit_slash(emit, "\n".join(lines))
+        await self._emit_resume_choices(records[:20], emit, body="Choose a saved session, or type `/resume <id>`.")
+
+    async def _emit_resume_choices(self, records: list[dict[str, Any]], emit: EmitFn, *, body: str) -> None:
+        """Emit saved-session choices as structured data for the TUI picker."""
+        choices = [self._session_choice_payload(r) for r in records]
+        await emit(
+            "notification",
+            {
+                "id": uuid.uuid4().hex[:12],
+                "category": "history",
+                "type": "resume_choices",
+                "severity": "info",
+                "title": "Resume session",
+                "body": body,
+                "payload": {"sessions": choices},
+            },
+        )
+
+    @staticmethod
+    def _session_choice_payload(record: dict[str, Any]) -> dict[str, Any]:
+        """Return a compact record payload for TUI session picking."""
+        sid = str(record.get("session_id") or record.get("id") or "")
+        messages = record.get("messages", 0)
+        if isinstance(messages, list):
+            message_count = len(messages)
+        else:
+            try:
+                message_count = int(messages or 0)
+            except (TypeError, ValueError):
+                message_count = 0
+        return {
+            "id": sid,
+            "session_id": sid,
+            "title": str(record.get("title") or "").strip() or sid,
+            "updated_at": str(record.get("updated_at") or ""),
+            "turn_count": int(record.get("turn_count", 0) or 0),
+            "messages": message_count,
+            "agent_id": str(record.get("agent_id") or ""),
+        }
+
+    def _saved_session_records(self) -> list[dict[str, Any]]:
+        """Return saved sessions, falling back for lightweight test doubles."""
+        if hasattr(self.sessions, "list_saved"):
+            return self.sessions.list_saved()
+        return self.sessions.list()
+
+    def _find_saved_sessions(self, query: str) -> list[dict[str, Any]]:
+        """Find saved sessions, falling back for lightweight test doubles."""
+        if hasattr(self.sessions, "find_saved"):
+            return self.sessions.find_saved(query)
+        needle = query.strip().lower()
+        return [
+            record
+            for record in self._saved_session_records()
+            if needle
+            and (
+                str(record.get("session_id") or record.get("id") or "").lower().startswith(needle)
+                or str(record.get("key") or "").lower() == needle
+                or str(record.get("title") or "").lower() == needle
+            )
+        ]
 
     async def _slash_memory(self, args: str, emit: EmitFn) -> None:
         """Show where the agent's memory files live + their sizes."""
@@ -730,7 +843,7 @@ class SlashCommandsMixin:
         session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
         await self._emit_slash(emit, f"New session `{session.id}` started. Scrollback cleared on TUI side.")
 
-    async def _slash_steer(self, args: str, emit: EmitFn) -> None:
+    async def _steer_session(self, session_key: str, args: str, emit: EmitFn) -> None:
         """Inject a steering hint into the active turn (``/btw`` and ``/steer``).
 
         Mid-turn the content is queued on the active session; the streaming
@@ -743,7 +856,7 @@ class SlashCommandsMixin:
         if not content:
             await self._emit_slash(emit, "Usage: `/steer <hint>` (also `/btw`). Anything after the command is injected.")
             return
-        session = self.sessions.get(self._current_session_key)
+        session = self.sessions.get(session_key)
         if session is None:
             await self._emit_slash(emit, "No active session to steer.")
             return
@@ -754,6 +867,10 @@ class SlashCommandsMixin:
         else:
             session.state.messages.append({"role": "user", "content": f"[steer from user]\n{content}"})
             await self._emit_slash(emit, "Steer injected — will land on the next turn.")
+
+    async def _slash_steer(self, args: str, emit: EmitFn) -> None:
+        """Inject a steering hint into the current slash-command session."""
+        await self._steer_session(self._current_session_key, args, emit)
 
     async def _slash_paste(self, args: str, emit: EmitFn) -> None:
         """Paste is TUI-side; ack with a hint."""
@@ -772,7 +889,7 @@ class SlashCommandsMixin:
         lines.append(f"  {'✓' if tools else '✗'} Tools loaded: {tools}")
         skills = len(self.runtime.discover_skills())
         lines.append(f"  ✓ Skills discovered: {skills}")
-        sessions = len(self.sessions.list())
+        sessions = len(self._saved_session_records())
         lines.append(f"  ✓ Saved sessions on disk: {sessions}")
         lines.append("")
         lines.append("All good." if ok else "Something needs attention — see above.")
@@ -831,8 +948,10 @@ class SlashCommandsMixin:
             await self._emit_status(emit)
 
     async def _slash_skin(self, args: str, emit: EmitFn) -> None:
-        """Skin is a pure TUI concern; ack and tell the user to use the TUI command."""
-        await self._emit_slash(emit, "Skin is a TUI-side setting. Use the TUI's `Ctrl+T` or the `xerxes-skin` CLI.")
+        """Skin is a pure TUI concern; ack and point at the live TUI command."""
+        await self._emit_slash(
+            emit, "Skin is a TUI-side setting. Use `/skin <name>` in the TUI, or set `XERXES_SKIN=<name>`."
+        )
 
     async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
         """Show the current project directory and the agent workspace path."""
@@ -929,7 +1048,7 @@ class SlashCommandsMixin:
 
     async def _slash_branches(self, args: str, emit: EmitFn) -> None:
         """List every saved session id grouped by who their last update was."""
-        records = self.sessions.list()
+        records = self._saved_session_records()
         if not records:
             await self._emit_slash(emit, "No branches / saved sessions.")
             return

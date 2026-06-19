@@ -32,7 +32,24 @@ from typing import Any, ClassVar
 
 from prompt_toolkit.formatted_text import AnyFormattedText
 
-from .console import severity_color, severity_icon
+from .console import severity_icon
+from .skin_engine import active_fg, get_active_skin
+
+# Map notification severities onto skin roles so notification coloring follows
+# the active skin instead of the legacy fixed palette in ``console.py``.
+_SEVERITY_ROLE: dict[str, str] = {
+    "info": "system",
+    "success": "accent",
+    "warning": "warn",
+    "error": "error",
+    "debug": "muted",
+}
+
+
+def _severity_role(sev: str) -> str:
+    """Return the skin role for ``sev`` (defaults to ``muted``)."""
+    return _SEVERITY_ROLE.get(sev, "muted")
+
 
 try:
     import markdown_it
@@ -378,13 +395,13 @@ class _SubToolCall:
         """Render one compact sub-call line: status, name, key arg, timing."""
         from .console import _prompt_text_to_ansi
 
-        icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self.status, "·")
+        icon = {"running": "◐", "done": "✓", "error": "✗"}.get(self.status, "○")
         name = _markup_safe(self.name)
         key_arg = _markup_safe(self.key_arg)
         if self.status == "done":
-            markup = f"  {icon} [cyan]{name}[/cyan] ({key_arg}) — {self.duration_ms:.0f}ms"
+            markup = f"  {icon} [tool_name]{name}[/tool_name] ({key_arg}) — {self.duration_ms:.0f}ms"
         else:
-            markup = f"  {icon} [cyan]{name}[/cyan] ({key_arg})"
+            markup = f"  {icon} [tool_name]{name}[/tool_name] ({key_arg})"
         return _prompt_text_to_ansi(markup)
 
 
@@ -477,28 +494,28 @@ class _ToolCallBlock:
         name = _markup_safe(self.name)
         key_arg = _markup_safe(self.key_arg)
 
-        # Status icon: running=○, done=✓, error=✗
+        # Status icon (unified set): running=◐, done=✓, error=✗
         if self._status == "running":
-            icon = "○"
-            icon_color = "yellow"
+            icon = "◐"
+            icon_color = "warn"
         elif self._status == "done":
             icon = "✓"
-            icon_color = "green"
+            icon_color = "accent"
         else:
             icon = "✗"
-            icon_color = "red"
+            icon_color = "error"
 
-        line = f"[{icon_color}]{icon}[/{icon_color}] [cyan]{name}[/cyan] ([dim]{key_arg}[/dim])"
+        line = f"[{icon_color}]{icon}[/{icon_color}] [tool_name]{name}[/tool_name] ([dim]{key_arg}[/dim])"
 
         if self._status == "done" and self._result:
             collapsed = _markup_safe(self._result).replace("\n", " ").strip()
             while "  " in collapsed:
                 collapsed = collapsed.replace("  ", " ")
             if len(collapsed) > self.MAX_RESULT_CHARS:
-                collapsed = collapsed[: self.MAX_RESULT_CHARS - 3] + "..."
+                collapsed = collapsed[: self.MAX_RESULT_CHARS - 1] + "…"
             line += f" — [dim]{collapsed}[/dim]"
         elif self._status == "running":
-            line += " — [dim]...[/dim]"
+            line += " — [dim]…[/dim]"
 
         line += f" — {duration}"
 
@@ -540,31 +557,26 @@ class _NotificationBlock:
         everything else uses the compact icon + title + dim-body layout."""
         from .console import _prompt_text_to_ansi, markdown_to_ansi
 
-        color = severity_color(self.severity)
+        role = _severity_role(self.severity)
         icon = severity_icon(self.severity)
         all_lines = self.body.strip().split("\n")
 
         if self.category in self.PROSE_CATEGORIES and not self.body.lstrip().startswith("✨"):
             try:
                 body_text = markdown_to_ansi(self.body)
-                return f"\x1b[38;5;{_severity_ansi(self.severity)}m{icon}\x1b[39m {body_text}"
+                return f"{active_fg(role)}{icon}\x1b[39m {body_text}"
             except Exception:
                 pass
 
         if self.category == "slash" or not self.title:
             body_text = "\n".join(all_lines)
-            markup = f"[{color}]{icon}[/{color}] {body_text}"
+            markup = f"[{role}]{icon}[/{role}] {body_text}"
         else:
             body_text = "\n".join(all_lines[: self.MAX_BODY_LINES])
             if len(all_lines) > self.MAX_BODY_LINES:
                 body_text += " [dim](truncated)[/dim]"
-            markup = f"[{color}]{icon} [bold]{self.title}[/bold][/{color}]\n[dim]{body_text}[/dim]"
+            markup = f"[{role}]{icon} [bold]{self.title}[/bold][/{role}]\n[dim]{body_text}[/dim]"
         return _prompt_text_to_ansi(markup)
-
-
-def _severity_ansi(sev: str) -> str:
-    """Return the ANSI 256-color index for ``sev`` (defaults to grey ``"245"``)."""
-    return {"info": "51", "warning": "214", "error": "196"}.get(sev, "245")
 
 
 class ApprovalRequestPanel:
@@ -622,7 +634,7 @@ class ApprovalRequestPanel:
         from .console import _prompt_text_to_ansi
 
         lines = [
-            "[yellow bold]? Permission required[/yellow bold]",
+            "[warn bold]? Permission required[/warn bold]",
             "",
             f"  [bold]{self.action}[/bold]",
             f"  [dim]{self.description}[/dim]",
@@ -630,15 +642,91 @@ class ApprovalRequestPanel:
         ]
 
         for i, response in enumerate(self.SELECTIONS):
-            marker = "▶" if i == self._selected else " "
+            marker = "▸" if i == self._selected else " "
             label = self.LABELS[response]
-            color = "green" if response == "approve" else ("cyan" if response == "approve_for_session" else "red")
-            lines.append(f"  {marker} [{color}]{label}[/{color}]")
+            role = "accent" if response == "approve" else ("tool_name" if response == "approve_for_session" else "error")
+            lines.append(f"  {marker} [{role}]{label}[/{role}]")
 
         if self.diff and self._expanded:
             lines.append("")
             lines.append("[dim]--- diff (Ctrl+E to collapse) ---[/dim]")
-            lines.append(self.diff)
+            for diff_line in self.diff.split("\n"):
+                if diff_line.startswith("+") and not diff_line.startswith("+++"):
+                    lines.append(f"[accent]{diff_line}[/accent]")
+                elif diff_line.startswith("-") and not diff_line.startswith("---"):
+                    lines.append(f"[error]{diff_line}[/error]")
+                else:
+                    lines.append(diff_line)
+
+        return _prompt_text_to_ansi("\n".join(lines))
+
+
+class ResumeSessionPanel:
+    """Interactive saved-session picker for ``/resume``."""
+
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        """Store display records and start with the newest session highlighted."""
+        self.records = records
+        self._selected = 0
+
+    @property
+    def selected_session_id(self) -> str:
+        """Session id for the highlighted row."""
+        if not self.records:
+            return ""
+        record = self.records[self._selected]
+        return str(record.get("session_id") or record.get("id") or "")
+
+    def move_cursor_up(self) -> None:
+        """Highlight the previous session."""
+        if self.records:
+            self._selected = (self._selected - 1) % len(self.records)
+
+    def move_cursor_down(self) -> None:
+        """Highlight the next session."""
+        if self.records:
+            self._selected = (self._selected + 1) % len(self.records)
+
+    @staticmethod
+    def _clip(value: Any, limit: int) -> str:
+        """Return ``value`` collapsed to one short display line."""
+        text = " ".join(str(value or "").split())
+        return text[: limit - 1] + "…" if len(text) > limit else text
+
+    @staticmethod
+    def _updated_label(value: Any) -> str:
+        """Compact an ISO timestamp for session-list display."""
+        text = str(value or "")
+        if "T" not in text:
+            return text
+        date, rest = text.split("T", 1)
+        return f"{date} {rest[:5]}"
+
+    def compose(self) -> str:
+        """Render the picker panel with one selectable row per session."""
+        from .console import _prompt_text_to_ansi
+
+        lines = [
+            "[bold accent]? Resume Session[/bold accent]",
+            "",
+            "[dim]Use Up/Down then Enter. Type a number, id, or title to resume. Type /cancel to close.[/dim]",
+            "",
+        ]
+        if not self.records:
+            lines.append("  [dim]No saved sessions found.[/dim]")
+            return _prompt_text_to_ansi("\n".join(lines))
+
+        for i, record in enumerate(self.records):
+            selected = i == self._selected
+            marker = "▸" if selected else " "
+            role = "accent" if selected else "system"
+            sid = str(record.get("session_id") or record.get("id") or "?")
+            title = self._clip(record.get("title") or sid, 68)
+            updated = self._updated_label(record.get("updated_at"))
+            turns = int(record.get("turn_count", 0) or 0)
+            messages = int(record.get("messages", 0) or 0)
+            lines.append(f"  {marker} [{role}]{i + 1}. {title}[/{role}]")
+            lines.append(f"      [dim]{sid} · {turns} turn(s), {messages} message(s), updated {updated}[/dim]")
 
         return _prompt_text_to_ansi("\n".join(lines))
 
@@ -742,21 +830,22 @@ class QuestionRequestPanel:
         from .console import _prompt_text_to_ansi
 
         lines = [
-            f"[bold cyan]? Question ({self._question_index + 1}/{len(self.questions)})[/bold cyan]",
+            f"[bold accent]? Question ({self._question_index + 1}/{len(self.questions)})[/bold accent]",
             "",
             f"  [bold]{self.current_question.get('question', '')}[/bold]",
             "",
         ]
 
         for i, option in enumerate(self.current_options):
-            marker = "▶" if i == self._option_index else " "
+            marker = "▸" if i == self._option_index else " "
             lines.append(f"  {i + 1}. {marker} {option}")
 
         if self.current_question.get("allow_free_form"):
-            other_marker = "▶" if self._free_text_mode else " "
+            other_marker = "▸" if self._free_text_mode else " "
             lines.append(f"     {other_marker} [dim]Other (type your answer)[/dim]")
             if self._free_text_mode:
-                lines.append(f"       [green]> {self._free_text}_[/green]")
+                prompt_glyph = get_active_skin().label("prompt_symbol")
+                lines.append(f"       [accent]{prompt_glyph} {self._free_text}_[/accent]")
 
         lines.append("")
         lines.append("[dim]Type a number to pick, free text for custom, or /cancel to abort.[/dim]")

@@ -113,8 +113,7 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
             "element": {
                 "type": "integer",
                 "description": (
-                    "Element index (1-based) from the most recent capture. "
-                    "Preferred over x/y for reliability."
+                    "Element index (1-based) from the most recent capture. Preferred over x/y for reliability."
                 ),
             },
             "x": {

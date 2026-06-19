@@ -381,9 +381,9 @@ class SessionManager:
     """Maps client session keys to persistent :class:`DaemonSession` state.
 
     Each session is persisted atomically to ``$XERXES_HOME/sessions/<id>.json``
-    so ``xerxes -r <id>`` truly rehydrates the conversation. The ``keep_messages``
-    bound caps in-memory history length; older messages are compacted out by
-    :meth:`compact_if_needed` and a marker is appended to the agent's daily note.
+    so ``xerxes -r <id>`` truly rehydrates the conversation. Message context
+    compaction happens inside the model runtime before provider calls; the
+    session manager only caps append-only side buffers.
     """
 
     def __init__(
@@ -475,12 +475,76 @@ class SessionManager:
                 i += 1
         return repaired
 
+    @staticmethod
+    def _message_text(content: Any) -> str:
+        """Return readable text from a persisted message ``content`` field."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            value = content.get("text") or content.get("content") or ""
+            return str(value)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text") or item.get("content") or ""
+                    if value:
+                        parts.append(str(value))
+            return "\n".join(parts)
+        return str(content or "")
+
+    @classmethod
+    def _derive_title_from_messages(cls, messages: Any) -> str:
+        """Use the first persisted user prompt as a compact session title."""
+        if not isinstance(messages, list):
+            return ""
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            text = " ".join(cls._message_text(message.get("content")).split())
+            if text:
+                return text[:77] + "..." if len(text) > 80 else text
+        return ""
+
+    @staticmethod
+    def _record_has_history(record: dict[str, Any]) -> bool:
+        """Return ``True`` when a persisted record has resumable content."""
+        messages = record.get("messages", [])
+        message_count = len(messages) if isinstance(messages, list) else 0
+        try:
+            turn_count = int(record.get("turn_count", 0) or 0)
+        except (TypeError, ValueError):
+            turn_count = 0
+        return message_count > 0 or turn_count > 0
+
+    @staticmethod
+    def _session_has_history(session: DaemonSession) -> bool:
+        """Return ``True`` when ``session`` should be persisted for resume."""
+        try:
+            turn_count = int(session.state.turn_count or 0)
+        except (TypeError, ValueError):
+            turn_count = 0
+        return bool(session.state.messages) or turn_count > 0
+
     def save(self, session: DaemonSession) -> None:
         """Persist ``session`` to disk via a tempfile + ``os.replace`` swap.
 
         Atomic so the JSON file is never partially overwritten if the daemon
         crashes mid-write.
         """
+        path = self._session_path(session.id)
+        if not self._session_has_history(session):
+            path.unlink(missing_ok=True)
+            return
+
+        metadata = dict(session.state.metadata or {})
+        if not str(metadata.get("title") or "").strip():
+            title = self._derive_title_from_messages(session.state.messages)
+            if title:
+                metadata["title"] = title
+        session.state.metadata = metadata
         record = {
             "session_id": session.id,
             "key": session.key,
@@ -491,10 +555,10 @@ class SessionManager:
             "turn_count": session.state.turn_count,
             "total_input_tokens": session.state.total_input_tokens,
             "total_output_tokens": session.state.total_output_tokens,
+            "metadata": metadata,
             "thinking_content": session.state.thinking_content,
             "tool_executions": session.state.tool_executions,
         }
-        path = self._session_path(session.id)
         path.parent.mkdir(parents=True, exist_ok=True)
         import tempfile
 
@@ -553,6 +617,8 @@ class SessionManager:
             state.turn_count = int(loaded.get("turn_count", 0))
             state.total_input_tokens = int(loaded.get("total_input_tokens", 0))
             state.total_output_tokens = int(loaded.get("total_output_tokens", 0))
+            metadata = loaded.get("metadata", {})
+            state.metadata = dict(metadata) if isinstance(metadata, dict) else {}
             state.thinking_content = list(loaded.get("thinking_content", []))
             state.tool_executions = list(loaded.get("tool_executions", []))
         else:
@@ -587,6 +653,69 @@ class SessionManager:
         """Return the live session bound to ``session_key``, or ``None``."""
         return self._sessions.get(session_key or "default")
 
+    def list_saved(self) -> list[dict[str, Any]]:
+        """Return persisted session records, newest first."""
+        records: list[dict[str, Any]] = []
+        for path in self._store_dir.glob("*.json"):
+            if path.name.startswith("."):
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                mtime = path.stat().st_mtime
+            except (OSError, json.JSONDecodeError):
+                continue
+            metadata = record.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if not self._record_has_history(record):
+                continue
+            session_id = str(record.get("session_id") or path.stem)
+            messages = record.get("messages", [])
+            title = str(metadata.get("title") or "").strip() or self._derive_title_from_messages(messages)
+            records.append(
+                {
+                    "id": session_id,
+                    "session_id": session_id,
+                    "key": str(record.get("key") or ""),
+                    "title": title,
+                    "agent_id": str(record.get("agent_id") or ""),
+                    "updated_at": str(record.get("updated_at") or ""),
+                    "turn_count": int(record.get("turn_count", 0) or 0),
+                    "messages": len(messages) if isinstance(messages, list) else 0,
+                    "path": str(path),
+                    "_mtime": mtime,
+                }
+            )
+        records.sort(key=lambda item: (str(item.get("updated_at") or ""), float(item.get("_mtime", 0.0))), reverse=True)
+        for record in records:
+            record.pop("_mtime", None)
+        return records
+
+    def find_saved(self, query: str) -> list[dict[str, Any]]:
+        """Return saved sessions matching ``query`` by id, key, or title."""
+        needle = query.strip()
+        if not needle:
+            return []
+        needle_lower = needle.lower()
+        records = self.list_saved()
+        exact = [
+            record
+            for record in records
+            if needle == str(record.get("id") or "")
+            or needle == str(record.get("session_id") or "")
+            or needle == str(record.get("key") or "")
+            or needle_lower == str(record.get("title") or "").lower()
+        ]
+        if exact:
+            return exact
+        return [
+            record
+            for record in records
+            if str(record.get("id") or "").startswith(needle)
+            or str(record.get("session_id") or "").startswith(needle)
+            or str(record.get("title") or "").lower().startswith(needle_lower)
+        ]
+
     def evict(self, session_key: str) -> None:
         """Drop the in-memory session bound to ``session_key`` (no-op if absent).
 
@@ -616,48 +745,19 @@ class SessionManager:
             count += 1
         return count
 
-    # Parallel trim limits applied at the same time we compact ``messages``.
     # ``thinking_content`` and ``tool_executions`` are append-only side
-    # buffers — they accumulate one entry per turn / tool call and were
-    # never trimmed, so a long-running session would silently hold tens
-    # of MB of stale reasoning text and audit records.
+    # buffers. The runtime provisioner owns message compaction, while these
+    # side buffers are bounded here during persistence.
     _THINKING_KEEP = 32
     _TOOL_EXEC_KEEP = 200
 
     def compact_if_needed(self, session: DaemonSession) -> bool:
-        """Trim ``session`` history to ``keep_messages`` (plus parallel buffers).
+        """Trim side buffers that are not sent back to the model.
 
-        Returns ``True`` when the session was actually compacted.
+        Returns ``True`` when a side buffer was trimmed.
         """
         state = session.state
         compacted = False
-
-        if len(state.messages) > self.keep_messages:
-            cut = len(state.messages) - self.keep_messages
-            # Snap the window start forward to a clean boundary. A raw tail slice
-            # can begin on a `tool` message whose matching `tool_use` was sliced
-            # off (or mid tool-use/result pair); messages_to_anthropic would then
-            # emit a tool_result with no tool_use and the provider 400s. Starting
-            # at the first user message at/after the cut guarantees a valid prefix.
-            start = cut
-            while start < len(state.messages) and state.messages[start].get("role") != "user":
-                start += 1
-            if start >= len(state.messages):
-                # No user-message boundary in the tail (pathological — e.g. a single
-                # assistant turn with a huge parallel tool batch). Skip the message
-                # trim THIS round rather than emptying the window or starting on an
-                # orphan tool_result; the side buffers below still trim, and the next
-                # turn introduces a user message that gives a clean boundary.
-                start = 0
-            if start > 0:
-                evicted = state.messages[:start]
-                self._archive_evicted(session, evicted)
-                session.workspace.append_daily_note(
-                    f"[session:{session.key}] compacted {len(evicted)} old messages "
-                    f"(archived to {session.id}.archive.jsonl); kept last {len(state.messages) - start}."
-                )
-                state.messages = state.messages[start:]
-                compacted = True
 
         if len(state.thinking_content) > self._THINKING_KEEP:
             state.thinking_content = state.thinking_content[-self._THINKING_KEEP :]

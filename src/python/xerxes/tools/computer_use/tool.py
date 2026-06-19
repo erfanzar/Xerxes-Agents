@@ -120,12 +120,15 @@ def _format_action_result(result: ActionResult, capture_after: bool = False) -> 
                     break
             return capture_dict
 
-    return json.dumps({
-        "ok": result.ok,
-        "action": result.action,
-        "message": result.message,
-        "meta": result.meta,
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "ok": result.ok,
+            "action": result.action,
+            "message": result.message,
+            "meta": result.meta,
+        },
+        ensure_ascii=False,
+    )
 
 
 class computer_use:
@@ -156,6 +159,7 @@ class computer_use:
             return
         logger.info("cua-driver not found, attempting auto-install...")
         import subprocess
+
         install_script = "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh"
         try:
             result = subprocess.run(
@@ -230,28 +234,36 @@ class computer_use:
 
             elif action == "click":
                 result = backend.click(
-                    element=element, x=x, y=y,
+                    element=element,
+                    x=x,
+                    y=y,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
 
             elif action == "double_click":
                 result = backend.double_click(
-                    element=element, x=x, y=y,
+                    element=element,
+                    x=x,
+                    y=y,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
 
             elif action == "right_click":
                 result = backend.right_click(
-                    element=element, x=x, y=y,
+                    element=element,
+                    x=x,
+                    y=y,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
 
             elif action == "middle_click":
                 result = backend.middle_click(
-                    element=element, x=x, y=y,
+                    element=element,
+                    x=x,
+                    y=y,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
@@ -259,17 +271,22 @@ class computer_use:
             elif action == "drag":
                 result = backend.drag(
                     start_element=start_element,
-                    start_x=start_x, start_y=start_y,
+                    start_x=start_x,
+                    start_y=start_y,
                     end_element=end_element,
-                    end_x=end_x, end_y=end_y,
+                    end_x=end_x,
+                    end_y=end_y,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
 
             elif action == "scroll":
                 result = backend.scroll(
-                    element=element, x=x, y=y,
-                    dx=dx, dy=dy,
+                    element=element,
+                    x=x,
+                    y=y,
+                    dx=dx,
+                    dy=dy,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)
@@ -284,7 +301,8 @@ class computer_use:
 
             elif action == "set_value":
                 result = backend.set_value(
-                    value=value, element=element,
+                    value=value,
+                    element=element,
                     capture_after=capture_after,
                 )
                 return _format_action_result(result, capture_after)

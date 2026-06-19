@@ -29,13 +29,13 @@ from typing import Any
 class UIElement:
     """One interactable element on the current screen."""
 
-    index: int                       # 1-based SOM index
-    role: str                        # AX role (AXButton, AXTextField, ...)
-    label: str = ""                  # AXTitle / AXDescription / AXValue snippet
+    index: int  # 1-based SOM index
+    role: str  # AX role (AXButton, AXTextField, ...)
+    label: str = ""  # AXTitle / AXDescription / AXValue snippet
     bounds: tuple[int, int, int, int] = (0, 0, 0, 0)  # x, y, w, h (logical px)
-    app: str = ""                    # owning bundle ID or app name
-    pid: int = 0                     # owning process PID
-    window_id: int = 0               # SkyLight / CG window ID
+    app: str = ""  # owning bundle ID or app name
+    pid: int = 0  # owning process PID
+    window_id: int = 0  # SkyLight / CG window ID
     attributes: dict[str, Any] = field(default_factory=dict)
 
     def center(self) -> tuple[int, int]:
@@ -56,7 +56,7 @@ class CaptureResult:
     """
 
     mode: str
-    width: int                      # screenshot width (logical px, pre-Anthropic-scale)
+    width: int  # screenshot width (logical px, pre-Anthropic-scale)
     height: int
     png_b64: str | None = None
     elements: list[UIElement] = field(default_factory=list)
@@ -73,7 +73,7 @@ class ActionResult:
 
     ok: bool
     action: str
-    message: str = ""                # human-readable summary
+    message: str = ""  # human-readable summary
     # Optional trailing screenshot — set when the caller asked for a
     # post-action capture or the backend always returns one.
     capture: CaptureResult | None = None
@@ -109,7 +109,7 @@ class ComputerUseBackend(ABC):
         element: int | None = None,
         x: int | None = None,
         y: int | None = None,
-        button: str = "left",           # left | right | middle
+        button: str = "left",  # left | right | middle
         click_count: int = 1,
         capture_after: bool = False,
     ) -> ActionResult: ...
