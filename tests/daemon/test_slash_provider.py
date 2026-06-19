@@ -65,13 +65,17 @@ def _drive(server, command: str) -> list[str]:
 
 
 class TestSlashProvider:
-    def test_no_profiles_returns_helpful_hint(self, daemon, monkeypatch):
+    def test_no_profiles_emits_add_panel(self, daemon, monkeypatch):
         monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: [])
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: None)
-        out = _drive(daemon, "/provider")
-        assert out
-        assert "No provider profiles" in out[0]
-        assert "XERXES_BASE_URL" in out[0]
+        rec = _Recorder()
+        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+
+        assert rec.slash_outputs() == []
+        qrs = [p for (t, p) in rec.events if t == "question_request"]
+        assert qrs, "no question_request emitted"
+        options = qrs[0]["questions"][0]["options"]
+        assert options == ["+ Add new profile…", "Cancel"]
 
     def test_bare_provider_emits_panel_with_active_marker(self, daemon, monkeypatch):
         """Bare ``/provider`` now opens an interactive panel — assert the

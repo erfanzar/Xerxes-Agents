@@ -44,8 +44,8 @@ class TestPlatformInfo:
 class TestHomebrewFormula:
     def test_renders(self):
         out = render_homebrew_formula(
-            version="0.2.2",
-            tarball_url="https://example.test/xerxes-agent-0.2.2.tar.gz",
+            version="0.2.3",
+            tarball_url="https://example.test/xerxes-agent-0.2.3.tar.gz",
             sha256="deadbeef",
         )
         assert "class XerxesAgent < Formula" in out

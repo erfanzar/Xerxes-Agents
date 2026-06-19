@@ -49,7 +49,7 @@ class BannerData:
         updates_ahead_available: Number of upstream commits ahead of HEAD.
     """
 
-    version: str = "0.2.2"
+    version: str = "0.2.3"
     model: str = ""
     workspace: str = ""
     session_id: str = ""
