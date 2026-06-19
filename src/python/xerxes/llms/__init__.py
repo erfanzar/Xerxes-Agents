@@ -53,6 +53,7 @@ from .registry import (
     get_provider_config,
     list_all_models,
     provider_default_headers,
+    resolve_provider,
 )
 
 PluginRegistry: type[Any] | None = None
@@ -192,4 +193,5 @@ __all__ = [
     "get_provider_config",
     "list_all_models",
     "provider_default_headers",
+    "resolve_provider",
 ]

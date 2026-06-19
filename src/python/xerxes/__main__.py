@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shlex
 import sys
 
 
@@ -117,6 +118,11 @@ def _run_update_command(argv: list[str]) -> None:
         help="Run the package update command even when no update is detected.",
     )
     update_parser.add_argument(
+        "--git",
+        action="store_true",
+        help="Install from the head of the Xerxes Git repository instead of PyPI or the saved source.",
+    )
+    update_parser.add_argument(
         "--no-fetch",
         action="store_true",
         help="Do not fetch before comparing HEAD to the upstream git ref.",
@@ -143,13 +149,22 @@ def _run_update_command(argv: list[str]) -> None:
 
     if args.check:
         return
-    if not args.force and not args.dry_run and package_update is None and git_status.updates_ahead_available == 0:
+    if (
+        not args.git
+        and not args.force
+        and not args.dry_run
+        and package_update is None
+        and git_status.updates_ahead_available == 0
+    ):
         print("Already current. Use `xerxes update --force` to reinstall.")
         return
 
-    result = apply_update(dry_run=args.dry_run)
+    if args.git:
+        result = apply_update(dry_run=args.dry_run, git=True)
+    else:
+        result = apply_update(dry_run=args.dry_run)
     argv_value = result.get("argv")
-    command = " ".join(str(part) for part in argv_value) if isinstance(argv_value, list) else ""
+    command = shlex.join(str(part) for part in argv_value) if isinstance(argv_value, list) else ""
     if args.dry_run:
         print(f"Would run: {command}")
         return

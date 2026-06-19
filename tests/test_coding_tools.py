@@ -47,6 +47,22 @@ class TestReadFile:
         assert "line2" in result
         assert "line3" in result
 
+    def test_read_large_file_chunked_by_default(self, tmp_path):
+        f = tmp_path / "test.py"
+        f.write_text("".join(f"payload-{i}\n" for i in range(1000)))
+        result = read_file(str(f))
+        assert "payload-0" in result
+        assert "payload-399" in result
+        assert "payload-400" not in result
+        assert "Continue with start_line=401" in result
+
+    def test_read_full_file_with_end_line_minus_one(self, tmp_path):
+        f = tmp_path / "test.py"
+        f.write_text("".join(f"payload-{i}\n" for i in range(1000)))
+        result = read_file(str(f), end_line=-1)
+        assert "payload-999" in result
+        assert "Continue with start_line" not in result
+
     def test_read_nonexistent(self):
         result = read_file("/nonexistent/file.txt")
         assert "Error" in result

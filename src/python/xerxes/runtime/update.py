@@ -150,6 +150,18 @@ def _managed_source_from_env() -> str:
     return source
 
 
+def git_update_source() -> str:
+    """Return the Git requirement used by ``xerxes update --git``.
+
+    This intentionally ignores ``XERXES_VERSION`` and saved managed-venv
+    source files: ``--git`` means install from the default Git branch head.
+    """
+    extras = os.environ.get("XERXES_INSTALL_EXTRAS", "").strip()
+    if not extras:
+        return DEFAULT_UPDATE_SPEC
+    return f"xerxes-agent[{extras}] @ {DEFAULT_UPDATE_SPEC.removeprefix('xerxes-agent @ ')}"
+
+
 def managed_venv_update_source() -> str:
     """Return the requirement used to update the managed Xerxes venv."""
     source_file = managed_venv_path() / MANAGED_VENV_SOURCE_FILE
@@ -389,20 +401,22 @@ def _semver_gt(a: str, b: str) -> bool:
     """Return ``True`` when ``a`` is strictly newer than ``b`` (best-effort)."""
 
     def _parts(v: str) -> tuple[int, ...]:
-        """Split ``v`` into up to three integer components, defaulting to zeros."""
+        """Split ``v`` into integer components, defaulting to zeros."""
         try:
-            return tuple(int(p) for p in v.split(".")[:3])
+            return tuple(int(p) for p in v.split("."))
         except ValueError:
             return (0, 0, 0)
 
     return _parts(a) > _parts(b)
 
 
-def apply_update(*, dry_run: bool = False) -> dict[str, object]:
+def apply_update(*, dry_run: bool = False, git: bool = False) -> dict[str, object]:
     """Run the upgrade command appropriate to the detected install mode.
 
     Args:
         dry_run: When ``True``, return the resolved argv without executing it.
+        git: When ``True``, install from the Git repository head instead of
+            the detected PyPI/editable/saved source.
 
     Returns:
         A dict with ``ok`` (bool), ``mode`` (the install mode string), and
@@ -411,11 +425,17 @@ def apply_update(*, dry_run: bool = False) -> dict[str, object]:
     """
     managed_python = managed_venv_python()
     if managed_python is not None:
-        source = managed_venv_update_source()
+        source = git_update_source() if git else managed_venv_update_source()
         if shutil.which("uv"):
-            argv = ["uv", "pip", "install", "--python", str(managed_python), "--upgrade", source]
+            argv = ["uv", "pip", "install", "--python", str(managed_python), "--upgrade"]
+            if git:
+                argv.extend(["--reinstall-package", "xerxes-agent", "--refresh-package", "xerxes-agent"])
+            argv.append(source)
         else:
-            argv = [str(managed_python), "-m", "pip", "install", "--upgrade", source]
+            argv = [str(managed_python), "-m", "pip", "install", "--upgrade"]
+            if git:
+                argv.append("--force-reinstall")
+            argv.append(source)
         if dry_run:
             return {"ok": True, "mode": "managed_venv", "argv": argv, "dry_run": True}
         try:
@@ -432,7 +452,17 @@ def apply_update(*, dry_run: bool = False) -> dict[str, object]:
 
     mode = detect_install_mode()
     argv: list[str]
-    if mode is InstallMode.UV_TOOL and shutil.which("uv"):
+    if git:
+        source = git_update_source()
+        if mode is InstallMode.UV_TOOL and shutil.which("uv"):
+            argv = ["uv", "tool", "install", "--force", "--refresh-package", "xerxes-agent", source]
+        elif mode in (InstallMode.EDITABLE, InstallMode.PIP_USER, InstallMode.PIP_SYSTEM):
+            argv = [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", source]
+            if mode is InstallMode.PIP_USER:
+                argv.append("--user")
+        else:
+            return {"ok": False, "mode": mode.value, "error": "unknown install mode; update manually"}
+    elif mode is InstallMode.UV_TOOL and shutil.which("uv"):
         argv = ["uv", "tool", "upgrade", "xerxes-agent"]
     elif mode is InstallMode.EDITABLE:
         if shutil.which("uv"):
@@ -468,6 +498,7 @@ __all__ = [
     "check_for_update",
     "detect_install_mode",
     "format_git_update_status",
+    "git_update_source",
     "git_update_status",
     "installed_version",
     "latest_pypi_version",

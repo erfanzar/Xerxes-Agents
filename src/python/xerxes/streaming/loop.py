@@ -538,13 +538,13 @@ def run(
         :class:`SkillSuggestion` when authoring fires.
     """
 
-    from xerxes.llms.registry import detect_provider, get_provider_config
+    from xerxes.llms.registry import get_provider_config, resolve_provider
 
     state.metadata["model"] = config.get("model", "")
 
     perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
     model = config.get("model", "")
-    provider_name = detect_provider(model)
+    provider_name = resolve_provider(model, config)
 
     try:
         provider_cfg = get_provider_config(provider_name)
@@ -1016,10 +1016,10 @@ def _stream_llm(
     the end, a single dict with ``tool_calls`` and token counters.
     """
 
-    from xerxes.llms.registry import PROVIDERS, bare_model, detect_provider
+    from xerxes.llms.registry import PROVIDERS, bare_model, resolve_provider
 
     has_explicit_base = bool(config.get("base_url") or config.get("custom_base_url"))
-    provider_name = detect_provider(model)
+    provider_name = resolve_provider(model, config)
 
     if has_explicit_base and provider_name not in PROVIDERS:
         model_name = model

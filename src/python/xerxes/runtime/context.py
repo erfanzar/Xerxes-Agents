@@ -605,7 +605,7 @@ class PromptContextBuilder:
             )
         if "readfile" in tools_section_lower or "read_file" in tools_section_lower:
             guidance_lines.append(
-                "- File-reading tools: Use them for project-specific facts, exact code behavior, config values, or anything the workspace can answer more reliably than memory."
+                "- File-reading tools: Use them for project-specific facts, exact code behavior, config values, or anything the workspace can answer more reliably than memory. Read in chunks by default; for `ReadFile`, continue with `offset` and use `limit=-1` only when the whole file is intentionally required."
             )
         if "listdir" in tools_section_lower or "list_dir" in tools_section_lower:
             guidance_lines.append(

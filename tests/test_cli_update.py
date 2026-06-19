@@ -70,6 +70,35 @@ def test_update_cli_dry_run_reports_command(monkeypatch, capsys):
     assert "Would run: uv tool upgrade xerxes-agent" in out
 
 
+def test_update_cli_git_dry_run_installs_from_git_even_when_current(monkeypatch, capsys):
+    monkeypatch.setattr(update, "installed_version", lambda: "0.2.4")
+    monkeypatch.setattr(update, "check_for_update", lambda: None)
+    monkeypatch.setattr(
+        update,
+        "git_update_status",
+        lambda *, fetch, timeout: update.GitUpdateStatus(is_git=True, head_hash="abc1234"),
+    )
+
+    def apply_from_git(*, dry_run, git):
+        assert dry_run is True
+        assert git is True
+        return {
+            "ok": True,
+            "dry_run": True,
+            "mode": "uv_tool",
+            "argv": ["uv", "tool", "install", "--force", update.DEFAULT_UPDATE_SPEC],
+        }
+
+    monkeypatch.setattr(update, "apply_update", apply_from_git)
+
+    __main__.main(["update", "--git", "--dry-run", "--no-fetch"])
+
+    out = capsys.readouterr().out
+    assert "Git: current (HEAD abc1234)" in out
+    assert "Already current" not in out
+    assert f"Would run: uv tool install --force '{update.DEFAULT_UPDATE_SPEC}'" in out
+
+
 def test_update_cli_does_not_apply_when_current(monkeypatch, capsys):
     monkeypatch.setattr(update, "installed_version", lambda: "0.2.4")
     monkeypatch.setattr(update, "check_for_update", lambda: None)
