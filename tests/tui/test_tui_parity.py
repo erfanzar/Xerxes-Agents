@@ -697,15 +697,27 @@ class TestBackgroundSessions:
 
 class TestBanner:
     def test_full_banner_includes_logo(self):
-        data = BannerData(version="0.2.1", model="claude-opus-4-7", session_id="abcd1234ef", workspace="/proj")
+        data = BannerData(
+            version="0.2.2",
+            model="claude-opus-4-7",
+            session_id="abcd1234ef",
+            workspace="/proj",
+            head_hash="abc1234",
+            upstream="origin/main",
+            upstream_hash="def5678",
+            updates_ahead_available=2,
+        )
         out = render_banner(data, terminal_width=120)
         assert FULL_LOGO.strip().splitlines()[0] in out
         assert "claude-opus-4-7" in out
+        assert "head:      abc1234" in out
+        assert "updates:   2 ahead available (origin/main def5678)" in out
 
     def test_compact_banner_under_64_cols(self):
-        data = BannerData(model="m", session_id="abcd1234", tip="tip text")
+        data = BannerData(model="m", session_id="abcd1234", tip="tip text", head_hash="abc1234")
         out = render_banner(data, terminal_width=50)
         assert COMPACT_LOGO in out
+        assert "head=abc1234" in out
         # No full-logo box.
         assert "╭" not in out
 

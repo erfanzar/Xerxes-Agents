@@ -4,7 +4,7 @@
 
 Xerxes is a multi-agent orchestration framework for building, running, and serving LLM-powered agents. It treats **agents, tools, memory, and runtime policy as first-class pluggable components** — not as scripts glued together — and ships with both a programmatic Python API and an interactive Rust-based TUI.
 
-Distribution name: `xerxes-agent` · Python module: `xerxes` · Version: **0.2.1** (Alpha).
+Distribution name: `xerxes-agent` · Python module: `xerxes` · Version: **0.2.2** (Alpha).
 
 ## Why it exists
 

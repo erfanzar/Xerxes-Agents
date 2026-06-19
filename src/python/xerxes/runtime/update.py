@@ -25,15 +25,23 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+MANAGED_VENV_ENV = "XERXES_VENV"
+MANAGED_VENV_SOURCE_ENV = "XERXES_UPDATE_SOURCE"
+MANAGED_VENV_SOURCE_FILE = ".xerxes-source"
+DEFAULT_MANAGED_VENV = "~/.xerxes-venv"
+DEFAULT_UPDATE_SPEC = "xerxes-agent @ git+https://github.com/erfanzar/Xerxes-Agents.git"
 
 
 class InstallMode(enum.Enum):
@@ -68,6 +76,88 @@ class UpdateAvailable:
     installed_version: str
     latest_version: str
     mode: InstallMode
+
+
+@dataclass(frozen=True)
+class GitUpdateStatus:
+    """Local git checkout status compared with its upstream ref.
+
+    ``ahead_count`` is the number of local commits not present upstream.
+    ``behind_count`` is the number of upstream commits not present in local
+    ``HEAD``; it is the "updates available ahead" count shown in the TUI.
+    """
+
+    is_git: bool
+    branch: str = ""
+    upstream: str = ""
+    head_hash: str = ""
+    upstream_hash: str = ""
+    ahead_count: int = 0
+    behind_count: int = 0
+    error: str = ""
+
+    @property
+    def updates_ahead_available(self) -> int:
+        """Return how many upstream commits are available ahead of ``HEAD``."""
+        return self.behind_count
+
+
+def installed_version() -> str:
+    """Return the installed ``xerxes-agent`` version, or ``"0.0.0"`` on failure."""
+    return _installed_version()
+
+
+def managed_venv_path() -> Path:
+    """Return the Xerxes-managed venv path used by ``scripts/install.sh``."""
+    return Path(os.environ.get(MANAGED_VENV_ENV, DEFAULT_MANAGED_VENV)).expanduser()
+
+
+def _venv_python_path(venv: Path) -> Path:
+    """Return the platform-specific Python executable path inside ``venv``."""
+    if sys.platform == "win32":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def managed_venv_python() -> Path | None:
+    """Return the managed venv Python when ``~/.xerxes-venv`` is available."""
+    python = _venv_python_path(managed_venv_path())
+    return python if python.exists() else None
+
+
+def _managed_source_from_env() -> str:
+    """Build the default managed-venv update requirement from env overrides."""
+    source = os.environ.get(MANAGED_VENV_SOURCE_ENV, "").strip()
+    if source:
+        return source
+    version = os.environ.get("XERXES_VERSION", "").strip()
+    ref = os.environ.get("XERXES_REF", "").strip()
+    if version:
+        source = f"xerxes-agent=={version}"
+    elif ref:
+        source = f"{DEFAULT_UPDATE_SPEC}@{ref}"
+    else:
+        source = DEFAULT_UPDATE_SPEC
+    extras = os.environ.get("XERXES_INSTALL_EXTRAS", "").strip()
+    if not extras:
+        return source
+    if source.startswith("xerxes-agent @ "):
+        return f"xerxes-agent[{extras}] {source.removeprefix('xerxes-agent ')}"
+    if source.startswith("xerxes-agent=="):
+        return f"xerxes-agent[{extras}]=={source.removeprefix('xerxes-agent==')}"
+    if source == "xerxes-agent":
+        return f"xerxes-agent[{extras}]"
+    return source
+
+
+def managed_venv_update_source() -> str:
+    """Return the requirement used to update the managed Xerxes venv."""
+    source_file = managed_venv_path() / MANAGED_VENV_SOURCE_FILE
+    try:
+        source = source_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        source = ""
+    return source or _managed_source_from_env()
 
 
 def _installed_version() -> str:
@@ -123,6 +213,128 @@ def detect_install_mode() -> InstallMode:
         # Site module probing failed; cannot classify further.
         logger.debug("install-mode heuristic (pip site) failed", exc_info=True)
         return InstallMode.UNKNOWN
+
+
+def _git_output(args: list[str], *, cwd: Path, timeout: float) -> str:
+    """Run ``git`` with ``args`` and return stripped stdout."""
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=cwd,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=timeout,
+    ).strip()
+
+
+def _fallback_upstream(branch: str, *, cwd: Path, timeout: float) -> str:
+    """Return a usable local remote-tracking ref when ``@{u}`` is unset."""
+    candidates: list[str] = []
+    if branch and branch != "HEAD":
+        candidates.append(f"origin/{branch}")
+    candidates.extend(["origin/main", "origin/master"])
+    for ref in candidates:
+        try:
+            _git_output(["rev-parse", "--verify", ref], cwd=cwd, timeout=timeout)
+            return ref
+        except (subprocess.CalledProcessError, TimeoutExpired):
+            continue
+    return ""
+
+
+def git_update_status(
+    *,
+    cwd: str | Path | None = None,
+    fetch: bool = False,
+    timeout: float = 1.0,
+) -> GitUpdateStatus:
+    """Compare the current git ``HEAD`` with its upstream tracking ref.
+
+    Args:
+        cwd: Directory inside the git checkout. Defaults to ``Path.cwd()``.
+        fetch: When ``True``, run a best-effort ``git fetch`` first so the
+            upstream ref reflects remote state. The TUI banner passes
+            ``False`` to avoid network work during startup.
+        timeout: Per-git-command timeout in seconds.
+
+    Returns:
+        A :class:`GitUpdateStatus` with ``is_git=False`` outside a checkout.
+    """
+    workdir = Path.cwd() if cwd is None else Path(cwd)
+    try:
+        if _git_output(["rev-parse", "--is-inside-work-tree"], cwd=workdir, timeout=timeout) != "true":
+            return GitUpdateStatus(is_git=False)
+    except (subprocess.CalledProcessError, FileNotFoundError, TimeoutExpired):
+        return GitUpdateStatus(is_git=False)
+
+    try:
+        branch = _git_output(["rev-parse", "--abbrev-ref", "HEAD"], cwd=workdir, timeout=timeout)
+        head_hash = _git_output(["rev-parse", "--short=12", "HEAD"], cwd=workdir, timeout=timeout)
+    except (subprocess.CalledProcessError, TimeoutExpired) as exc:
+        return GitUpdateStatus(is_git=True, error=str(exc))
+
+    try:
+        upstream = _git_output(
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            cwd=workdir,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, TimeoutExpired):
+        upstream = _fallback_upstream(branch, cwd=workdir, timeout=timeout)
+
+    if not upstream:
+        return GitUpdateStatus(is_git=True, branch=branch, head_hash=head_hash, error="no upstream ref")
+
+    if fetch:
+        remote = upstream.split("/", 1)[0]
+        try:
+            _git_output(["fetch", "--quiet", "--no-tags", remote], cwd=workdir, timeout=max(timeout, 10.0))
+        except (subprocess.CalledProcessError, FileNotFoundError, TimeoutExpired) as exc:
+            logger.debug("git fetch for update status failed", exc_info=True)
+            fetch_error = f"fetch failed: {exc}"
+        else:
+            fetch_error = ""
+    else:
+        fetch_error = ""
+
+    try:
+        counts = _git_output(["rev-list", "--left-right", "--count", f"HEAD...{upstream}"], cwd=workdir, timeout=timeout)
+        ahead_raw, behind_raw = counts.split()
+        upstream_hash = _git_output(["rev-parse", "--short=12", upstream], cwd=workdir, timeout=timeout)
+        return GitUpdateStatus(
+            is_git=True,
+            branch=branch,
+            upstream=upstream,
+            head_hash=head_hash,
+            upstream_hash=upstream_hash,
+            ahead_count=int(ahead_raw),
+            behind_count=int(behind_raw),
+            error=fetch_error,
+        )
+    except (subprocess.CalledProcessError, TimeoutExpired, ValueError) as exc:
+        return GitUpdateStatus(
+            is_git=True,
+            branch=branch,
+            upstream=upstream,
+            head_hash=head_hash,
+            error=fetch_error or str(exc),
+        )
+
+
+def format_git_update_status(status: GitUpdateStatus) -> str:
+    """Return a compact human-readable git update status line."""
+    if not status.is_git:
+        return "not a git checkout"
+
+    head = f"HEAD {status.head_hash}" if status.head_hash else "HEAD unknown"
+    if status.updates_ahead_available > 0:
+        upstream = status.upstream or "upstream"
+        upstream_hash = f" {status.upstream_hash}" if status.upstream_hash else ""
+        return f"{status.updates_ahead_available} ahead available ({upstream}{upstream_hash}; {head})"
+    if status.ahead_count > 0:
+        return f"current upstream; local {status.ahead_count} ahead ({head})"
+    if status.error:
+        return f"unknown ({status.error}; {head})"
+    return f"current ({head})"
 
 
 def latest_pypi_version(
@@ -197,12 +409,36 @@ def apply_update(*, dry_run: bool = False) -> dict[str, object]:
         either ``argv``/``stdout``/``stderr`` from the subprocess, or
         ``error`` when the mode could not be determined.
     """
+    managed_python = managed_venv_python()
+    if managed_python is not None:
+        source = managed_venv_update_source()
+        if shutil.which("uv"):
+            argv = ["uv", "pip", "install", "--python", str(managed_python), "--upgrade", source]
+        else:
+            argv = [str(managed_python), "-m", "pip", "install", "--upgrade", source]
+        if dry_run:
+            return {"ok": True, "mode": "managed_venv", "argv": argv, "dry_run": True}
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            return {"ok": False, "mode": "managed_venv", "argv": argv, "error": str(exc)}
+        return {
+            "ok": proc.returncode == 0,
+            "mode": "managed_venv",
+            "argv": argv,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+
     mode = detect_install_mode()
     argv: list[str]
     if mode is InstallMode.UV_TOOL and shutil.which("uv"):
         argv = ["uv", "tool", "upgrade", "xerxes-agent"]
     elif mode is InstallMode.EDITABLE:
-        argv = ["pip", "install", "-e", "."]
+        if shutil.which("uv"):
+            argv = ["uv", "pip", "install", "-e", "."]
+        else:
+            argv = [sys.executable, "-m", "pip", "install", "-e", "."]
     elif mode in (InstallMode.PIP_USER, InstallMode.PIP_SYSTEM):
         argv = [sys.executable, "-m", "pip", "install", "--upgrade", "xerxes-agent"]
         if mode is InstallMode.PIP_USER:
@@ -211,7 +447,10 @@ def apply_update(*, dry_run: bool = False) -> dict[str, object]:
         return {"ok": False, "mode": mode.value, "error": "unknown install mode; update manually"}
     if dry_run:
         return {"ok": True, "mode": mode.value, "argv": argv, "dry_run": True}
-    proc = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+    except FileNotFoundError as exc:
+        return {"ok": False, "mode": mode.value, "argv": argv, "error": str(exc)}
     return {
         "ok": proc.returncode == 0,
         "mode": mode.value,
@@ -222,10 +461,17 @@ def apply_update(*, dry_run: bool = False) -> dict[str, object]:
 
 
 __all__ = [
+    "GitUpdateStatus",
     "InstallMode",
     "UpdateAvailable",
     "apply_update",
     "check_for_update",
     "detect_install_mode",
+    "format_git_update_status",
+    "git_update_status",
+    "installed_version",
     "latest_pypi_version",
+    "managed_venv_path",
+    "managed_venv_python",
+    "managed_venv_update_source",
 ]

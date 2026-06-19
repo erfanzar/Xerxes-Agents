@@ -166,3 +166,60 @@ async def test_daemon_socket_initialize_and_old_task_error(tmp_path):
         if not task.done():
             await server.shutdown()
         await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_daemon_socket_starts_without_configured_model(tmp_path, monkeypatch):
+    monkeypatch.setattr("xerxes.daemon.runtime.profiles.get_active_profile", lambda: None)
+    short_tmp = Path(tempfile.gettempdir()) / f"xerxes-d-{uuid.uuid4().hex[:8]}"
+    short_tmp.mkdir()
+    cfg = DaemonConfig(
+        runtime={"permission_mode": "accept-all"},
+        control={
+            "websocket_host": "127.0.0.1",
+            "websocket_port": 0,
+            "unix_socket": str(short_tmp / "d.sock"),
+            "pid_file": str(short_tmp / "daemon.pid"),
+            "log_dir": str(short_tmp / "logs"),
+        },
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "default"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    task = asyncio.create_task(server.run())
+    try:
+        for _ in range(100):
+            if Path(cfg.socket_path).exists():
+                break
+            await asyncio.sleep(0.05)
+
+        reader, writer = await asyncio.open_unix_connection(cfg.socket_path)
+        writer.write(json.dumps({"jsonrpc": "2.0", "id": "1", "method": "initialize", "params": {}}).encode() + b"\n")
+        await writer.drain()
+
+        result = None
+        while result is None:
+            msg = json.loads((await asyncio.wait_for(reader.readline(), timeout=5)).decode())
+            if msg.get("id") == "1":
+                result = msg["result"]
+
+        assert result["ok"] is True
+        assert result["model"] == ""
+
+        writer.write(
+            json.dumps({"jsonrpc": "2.0", "id": "2", "method": "prompt", "params": {"user_input": "hi"}}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        rejected = json.loads((await asyncio.wait_for(reader.readline(), timeout=5)).decode())["result"]
+        assert rejected == {"ok": False, "error": "No model configured. Run /provider first or set XERXES_MODEL."}
+
+        writer.write(json.dumps({"jsonrpc": "2.0", "id": "3", "method": "shutdown", "params": {}}).encode() + b"\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readline(), timeout=5)
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        if not task.done():
+            await server.shutdown()
+        await asyncio.wait_for(task, timeout=5)

@@ -207,16 +207,25 @@ class SlashCommandsMixin:
         await self._emit_slash(emit, "Compaction turn queued.")
 
     async def _slash_update(self, args: str, emit: EmitFn) -> None:
-        """Show the installed Xerxes version and an update hint."""
-        try:
-            from importlib.metadata import version
+        """Show the installed Xerxes version and release/git update status."""
+        from ..runtime.update import (
+            check_for_update,
+            format_git_update_status,
+            git_update_status,
+            installed_version,
+        )
 
-            ver = version("xerxes")
-        except Exception:
-            ver = "(unknown — running from source)"
+        ver = installed_version()
+        package_update = check_for_update()
+        package_line = "Package: current or PyPI unavailable"
+        if package_update is not None:
+            package_line = (
+                f"Package: `{package_update.latest_version}` available (installed `{package_update.installed_version}`)"
+            )
+        git_line = format_git_update_status(git_update_status(fetch=True, timeout=2.0))
         await self._emit_slash(
             emit,
-            f"Xerxes `{ver}`\nUpdate with: `uv pip install -U xerxes` (or your package manager).",
+            f"Xerxes `{ver}`\n{package_line}\nGit: {git_line}\nRun: `xerxes update`.",
         )
 
     async def _slash_resume(self, args: str, emit: EmitFn) -> None:

@@ -95,6 +95,78 @@ async def _run_one_shot(prompt: str, *, resume_session_id: str = "", mode: str =
         client.close()
 
 
+def _run_update_command(argv: list[str]) -> None:
+    """Run ``xerxes update``: report status and optionally apply the upgrade."""
+    update_parser = argparse.ArgumentParser(
+        prog="xerxes update",
+        description="Check Xerxes release and git checkout status, then update the installed package.",
+    )
+    update_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Only print package/git update status; do not run the package update command.",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the update command that would run without executing it.",
+    )
+    update_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run the package update command even when no update is detected.",
+    )
+    update_parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Do not fetch before comparing HEAD to the upstream git ref.",
+    )
+    args = update_parser.parse_args(argv)
+
+    from .runtime.update import (
+        apply_update,
+        check_for_update,
+        format_git_update_status,
+        git_update_status,
+        installed_version,
+    )
+
+    print(f"Xerxes {installed_version()}")
+    package_update = check_for_update()
+    if package_update is None:
+        print("Package: current or PyPI unavailable")
+    else:
+        print(f"Package: {package_update.latest_version} available (installed {package_update.installed_version})")
+
+    git_status = git_update_status(fetch=not args.no_fetch, timeout=2.0)
+    print(f"Git: {format_git_update_status(git_status)}")
+
+    if args.check:
+        return
+    if not args.force and not args.dry_run and package_update is None and git_status.updates_ahead_available == 0:
+        print("Already current. Use `xerxes update --force` to reinstall.")
+        return
+
+    result = apply_update(dry_run=args.dry_run)
+    argv_value = result.get("argv")
+    command = " ".join(str(part) for part in argv_value) if isinstance(argv_value, list) else ""
+    if args.dry_run:
+        print(f"Would run: {command}")
+        return
+
+    if command:
+        print(f"Ran: {command}")
+    if result.get("stdout"):
+        print(str(result["stdout"]).rstrip())
+    if result.get("stderr"):
+        print(str(result["stderr"]).rstrip(), file=sys.stderr)
+    if not result.get("ok"):
+        error = result.get("error")
+        if error:
+            print(str(error), file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse ``argv`` and dispatch to telegram, one-shot, or TUI mode.
 
@@ -103,6 +175,10 @@ def main(argv: list[str] | None = None) -> None:
     ``KeyboardInterrupt`` quietly.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "update":
+        _run_update_command(argv[1:])
+        return
+
     if argv and argv[0] == "telegram":
         telegram_parser = argparse.ArgumentParser(
             prog="xerxes telegram", description="Start the daemon with Telegram enabled."
