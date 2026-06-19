@@ -15,8 +15,8 @@
 
 :class:`QueryEngine` owns the per-session transcript, history log, and cost
 tracker, and drives :func:`xerxes.streaming.loop.run` to actually talk to the
-LLM. It enforces per-session limits (max turns, token budget, automatic
-compaction) and exposes both a blocking :meth:`QueryEngine.submit` and a
+LLM. It enforces per-session limits (max turns, token budget) and exposes both
+a blocking :meth:`QueryEngine.submit` and a
 streaming :meth:`QueryEngine.submit_stream` interface for the TUI and bridge.
 """
 
@@ -45,10 +45,6 @@ class QueryEngineConfig:
             new prompts with ``stop_reason="max_turns"``.
         max_budget_tokens: Combined input+output token ceiling enforced across
             the whole session.
-        compact_after_turns: Trigger transcript compaction once the stored
-            turn count reaches this value.
-        compact_keep_last: Number of most-recent transcript entries preserved
-            when compaction runs.
         model: LLM identifier passed to the streaming loop.
         system_prompt: System prompt injected ahead of every turn.
         permission_mode: Permission policy forwarded to the streaming loop.
@@ -61,8 +57,6 @@ class QueryEngineConfig:
 
     max_turns: int = 50
     max_budget_tokens: int = 500_000
-    compact_after_turns: int = 20
-    compact_keep_last: int = 10
     model: str = "gpt-4o"
     system_prompt: str = ""
     permission_mode: str = "accept-all"
@@ -147,8 +141,9 @@ class QueryEngine:
 
         Blocks until the streaming loop emits ``TurnDone`` (or the configured
         limits are hit). Updates the session transcript, history log, and
-        cost tracker as a side-effect. Triggers transcript compaction when the
-        stored turn count crosses ``compact_after_turns``.
+        cost tracker as a side-effect. Context compaction, when needed, is
+        handled inside the streaming loop by an agent-written summary before
+        provider requests.
 
         Args:
             prompt: User message to send for this turn.
@@ -174,11 +169,6 @@ class QueryEngine:
                 output=f"Token budget ({self.config.max_budget_tokens:,}) exhausted.",
                 stop_reason="budget_exhausted",
             )
-
-        if self.transcript.turn_count >= self.config.compact_after_turns:
-            removed = self.transcript.compact(keep_last=self.config.compact_keep_last)
-            if removed > 0:
-                self.history.add("compaction", f"Removed {removed} old messages")
 
         self._turn_count += 1
 
@@ -263,9 +253,6 @@ class QueryEngine:
         if self._turn_count >= self.config.max_turns:
             result = TurnResult(prompt=prompt, output="Max turns reached.", stop_reason="max_turns")
             return result
-
-        if self.transcript.turn_count >= self.config.compact_after_turns:
-            self.transcript.compact(keep_last=self.config.compact_keep_last)
 
         self._turn_count += 1
 

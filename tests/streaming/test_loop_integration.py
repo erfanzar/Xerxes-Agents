@@ -259,6 +259,75 @@ class TestBudgetEnforcement:
         assert any(message.get("tool_call_id") == "call_missing" for message in tool_messages)
         self._assert_valid_tool_sequence(state.messages)
 
+    def test_context_compacts_after_tool_results_before_next_request(self, fake_llm):
+        fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, call_id="c1")
+        fake_llm.add_text("Done.")
+        state = AgentState(
+            messages=[
+                {"role": "user", "content": "old " * 100},
+                {"role": "assistant", "content": "prior " * 50},
+            ]
+        )
+        config = {
+            "model": "gpt-4o",
+            "permission_mode": "accept-all",
+            "max_context_tokens": 500,
+            "compaction_threshold_tokens": 300,
+            "compaction_target_tokens": 120,
+            "compaction_summary_agent": self._summary_agent,
+        }
+
+        events = list(
+            run(
+                user_message="Read",
+                state=state,
+                config=config,
+                system_prompt="You are a test agent.",
+                tool_executor=lambda _name, _inp: "data " * 300,
+                tool_schemas=[],
+            )
+        )
+
+        text = _text(events)
+        assert "Context compacted after tool results" in text
+        assert "Done." in text
+        assert state.metadata["last_compaction"]["tokens_before"] > state.metadata["last_compaction"]["tokens_after"]
+        self._assert_valid_tool_sequence(state.messages)
+
+    def test_context_stops_after_tool_results_when_compaction_unavailable(self, fake_llm):
+        fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, call_id="c1")
+        fake_llm.add_text("Done.")
+        state = AgentState(
+            messages=[
+                {"role": "user", "content": "old " * 100},
+                {"role": "assistant", "content": "prior " * 50},
+            ]
+        )
+        config = {
+            "model": "gpt-4o",
+            "permission_mode": "accept-all",
+            "max_context_tokens": 300,
+            "compaction_threshold_tokens": 200,
+            "compaction_summary_agent": False,
+        }
+
+        events = list(
+            run(
+                user_message="Read",
+                state=state,
+                config=config,
+                system_prompt="You are a test agent.",
+                tool_executor=lambda _name, _inp: "data " * 300,
+                tool_schemas=[],
+            )
+        )
+
+        text = _text(events)
+        assert "exceeded after tool results" in text
+        assert "Done." not in text
+        assert fake_llm.call_count == 1
+        self._assert_valid_tool_sequence(state.messages)
+
 
 class TestCancellation:
     """Cancellation between tool iterations."""

@@ -5,11 +5,9 @@
 # You may obtain a copy of the License at
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
-"""Message-layer hardening: tool-result bounding, is_error flag, thinking replay.
+"""Message-layer hardening: is_error flag, thinking replay, parser closure.
 
 These guard the streaming-loop self-correction + context-safety fixes:
-  * ``bound_tool_result`` clamps an oversized tool output so one result can't
-    poison the window (kept head+tail, idempotent).
   * Anthropic tool_result blocks carry ``is_error`` so the model recognises
     failures instead of treating them as success.
   * Anthropic thinking blocks are only replayed WITH their signature (Anthropic
@@ -19,31 +17,10 @@ These guard the streaming-loop self-correction + context-safety fixes:
 from __future__ import annotations
 
 from xerxes.streaming.messages import (
-    MAX_TOOL_RESULT_CHARS,
-    bound_tool_result,
     messages_from_anthropic,
     messages_to_anthropic,
 )
 from xerxes.streaming.parsers.common import parse_tool_call_blocks
-
-
-def test_bound_tool_result_passthrough_small():
-    assert bound_tool_result("hello") == "hello"
-
-
-def test_bound_tool_result_clamps_large_keeping_head_and_tail():
-    big = "A" * 100 + "M" * (MAX_TOOL_RESULT_CHARS * 2) + "C" * 100
-    out = bound_tool_result(big)
-    assert len(out) < len(big)
-    assert out.startswith("A")
-    assert out.rstrip().endswith("C")
-    assert "elided" in out
-
-
-def test_bound_tool_result_idempotent():
-    big = "X" * (MAX_TOOL_RESULT_CHARS * 2)
-    once = bound_tool_result(big)
-    assert bound_tool_result(once) == once
 
 
 def test_anthropic_tool_result_carries_is_error():

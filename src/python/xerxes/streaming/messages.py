@@ -26,43 +26,6 @@ from typing import Any, TypeAlias
 
 NeutralMessage: TypeAlias = dict[str, Any]
 
-# A single oversized tool result (a huge file read, a verbose command dump) can
-# otherwise crowd out the rest of the window and the model can't self-correct out
-# of a context it already poisoned. Clamp at the shared message boundary so BOTH
-# engines get the same protection.
-MAX_TOOL_RESULT_CHARS = 30_000
-
-
-def bound_tool_result(result: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
-    """Clamp an oversized tool result, keeping its head and tail.
-
-    The signal in a long tool output usually lives at the start (what ran) and
-    the end (the final error/summary); the middle is elided with a marker.
-    Idempotent for already-small results, so it is safe to call more than once.
-
-    Args:
-        result: The tool's string output.
-        max_chars: Maximum characters to keep before eliding the middle.
-
-    Returns:
-        The original string if within budget, else a head+tail excerpt with an
-        elision marker.
-    """
-    if not isinstance(result, str) or len(result) <= max_chars:
-        return result
-    # Reserve room for the elision marker so the OUTPUT stays within max_chars.
-    # That keeps this idempotent: a second pass sees a within-budget string and
-    # returns it unchanged (the loop and the shared executor both bound results).
-    budget = max(0, max_chars - 200)
-    head = budget * 2 // 3
-    tail = budget - head
-    elided = len(result) - head - tail
-    marker = (
-        f"\n\n[... {elided} characters elided to fit context; re-run with a narrower "
-        "query/range or read the file directly for the full output ...]\n\n"
-    )
-    return result[:head] + marker + (result[-tail:] if tail else "")
-
 
 def messages_to_anthropic(messages: list[NeutralMessage]) -> list[dict[str, Any]]:
     """Convert neutral messages to Anthropic Messages-API content blocks.
@@ -353,9 +316,7 @@ def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]
 
 
 __all__ = [
-    "MAX_TOOL_RESULT_CHARS",
     "NeutralMessage",
-    "bound_tool_result",
     "messages_from_anthropic",
     "messages_from_openai",
     "messages_to_anthropic",
