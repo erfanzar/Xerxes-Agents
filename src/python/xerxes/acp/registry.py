@@ -28,7 +28,7 @@ REGISTRY_METADATA: dict[str, Any] = {
     "name": "xerxes",
     "display_name": "Xerxes",
     "description": "Multi-agent coding assistant built on Xerxes-Agents.",
-    "version": "0.2.4.1",
+    "version": "0.2.4.2",
     "vendor": "Erfan Zare Chavoshi",
     "license": "Apache-2.0",
     "homepage": "https://github.com/erfanzar/Xerxes-Agents",

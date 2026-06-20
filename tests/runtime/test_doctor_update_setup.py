@@ -73,7 +73,7 @@ class TestUpdate:
 
     def test_semver_gt_basic(self):
         assert update._semver_gt("0.2.4", "0.2.3") is True
-        assert update._semver_gt("0.2.4.1", "0.2.4") is True
+        assert update._semver_gt("0.2.4.2", "0.2.4.1") is True
         assert update._semver_gt("0.2.3", "0.2.3") is False
         assert update._semver_gt("0.2.2", "0.2.3") is False
 
