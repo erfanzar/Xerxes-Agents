@@ -4,7 +4,7 @@ import time
 
 from xerxes.runtime.agent_memory import AgentMemory
 from xerxes.streaming import loop
-from xerxes.streaming.events import TextChunk, ToolEnd, ToolStart
+from xerxes.streaming.events import TextChunk, ToolEnd, ToolStart, TurnDone
 from xerxes.tools.agent_memory_tool import active_memory, set_active_memory
 
 
@@ -369,6 +369,43 @@ def test_steer_drain_noop_when_empty() -> None:
     user_messages = [m for m in state.messages if m.get("role") == "user"]
     assert len(user_messages) == 1
     assert user_messages[0]["content"] == "ping"
+
+
+def test_llm_stream_retry_uses_six_fixed_delay_stages(monkeypatch) -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+    sleeps: list[int] = []
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise ConnectionError("Connection error.")
+        yield TextChunk("done")
+        yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    monkeypatch.setattr(loop.time, "sleep", sleeps.append)
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=loop.AgentState(),
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+
+    assert calls["n"] == 7
+    assert sleeps == [5, 5, 5, 5, 5, 5]
+    assert "Retrying in 5s... (6/6)" in text
+    assert "done" in text
+    assert any(isinstance(event, TurnDone) for event in events)
 
 
 def test_tool_end_duration_reflects_executor_time() -> None:

@@ -364,6 +364,7 @@ def _provision_context_window(
 
 
 MAX_TOOL_TURNS = 50
+LLM_STREAM_RETRY_DELAYS = (5, 5, 5, 5, 5, 5)
 
 _DEFAULT_TOOL_RESULT_SPILL_CHARS = 30_000
 
@@ -761,11 +762,11 @@ def run(
         cache_creation_tokens = 0
         thinking_parser = _ThinkingParser()
 
-        # Retry configuration: 3 attempts with exponential backoff (5s, 10s, 20s)
-        _MAX_RETRIES = 3
-        _RETRY_DELAYS = [5, 10, 20]
+        # Retry streaming failures with a fixed short delay.
+        _MAX_RETRIES = len(LLM_STREAM_RETRY_DELAYS)
         _retry_attempt = 0
         _last_error: Exception | None = None
+        _stream_succeeded = False
 
         while _retry_attempt <= _MAX_RETRIES:
             try:
@@ -803,11 +804,13 @@ def run(
                     if isinstance(sub, ThinkingChunk):
                         thinking_text += sub.text
                         yield sub
+                _last_error = None
+                _stream_succeeded = True
                 break  # Success — exit retry loop
             except Exception as e:
                 _last_error = e
                 if _retry_attempt < _MAX_RETRIES:
-                    delay = _RETRY_DELAYS[_retry_attempt]
+                    delay = LLM_STREAM_RETRY_DELAYS[_retry_attempt]
                     logger.warning(
                         "LLM streaming error (attempt %d/%d): %s. Retrying in %ds...",
                         _retry_attempt + 1,
@@ -825,7 +828,7 @@ def run(
                     break  # All retries exhausted — fall through to error handling below
 
         # If all retries failed, handle the error gracefully
-        if _last_error is not None and _retry_attempt >= _MAX_RETRIES:
+        if not _stream_succeeded and _last_error is not None:
             for sub in thinking_parser.process(""):
                 if isinstance(sub, ThinkingChunk):
                     thinking_text += sub.text
