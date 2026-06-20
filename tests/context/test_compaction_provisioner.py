@@ -94,6 +94,24 @@ def test_compact_before_append_compacts_existing_messages_only() -> None:
     assert "summary for" in result.messages[1]["content"]
 
 
+def test_compact_before_append_without_agent_does_not_drop_history() -> None:
+    provisioner = CompactionProvisioner(
+        model="gpt-4o",
+        max_context_tokens=200,
+        threshold_tokens=1,
+        target_tokens=40,
+        summary_agent=None,
+    )
+    messages = _messages()
+    incoming = [{"role": "user", "content": "new turn " * 100}]
+
+    result = provisioner.compact_before_append(messages, incoming)
+
+    assert result.compacted is False
+    assert result.messages == messages
+    assert result.reason == "no_summary_agent"
+
+
 def test_repair_tool_message_sequence_drops_orphans_and_backfills_missing_results() -> None:
     messages = [
         {"role": "tool", "tool_call_id": "orphan", "name": "X", "content": "drop"},

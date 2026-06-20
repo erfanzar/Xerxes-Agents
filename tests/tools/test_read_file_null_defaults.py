@@ -29,6 +29,17 @@ def test_standalone_read_file_null_chunk_args_use_defaults(tmp_path):
     assert "Continue with offset=400, limit=400" in result
 
 
+def test_standalone_read_file_full_read_requires_limit_minus_one(tmp_path):
+    path = tmp_path / "big.txt"
+    path.write_text("".join(f"payload-{idx}\n" for idx in range(1000)))
+
+    result = ReadFile.static_call(str(path), limit=-1)
+
+    assert "payload-0" in result
+    assert "payload-999" in result
+    assert "Continue with offset=" not in result
+
+
 def test_coding_read_file_null_line_args_use_defaults(tmp_path):
     path = tmp_path / "big.py"
     path.write_text("".join(f"payload-{idx}\n" for idx in range(1000)))

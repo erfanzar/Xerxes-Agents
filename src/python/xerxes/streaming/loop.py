@@ -46,6 +46,7 @@ from ..context.compaction_provisioner import (
 )
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
+from ..runtime.workflow_memory import capture_user_workflow_memory
 from .events import (
     AgentState,
     PermissionRequest,
@@ -382,6 +383,57 @@ def _safe_tool_result_name(name: str) -> str:
     return safe or "tool"
 
 
+def _project_root_for_runtime_memory(config: dict[str, Any]) -> Path:
+    """Return the current project root used for runtime memory annotations."""
+    raw = config.get("project_dir") or config.get("cwd") or config.get("workspace_root")
+    if raw:
+        return Path(str(raw)).expanduser()
+    try:
+        return Path.cwd()
+    except OSError:
+        return Path(".")
+
+
+def _capture_runtime_workflow_memory(user_message: str, *, config: dict[str, Any], depth: int) -> None:
+    """Persist explicit durable workflow notes before the provider sees the turn."""
+    if depth != 0:
+        return
+    try:
+        result = capture_user_workflow_memory(
+            user_message,
+            project_root=_project_root_for_runtime_memory(config),
+        )
+    except Exception as exc:
+        logger.warning("Failed to capture runtime workflow memory: %s", exc)
+        return
+    if result.captured:
+        logger.info("Captured runtime workflow memory in %s:%s", result.scope, result.path)
+
+
+def _project_memory_for_tool_result(config: dict[str, Any]) -> tuple[Any | None, str]:
+    """Return project-scoped agent memory, initializing it from config when needed."""
+    from ..tools.agent_memory_tool import active_memory, set_active_memory
+
+    memory = active_memory()
+    if memory is not None and memory.has_project_scope():
+        return memory, ""
+
+    project_root = _project_root_for_runtime_memory(config)
+    try:
+        from ..runtime.agent_memory import AgentMemory
+
+        global_dir = getattr(memory, "global_dir", None)
+        if global_dir is None:
+            initialized = AgentMemory(project_root=project_root)
+        else:
+            initialized = AgentMemory(project_root=project_root, global_dir=global_dir)
+        initialized.ensure()
+        set_active_memory(initialized)
+        return initialized, ""
+    except Exception as exc:
+        return None, f"project agent memory could not initialize for {project_root}: {exc}"
+
+
 def _spill_tool_result_to_project_memory(
     result: str,
     *,
@@ -408,14 +460,10 @@ def _spill_tool_result_to_project_memory(
     saved = False
     save_error = ""
     try:
-        from ..tools.agent_memory_tool import active_memory
-
-        memory = active_memory()
+        memory, save_error = _project_memory_for_tool_result(config)
         if memory is not None:
             memory.write("project", memory_path, result)
             saved = True
-        else:
-            save_error = "project agent memory is not configured"
     except Exception as exc:
         save_error = str(exc)
 
@@ -462,6 +510,67 @@ def _spill_tool_result_to_project_memory(
     else:
         lines.append("- Summary unavailable: no compaction agent configured.")
     return "\n".join(lines)
+
+
+def _append_model_visible_messages(
+    state: AgentState,
+    messages: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    model: str,
+    compact_before_append: bool = True,
+) -> bool:
+    """Append provider-visible messages through one guarded runtime path.
+
+    User-like messages can compact the existing prefix before they are appended.
+    Tool-result messages deliberately skip pre-append compaction because their
+    matching assistant ``tool_calls`` item must remain directly reachable until
+    the result is appended; the post-tool context provisioner handles any
+    follow-up compaction with tool-call repair.
+    """
+    if not messages:
+        return False
+    compacted = False
+    if compact_before_append:
+        compacted = _compact_before_append(state, messages, config=config, model=model)
+    state.messages.extend(messages)
+    return compacted
+
+
+def _append_tool_result_message(
+    state: AgentState,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    result: str,
+    is_error: bool,
+    config: dict[str, Any],
+    model: str,
+) -> str:
+    """Spill and append a tool result while preserving tool-call pairing."""
+    stored_result = _spill_tool_result_to_project_memory(
+        result,
+        tool_name=tool_name,
+        tool_call_id=tool_call_id,
+        config=config,
+        model=model,
+    )
+    _append_model_visible_messages(
+        state,
+        [
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": stored_result,
+                "is_error": is_error,
+            }
+        ],
+        config=config,
+        model=model,
+        compact_before_append=False,
+    )
+    return stored_result
 
 
 def _request_timeout(config: dict[str, Any]) -> float:
@@ -551,6 +660,7 @@ def run(
     from xerxes.llms.registry import get_provider_config, resolve_provider
 
     state.metadata["model"] = config.get("model", "")
+    _capture_runtime_workflow_memory(user_message, config=config, depth=depth)
 
     perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
     model = config.get("model", "")
@@ -563,7 +673,7 @@ def run(
         provider_cfg = get_provider_config("openai")
 
     initial_user_message = {"role": "user", "content": user_message}
-    precompacted_initial = _compact_before_append(
+    precompacted_initial = _append_model_visible_messages(
         state,
         [initial_user_message],
         config=config,
@@ -571,7 +681,6 @@ def run(
     )
     if precompacted_initial:
         yield TextChunk("\n[Context compacted before adding the new turn.]\n")
-    state.messages.append(initial_user_message)
 
     for _turn in range(MAX_TOOL_TURNS):
         if cancel_check and cancel_check():
@@ -626,9 +735,8 @@ def run(
                     "role": "user",
                     "content": f"[mid-turn steer from user]\n{joined}",
                 }
-                if _compact_before_append(state, [steer_message], config=config, model=model):
+                if _append_model_visible_messages(state, [steer_message], config=config, model=model):
                     yield TextChunk("\n[Context compacted before applying steer.]\n")
-                state.messages.append(steer_message)
                 yield TextChunk(f"\n[Steer applied: {pending[0][:80]}{'…' if len(pending[0]) > 80 else ''}]\n")
 
         if agent_event_drain is not None:
@@ -638,9 +746,8 @@ def run(
                     "role": "user",
                     "content": "[sub-agent events]\n" + "\n".join(agent_lines),
                 }
-                if _compact_before_append(state, [agent_event_message], config=config, model=model):
+                if _append_model_visible_messages(state, [agent_event_message], config=config, model=model):
                     yield TextChunk("\n[Context compacted before adding sub-agent events.]\n")
-                state.messages.append(agent_event_message)
 
         state.turn_count += 1
 
@@ -803,14 +910,20 @@ def run(
                 for unrun_tc in tool_calls[tc_index:]:
                     pid = unrun_tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
                     unrun_tc["id"] = pid
-                    state.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": pid,
-                            "name": unrun_tc.get("name", ""),
-                            "content": "[Cancelled by user before execution]",
-                            "is_error": True,
-                        }
+                    _append_model_visible_messages(
+                        state,
+                        [
+                            {
+                                "role": "tool",
+                                "tool_call_id": pid,
+                                "name": unrun_tc.get("name", ""),
+                                "content": "[Cancelled by user before execution]",
+                                "is_error": True,
+                            }
+                        ],
+                        config=config,
+                        model=model,
+                        compact_before_append=False,
                     )
                 yield TextChunk("\n[Cancelled]")
                 return
@@ -833,22 +946,23 @@ def run(
 
                 _arg_error = validate_and_format_error(tc_name, tc_input, _tool_schema)
                 if _arg_error:
+                    error_result = f"Error: {_arg_error}"
                     yield ToolStart(name=tc_name, inputs=tc_input, tool_call_id=tc_id)
                     yield ToolEnd(
                         name=tc_name,
-                        result=f"Error: {_arg_error}",
+                        result=error_result,
                         permitted=True,
                         tool_call_id=tc_id,
                         duration_ms=0.0,
                     )
-                    state.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc_id,
-                            "name": tc_name,
-                            "content": f"Error: {_arg_error}",
-                            "is_error": True,
-                        }
+                    _append_tool_result_message(
+                        state,
+                        tool_name=tc_name,
+                        tool_call_id=tc_id,
+                        result=error_result,
+                        is_error=True,
+                        config=config,
+                        model=model,
                     )
                     continue
 
@@ -880,17 +994,20 @@ def run(
                     result = f"Tool '{tc_name}' executed (no executor configured)."
                 duration_ms = (time.monotonic() - t0) * 1000
 
-            result = _spill_tool_result_to_project_memory(
-                result,
-                tool_name=tc_name,
-                tool_call_id=tc_id,
-                config=config,
-                model=model,
-            )
             # A tool-level failure surfaced as an "Error:" string (FileEdit no-match,
             # non-zero shell, etc.) should also be flagged so the model recovers.
             if not is_error and isinstance(result, str) and result.lstrip()[:6].lower() == "error:":
                 is_error = True
+
+            result = _append_tool_result_message(
+                state,
+                tool_name=tc_name,
+                tool_call_id=tc_id,
+                result=result,
+                is_error=is_error,
+                config=config,
+                model=model,
+            )
 
             yield ToolEnd(
                 name=tc_name,
@@ -907,16 +1024,6 @@ def run(
                     "duration_ms": duration_ms,
                     "permitted": permitted,
                     "tool_call_id": tc_id,
-                }
-            )
-
-            state.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "name": tc_name,
-                    "content": result,
-                    "is_error": is_error,
                 }
             )
 
@@ -964,16 +1071,21 @@ def _inject_workspace_guard_message(state: AgentState, *, config: dict[str, Any]
         return
     metadata["last_change_guard_model_fingerprint"] = report.fingerprint
     state.metadata = metadata
-    state.messages.append(
-        {
-            "role": "user",
-            "content": (
-                "[Workspace guard]\n"
-                f"{format_change_guard_notification(report)}\n\n"
-                "Do not claim completion until the risky change is either fixed or explicitly justified, "
-                "and run focused verification for edited runtime/test/build surfaces."
-            ),
-        }
+    _append_model_visible_messages(
+        state,
+        [
+            {
+                "role": "user",
+                "content": (
+                    "[Workspace guard]\n"
+                    f"{format_change_guard_notification(report)}\n\n"
+                    "Do not claim completion until the risky change is either fixed or explicitly justified, "
+                    "and run focused verification for edited runtime/test/build surfaces."
+                ),
+            }
+        ],
+        config=config,
+        model=str(config.get("model", "")),
     )
 
 

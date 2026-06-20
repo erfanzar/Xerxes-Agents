@@ -170,6 +170,73 @@ def test_run_spills_large_tool_result_to_project_memory(tmp_path) -> None:
     assert large_result not in seen_provider_messages[1][-1]["content"]
 
 
+def test_large_tool_result_when_memory_init_fails_returns_pointer_error_not_raw_payload(tmp_path, monkeypatch) -> None:
+    original = loop._stream_llm
+    previous_memory = active_memory()
+    large_result = "NOISY-RAW-OUTPUT\n" * 500
+    calls = {"n": 0}
+    seen_provider_messages: list[list[dict]] = []
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        seen_provider_messages.append(list(kwargs["messages"]))
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {
+                        "id": "call_large",
+                        "name": "ExecuteShell",
+                        "input": {"command": "make noisy"},
+                    }
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("done")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    from xerxes.runtime.agent_memory import AgentMemory
+
+    def fail_ensure(self):
+        raise OSError("readonly memory root")
+
+    monkeypatch.setattr(AgentMemory, "ensure", fail_ensure)
+    loop._stream_llm = fake_stream
+    set_active_memory(None)
+    try:
+        events = list(
+            loop.run(
+                user_message="run noisy command",
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "project_dir": str(tmp_path / "repo"),
+                    "tool_result_spill_chars": 100,
+                    "compaction_summary_agent": False,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: large_result,
+                tool_schemas=[],
+            )
+        )
+    finally:
+        set_active_memory(previous_memory)
+        loop._stream_llm = original
+
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+    tool_messages = [msg for msg in state.messages if msg.get("role") == "tool"]
+
+    assert "[Large tool result stored outside model context]" in ends[0].result
+    assert "project agent memory could not initialize" in ends[0].result
+    assert "readonly memory root" in ends[0].result
+    assert large_result not in ends[0].result
+    assert tool_messages[0]["content"] == ends[0].result
+    assert large_result not in seen_provider_messages[1][-1]["content"]
+
+
 def test_steer_drain_injects_user_message_between_tool_iterations() -> None:
     """Pending steers must land as a user message before the next LLM call."""
     original = loop._stream_llm

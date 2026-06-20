@@ -52,6 +52,7 @@ from ..core.paths import xerxes_subdir
 from ..extensions.skill_authoring.pipeline import SkillAuthoringPipeline
 from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
 from ..llms.registry import calc_cost, detect_provider, get_context_limit
+from ..runtime.agent_memory import AgentMemory
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
@@ -68,6 +69,7 @@ from ..streaming.events import (
     TurnDone,
 )
 from ..streaming.loop import run as run_agent_loop
+from ..tools.agent_memory_tool import set_active_memory
 from ..tools.agent_meta_tools import set_skill_registry
 from ..tools.claude_tools import set_ask_user_question_callback
 from . import profiles
@@ -127,6 +129,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         self.state = AgentState()
         self.cost_tracker = CostTracker()
         self.system_prompt = ""
+        self.agent_memory: AgentMemory | None = None
         self.tool_executor = None
         self.tool_schemas: list[dict[str, Any]] = []
         self._initialized = False
@@ -320,48 +323,23 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         else:
             prompt = self.system_prompt.rstrip()
 
-        # Inject agent self-knowledge from persistent memory
-        try:
-            from ..memory.agent_memory import get_agent_memory
-
-            agent_id = getattr(self, "agent_id", "default")
-            memory = get_agent_memory(agent_id)
-            memory_addendum = memory.get_system_prompt_addendum()
-            if memory_addendum:
-                prompt += "\n\n[Agent Self-Knowledge]\n" + memory_addendum
-        except Exception:
-            pass
+        if self.agent_memory is not None:
+            try:
+                memory_section = self.agent_memory.to_prompt_section()
+            except Exception as exc:
+                logger.warning("Failed to render agent memory section: %s", exc)
+            else:
+                if memory_section:
+                    prompt += "\n\n" + memory_section
 
         return prompt + "\n\n" + self._mode_switch_hint(mode) + "\n"
 
     def _begin_turn_memory_sync(self) -> None:
-        """Proactively read agent memory at the start of each turn.
-
-        This ensures the agent always has up-to-date context from previous sessions.
-        """
-        try:
-            from ..memory.agent_memory import get_agent_memory
-
-            agent_id = getattr(self, "agent_id", "default")
-            memory = get_agent_memory(agent_id)
-
-            # Read all memory files and emit them as context events
-            for key in memory.list_keys():
-                try:
-                    content = memory.read(key)
-                    if content:
-                        self._emit(
-                            "memory_context",
-                            {
-                                "key": key,
-                                "content": content[:2000],  # Truncate to avoid flooding
-                                "scope": memory.scope,
-                            },
-                        )
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        """Keep the active two-tier memory bound for this bridge turn."""
+        if self.agent_memory is None:
+            return
+        self.agent_memory.ensure()
+        set_active_memory(self.agent_memory)
 
     @staticmethod
     def _mode_switch_hint(mode: str) -> str:
@@ -430,6 +408,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             self.config["base_url"] = base_url
         if api_key:
             self.config["api_key"] = api_key
+        project_root = Path(self._session_cwd or os.getcwd()).expanduser()
+        self.config["project_dir"] = str(project_root)
 
         if base_url and not params.get("model", ""):
             try:
@@ -444,6 +424,10 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         agent_skill = self._skill_registry.get("xerxes-agent")
         if agent_skill is not None:
             self.system_prompt += "\n\n" + agent_skill.to_prompt_section()
+
+        self.agent_memory = AgentMemory(project_root=project_root)
+        self.agent_memory.ensure()
+        set_active_memory(self.agent_memory)
 
         registry = populate_registry()
         self.tool_executor = build_tool_executor(registry=registry)

@@ -103,6 +103,76 @@ def test_task_get_returns_latest_agent_content_without_snapshot_noise(monkeypatc
     mgr.shutdown()
 
 
+def test_subagent_file_coordination_notifies_stale_reader(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "src" / "service.py"
+    target.parent.mkdir()
+    target.write_text("old\n", encoding="utf-8")
+
+    mgr = SubAgentManager()
+    reader = SubAgentTask(id="reader", name="reader", status="running")
+    writer = SubAgentTask(id="writer", name="writer", status="running")
+    mgr.tasks[reader.id] = reader
+    mgr.tasks[writer.id] = writer
+
+    try:
+        mgr.record_tool_file_access(
+            reader,
+            "ReadFile",
+            {"file_path": "src/service.py"},
+            phase="start",
+        )
+        target.write_text("new\n", encoding="utf-8")
+        mgr.record_tool_file_access(
+            writer,
+            "FileEditTool",
+            {"file_path": "src/service.py"},
+            phase="end",
+            permitted=True,
+            result="Replaced 1 occurrence",
+        )
+
+        notice = reader._inbox.get_nowait()
+        assert "Swarm coordination" in notice
+        assert "src/service.py" in notice
+        assert "writer" in notice
+        assert any(path.endswith("src/service.py") for path in reader.read_files)
+        assert any(path.endswith("src/service.py") for path in writer.written_files)
+        events = mgr.drain_mailbox()
+        assert any(event["type"] == "coordination" and event["task_id"] == "reader" for event in events)
+        assert any(event["type"] == "file_write" and event["task_id"] == "writer" for event in events)
+    finally:
+        mgr.shutdown()
+
+
+def test_subagent_file_coordination_ignores_failed_writes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "settings.toml"
+    target.write_text("old\n", encoding="utf-8")
+
+    mgr = SubAgentManager()
+    reader = SubAgentTask(id="reader", name="reader", status="running")
+    writer = SubAgentTask(id="writer", name="writer", status="running")
+    mgr.tasks[reader.id] = reader
+    mgr.tasks[writer.id] = writer
+
+    try:
+        mgr.record_tool_file_access(reader, "ReadFile", {"file_path": "settings.toml"}, phase="start")
+        mgr.record_tool_file_access(
+            writer,
+            "WriteFile",
+            {"file_path": "settings.toml"},
+            phase="end",
+            permitted=True,
+            result="Error: denied",
+        )
+
+        assert reader._inbox.empty()
+        assert not writer.written_files
+    finally:
+        mgr.shutdown()
+
+
 def test_spawn_agents_grows_pool_to_batch_size(monkeypatch):
     agent_count = 12
     ready = threading.Barrier(agent_count + 1)
