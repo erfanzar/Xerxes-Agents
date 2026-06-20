@@ -93,7 +93,7 @@ def check_provider_keys() -> Diagnosis:
         "provider-keys",
         "warn",
         "No provider API key in environment",
-        fix_hint="Run `xerxes /provider` or set OPENAI_API_KEY / ANTHROPIC_API_KEY.",
+        fix_hint="Run `xerxes /provider` or set OPENAI_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY.",
     )
 
 

@@ -51,6 +51,19 @@ def test_model_list_auto_switches_single_available_model(monkeypatch, tmp_path) 
     assert "qwen3_5-27.36b (active)" in output
 
 
+def test_openrouter_profile_provider_is_detected(monkeypatch, tmp_path) -> None:
+    _isolated_profiles(monkeypatch, tmp_path)
+
+    profile = profiles.save_profile(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        model="anthropic/claude-sonnet-4.5",
+    )
+
+    assert profile["provider"] == "openrouter"
+
+
 def test_cancel_cancels_subagents(monkeypatch) -> None:
     class Manager:
         def __init__(self) -> None:

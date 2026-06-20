@@ -237,6 +237,8 @@ def _guess_provider(base_url: str) -> str:
     generic Kimi chat provider.
     """
     url = base_url.lower()
+    if "openrouter.ai" in url:
+        return "openrouter"
     if "openai" in url:
         return "openai"
     if "anthropic" in url:

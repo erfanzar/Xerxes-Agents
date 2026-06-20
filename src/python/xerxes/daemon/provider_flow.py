@@ -41,6 +41,7 @@ class ProviderFlowMixin:
     _PROVIDER_TYPE_OPTIONS: tuple[str, ...] = (
         "auto",
         "openai",
+        "openrouter",
         "anthropic",
         "ollama",
         "gemini",

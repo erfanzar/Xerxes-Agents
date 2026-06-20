@@ -62,6 +62,7 @@ class LLMProvider(StrEnum):
     """LLM providers known to the legacy core config layer."""
 
     OPENAI = "openai"
+    OPENROUTER = "openrouter"
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
     COHERE = "cohere"
