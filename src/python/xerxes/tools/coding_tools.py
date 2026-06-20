@@ -35,7 +35,10 @@ DEFAULT_READ_LINE_LIMIT = 400
 
 
 def read_file(
-    file_path: str, start_line: int = 1, end_line: int | None = None, context_variables: dict | None = None
+    file_path: str,
+    start_line: int | None = 1,
+    end_line: int | None = None,
+    context_variables: dict | None = None,
 ) -> str:
     """Read content from a file with optional line range selection.
 
@@ -60,6 +63,8 @@ def read_file(
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
 
+        start_line = 1 if start_line is None else int(start_line)
+        end_line = None if end_line is None else int(end_line)
         if start_line < 1:
             start_line = 1
 
