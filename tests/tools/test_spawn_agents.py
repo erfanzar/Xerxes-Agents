@@ -284,6 +284,43 @@ def test_subagent_tool_filter_blocks_recursive_delegation_tools():
     assert calls == ["ReadFile"]
 
 
+def test_researcher_subagent_can_use_project_memory_tools():
+    schemas = [
+        {"name": "ReadFile"},
+        {"name": "SpawnAgents"},
+        {"name": "agent_memory_status"},
+        {"name": "agent_memory_read"},
+        {"name": "agent_memory_write"},
+        {"name": "agent_memory_append"},
+        {"name": "agent_memory_journal"},
+    ]
+    calls: list[str] = []
+    agent_def = get_agent_definition("researcher")
+
+    def executor(tool_name, tool_input):
+        calls.append(tool_name)
+        return "ok"
+
+    filtered, filtered_executor = _filter_subagent_tools(
+        tool_schemas=schemas,
+        tool_executor=executor,
+        config={"_tools_allowed": agent_def.allowed_tools},
+        is_subagent=True,
+    )
+
+    names = {schema["name"] for schema in filtered or []}
+    assert "ReadFile" in names
+    assert "agent_memory_status" in names
+    assert "agent_memory_read" in names
+    assert "agent_memory_write" in names
+    assert "agent_memory_append" in names
+    assert "agent_memory_journal" in names
+    assert "SpawnAgents" not in names
+    assert filtered_executor("agent_memory_write", {}) == "ok"
+    assert filtered_executor("SpawnAgents", {}) == "Error: tool 'SpawnAgents' is not allowed for this agent."
+    assert calls == ["agent_memory_write"]
+
+
 def test_subagent_system_prompt_does_not_include_active_skills_by_default(monkeypatch):
     class _Skill:
         def to_prompt_section(self):

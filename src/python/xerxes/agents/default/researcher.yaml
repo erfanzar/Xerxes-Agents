@@ -15,8 +15,16 @@ agent:
     - ReadFile
     - GlobTool
     - GrepTool
+    - ListDir
     - DuckDuckGoSearch
     - SetInteractionModeTool
+    - agent_memory_status
+    - agent_memory_read
+    - agent_memory_write
+    - agent_memory_append
+    - agent_memory_list
+    - agent_memory_search
+    - agent_memory_journal
   exclude_tools:
     - AgentTool
     - SpawnAgents

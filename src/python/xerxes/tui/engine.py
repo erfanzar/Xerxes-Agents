@@ -22,6 +22,7 @@ correlated request futures."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -35,12 +36,28 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from ..daemon.config import load_config
+from ..daemon.config import DAEMON_DIR, DaemonConfig, load_config
 from ..streaming.wire_events import (
     Notification,
     WireEvent,
     event_from_dict,
 )
+
+
+def _resolve_project_dir(project_dir: str | os.PathLike[str] | None = None) -> str:
+    """Return the canonical project directory for a TUI-attached daemon."""
+    path = Path(project_dir or os.getcwd()).expanduser()
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path.absolute())
+
+
+def _project_daemon_paths(project_dir: str) -> tuple[Path, Path]:
+    """Return stable per-project socket and pid paths for ``project_dir``."""
+    digest = hashlib.sha256(project_dir.encode("utf-8")).hexdigest()[:16]
+    base = DAEMON_DIR / "projects"
+    return base / f"{digest}.sock", base / f"{digest}.pid"
 
 
 class BridgeClient:
@@ -56,14 +73,18 @@ class BridgeClient:
     def __init__(
         self,
         python_executable: str | None = None,
+        project_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         """Stash configuration; no daemon contact happens until :meth:`spawn`.
 
         Args:
             python_executable: Interpreter used to launch the daemon
                 module if none is running. Defaults to ``sys.executable``.
+            project_dir: Workspace directory this client should bind to.
+                Defaults to the current working directory.
         """
         self._python = python_executable or sys.executable
+        self._project_dir = _resolve_project_dir(project_dir)
         self._proc: subprocess.Popen[bytes, bytes] | None = None
         self._sock: socket.socket | None = None
         self._socket_reader: Any = None
@@ -94,14 +115,25 @@ class BridgeClient:
         except RuntimeError:
             self._loop = asyncio.get_event_loop()
 
-        config = load_config()
+        config = self._daemon_config()
         socket_path = Path(config.socket_path).expanduser()
         required_protocol = 35
         if self._daemon_protocol(socket_path) < required_protocol:
             self._stop_stale_daemon(Path(config.pid_file).expanduser(), socket_path)
         if not self._connect_socket(socket_path):
+            argv = [
+                self._python,
+                "-m",
+                "xerxes.daemon",
+                "--project-dir",
+                self._project_dir,
+                "--socket",
+                str(socket_path),
+                "--pid-file",
+                str(Path(config.pid_file).expanduser()),
+            ]
             self._proc = subprocess.Popen(
-                [self._python, "-m", "xerxes.daemon"],
+                argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -163,12 +195,21 @@ class BridgeClient:
 
         # Remove stale socket file so spawn() doesn't think a daemon is alive
         try:
-            config = load_config()
+            config = self._daemon_config()
             socket_path = Path(config.socket_path).expanduser()
             if socket_path.exists():
                 socket_path.unlink()
         except Exception:
             pass
+
+    def _daemon_config(self) -> DaemonConfig:
+        """Return daemon config for this client's project-scoped control socket."""
+        config = load_config(project_dir=self._project_dir)
+        if not os.environ.get("XERXES_DAEMON_SOCKET"):
+            socket_path, pid_file = _project_daemon_paths(self._project_dir)
+            config.socket_path = str(socket_path)
+            config.pid_file = str(pid_file)
+        return config
 
     def stderr_tail(self) -> list[str]:
         """Snapshot the last ~200 stderr lines captured from the daemon subprocess."""
