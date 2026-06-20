@@ -311,10 +311,10 @@ class XerxesTUI:
         ``await tui.run()`` and continue chaining."""
         self._running = True
 
-        self._client = BridgeClient(python_executable=self._python_executable)
+        cwd = os.getcwd()
+        self._client = BridgeClient(python_executable=self._python_executable, project_dir=cwd)
         self._client.spawn()
 
-        cwd = os.getcwd()
         provisional_session = uuid.uuid4().hex[:8]
         provisional_branch = _git_branch(cwd)
 
@@ -1522,7 +1522,7 @@ class XerxesTUI:
         if old_client is not None:
             await asyncio.to_thread(old_client.close)
 
-        self._client = BridgeClient(python_executable=self._python_executable)
+        self._client = BridgeClient(python_executable=self._python_executable, project_dir=os.getcwd())
         self._client.spawn()
         consumer = asyncio.create_task(self._event_consumer())
         self._tasks.append(consumer)

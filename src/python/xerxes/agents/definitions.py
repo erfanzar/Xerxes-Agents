@@ -151,7 +151,20 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- Cite specific file paths and line numbers\n"
             "- Be concise and focused\n"
         ),
-        allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir", "DuckDuckGoSearch"],
+        allowed_tools=[
+            "ReadFile",
+            "GlobTool",
+            "GrepTool",
+            "ListDir",
+            "DuckDuckGoSearch",
+            "agent_memory_status",
+            "agent_memory_read",
+            "agent_memory_write",
+            "agent_memory_append",
+            "agent_memory_list",
+            "agent_memory_search",
+            "agent_memory_journal",
+        ],
         source="built-in",
     ),
     "tester": AgentDefinition(

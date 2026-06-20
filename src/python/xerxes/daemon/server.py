@@ -880,6 +880,7 @@ def main() -> None:
     parser.add_argument("--host", default="", help="WebSocket host")
     parser.add_argument("--port", type=int, default=None, help="WebSocket port")
     parser.add_argument("--socket", default="", help="Unix socket path")
+    parser.add_argument("--pid-file", default="", help="Daemon pid file path")
     args = parser.parse_args()
 
     config = load_config(project_dir=args.project_dir)
@@ -889,6 +890,8 @@ def main() -> None:
         config.ws_port = args.port
     if args.socket:
         config.socket_path = args.socket
+    if args.pid_file:
+        config.pid_file = args.pid_file
 
     server = DaemonServer(config)
     try:
