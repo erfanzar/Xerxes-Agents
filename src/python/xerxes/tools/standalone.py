@@ -99,8 +99,8 @@ class ReadFile(AgentBaseFn):
     def static_call(
         file_path: str,
         max_chars: int | None = None,
-        offset: int = 0,
-        limit: int = DEFAULT_READ_LINE_LIMIT,
+        offset: int | None = 0,
+        limit: int | None = DEFAULT_READ_LINE_LIMIT,
         encoding: str = "utf-8",
         errors: str = "ignore",
         **context_variables,
@@ -128,6 +128,8 @@ class ReadFile(AgentBaseFn):
         if not p.exists() or not p.is_file():
             raise FileNotFoundError(f"File '{p}' does not exist")
 
+        offset = 0 if offset is None else int(offset)
+        limit = DEFAULT_READ_LINE_LIMIT if limit is None else int(limit)
         text = p.read_text(encoding=encoding, errors=errors)
         if limit == -1:
             selected = text

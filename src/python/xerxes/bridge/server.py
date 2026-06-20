@@ -40,6 +40,7 @@ import queue
 import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..context.compaction_provisioner import (
@@ -53,6 +54,7 @@ from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
 from ..llms.registry import calc_cost, detect_provider, get_context_limit
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
+from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.config_context import set_config as set_global_config
 from ..runtime.config_context import set_event_callback
 from ..runtime.cost_tracker import CostTracker
@@ -758,6 +760,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                     },
                 )
 
+        self._emit_change_guard_if_needed()
+
         try:
             self._save_session()
         except Exception as exc:
@@ -769,6 +773,49 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
 
         self._emit("query_done", {})
         self._emit_state()
+
+    def _emit_change_guard_if_needed(self) -> None:
+        """Notify once when the current Git diff contains high-risk edits."""
+        report = analyze_workspace_changes(
+            Path(self._session_cwd or os.getcwd()).expanduser(), self.state.tool_executions
+        )
+        if not report.should_notify:
+            return
+
+        metadata = dict(self.state.metadata or {})
+        if metadata.get("last_change_guard_fingerprint") == report.fingerprint:
+            return
+        metadata["last_change_guard_fingerprint"] = report.fingerprint
+        self.state.metadata = metadata
+
+        payload = {
+            "fingerprint": report.fingerprint,
+            "findings": [finding.__dict__ for finding in report.findings],
+            "verification_commands": list(report.verification_commands),
+        }
+        if self._wire_mode:
+            self._emit_wire_notification(
+                notification_id=str(uuid.uuid4()),
+                category="workspace_guard",
+                type_="risky_changes",
+                severity=report.severity,
+                title="Workspace guard",
+                body=format_change_guard_notification(report),
+                payload=payload,
+            )
+            return
+        self._emit(
+            "notification",
+            {
+                "id": str(uuid.uuid4()),
+                "category": "workspace_guard",
+                "type": "risky_changes",
+                "severity": report.severity,
+                "title": "Workspace guard",
+                "body": format_change_guard_notification(report),
+                "payload": payload,
+            },
+        )
 
     @staticmethod
     def _filter_tool_schemas_for_agent(tool_schemas: list[dict[str, Any]], agent_def: Any) -> list[dict[str, Any]]:

@@ -37,6 +37,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
+from pathlib import Path
 from typing import Any
 
 from ..context.compaction_provisioner import (
@@ -44,6 +45,7 @@ from ..context.compaction_provisioner import (
     compaction_summary_agent_from_config,
 )
 from ..llms.registry import get_context_limit
+from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from .events import (
     AgentState,
     PermissionRequest,
@@ -918,6 +920,7 @@ def run(
                 }
             )
 
+        _inject_workspace_guard_message(state, config=config)
         post_tool_context = _provision_context_window(state, config=config, model=model)
         if post_tool_context["compacted"]:
             yield TextChunk(
@@ -948,6 +951,30 @@ def run(
         yield TextChunk(
             f"\n[Stopped: reached max tool turns ({MAX_TOOL_TURNS}). Ask me to continue if there's more to do.]"
         )
+
+
+def _inject_workspace_guard_message(state: AgentState, *, config: dict[str, Any]) -> None:
+    """Feed risky working-tree state back to the model before its next step."""
+    cwd = Path(str(config.get("project_dir") or os.getcwd())).expanduser()
+    report = analyze_workspace_changes(cwd, state.tool_executions)
+    if not report.should_notify:
+        return
+    metadata = dict(state.metadata or {})
+    if metadata.get("last_change_guard_model_fingerprint") == report.fingerprint:
+        return
+    metadata["last_change_guard_model_fingerprint"] = report.fingerprint
+    state.metadata = metadata
+    state.messages.append(
+        {
+            "role": "user",
+            "content": (
+                "[Workspace guard]\n"
+                f"{format_change_guard_notification(report)}\n\n"
+                "Do not claim completion until the risky change is either fixed or explicitly justified, "
+                "and run focused verification for edited runtime/test/build surfaces."
+            ),
+        }
+    )
 
 
 async def arun(

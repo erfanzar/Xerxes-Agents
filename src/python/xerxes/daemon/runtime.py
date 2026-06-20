@@ -36,6 +36,7 @@ from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs, get
 from ..runtime.agent_memory import AgentMemory
 from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
+from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.config_context import set_config as set_global_config
 from ..streaming.events import (
     AgentState,
@@ -1253,6 +1254,7 @@ class TurnRunner:
                         "mode": mode,
                     },
                 )
+                self._emit_change_guard_if_needed(session, push)
                 # Persist the session so /resume + `xerxes -r <id>` actually
                 # rehydrate this conversation on the next launch.
                 try:
@@ -1272,6 +1274,40 @@ class TurnRunner:
                         "payload": {"source_path": event.source_path},
                     },
                 )
+
+    def _emit_change_guard_if_needed(
+        self,
+        session: DaemonSession,
+        push: Callable[[str, dict[str, Any]], None],
+    ) -> None:
+        """Notify once when the current Git diff contains high-risk edits."""
+        cwd = Path(self.runtime.config.project_dir or os.getcwd()).expanduser()
+        report = analyze_workspace_changes(cwd, session.state.tool_executions)
+        if not report.should_notify:
+            return
+
+        metadata = dict(session.state.metadata or {})
+        if metadata.get("last_change_guard_fingerprint") == report.fingerprint:
+            return
+        metadata["last_change_guard_fingerprint"] = report.fingerprint
+        session.state.metadata = metadata
+
+        push(
+            "notification",
+            {
+                "id": uuid.uuid4().hex[:12],
+                "category": "workspace_guard",
+                "type": "risky_changes",
+                "severity": report.severity,
+                "title": "Workspace guard",
+                "body": format_change_guard_notification(report),
+                "payload": {
+                    "fingerprint": report.fingerprint,
+                    "findings": [finding.__dict__ for finding in report.findings],
+                    "verification_commands": list(report.verification_commands),
+                },
+            },
+        )
 
     SUBAGENT_PREVIEW_CHARS = 100
 
