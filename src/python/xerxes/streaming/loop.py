@@ -1157,7 +1157,7 @@ def _stream_llm(
     the end, a single dict with ``tool_calls`` and token counters.
     """
 
-    from xerxes.llms.registry import PROVIDERS, bare_model, resolve_provider
+    from xerxes.llms.registry import PROVIDERS, provider_model, resolve_provider
 
     has_explicit_base = bool(config.get("base_url") or config.get("custom_base_url"))
     provider_name = resolve_provider(model, config)
@@ -1166,7 +1166,7 @@ def _stream_llm(
         model_name = model
         provider_name = "openai"
     else:
-        model_name = bare_model(model)
+        model_name = provider_model(model, provider_name)
 
     if provider_type == "anthropic":
         yield from _stream_anthropic(model_name, system, messages, tool_schemas, config, provider_name)

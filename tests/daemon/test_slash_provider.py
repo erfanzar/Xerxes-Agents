@@ -238,6 +238,7 @@ class TestSlashProviderInteractivePanel:
         ptype_q = next(q for q in meta_panel["questions"] if q["id"] == "provider_type")
         assert "auto" in ptype_q["options"]
         assert "anthropic" in ptype_q["options"]
+        assert "openrouter" in ptype_q["options"]
         assert "ollama" in ptype_q["options"]
         assert "kimi-code" in ptype_q["options"]
 
@@ -345,6 +346,30 @@ class TestSlashProviderInteractivePanel:
         assert "kimi-code" in ptype["options"]
         # Order: general "kimi" before "kimi-code".
         assert ptype["options"].index("kimi") < ptype["options"].index("kimi-code")
+
+    def test_openrouter_defaults_auto_fill(self, daemon, monkeypatch, profiles_data):
+        """Pick provider_type=openrouter and the credentials panel must
+        suggest the OpenRouter base URL.
+        """
+        monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: profiles_data)
+        monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
+
+        rec = _Recorder()
+        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        rid = next(p for (t, p) in rec.events if t == "question_request")["id"]
+        self._async_question_response(daemon, rid, {"action": "+ Add new profile…"}, rec)
+        meta = [p for (t, p) in rec.events if t == "question_request"][-1]
+
+        self._async_question_response(
+            daemon,
+            meta["id"],
+            {"name": "orouter", "provider_type": "openrouter"},
+            rec,
+        )
+
+        creds = [p for (t, p) in rec.events if t == "question_request"][-1]
+        url_q = next(q for q in creds["questions"] if q["id"] == "base_url")
+        assert "https://openrouter.ai/api/v1" in url_q["question"]
 
     def test_kimi_code_defaults_auto_fill(self, daemon, monkeypatch, profiles_data):
         """Pick provider_type=kimi-code and the credentials panel must

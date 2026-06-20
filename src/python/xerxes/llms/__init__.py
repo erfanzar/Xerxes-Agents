@@ -15,7 +15,7 @@
 
 Provides a uniform :class:`BaseLLM` interface plus concrete adapters
 for OpenAI, Anthropic, Gemini, Ollama, and a family of
-OpenAI-compatible providers (DeepSeek, Kimi/Moonshot, Qwen,
+OpenAI-compatible providers (DeepSeek, OpenRouter, Kimi/Moonshot, Qwen,
 Zhipu/GLM, LMStudio, MiniMax). :func:`create_llm` is the public
 factory that resolves a provider name to its implementation; provider
 metadata (pricing, context limits, API key env var) is centralised in
@@ -35,6 +35,7 @@ from .compat import (
     LMStudioLLM,
     MiniMaxLLM,
     OpenAICompatLLM,
+    OpenRouterLLM,
     QwenLLM,
     ZhipuLLM,
 )
@@ -105,6 +106,7 @@ def create_llm(
             "ollama",
             "local",
             "deepseek",
+            "openrouter",
             "kimi",
             "moonshot",
             "kimi-code",
@@ -140,6 +142,7 @@ def create_llm(
         "ollama": OllamaLLM,
         "local": LocalLLM,
         "deepseek": DeepSeekLLM,
+        "openrouter": OpenRouterLLM,
         "kimi": KimiLLM,
         "moonshot": KimiLLM,
         "kimi-code": KimiCodeLLM,
@@ -181,6 +184,7 @@ __all__ = [
     "OllamaLLM",
     "OpenAICompatLLM",
     "OpenAILLM",
+    "OpenRouterLLM",
     "ProviderConfig",
     "QwenLLM",
     "ZhipuLLM",

@@ -27,9 +27,9 @@ from .base import LLMConfig
 from .openai import OpenAILLM
 from .registry import (
     PROVIDERS,
-    bare_model,
     detect_provider,
     get_api_key,
+    provider_model,
 )
 
 
@@ -70,7 +70,7 @@ class OpenAICompatLLM(OpenAILLM):
             kwargs.setdefault("model", model)
             config = LLMConfig(**kwargs)
 
-        config.model = bare_model(config.model)
+        config.model = provider_model(config.model, self.provider_name)
 
         if not config.base_url and prov:
             config.base_url = prov.base_url
@@ -128,6 +128,22 @@ class MiniMaxLLM(OpenAICompatLLM):
             **kwargs: Additional configuration fields forwarded to the parent class.
         """
         super().__init__(config=config, provider="minimax", **kwargs)
+
+
+class OpenRouterLLM(OpenAICompatLLM):
+    """OpenRouter LLM client using the OpenAI-compatible API.
+
+    Inherits from OpenAICompatLLM with provider="openrouter".
+    """
+
+    def __init__(self, config: LLMConfig | None = None, **kwargs):
+        """Initialize the OpenRouter LLM client.
+
+        Args:
+            config: Optional LLM configuration.
+            **kwargs: Additional configuration fields forwarded to the parent class.
+        """
+        super().__init__(config=config, provider="openrouter", **kwargs)
 
 
 class KimiLLM(OpenAICompatLLM):
@@ -243,6 +259,7 @@ __all__ = [
     "LMStudioLLM",
     "MiniMaxLLM",
     "OpenAICompatLLM",
+    "OpenRouterLLM",
     "QwenLLM",
     "ZhipuLLM",
 ]

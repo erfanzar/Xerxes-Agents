@@ -113,6 +113,47 @@ def test_stream_llm_resolves_kimi_code_saved_profile(monkeypatch) -> None:
     }
 
 
+def test_stream_llm_preserves_openrouter_namespaced_model(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_stream_openai_compat(
+        model: str,
+        system: str,
+        messages: list[dict],
+        tool_schemas: list[dict],
+        config: dict,
+        provider_name: str,
+    ):
+        captured.update(
+            {
+                "model": model,
+                "provider_name": provider_name,
+                "base_url": config["base_url"],
+            }
+        )
+        yield {"tool_calls": [], "input_tokens": 1, "output_tokens": 1}
+
+    monkeypatch.setattr(loop, "_stream_openai_compat", fake_stream_openai_compat)
+
+    result = list(
+        loop._stream_llm(
+            model="anthropic/claude-sonnet-4.5",
+            provider_type="openai",
+            system="",
+            messages=[{"role": "user", "content": "hi"}],
+            tool_schemas=[],
+            config={"base_url": "https://openrouter.ai/api/v1"},
+        )
+    )
+
+    assert result[-1]["tool_calls"] == []
+    assert captured == {
+        "model": "anthropic/claude-sonnet-4.5",
+        "provider_name": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+
+
 def test_kimi_code_explicit_base_url_gets_coding_agent_headers(monkeypatch) -> None:
     import openai
 

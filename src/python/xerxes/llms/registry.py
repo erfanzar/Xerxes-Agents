@@ -89,6 +89,22 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "o1-mini",
         ],
     ),
+    "openrouter": ProviderConfig(
+        name="openrouter",
+        type="openai",
+        api_key_env="OPENROUTER_API_KEY",
+        base_url="https://openrouter.ai/api/v1",
+        context_limit=1_000_000,
+        models=[
+            "openrouter/auto",
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-4o",
+            "google/gemini-2.5-pro",
+            "deepseek/deepseek-chat",
+            "qwen/qwen3-coder",
+            "x-ai/grok-code-fast-1",
+        ],
+    ),
     "gemini": ProviderConfig(
         name="gemini",
         type="openai",
@@ -301,6 +317,7 @@ _PREFIX_MAP: list[tuple[str, str]] = sorted(
         ("o1", "openai"),
         ("o3", "openai"),
         ("o4", "openai"),
+        ("openrouter/", "openrouter"),
         ("gemini-", "gemini"),
         ("moonshot-", "kimi"),
         # ``kimi-for-`` must precede the looser ``kimi-`` rule (the prefix
@@ -357,6 +374,8 @@ def resolve_provider(model: str, extra_config: dict | None = None) -> str:
     cfg = extra_config or {}
     base_url = str(cfg.get("base_url") or cfg.get("custom_base_url") or "").lower()
     model_name = bare_model(model).lower()
+    if "openrouter.ai" in base_url or model.lower().startswith("openrouter/"):
+        return "openrouter"
     if "kimi.com/coding" in base_url or model_name.startswith("kimi-for-"):
         return "kimi-code"
     return provider_name
@@ -366,6 +385,23 @@ def bare_model(model: str) -> str:
     """Strip any ``provider/`` prefix from ``model``."""
 
     return model.split("/", 1)[1] if "/" in model else model
+
+
+def provider_model(model: str, provider_name: str) -> str:
+    """Return the model id to send to ``provider_name``.
+
+    Most providers use Xerxes' ``provider/model`` prefix as local routing
+    syntax, so the prefix should be stripped before the API call. OpenRouter
+    is different: its real model ids are themselves namespaced with slashes
+    (for example ``anthropic/claude-sonnet-4.5``). Only strip the outer
+    ``openrouter/`` routing prefix there.
+    """
+    if provider_name == "openrouter":
+        if model.lower().startswith("openrouter/"):
+            routed = model.split("/", 1)[1]
+            return routed if "/" in routed else model
+        return model
+    return bare_model(model)
 
 
 def get_provider_config(provider_name: str) -> ProviderConfig:
@@ -503,5 +539,6 @@ __all__ = [
     "get_provider_config",
     "list_all_models",
     "provider_default_headers",
+    "provider_model",
     "resolve_provider",
 ]

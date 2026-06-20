@@ -52,6 +52,7 @@ class TestEnums:
 
     def test_llm_provider_values(self):
         assert LLMProvider.OPENAI == "openai"
+        assert LLMProvider.OPENROUTER == "openrouter"
         assert LLMProvider.GEMINI == "gemini"
         assert LLMProvider.ANTHROPIC == "anthropic"
         assert LLMProvider.LOCAL == "local"

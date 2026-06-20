@@ -13,7 +13,7 @@
 # limitations under the License.
 """LLM provider registry tests."""
 
-from xerxes.llms.registry import get_context_limit, resolve_provider
+from xerxes.llms.registry import PROVIDERS, get_context_limit, provider_model, resolve_provider
 
 
 def test_resolve_provider_promotes_kimi_for_coding_model() -> None:
@@ -22,6 +22,29 @@ def test_resolve_provider_promotes_kimi_for_coding_model() -> None:
 
 def test_resolve_provider_promotes_kimi_coding_endpoint() -> None:
     assert resolve_provider("kimi/kimi-latest", {"base_url": "https://api.kimi.com/coding/v1"}) == "kimi-code"
+
+
+def test_resolve_provider_promotes_openrouter_endpoint() -> None:
+    assert (
+        resolve_provider(
+            "anthropic/claude-sonnet-4.5",
+            {"base_url": "https://openrouter.ai/api/v1"},
+        )
+        == "openrouter"
+    )
+
+
+def test_openrouter_provider_config() -> None:
+    cfg = PROVIDERS["openrouter"]
+    assert cfg.type == "openai"
+    assert cfg.api_key_env == "OPENROUTER_API_KEY"
+    assert cfg.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_provider_model_preserves_openrouter_namespaced_model_ids() -> None:
+    assert provider_model("anthropic/claude-sonnet-4.5", "openrouter") == "anthropic/claude-sonnet-4.5"
+    assert provider_model("openrouter/anthropic/claude-sonnet-4.5", "openrouter") == "anthropic/claude-sonnet-4.5"
+    assert provider_model("openrouter/auto", "openrouter") == "openrouter/auto"
 
 
 def test_resolve_provider_keeps_generic_kimi_endpoint() -> None:
