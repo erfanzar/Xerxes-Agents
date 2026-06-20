@@ -45,6 +45,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .definitions import AgentDefinition
@@ -75,6 +76,21 @@ _RECENT_OUTPUT_MAXLEN = 32
 # misbehaving subagent from blowing up the main agent's context window when
 # it peeks.
 _RECENT_OUTPUT_CHARS = 2000
+_FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
+_READ_FILE_TOOLS = {
+    "ReadFile",
+    "read_file",
+    "analyze_code_structure",
+}
+_WRITE_FILE_TOOLS = {
+    "AppendFile",
+    "FileEditTool",
+    "NotebookEditTool",
+    "WriteFile",
+    "delete_file",
+    "replace_in_file",
+    "write_file",
+}
 
 
 @dataclass
@@ -106,6 +122,9 @@ class SubAgentTask:
         last_activity_ts: ``time.monotonic()`` of the most recent event from
             this subagent — useful to detect stuck agents.
         tool_calls_count: Total tool invocations observed so far.
+        read_files: Normalised file paths the subagent has explicitly read.
+        written_files: Normalised file paths the subagent has explicitly
+            modified through file tools.
         spawn_spec: Arguments needed to respawn the task identically;
             populated by :meth:`SubAgentManager.spawn`.
     """
@@ -124,6 +143,8 @@ class SubAgentTask:
     current_tool: str = ""
     last_activity_ts: float = 0.0
     tool_calls_count: int = 0
+    read_files: set[str] = field(default_factory=set)
+    written_files: set[str] = field(default_factory=set)
     spawn_spec: dict[str, Any] = field(default_factory=dict)
     _cancel_flag: bool = field(default=False, repr=False)
     _future: Future | None = field(default=None, repr=False)
@@ -173,9 +194,68 @@ class SubAgentTask:
             "inbox_size": self._inbox.qsize(),
             "current_tool": self.current_tool,
             "tool_calls_count": self.tool_calls_count,
+            "read_files": _compact_path_list(self.read_files),
+            "written_files": _compact_path_list(self.written_files),
             "recent_output": self.recent_output_text(),
             "idle_seconds": (round(time.monotonic() - self.last_activity_ts, 2) if self.last_activity_ts else None),
         }
+
+
+def _compact_path_list(paths: set[str], limit: int = 20) -> list[str]:
+    """Return a bounded, stable path list for task snapshots."""
+    return sorted(paths)[:limit]
+
+
+def _iter_tool_path_values(inputs: dict[str, Any]) -> list[str]:
+    """Extract explicit path arguments from tool inputs."""
+    values: list[str] = []
+    for key in _FILE_PATH_KEYS:
+        raw = inputs.get(key)
+        if isinstance(raw, str):
+            values.append(raw)
+        elif isinstance(raw, list):
+            values.extend(str(item) for item in raw if isinstance(item, str))
+    return values
+
+
+def _normalise_tool_path(raw_path: str) -> str:
+    """Return an absolute path string for a tool path argument."""
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return str(path.resolve(strict=False))
+
+
+def _tool_file_paths(tool_name: str, inputs: dict[str, Any]) -> list[str]:
+    """Return normalised explicit file paths for a tool call."""
+    if tool_name not in _READ_FILE_TOOLS and tool_name not in _WRITE_FILE_TOOLS:
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in _iter_tool_path_values(inputs):
+        if not raw_path or "\x00" in raw_path:
+            continue
+        try:
+            path = _normalise_tool_path(raw_path)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path in seen:
+            continue
+        candidate = Path(path)
+        if candidate.exists() and candidate.is_dir():
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def _display_tool_path(path: str) -> str:
+    """Return a readable path for coordination messages."""
+    resolved = Path(path)
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except (OSError, ValueError):
+        return path
 
 
 def _git_root(cwd: str) -> str | None:
@@ -304,6 +384,11 @@ class SubAgentManager:
         # "wrote N tokens" instead of N separate pings.
         self._text_burst: dict[str, list[str]] = {}
         self._text_burst_lock = threading.Lock()
+        # File-access index for same-workspace subagent coordination. When
+        # one subagent writes a file another subagent already read, the reader
+        # gets a direct inbox note to re-read before acting on stale context.
+        self._file_access_lock = threading.Lock()
+        self._file_readers: dict[str, set[str]] = {}
 
     def ensure_capacity(self, min_concurrent: int) -> bool:
         """Grow the pool to at least ``min_concurrent`` workers.
@@ -327,6 +412,70 @@ class SubAgentManager:
         custom runner lets tests stub out execution.
         """
         self._agent_runner = runner
+
+    def record_tool_file_access(
+        self,
+        task: SubAgentTask,
+        tool_name: str,
+        inputs: dict[str, Any],
+        *,
+        phase: str,
+        permitted: bool = True,
+        result: str = "",
+    ) -> None:
+        """Track explicit file reads/writes and notify stale readers."""
+        paths = _tool_file_paths(tool_name, inputs)
+        if not paths:
+            return
+
+        if tool_name in _READ_FILE_TOOLS and phase == "start":
+            with self._file_access_lock:
+                for path in paths:
+                    task.read_files.add(path)
+                    self._file_readers.setdefault(path, set()).add(task.id)
+            return
+
+        if tool_name not in _WRITE_FILE_TOOLS or phase != "end":
+            return
+        if not permitted or result.lstrip().startswith("Error:"):
+            return
+
+        notifications: list[tuple[SubAgentTask, str, str]] = []
+        with self._file_access_lock:
+            for path in paths:
+                task.written_files.add(path)
+                reader_ids = set(self._file_readers.get(path, set()))
+                for reader_id in reader_ids - {task.id}:
+                    reader = self.tasks.get(reader_id)
+                    if reader is not None and reader.status in ("pending", "running"):
+                        notifications.append((reader, path, task.name or task.id))
+
+        for reader, path, writer in notifications:
+            display_path = _display_tool_path(path)
+            message = (
+                "[Swarm coordination] "
+                f"`{display_path}` changed in another subagent ({writer}). "
+                "Re-read or inspect the diff before relying on earlier file context."
+            )
+            self.send_message(reader.id, message)
+            self.post_event(
+                reader,
+                "coordination",
+                {
+                    "path": display_path,
+                    "writer": writer,
+                },
+            )
+
+        for path in paths:
+            self.post_event(
+                task,
+                "file_write",
+                {
+                    "path": _display_tool_path(path),
+                    "readers_notified": len([note for note in notifications if note[1] == path]),
+                },
+            )
 
     # ----- event bus + wait_for -------------------------------------------
 
@@ -926,6 +1075,7 @@ def _run_streaming_loop(
 
     state = AgentState()
     output_parts: list[str] = []
+    tool_inputs_by_id: dict[str, dict[str, Any]] = {}
     eff_tool_schemas, eff_tool_executor = _filter_subagent_tools(
         tool_schemas=tool_schemas,
         tool_executor=tool_executor,
@@ -969,8 +1119,15 @@ def _run_streaming_loop(
         elif isinstance(event, ToolStart):
             task.current_tool = event.name
             task.tool_calls_count += 1
+            tool_inputs_by_id[event.tool_call_id] = event.inputs
             if manager is not None:
                 manager._flush_text_burst(task)
+                manager.record_tool_file_access(
+                    task,
+                    event.name,
+                    event.inputs,
+                    phase="start",
+                )
                 manager.post_event(
                     task,
                     "tool_start",
@@ -993,7 +1150,16 @@ def _run_streaming_loop(
             )
         elif isinstance(event, ToolEnd):
             task.current_tool = ""
+            inputs = tool_inputs_by_id.pop(event.tool_call_id, {})
             if manager is not None:
+                manager.record_tool_file_access(
+                    task,
+                    event.name,
+                    inputs,
+                    phase="end",
+                    permitted=event.permitted,
+                    result=event.result,
+                )
                 manager.post_event(
                     task,
                     "tool_end",

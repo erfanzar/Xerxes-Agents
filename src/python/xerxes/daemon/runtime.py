@@ -77,6 +77,14 @@ def _format_agent_event(evt: dict[str, Any]) -> str:
         ms = data.get("duration_ms")
         suffix = f" in {ms:.0f}ms" if isinstance(ms, (int, float)) else ""
         return f"[agent {agent}] ← {tool}{suffix}"
+    if etype == "coordination":
+        path = data.get("path", "?")
+        writer = data.get("writer", "?")
+        return f"[agent {agent}] coordination: {path} changed by {writer}; re-read before continuing"
+    if etype == "file_write":
+        path = data.get("path", "?")
+        readers = data.get("readers_notified", 0)
+        return f"[agent {agent}] wrote {path}; notified {readers} stale reader(s)"
     if etype == "text_burst":
         chars = data.get("chars", 0)
         return f"[agent {agent}] +{chars} chars"
@@ -150,9 +158,10 @@ class RuntimeManager:
                 runtime.setdefault(_k, _v)
 
         runtime.setdefault("permission_mode", "accept-all")
+        cwd = Path(self.config.project_dir or os.getcwd()).expanduser()
+        runtime["project_dir"] = str(cwd)
         set_global_config(runtime)
 
-        cwd = Path(self.config.project_dir or os.getcwd()).expanduser()
         boot = bootstrap(model=str(runtime.get("model", "")), cwd=cwd)
         registry = populate_registry()
         self.discover_skills()
@@ -1241,19 +1250,7 @@ class TurnRunner:
                     with self._permission_lock:
                         self._permission_waiters.pop(request_id, None)
             elif isinstance(event, TurnDone):
-                push(
-                    "status_update",
-                    {
-                        "context_tokens": estimate_context_tokens(
-                            session.state.messages,
-                            model=self.runtime.model or str(self.runtime.runtime_config.get("model", "")),
-                        ),
-                        "max_context": self._resolve_context_limit(),
-                        "mcp_status": {},
-                        "plan_mode": plan_mode,
-                        "mode": mode,
-                    },
-                )
+                push("status_update", self._status_payload(session, mode=mode, plan_mode=plan_mode))
                 self._emit_change_guard_if_needed(session, push)
                 # Persist the session so /resume + `xerxes -r <id>` actually
                 # rehydrate this conversation on the next launch.
