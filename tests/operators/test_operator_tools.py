@@ -36,6 +36,10 @@ def test_operator_tools_use_public_names_and_dotted_aliases():
     mapping = agent.get_functions_mapping()
     assert "web.time" in mapping
     assert "exec_command" in mapping
+    assert "write_stdin" in mapping
+    assert "list_terminal_sessions" in mapping
+    assert "close_terminal_session" in mapping
+    assert "parallel_tools" in mapping
 
     schema = function_to_json(mapping["web.time"])
     assert schema["function"]["name"] == "web.time"
@@ -58,6 +62,14 @@ def test_operator_tool_schema_descriptions_are_detailed():
     assert "interactive terminal session" in exec_schema["function"]["description"]
     assert exec_props["cmd"]["type"] == "string"
     assert "Shell command to launch" in exec_props["cmd"]["description"]
+    assert exec_props["yield_time_ms"]["type"] == "integer"
+    assert exec_props["login"]["type"] == "boolean"
+
+    stdin_schema = function_to_json(mapping["write_stdin"])
+    stdin_props = stdin_schema["function"]["parameters"]["properties"]
+    assert stdin_props["yield_time_ms"]["type"] == "integer"
+    assert stdin_props["close_stdin"]["type"] == "boolean"
+    assert stdin_props["interrupt"]["type"] == "boolean"
 
     search_schema = function_to_json(mapping["web.search_query"])
     search_props = search_schema["function"]["parameters"]["properties"]

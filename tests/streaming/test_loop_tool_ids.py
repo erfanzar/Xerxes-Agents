@@ -54,6 +54,97 @@ def test_run_assigns_tool_id_when_provider_omits_one() -> None:
     assert ends[0].tool_call_id == starts[0].tool_call_id
 
 
+def test_run_has_no_hidden_fifty_tool_turn_cap() -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 55:
+            yield {
+                "tool_calls": [
+                    {
+                        "id": f"call_{calls['n']}",
+                        "name": "ReadFile",
+                        "input": {"file_path": "x"},
+                    }
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("done")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=loop.AgentState(),
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+
+    assert calls["n"] == 56
+    assert len(ends) == 55
+    assert "reached max tool turns (50)" not in text
+    assert "done" in text
+
+
+def test_run_honors_configured_max_tool_turns() -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        yield {
+            "tool_calls": [
+                {
+                    "id": f"call_{calls['n']}",
+                    "name": "ReadFile",
+                    "input": {"file_path": "x"},
+                }
+            ],
+            "in_tokens": 1,
+            "out_tokens": 1,
+        }
+
+    loop._stream_llm = fake_stream
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=loop.AgentState(),
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "max_tool_turns": 2,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+
+    assert calls["n"] == 2
+    assert len(ends) == 2
+    assert "reached configured max tool turns (2)" in text
+
+
 def test_run_preserves_full_tool_result_for_model_context() -> None:
     original = loop._stream_llm
     long_result = "x" * 5000

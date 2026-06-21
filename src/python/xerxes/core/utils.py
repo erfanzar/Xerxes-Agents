@@ -26,6 +26,7 @@
 
 import asyncio
 import inspect
+import json
 import re
 from collections.abc import Callable, Coroutine
 from datetime import datetime
@@ -134,9 +135,11 @@ def function_to_json(func: Callable[..., Any]) -> dict:
     custom_description = None
     custom_parameters = None
     if isinstance(schema, dict):
-        custom_name = schema.get("name")
-        custom_description = schema.get("description")
-        custom_parameters = schema.get("parameters")
+        schema_payload = schema.get("function") if schema.get("type") == "function" else schema
+        if isinstance(schema_payload, dict):
+            custom_name = schema_payload.get("name")
+            custom_description = schema_payload.get("description")
+            custom_parameters = schema_payload.get("parameters") or schema_payload.get("input_schema")
 
     type_map = {
         str: "string",
@@ -218,7 +221,11 @@ def function_to_json(func: Callable[..., Any]) -> dict:
         if param.name in param_descriptions:
             param_info["description"] = param_descriptions[param.name]
         if param.default != inspect.Parameter.empty:
-            pass
+            try:
+                json.dumps(param.default)
+                param_info["default"] = param.default
+            except TypeError:
+                param_info["default"] = str(param.default)
 
         parameters[param.name] = param_info
 
