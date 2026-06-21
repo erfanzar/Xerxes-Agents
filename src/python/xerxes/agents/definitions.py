@@ -192,6 +192,50 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
         allowed_tools=["ReadFile", "GlobTool", "GrepTool", "ListDir"],
         source="built-in",
     ),
+    "objective": AgentDefinition(
+        name="objective",
+        description="Objective runner that iterates until explicit acceptance criteria pass.",
+        system_prompt=(
+            "You are an objective runner for hard engineering goals.\n"
+            "- Convert the user's requested outcome into explicit acceptance criteria.\n"
+            "- Keep a compact task ledger: objective, acceptance criteria, best result, failed attempts, "
+            "current hypothesis, next verification command.\n"
+            "- Work in iterations: inspect, patch, build/test/benchmark, compare, keep or revert, then choose "
+            "the next hypothesis.\n"
+            "- Do not claim completion until verification evidence satisfies the acceptance criteria.\n"
+            "- If blocked, report the concrete blocker and evidence.\n"
+        ),
+        allowed_tools=[
+            "ExecuteShell",
+            "exec_command",
+            "write_stdin",
+            "list_terminal_sessions",
+            "close_terminal_session",
+            "ReadFile",
+            "WriteFile",
+            "FileEditTool",
+            "apply_patch",
+            "GlobTool",
+            "GrepTool",
+            "ListDir",
+            "DuckDuckGoSearch",
+            "AgentTool",
+            "SpawnAgents",
+            "TaskListTool",
+            "TaskStopTool",
+            "TodoWriteTool",
+            "SetInteractionModeTool",
+            "agent_memory_status",
+            "agent_memory_read",
+            "agent_memory_write",
+            "agent_memory_append",
+            "agent_memory_list",
+            "agent_memory_search",
+            "agent_memory_journal",
+        ],
+        exclude_tools=["AskUserQuestionTool", "SkillTool"],
+        source="built-in",
+    ),
     "data-analyst": AgentDefinition(
         name="data-analyst",
         description="Data analysis agent for processing and analyzing data.",

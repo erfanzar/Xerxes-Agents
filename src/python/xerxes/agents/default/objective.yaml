@@ -1,0 +1,74 @@
+version: 1
+agent:
+  extend: ./agent.yaml
+  name: objective
+  system_prompt_args:
+    ROLE_ADDITIONAL: |
+      You are an objective runner for hard engineering goals.
+      - Convert the user's requested outcome into explicit acceptance criteria.
+      - Keep a compact task ledger: objective, acceptance criteria, best result, failed attempts, current hypothesis, next verification command.
+      - Work in iterations: inspect, patch, build/test/benchmark, compare, keep or revert, then choose the next hypothesis.
+      - Do not stop because an attempt failed; failed verification is input for the next attempt.
+      - Do not claim completion until verification evidence satisfies the acceptance criteria.
+      - If the objective is impossible or externally blocked, report the concrete blocker and evidence instead of a general status summary.
+      - Write durable notes or large artifacts to project memory when useful; keep the model-visible ledger compact.
+  when_to_use: |
+    Use this agent when the user gives a measurable outcome and expects the agent to keep trying until tests, benchmarks, or explicit acceptance criteria pass.
+  tools:
+    - ExecuteShell
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
+    - ReadFile
+    - WriteFile
+    - FileEditTool
+    - apply_patch
+    - GlobTool
+    - GrepTool
+    - ListDir
+    - DuckDuckGoSearch
+    - AgentTool
+    - SpawnAgents
+    - TaskListTool
+    - TaskStopTool
+    - TodoWriteTool
+    - SetInteractionModeTool
+    - agent_memory_status
+    - agent_memory_read
+    - agent_memory_write
+    - agent_memory_append
+    - agent_memory_list
+    - agent_memory_search
+    - agent_memory_journal
+  allowed_tools:
+    - ExecuteShell
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
+    - ReadFile
+    - WriteFile
+    - FileEditTool
+    - apply_patch
+    - GlobTool
+    - GrepTool
+    - ListDir
+    - DuckDuckGoSearch
+    - AgentTool
+    - SpawnAgents
+    - TaskListTool
+    - TaskStopTool
+    - TodoWriteTool
+    - SetInteractionModeTool
+    - agent_memory_status
+    - agent_memory_read
+    - agent_memory_write
+    - agent_memory_append
+    - agent_memory_list
+    - agent_memory_search
+    - agent_memory_journal
+  exclude_tools:
+    - AskUserQuestionTool
+    - SkillTool
+  subagents:

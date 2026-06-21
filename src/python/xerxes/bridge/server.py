@@ -59,6 +59,11 @@ from ..runtime.change_guard import analyze_workspace_changes, format_change_guar
 from ..runtime.config_context import set_config as set_global_config
 from ..runtime.config_context import set_event_callback
 from ..runtime.cost_tracker import CostTracker
+from ..runtime.interaction_modes import (
+    agent_name_for_mode,
+    mode_switch_hint,
+    normalize_interaction_mode,
+)
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
@@ -81,29 +86,13 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_interaction_mode(mode: Any, *, plan_mode: bool = False) -> str:
-    """Coerce assorted mode labels (``coder``, ``research``, ...) to ``code``/``researcher``/``plan``."""
-    if plan_mode:
-        return "plan"
-    value = str(mode or "code").strip().lower()
-    aliases = {
-        "": "code",
-        "coding": "code",
-        "coder": "code",
-        "research": "researcher",
-        "researcher": "researcher",
-        "plan": "plan",
-        "planner": "plan",
-    }
-    return aliases.get(value, "code")
+    """Coerce assorted mode labels through the shared interaction-mode vocabulary."""
+    return normalize_interaction_mode(mode, plan_mode=plan_mode)
 
 
 def _agent_name_for_mode(mode: str) -> str:
-    """Map an interaction mode to its YAML agent definition (``planner``/``researcher``/``coder``)."""
-    if mode == "plan":
-        return "planner"
-    if mode == "researcher":
-        return "researcher"
-    return "coder"
+    """Map an interaction mode to its YAML agent definition."""
+    return agent_name_for_mode(mode)
 
 
 class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
@@ -346,25 +335,9 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         """Return the ``[Mode control]`` paragraph appended to system prompts.
 
         The hint tells the model which ``SetInteractionModeTool`` call moves
-        forward from the current mode (plan/research/code).
+        forward from the current mode.
         """
-        if mode == "plan":
-            return (
-                "[Mode control]\n"
-                "If the plan is complete and implementation should begin in a later turn, "
-                'call SetInteractionModeTool(mode="code").'
-            )
-        if mode == "researcher":
-            return (
-                "[Mode control]\n"
-                "If implementation is needed after your findings, "
-                'call SetInteractionModeTool(mode="code").'
-            )
-        return (
-            "[Mode control]\n"
-            "If this task should first be researched or planned, call "
-            'SetInteractionModeTool(mode="researcher") or SetInteractionModeTool(mode="plan").'
-        )
+        return mode_switch_hint(mode)
 
     def handle_init(self, params: dict[str, Any]) -> None:
         """Bootstrap the runtime and emit ``ready``/``init_done``.

@@ -170,7 +170,7 @@ class ExitPlanModeTool(AgentBaseFn):
 class SetInteractionModeTool(AgentBaseFn):
     """Switch the active interaction mode for future turns.
 
-    Use this when the task should move between code, research, and plan modes.
+    Use this when the task should move between code, research, plan, and objective modes.
     """
 
     @staticmethod
@@ -182,8 +182,8 @@ class SetInteractionModeTool(AgentBaseFn):
         """Switch interaction mode.
 
         Args:
-            mode: Target mode. One of ``code``, ``researcher``/``research``, or
-                ``plan``/``planner``.
+            mode: Target mode. One of ``code``, ``researcher``/``research``,
+                ``plan``/``planner``, or ``objective``/``goal``.
             reason: Short reason for the switch.
             **context_variables: Additional context passed through to downstream calls.
 
@@ -191,20 +191,11 @@ class SetInteractionModeTool(AgentBaseFn):
             Confirmation message with the normalized target mode.
         """
         from ...runtime.config_context import emit_event, get_config, set_config
+        from ...runtime.interaction_modes import MODE_ALIASES
 
-        aliases = {
-            "": "code",
-            "coding": "code",
-            "coder": "code",
-            "code": "code",
-            "research": "researcher",
-            "researcher": "researcher",
-            "plan": "plan",
-            "planner": "plan",
-        }
-        normalized = aliases.get((mode or "").strip().lower())
+        normalized = MODE_ALIASES.get((mode or "").strip().lower())
         if normalized is None:
-            return "Error: mode must be one of code, researcher, or plan."
+            return "Error: mode must be one of code, researcher, plan, or objective."
 
         config = get_config()
         config["mode"] = normalized

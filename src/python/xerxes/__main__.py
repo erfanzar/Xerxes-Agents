@@ -30,6 +30,8 @@ import os
 import shlex
 import sys
 
+from .runtime.interaction_modes import normalize_interaction_mode
+
 
 def _resolve_one_shot_prompt(
     prompt_parts: list[str],
@@ -233,7 +235,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("code", "researcher", "research", "plan"),
+        choices=("code", "researcher", "research", "plan", "objective", "goal"),
         default="code",
         help="Mode for one-shot prompts.",
     )
@@ -270,7 +272,7 @@ def main(argv: list[str] | None = None) -> None:
     if one_shot:
         if not prompt:
             parser.error("empty prompt")
-        mode = "researcher" if args.mode == "research" else args.mode
+        mode = normalize_interaction_mode(args.mode)
         try:
             asyncio.run(_run_one_shot(prompt, resume_session_id=args.resume, mode=mode))
         except KeyboardInterrupt:

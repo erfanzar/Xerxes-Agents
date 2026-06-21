@@ -198,6 +198,26 @@ def test_resume_replay_renders_as_transcript_not_notification() -> None:
     assert tui._notification_history == []
 
 
+def test_resume_replay_renders_assistant_markdown() -> None:
+    tui = XerxesTUI()
+    prompt = PersistentPrompt()
+    tui._prompt = prompt
+
+    tui._on_notification(
+        Notification(
+            id="assistant",
+            category="history",
+            type="replay_assistant",
+            body="**Hello**\n\n- item",
+        )
+    )
+
+    history = "\n".join(prompt._status._content_lines)
+    assert "**Hello**" not in history
+    assert "\x1b[1mHello" in history
+    assert "item" in history
+
+
 def test_resume_picker_resolves_enter_and_numbers() -> None:
     tui = XerxesTUI()
     prompt = _PromptStub()

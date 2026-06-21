@@ -63,7 +63,7 @@ def test_tui_defaults_to_accept_all_permissions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shift_tab_cycles_code_plan_research_modes() -> None:
+async def test_shift_tab_cycles_code_plan_research_objective_modes() -> None:
     tui = XerxesTUI()
     client = _ClientStub()
     prompt = _PromptStub()
@@ -88,7 +88,15 @@ async def test_shift_tab_cycles_code_plan_research_modes() -> None:
 
     assert tui._plan_mode is False
     assert prompt.plan_mode is False
+    assert prompt.activity_mode == "objective"
+    assert client.sent[-1] == ("set_mode", {"mode": "objective"})
+
+    await tui._cycle_interaction_mode()
+
+    assert tui._plan_mode is False
+    assert prompt.plan_mode is False
     assert prompt.activity_mode == "code"
+    assert client.sent[-1] == ("set_mode", {"mode": "code"})
 
 
 @pytest.mark.asyncio
@@ -105,6 +113,24 @@ async def test_slash_plan_uses_same_plan_mode_state_path() -> None:
     assert prompt.plan_mode is True
     assert ("set_plan_mode", {"enabled": True, "mode": "plan"}) in client.sent
     assert client.steered == ["/plan inspect auth"]
+
+
+@pytest.mark.asyncio
+async def test_slash_objective_sets_sticky_objective_mode() -> None:
+    tui = XerxesTUI()
+    client = _ClientStub()
+    prompt = _PromptStub()
+    tui._client = client  # type: ignore[assignment]
+    tui._prompt = prompt  # type: ignore[assignment]
+
+    await tui._handle_slash("/objective beat benchmark")
+
+    assert tui._plan_mode is False
+    assert prompt.plan_mode is False
+    assert prompt.activity_mode == "objective"
+    assert tui._user_activity_mode == "objective"
+    assert ("set_plan_mode", {"enabled": False, "mode": "objective"}) in client.sent
+    assert client.steered == ["/objective beat benchmark"]
 
 
 def test_status_update_syncs_plan_mode_to_ui() -> None:
@@ -195,6 +221,18 @@ def test_status_update_keeps_non_plan_activity_mode() -> None:
     assert prompt.activity_mode == "researcher"
 
 
+def test_status_update_makes_model_selected_objective_mode_sticky() -> None:
+    tui = XerxesTUI()
+    prompt = _PromptStub()
+    tui._prompt = prompt  # type: ignore[assignment]
+
+    tui._on_status_update(StatusUpdate(context_tokens=1, max_context=100, plan_mode=False, mode="objective"))
+
+    assert tui._plan_mode is False
+    assert prompt.activity_mode == "objective"
+    assert tui._user_activity_mode == "objective"
+
+
 def test_plan_mode_colors_footer_and_input_separator_purple() -> None:
     from xerxes.tui.skin_engine import active_fg
 
@@ -233,6 +271,26 @@ def test_research_mode_colors_footer_and_input_separator_cyan() -> None:
     status_markup = status._markup()
     assert research_color in status_markup
     assert "input · research" in status_markup
+
+
+def test_objective_mode_colors_footer_and_input_separator_yellow() -> None:
+    from xerxes.tui.skin_engine import active_fg
+
+    objective_color = active_fg("warn")
+
+    footer = FooterRenderer()
+    footer.set_activity_mode("objective")
+
+    footer_markup = footer._markup()
+    assert objective_color in footer_markup
+    assert "mode: objective" in footer_markup
+
+    status = StatusRenderer()
+    status.set_activity_mode("objective")
+
+    status_markup = status._markup()
+    assert objective_color in status_markup
+    assert "input · objective" in status_markup
 
 
 def test_status_renderer_trims_thinking_preview_to_last_non_empty_lines() -> None:

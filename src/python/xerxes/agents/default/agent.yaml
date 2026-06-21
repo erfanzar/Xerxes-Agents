@@ -31,3 +31,6 @@ agent:
     planner:
       path: ./planner.yaml
       description: "Read-only implementation planning and architecture design."
+    objective:
+      path: ./objective.yaml
+      description: "Hard-goal execution loop with verification gates."

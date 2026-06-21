@@ -93,7 +93,7 @@ TIPS: tuple[str, ...] = (
     "Holographic memory works offline; it's the default fallback when no plugin is configured.",
     "/insights catches token spikes early — set /budget so they actually cost less.",
     "All slash commands have aliases — /q and /quit both exit.",
-    "Tab cycles completions; Shift+Tab cycles activity modes (code/researcher/agents).",
+    "Tab cycles completions; Shift+Tab cycles activity modes (code/plan/researcher/objective).",
     "Activity mode auto-detects from tool-call patterns over the last few turns.",
     "Browser providers: local Playwright + Browserbase + Browser Use + Camofox + Firecrawl.",
     "Set XERXES_CAMOFOX_SCRIPT to the camofox-bridge JS entrypoint for stealth Firefox.",

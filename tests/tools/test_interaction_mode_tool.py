@@ -37,3 +37,29 @@ def test_set_interaction_mode_tool_rejects_unknown_mode() -> None:
 
     assert result.startswith("Error:")
     assert get_config()["mode"] == "code"
+
+
+def test_set_interaction_mode_tool_accepts_objective_alias() -> None:
+    events: list[tuple[str, dict]] = []
+    set_config({"mode": "code", "plan_mode": False})
+    set_event_callback(lambda event_type, data: events.append((event_type, data)))
+
+    result = SetInteractionModeTool.static_call("goal", reason="Benchmark target")
+
+    config = get_config()
+    assert "objective" in result
+    assert config["mode"] == "objective"
+    assert config["plan_mode"] is False
+    assert events == [
+        (
+            "interaction_mode_changed",
+            {
+                "mode": "objective",
+                "plan_mode": False,
+                "reason": "Benchmark target",
+                "source": "model",
+            },
+        )
+    ]
+
+    set_event_callback(None)

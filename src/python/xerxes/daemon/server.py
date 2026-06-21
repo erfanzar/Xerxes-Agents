@@ -29,6 +29,7 @@ from ..bridge import profiles
 from ..channels.types import ChannelMessage, MessageDirection
 from ..context.window_usage import estimate_context_tokens
 from ..runtime.config_context import get_event_callback, set_event_callback
+from ..runtime.interaction_modes import normalize_interaction_mode
 from . import slash_commands as _slash_commands
 from .channels import ChannelManager, ChannelWebhookServer
 from .config import DaemonConfig, load_config
@@ -274,11 +275,13 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             await self._handle_slash(str(params.get("command", "")), emit)
             return {"ok": True}
         if method == "set_plan_mode":
-            self._current_plan_mode = bool(params.get("enabled", params.get("plan_mode", False)))
+            enabled = bool(params.get("enabled", params.get("plan_mode", False)))
+            self._current_mode = normalize_interaction_mode(params.get("mode", self._current_mode), plan_mode=enabled)
+            self._current_plan_mode = self._current_mode == "plan"
             await self._emit_status(emit)
             return {"ok": True}
         if method == "set_mode":
-            self._current_mode = str(params.get("mode", self._current_mode) or self._current_mode)
+            self._current_mode = normalize_interaction_mode(params.get("mode", self._current_mode))
             self._current_plan_mode = self._current_mode == "plan"
             await self._emit_status(emit)
             return {"ok": True}
@@ -488,8 +491,9 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if not self.runtime.model:
             return {"ok": False, "error": "No model configured. Run /provider first or set XERXES_MODEL."}
         agent_id = str(params.get("agent_id") or self.workspaces.default_agent_id)
-        mode = str(params.get("mode") or self._current_mode or "code")
-        plan_mode = bool(params.get("plan_mode", self._current_plan_mode or mode == "plan"))
+        plan_mode = bool(params.get("plan_mode", self._current_plan_mode))
+        mode = normalize_interaction_mode(params.get("mode") or self._current_mode or "code", plan_mode=plan_mode)
+        plan_mode = mode == "plan"
         # Keep this connection's binding current, but DON'T overwrite the
         # shared ``_current_session_key`` when the caller carried an explicit
         # session key — doing so is exactly the cross-client clobber bug. We

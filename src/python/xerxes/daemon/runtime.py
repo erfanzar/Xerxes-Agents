@@ -38,6 +38,7 @@ from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.config_context import set_config as set_global_config
+from ..runtime.interaction_modes import mode_switch_hint
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
@@ -1119,6 +1120,7 @@ class TurnRunner:
                 workspace_context.prompt,
                 memory_section,
                 self.runtime.active_skill_prompt(),
+                mode_switch_hint(mode),
             )
             if part
         )

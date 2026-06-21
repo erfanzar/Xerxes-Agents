@@ -125,13 +125,16 @@ def _mode_style(plan_mode: bool, activity_mode: str) -> str:
     """Return the ANSI escape that tints prompt chrome for the current mode.
 
     Routed through the active skin: plan mode -> ``system`` role, researcher
-    mode -> ``accent`` role, everything else falls back to the dim ``muted``
-    role. Shared by both the input rule and the footer so the tint stays
-    consistent across prompt chrome."""
+    mode -> ``accent`` role, objective mode -> ``warn`` role, everything else
+    falls back to the dim ``muted`` role. Shared by both the input rule and
+    the footer so the tint stays consistent across prompt chrome."""
     if plan_mode:
         return active_fg("system")
-    if (activity_mode or "").lower() == "researcher":
+    normalized = (activity_mode or "").lower()
+    if normalized == "researcher":
         return active_fg("accent")
+    if normalized == "objective":
+        return active_fg("warn")
     return "\x1b[2m" + active_fg("muted")
 
 
@@ -142,6 +145,7 @@ SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/sampling", "View or set sampling parameters"),
     ("/compact", "Summarize conversation to free context"),
     ("/plan", "Toggle plan mode (or /plan OBJECTIVE)"),
+    ("/objective", "Switch to objective mode (or /objective GOAL)"),
     ("/agents", "List agent types and running agents"),
     ("/skills", "List available skills"),
     ("/skill", "Invoke a skill by name"),
@@ -649,6 +653,8 @@ class StatusRenderer:
             title_parts.append("plan")
         elif self._activity_mode == "researcher":
             title_parts.append("research")
+        elif self._activity_mode == "objective":
+            title_parts.append("objective")
         if self._queue_count:
             title_parts.append(f"{self._queue_count} queued")
         title = f" {' · '.join(title_parts)} "
