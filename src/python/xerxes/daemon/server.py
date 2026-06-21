@@ -567,7 +567,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
 
     async def _emit_status(self, emit: EmitFn) -> None:
         """Push a ``status_update`` reflecting the current session's token usage and mode."""
-        session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
+        session = self.sessions.open(self._connection_session_key(emit), self.workspaces.default_agent_id)
         await emit(
             "status_update",
             {
@@ -806,7 +806,10 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         the normal constructor) degrade to empty strings rather than crashing.
         """
         sessions = getattr(self, "sessions", None)
-        session_key = getattr(self, "_current_session_key", "")
+        try:
+            session_key = self._connection_session_key(emit)
+        except Exception:
+            session_key = getattr(self, "_current_session_key", "")
         session = sessions.get(session_key) if sessions is not None and session_key else None
         workspaces = getattr(self, "workspaces", None)
         default_agent = getattr(workspaces, "default_agent_id", "default") if workspaces else "default"
