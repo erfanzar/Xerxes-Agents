@@ -262,6 +262,7 @@ class BridgeClient:
                 "api_key": api_key,
                 "permission_mode": permission_mode,
                 "resume_session_id": resume_session_id,
+                "project_dir": self._project_dir,
             },
         )
         self._initialized = True

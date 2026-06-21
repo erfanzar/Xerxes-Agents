@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..context.window_usage import estimate_context_tokens
@@ -77,7 +78,7 @@ class WireEventMixin:
                 "model": model,
                 "session_id": self._session_id,
                 "cwd": str(self._session_cwd) if self._session_cwd else os.getcwd(),
-                "git_branch": self._git_branch(),
+                "git_branch": self._git_branch(self._session_cwd),
                 "context_limit": get_context_limit(model),
                 "agent_name": agent_name,
                 "skills": sorted(self._skill_registry.skill_names),
@@ -149,13 +150,14 @@ class WireEventMixin:
 
         self._emit_wire_event("text_part", {"text": text})
 
-    def _git_branch() -> str:
+    def _git_branch(self, cwd: str | os.PathLike[str] | None = None) -> str:
         """Return the current branch name, or empty string when not in a git repo."""
         try:
             import subprocess
 
             return subprocess.check_output(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=Path(cwd).expanduser() if cwd else None,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=2,

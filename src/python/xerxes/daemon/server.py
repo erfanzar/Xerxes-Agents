@@ -362,11 +362,12 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         ``resume_session_id``, emits the ``init_done`` and a ``status_update``
         event, and replays prior turns as inline scrollback notifications.
         """
+        project_dir = self._resolve_project_dir(params.get("project_dir") or self.config.project_dir or Path.cwd())
         overrides = {
             key: params.get(key) for key in ("model", "base_url", "api_key", "permission_mode") if params.get(key)
         }
-        if overrides:
-            self.runtime.reload(overrides)
+        overrides["project_dir"] = str(project_dir)
+        self.runtime.reload(overrides)
         resume_id = str(params.get("resume_session_id") or "").strip()
         self._current_session_key = resume_id or "tui:default"
         # Bind this session to the originating connection so its ``prompt``
@@ -390,8 +391,8 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             {
                 "model": self.runtime.model,
                 "session_id": session.id,
-                "cwd": str(Path.cwd()),
-                "git_branch": self._git_branch(),
+                "cwd": str(project_dir),
+                "git_branch": self._git_branch(project_dir),
                 "context_limit": self._resolve_context_limit(),
                 "agent_name": session.agent_id,
                 "skills": self.runtime.discover_skills(),
@@ -409,6 +410,15 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             "session": session.status(),
             "daemon_protocol": DAEMON_PROTOCOL_VERSION,
         }
+
+    @staticmethod
+    def _resolve_project_dir(raw: Any) -> Path:
+        """Return a normalized project directory from a client/runtime value."""
+        path = Path(str(raw or Path.cwd())).expanduser()
+        try:
+            return path.resolve()
+        except OSError:
+            return path.absolute()
 
     def _connection_session_key(self, emit: EmitFn) -> str:
         """Return the session key bound to ``emit``'s connection.
@@ -615,12 +625,12 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         )
 
     @staticmethod
-    def _git_branch() -> str:
+    def _git_branch(cwd: Path | None = None) -> str:
         """Return the current git branch name, or empty string if unavailable."""
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=Path.cwd(),
+                cwd=cwd or Path.cwd(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -804,8 +814,9 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             skills = self.runtime.discover_skills()
         except Exception:
             skills = []
+        project_dir = self._resolve_project_dir(getattr(self.config, "project_dir", "") or Path.cwd())
         try:
-            git_branch = self._git_branch()
+            git_branch = self._git_branch(project_dir)
         except Exception:
             git_branch = ""
         await emit(
@@ -813,7 +824,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             {
                 "model": getattr(self.runtime, "model", ""),
                 "session_id": session.id if session else "",
-                "cwd": str(Path.cwd()),
+                "cwd": str(project_dir),
                 "git_branch": git_branch,
                 "context_limit": self._resolve_context_limit(),
                 "agent_name": (session.agent_id if session else default_agent),

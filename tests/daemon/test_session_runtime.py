@@ -40,6 +40,50 @@ def test_session_manager_creates_workspace_under_agents_root(tmp_path):
     assert (session.workspace.path / "memory").is_dir()
 
 
+def test_session_save_records_project_cwd_not_agent_workspace(tmp_path):
+    project = tmp_path / "project"
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(project),
+    )
+    manager = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=tmp_path / "sessions")
+    session = manager.open("tui:default")
+    session.state.messages = [{"role": "user", "content": "hello"}]
+
+    manager.save(session)
+
+    record = json.loads((tmp_path / "sessions" / f"{session.id}.json").read_text(encoding="utf-8"))
+    assert record["cwd"] == str(project.resolve())
+    assert record["workspace"] == str(tmp_path / "agents" / "xerxes")
+    assert record["cwd"] != record["workspace"]
+
+
+def test_session_load_migrates_old_workspace_cwd_to_current_project(tmp_path):
+    project = tmp_path / "project"
+    workspace_root = tmp_path / "agents"
+    store_dir = tmp_path / "sessions"
+    store_dir.mkdir()
+    old_workspace = workspace_root / "xerxes"
+    old_workspace.mkdir(parents=True)
+    cfg = DaemonConfig(
+        workspace={"root": str(workspace_root), "default_agent_id": "xerxes"},
+        project_dir=str(project),
+    )
+    record = {
+        "session_id": "abcd1234",
+        "key": "abcd1234",
+        "agent_id": "xerxes",
+        "cwd": str(old_workspace),
+        "messages": [{"role": "user", "content": "hello"}],
+        "turn_count": 1,
+    }
+    (store_dir / "abcd1234.json").write_text(json.dumps(record), encoding="utf-8")
+
+    session = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=store_dir).open("abcd1234")
+
+    assert session.project_dir == project.resolve()
+
+
 @pytest.mark.asyncio
 async def test_turn_runner_permission_response_unblocks_request(tmp_path):
     cfg = DaemonConfig(workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"})

@@ -47,6 +47,7 @@ from ..context.compaction_provisioner import (
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.iteration_budget import iteration_budget_from_config
+from ..runtime.objective_guard import inspect_objective_response, objective_guard_retry_limit
 from ..runtime.workflow_memory import capture_user_workflow_memory
 from .events import (
     AgentState,
@@ -685,6 +686,8 @@ def run(
         yield TextChunk("\n[Context compacted before adding the new turn.]\n")
 
     iteration_budget = iteration_budget_from_config(config)
+    objective_guard_retries = 0
+    objective_guard_limit = objective_guard_retry_limit(config)
     stopped_by_iteration_budget = False
     while True:
         if not iteration_budget.try_consume():
@@ -893,6 +896,26 @@ def run(
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
+
+        if not tool_calls:
+            objective_decision = inspect_objective_response(text, mode=config.get("mode", "code"))
+            if objective_decision.should_continue:
+                objective_guard_retries += 1
+                if objective_guard_retries > objective_guard_limit:
+                    yield TextChunk(
+                        "\n[Stopped: objective guard could not get a verified completion or concrete blocker "
+                        f"after {objective_guard_limit} retries. The last issue was: {objective_decision.reason}.]"
+                    )
+                    break
+                if _append_model_visible_messages(
+                    state,
+                    [{"role": "user", "content": objective_decision.reminder}],
+                    config=config,
+                    model=model,
+                ):
+                    yield TextChunk("\n[Context compacted before adding objective guard reminder.]\n")
+                yield TextChunk(f"\n[Objective gate: {objective_decision.reason}. Continuing.]\n")
+                continue
 
         if runtime_features_state is not None and runtime_features_state.authoring_pipeline is not None:
             result = runtime_features_state.authoring_pipeline.on_turn_end(final_response=text)

@@ -126,6 +126,7 @@ async def test_initialize_defaults_to_accept_all_permissions(monkeypatch) -> Non
                 "api_key": "",
                 "permission_mode": "accept-all",
                 "resume_session_id": "",
+                "project_dir": client._project_dir,
             },
             None,
         )

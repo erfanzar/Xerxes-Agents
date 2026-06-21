@@ -22,6 +22,7 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -120,6 +121,13 @@ class SessionMixin:
             data = json.loads(path.read_text())
             self._session_id = data["session_id"]
             self._created_at = data.get("created_at", "")
+            if data.get("cwd"):
+                cwd = Path(str(data["cwd"])).expanduser()
+                try:
+                    cwd = cwd.resolve()
+                except OSError:
+                    cwd = cwd.absolute()
+                self._session_cwd = str(cwd)
             sanitized, replays = self._sanitize_resumed_messages(data.get("messages", []))
             self.state.messages = sanitized
             self._pending_resume_replays = replays
