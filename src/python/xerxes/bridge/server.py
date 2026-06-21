@@ -381,7 +381,12 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             self.config["base_url"] = base_url
         if api_key:
             self.config["api_key"] = api_key
-        project_root = Path(self._session_cwd or os.getcwd()).expanduser()
+        project_root = Path(str(params.get("project_dir") or self._session_cwd or os.getcwd())).expanduser()
+        try:
+            project_root = project_root.resolve()
+        except OSError:
+            project_root = project_root.absolute()
+        self._session_cwd = str(project_root)
         self.config["project_dir"] = str(project_root)
 
         if base_url and not params.get("model", ""):
@@ -391,7 +396,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 available = []
             self._auto_switch_stale_model(available)
 
-        boot = bootstrap(model=self.config["model"])
+        boot = bootstrap(model=self.config["model"], cwd=project_root)
         self.system_prompt = boot.system_prompt
 
         agent_skill = self._skill_registry.get("xerxes-agent")

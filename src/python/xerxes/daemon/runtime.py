@@ -140,7 +140,8 @@ class RuntimeManager:
         current working directory.
         """
         runtime = self.config.resolved_runtime()
-        runtime.update({k: v for k, v in (overrides or {}).items() if v not in (None, "")})
+        clean_overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
+        runtime.update(clean_overrides)
 
         profile = profiles.get_active_profile()
         if profile:
@@ -159,7 +160,12 @@ class RuntimeManager:
                 runtime.setdefault(_k, _v)
 
         runtime.setdefault("permission_mode", "accept-all")
-        cwd = Path(self.config.project_dir or os.getcwd()).expanduser()
+        cwd = Path(str(clean_overrides.get("project_dir") or self.config.project_dir or os.getcwd())).expanduser()
+        try:
+            cwd = cwd.resolve()
+        except OSError:
+            cwd = cwd.absolute()
+        self.config.project_dir = str(cwd)
         runtime["project_dir"] = str(cwd)
         set_global_config(runtime)
 
@@ -321,6 +327,7 @@ class DaemonSession:
         key: Stable client-supplied key (e.g. ``"tui:default"`` or a session id).
         agent_id: Name of the agent definition driving the session.
         workspace: Markdown workspace at ``$XERXES_HOME/agents/<agent_id>``.
+        project_dir: User project directory this session operates on.
         state: Cumulative streaming-loop state (messages, tokens, tools).
         lock: Asyncio lock serialising turns on this session.
         cancel_requested: Set true to tell the streaming loop to stop early.
@@ -333,6 +340,7 @@ class DaemonSession:
     key: str
     agent_id: str
     workspace: MarkdownAgentWorkspace
+    project_dir: Path
     state: AgentState = field(default_factory=AgentState)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_requested: bool = False
@@ -356,6 +364,7 @@ class DaemonSession:
             "key": self.key,
             "agent_id": self.agent_id,
             "workspace": str(self.workspace.path),
+            "cwd": str(self.project_dir),
             "active_turn_id": self.active_turn_id,
             "messages": len(self.state.messages),
             "turn_count": self.state.turn_count,
@@ -504,6 +513,32 @@ class SessionManager:
             return "\n".join(parts)
         return str(content or "")
 
+    def _current_project_dir(self) -> Path:
+        """Return the active project directory for newly created sessions."""
+        raw = self.workspace_manager.config.project_dir or os.getcwd()
+        path = Path(str(raw)).expanduser()
+        try:
+            return path.resolve()
+        except OSError:
+            return path.absolute()
+
+    def _record_project_dir(self, record: dict[str, Any]) -> Path:
+        """Return the persisted project dir, migrating old workspace-cwd records."""
+        raw = record.get("cwd") or record.get("project_dir") or ""
+        if raw:
+            path = Path(str(raw)).expanduser()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path.absolute()
+            try:
+                workspace_root = self.workspace_manager.root.resolve()
+            except OSError:
+                workspace_root = self.workspace_manager.root.absolute()
+            if resolved != workspace_root and workspace_root not in resolved.parents:
+                return resolved
+        return self._current_project_dir()
+
     @classmethod
     def _derive_title_from_messages(cls, messages: Any) -> str:
         """Use the first persisted user prompt as a compact session title."""
@@ -558,7 +593,8 @@ class SessionManager:
             "session_id": session.id,
             "key": session.key,
             "agent_id": session.agent_id,
-            "cwd": str(session.workspace.path),
+            "cwd": str(session.project_dir),
+            "workspace": str(session.workspace.path),
             "updated_at": datetime.now(UTC).isoformat(),
             "messages": session.state.messages,
             "turn_count": session.state.turn_count,
@@ -603,6 +639,7 @@ class SessionManager:
             return self._sessions[key]
         agent = agent_id or self.workspace_manager.default_agent_id
         workspace = self.workspace_manager.workspace_for(agent)
+        project_dir = self._current_project_dir()
 
         # Only rehydrate when the key is itself a valid session id that
         # has a saved record on disk. ``tui:default`` and other slot
@@ -618,6 +655,7 @@ class SessionManager:
                 key=key,
                 agent_id=str(loaded.get("agent_id") or agent),
                 workspace=workspace,
+                project_dir=self._record_project_dir(loaded),
             )
             state = session.state
             # Repair any orphaned tool calls from a mid-turn crash so resume
@@ -639,6 +677,7 @@ class SessionManager:
                 key=key,
                 agent_id=agent,
                 workspace=workspace,
+                project_dir=project_dir,
             )
         self._sessions[key] = session
         return session

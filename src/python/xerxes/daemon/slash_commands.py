@@ -278,8 +278,8 @@ class SlashCommandsMixin:
                 {
                     "model": self.runtime.model,
                     "session_id": session.id,
-                    "cwd": str(self.config.project_dir or os.getcwd()),
-                    "git_branch": self._git_branch(),
+                    "cwd": str(session.project_dir),
+                    "git_branch": self._git_branch(session.project_dir),
                     "context_limit": self._resolve_context_limit(),
                     "agent_name": session.agent_id,
                     "skills": self.runtime.discover_skills(),
@@ -413,6 +413,7 @@ class SlashCommandsMixin:
             key=new_id,
             agent_id=session.agent_id,
             workspace=session.workspace,
+            project_dir=session.project_dir,
         )
         clone.state.messages = copy.deepcopy(session.state.messages)
         clone.state.turn_count = session.state.turn_count
@@ -967,8 +968,9 @@ class SlashCommandsMixin:
         """Show the current project directory and the agent workspace path."""
         session = self.sessions.get(self._current_session_key)
         ws_path = str(session.workspace.path) if session is not None else "(no session)"
+        project_dir = str(session.project_dir) if session is not None else str(self.config.project_dir or os.getcwd())
         lines = [
-            f"Project dir:    `{self.config.project_dir or os.getcwd()}`",
+            f"Project dir:    `{project_dir}`",
             f"Agent workspace: `{ws_path}`",
             f"Agent id:        `{(session.agent_id if session else self.workspaces.default_agent_id)}`",
         ]

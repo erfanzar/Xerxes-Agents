@@ -143,7 +143,7 @@ class SlashHandlerMixin:
             provider = resolve_provider(model, self.config)
             cost = calc_cost(model, self.state.total_input_tokens, self.state.total_output_tokens)
             return (
-                f"CWD: {os.getcwd()}\n"
+                f"CWD: {self._session_cwd or os.getcwd()}\n"
                 f"Model: {model}\n"
                 f"Provider: {provider}\n"
                 f"Turns: {self.state.turn_count}\n"

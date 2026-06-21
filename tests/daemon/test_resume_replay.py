@@ -192,7 +192,7 @@ class TestInitializeReplaysWhenResuming:
         server.runtime.runtime_config = {"permission_mode": "auto", "model": "claude-haiku-4-5"}
         server.runtime.skill_registry = type(server.runtime.skill_registry)()
         # Required for /context handler used in _emit_status — we stub.
-        server._git_branch = lambda: ""
+        server._git_branch = lambda cwd=None: ""
         server._emit_status = _stub_async  # type: ignore[method-assign]
 
         recorder = _Recorder()
@@ -246,7 +246,7 @@ class TestSlashResume:
 
         server.runtime.runtime_config = {"permission_mode": "auto", "model": "claude-haiku-4-5"}
         server.runtime.discover_skills = lambda: []
-        server._git_branch = lambda: ""
+        server._git_branch = lambda cwd=None: ""
         server._emit_status = _stub_async  # type: ignore[method-assign]
 
         recorder = _Recorder()
@@ -279,7 +279,7 @@ class TestSlashResume:
 
         server.runtime.runtime_config = {"permission_mode": "auto", "model": "claude-haiku-4-5"}
         server.runtime.discover_skills = lambda: []
-        server._git_branch = lambda: ""
+        server._git_branch = lambda cwd=None: ""
         server._emit_status = _stub_async  # type: ignore[method-assign]
 
         recorder = _Recorder()
