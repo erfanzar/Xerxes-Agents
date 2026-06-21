@@ -1509,7 +1509,7 @@ class XerxesTUI:
         if self._running:
             self._pending_cancel_task = asyncio.create_task(self._interrupt_current_turn())
 
-    async def _interrupt_current_turn(self, *, cancel_all: bool = True) -> None:
+    async def _interrupt_current_turn(self, *, cancel_all: bool = False) -> None:
         """Cancel the active turn, clear panel state, and respawn the bridge.
 
         Restart-after-interrupt is necessary because long provider

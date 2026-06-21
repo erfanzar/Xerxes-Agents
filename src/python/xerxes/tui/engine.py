@@ -407,8 +407,8 @@ class BridgeClient:
         await self._send_jsonrpc(method="provider_delete", params={"name": name})
 
     async def shutdown(self) -> None:
-        """Cancel every running turn before the TUI disconnects."""
-        await self._send_jsonrpc(method="cancel_all", params={})
+        """Cancel this client's running turn before the TUI disconnects."""
+        await self._send_jsonrpc(method="cancel", params={})
 
     async def events(self) -> AsyncIterator[WireEvent]:
         """Yield :class:`WireEvent` instances as the daemon pushes them.

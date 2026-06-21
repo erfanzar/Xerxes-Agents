@@ -131,3 +131,18 @@ async def test_initialize_defaults_to_accept_all_permissions(monkeypatch) -> Non
             None,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_only_this_client_turn(monkeypatch) -> None:
+    client = BridgeClient()
+    sent: list[tuple[str, dict, str | None]] = []
+
+    async def send_jsonrpc(*, method: str, params: dict, req_id: str | None = None) -> None:
+        sent.append((method, params, req_id))
+
+    monkeypatch.setattr(client, "_send_jsonrpc", send_jsonrpc)
+
+    await client.shutdown()
+
+    assert sent == [("cancel", {}, None)]
