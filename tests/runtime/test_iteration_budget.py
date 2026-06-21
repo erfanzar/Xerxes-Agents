@@ -18,16 +18,23 @@ from __future__ import annotations
 import threading
 
 import pytest
-from xerxes.runtime.iteration_budget import BudgetExhausted, IterationBudget
+from xerxes.runtime.iteration_budget import BudgetExhausted, IterationBudget, iteration_budget_from_config
 
 
 class TestIterationBudget:
-    def test_default_max(self) -> None:
+    def test_default_is_unbounded(self) -> None:
         b = IterationBudget()
-        assert b.max_iterations == 50
-        assert b.remaining == 50
+        assert b.max_iterations is None
+        assert b.remaining is None
         assert b.used == 0
         assert not b.exhausted
+
+    def test_non_positive_max_is_unbounded(self) -> None:
+        b = IterationBudget(max_iterations=0)
+        assert b.max_iterations is None
+        assert b.remaining is None
+        assert b.try_consume() is True
+        assert b.used == 1
 
     def test_consume_decrements(self) -> None:
         b = IterationBudget(max_iterations=5)
@@ -56,6 +63,14 @@ class TestIterationBudget:
         b = IterationBudget(max_iterations=1)
         assert b.try_consume() is True
         assert b.try_consume() is False
+
+    def test_try_consume_unbounded_never_exhausts(self) -> None:
+        b = IterationBudget()
+        for _ in range(100):
+            assert b.try_consume() is True
+        assert b.used == 100
+        assert b.remaining is None
+        assert not b.exhausted
 
     def test_refund(self) -> None:
         b = IterationBudget(max_iterations=10)
@@ -95,3 +110,11 @@ class TestIterationBudget:
         for t in threads:
             t.join()
         assert b.used == 1000
+
+    def test_config_limit(self) -> None:
+        b = iteration_budget_from_config({"max_tool_turns": 3})
+        assert b.max_iterations == 3
+
+    def test_config_zero_disables_limit(self) -> None:
+        b = iteration_budget_from_config({"max_tool_turns": 0})
+        assert b.max_iterations is None

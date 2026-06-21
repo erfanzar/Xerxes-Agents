@@ -11,19 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Thread-safe iteration budget for the agent loop.
+"""Thread-safe optional iteration budget for the agent loop.
 
-Replaces the bare ``MAX_TOOL_TURNS`` counter in :mod:`xerxes.streaming.loop`.
-The budget supports *refunds* for programmatic tool calls (PTC) — when a
-single PTC turn issues N internal tool calls, only one turn of the budget is
-consumed because the LLM only observed one turn pass by; the rest are
-refunded.
+``max_iterations=None`` means unbounded: the loop relies on cancellation,
+context-window provisioning, and explicit token budgets instead of a hidden
+fixed tool-turn cap. A positive value re-enables a hard ceiling.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass, field
+from typing import Any
 
 
 class BudgetExhausted(RuntimeError):
@@ -41,12 +41,19 @@ class IterationBudget:
     retracts via :meth:`consume` and :meth:`refund`.
 
     Attributes:
-        max_iterations: Hard ceiling on accumulated iterations.
+        max_iterations: Optional hard ceiling on accumulated iterations.
+            ``None`` means no iteration cap.
     """
 
-    max_iterations: int = 50
+    max_iterations: int | None = None
     _used: int = field(default=0, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Normalize non-positive limits to uncapped."""
+
+        if self.max_iterations is not None and self.max_iterations <= 0:
+            self.max_iterations = None
 
     @property
     def used(self) -> int:
@@ -55,15 +62,19 @@ class IterationBudget:
             return self._used
 
     @property
-    def remaining(self) -> int:
-        """Iterations still available before :class:`BudgetExhausted` triggers."""
+    def remaining(self) -> int | None:
+        """Iterations still available, or ``None`` when unbounded."""
         with self._lock:
+            if self.max_iterations is None:
+                return None
             return max(0, self.max_iterations - self._used)
 
     @property
     def exhausted(self) -> bool:
         """``True`` when ``used >= max_iterations``."""
         with self._lock:
+            if self.max_iterations is None:
+                return False
             return self._used >= self.max_iterations
 
     def consume(self, n: int = 1) -> int:
@@ -79,7 +90,7 @@ class IterationBudget:
         if n <= 0:
             raise ValueError("n must be positive")
         with self._lock:
-            if self._used + n > self.max_iterations:
+            if self.max_iterations is not None and self._used + n > self.max_iterations:
                 raise BudgetExhausted(
                     f"Iteration budget exhausted (used={self._used}, max={self.max_iterations}, asked={n})"
                 )
@@ -112,4 +123,27 @@ class IterationBudget:
             self._used = 0
 
 
-__all__ = ["BudgetExhausted", "IterationBudget"]
+def iteration_budget_from_config(
+    config: dict[str, Any],
+    *,
+    key: str = "max_tool_turns",
+    env_var: str = "XERXES_MAX_TOOL_TURNS",
+) -> IterationBudget:
+    """Build an optional budget from runtime config and environment.
+
+    A missing, empty, zero, or negative value means uncapped.
+    """
+
+    raw = config.get(key)
+    if raw in (None, ""):
+        raw = os.environ.get(env_var)
+    if raw in (None, ""):
+        return IterationBudget()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return IterationBudget()
+    return IterationBudget(max_iterations=parsed if parsed > 0 else None)
+
+
+__all__ = ["BudgetExhausted", "IterationBudget", "iteration_budget_from_config"]

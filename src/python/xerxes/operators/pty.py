@@ -124,13 +124,20 @@ class PTYSessionManager:
             command=cmd,
             workdir=resolved_workdir,
         )
-        output = self._read_output(session_id, yield_time_ms=yield_time_ms, max_output_chars=max_output_chars)
+        output = self._read_output_snapshot(
+            session_id,
+            yield_time_ms=yield_time_ms,
+            max_output_chars=max_output_chars,
+        )
+        running = process.poll() is None
+        if running:
+            output["note"] = f"Process is still running; poll with write_stdin(session_id='{session_id}', chars='')."
         return {
             "session_id": session_id,
             "command": cmd,
             "workdir": resolved_workdir,
-            "stdout": output,
-            "running": process.poll() is None,
+            **output,
+            "running": running,
             "exit_code": process.poll(),
         }
 
@@ -172,11 +179,20 @@ class PTYSessionManager:
                 os.write(session.master_fd, b"\x04")
             except OSError:
                 pass
-        output = self._read_output(session_id, yield_time_ms=yield_time_ms, max_output_chars=max_output_chars)
+        output = self._read_output_snapshot(
+            session_id,
+            yield_time_ms=yield_time_ms,
+            max_output_chars=max_output_chars,
+        )
+        running = session.process.poll() is None
+        if running:
+            output["note"] = (
+                f"Process is still running; poll again with write_stdin(session_id='{session_id}', chars='')."
+            )
         return {
             "session_id": session_id,
-            "stdout": output,
-            "running": session.process.poll() is None,
+            **output,
+            "running": running,
             "exit_code": session.process.poll(),
         }
 
@@ -218,10 +234,20 @@ class PTYSessionManager:
     def _read_output(self, session_id: str, *, yield_time_ms: int, max_output_chars: int) -> str:
         """Bounded non-blocking drain of the session's master fd."""
 
+        return self._read_output_snapshot(
+            session_id,
+            yield_time_ms=yield_time_ms,
+            max_output_chars=max_output_chars,
+        )["stdout"]
+
+    def _read_output_snapshot(self, session_id: str, *, yield_time_ms: int, max_output_chars: int) -> dict[str, tp.Any]:
+        """Bounded non-blocking drain plus output-budget metadata."""
+
         session = self._require_session(session_id)
-        deadline = time.time() + max(yield_time_ms, 0) / 1000
+        budget = max(int(max_output_chars), 0)
+        deadline = time.time() + max(int(yield_time_ms), 0) / 1000
         chunks: list[str] = []
-        remaining = max_output_chars
+        remaining = budget
         while remaining > 0:
             timeout = max(0.0, deadline - time.time())
             ready, _, _ = select.select([session.master_fd], [], [], timeout)
@@ -240,7 +266,12 @@ class PTYSessionManager:
             remaining -= len(text)
             if time.time() >= deadline:
                 break
-        return "".join(chunks)
+        return {
+            "stdout": "".join(chunks),
+            "output_truncated": budget > 0 and remaining <= 0,
+            "yield_time_ms": int(yield_time_ms),
+            "max_output_chars": budget,
+        }
 
     def _require_session(self, session_id: str) -> PTYSession:
         """Return the tracked session or raise ``ValueError`` if unknown."""

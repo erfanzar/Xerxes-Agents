@@ -17,6 +17,7 @@ import asyncio
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,6 +56,51 @@ def test_pty_session_manager_round_trip():
     assert closed["closed"] is True
 
 
+def test_pty_session_manager_returns_before_long_command_finishes():
+    manager = PTYSessionManager()
+    script = "import time; print('start', flush=True); time.sleep(0.8); print('done', flush=True)"
+    cmd = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
+
+    started_at = time.monotonic()
+    started = manager.create_session(cmd, yield_time_ms=100)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 0.6
+    assert started["running"] is True
+    assert started["session_id"].startswith("pty_")
+    assert "poll with write_stdin" in started["note"]
+    assert started["output_truncated"] is False
+
+    polled = manager.write(started["session_id"], yield_time_ms=1200)
+    assert "done" in polled["stdout"]
+    manager.close(started["session_id"])
+
+
+@pytest.mark.asyncio
+async def test_terminal_lifecycle_operator_tools():
+    state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
+    tools = _operator_tools(state)
+    script = "import time; print('ready', flush=True); time.sleep(5)"
+    cmd = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
+
+    started = await tools["exec_command"](cmd, yield_time_ms=100)
+    session_id = started["session_id"]
+
+    sessions = tools["list_terminal_sessions"]()
+    assert any(session["session_id"] == session_id for session in sessions)
+
+    polled = await tools["write_stdin"](session_id=session_id, chars="", yield_time_ms=50)
+    assert polled["session_id"] == session_id
+    assert polled["running"] is True
+
+    interrupted = await tools["write_stdin"](session_id=session_id, interrupt=True, yield_time_ms=200)
+    assert interrupted["session_id"] == session_id
+
+    closed = tools["close_terminal_session"](session_id)
+    assert closed["closed"] is True
+    assert all(session["session_id"] != session_id for session in tools["list_terminal_sessions"]())
+
+
 def test_apply_patch_tool_applies_unified_diff_and_rejects_malformed(tmp_path: Path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     target = tmp_path / "demo.txt"
@@ -75,6 +121,33 @@ def test_apply_patch_tool_applies_unified_diff_and_rejects_malformed(tmp_path: P
 
     with pytest.raises(ValueError):
         apply_patch("not a patch", workdir=str(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_parallel_tools_runs_only_readonly_calls(tmp_path: Path):
+    target = tmp_path / "data.txt"
+    target.write_text("payload\n", encoding="utf-8")
+    state = OperatorState(OperatorRuntimeConfig(enabled=True, power_tools_enabled=True))
+    tools = _operator_tools(state)
+
+    payload = await tools["parallel_tools"](
+        [
+            {"name": "ReadFile", "input": {"file_path": str(target), "limit": -1}},
+            {"name": "ListDir", "input": {"directory_path": str(tmp_path)}},
+        ],
+        max_workers=2,
+    )
+
+    assert payload["results"][0]["ok"] is True
+    assert payload["results"][0]["result"] == "payload\n"
+    assert payload["results"][1]["ok"] is True
+    assert "data.txt" in payload["results"][1]["result"]
+
+    rejected = await tools["parallel_tools"](
+        [{"name": "WriteFile", "input": {"file_path": str(target), "content": "nope"}}],
+    )
+    assert rejected["results"][0]["ok"] is False
+    assert "only allows read-only safe tools" in rejected["results"][0]["error"]
 
 
 class _FakeLocator:

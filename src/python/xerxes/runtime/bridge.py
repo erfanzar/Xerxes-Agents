@@ -25,8 +25,10 @@ for one-shot CLI runs.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
-from typing import Any
+from types import UnionType
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +233,7 @@ def populate_registry(
             if handler is None and callable(tool_obj):
                 handler = tool_obj
 
-            schema = _build_tool_schema(tool_name, description, handler)
+            schema = _build_tool_schema(tool_name, description, handler, tool_obj=tool_obj)
 
             is_safe = tool_name in SAFE_TOOLS
 
@@ -274,7 +276,107 @@ def populate_registry(
     return registry
 
 
-def _build_tool_schema(name: str, description: str, handler: Any) -> dict[str, Any]:
+def _normalise_explicit_tool_schema(
+    raw_schema: dict[str, Any],
+    *,
+    fallback_name: str,
+    fallback_description: str,
+) -> dict[str, Any]:
+    """Return the runtime's Anthropic-style schema from supported tool shapes."""
+
+    schema = dict(raw_schema)
+    if schema.get("type") == "function" and isinstance(schema.get("function"), dict):
+        schema = dict(schema["function"])
+
+    input_schema = schema.get("input_schema")
+    if input_schema is None:
+        input_schema = schema.get("parameters")
+    if not isinstance(input_schema, dict):
+        input_schema = {"type": "object", "properties": {}, "required": []}
+
+    normalised_input = dict(input_schema)
+    normalised_input.setdefault("type", "object")
+    normalised_input.setdefault("properties", {})
+    normalised_input.setdefault("required", [])
+
+    return {
+        "name": schema.get("name") or fallback_name,
+        "description": schema.get("description") or fallback_description or f"Execute {fallback_name}",
+        "input_schema": normalised_input,
+    }
+
+
+def _explicit_schema_from_tool(tool_obj: Any, handler: Any) -> dict[str, Any] | None:
+    """Return explicit schema metadata from a tool object or handler."""
+
+    for candidate in (tool_obj, handler):
+        raw_schema = getattr(candidate, "__xerxes_schema__", None)
+        if isinstance(raw_schema, dict):
+            return raw_schema
+        get_schema = getattr(candidate, "get_schema", None)
+        if callable(get_schema):
+            schema = get_schema()
+            if isinstance(schema, dict):
+                return schema
+    return None
+
+
+def _json_schema_default(value: Any) -> Any:
+    """Return a JSON-safe default value for generated schemas."""
+
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return str(value)
+
+
+def _json_schema_for_annotation(annotation: Any) -> dict[str, Any]:
+    """Map a Python annotation to a small JSON schema fragment."""
+
+    if annotation in (inspect.Parameter.empty, Any):
+        return {"type": "string"}
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if origin in (Union, UnionType):
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            return _json_schema_for_annotation(non_none[0])
+        return {"anyOf": [_json_schema_for_annotation(arg) for arg in non_none]}
+
+    if origin in (list, tuple, set):
+        schema: dict[str, Any] = {"type": "array"}
+        if args:
+            schema["items"] = _json_schema_for_annotation(args[0])
+        return schema
+    if origin is dict:
+        return {"type": "object"}
+
+    if annotation is str:
+        return {"type": "string"}
+    if annotation is int:
+        return {"type": "integer"}
+    if annotation is float:
+        return {"type": "number"}
+    if annotation is bool:
+        return {"type": "boolean"}
+    if annotation is list:
+        return {"type": "array"}
+    if annotation is dict:
+        return {"type": "object"}
+
+    return {"type": "string"}
+
+
+def _build_tool_schema(
+    name: str,
+    description: str,
+    handler: Any,
+    *,
+    tool_obj: Any = None,
+) -> dict[str, Any]:
     """Derive a JSON tool schema from ``handler``'s signature.
 
     Skips ``self``, ``cls``, ``context_variables``, ``_``-prefixed, and
@@ -282,6 +384,14 @@ def _build_tool_schema(name: str, description: str, handler: Any) -> dict[str, A
     (``str``/``int``/``float``/``bool``/``list``); anything else falls back
     to ``"string"``. Parameters without a default are marked required.
     """
+
+    explicit_schema = _explicit_schema_from_tool(tool_obj, handler)
+    if explicit_schema is not None:
+        return _normalise_explicit_tool_schema(
+            explicit_schema,
+            fallback_name=name,
+            fallback_description=description,
+        )
 
     schema: dict[str, Any] = {
         "name": name,
@@ -300,6 +410,10 @@ def _build_tool_schema(name: str, description: str, handler: Any) -> dict[str, A
         sig = inspect.signature(handler)
     except (ValueError, TypeError):
         return schema
+    try:
+        resolved_hints = get_type_hints(handler)
+    except Exception:
+        resolved_hints = {}
 
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -310,27 +424,11 @@ def _build_tool_schema(name: str, description: str, handler: Any) -> dict[str, A
         if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
             continue
 
-        prop: dict[str, Any] = {}
-        annotation = param.annotation
-
-        if annotation is inspect.Parameter.empty or annotation is Any:
-            prop["type"] = "string"
-        elif annotation is str:
-            prop["type"] = "string"
-        elif annotation is int:
-            prop["type"] = "integer"
-        elif annotation is float:
-            prop["type"] = "number"
-        elif annotation is bool:
-            prop["type"] = "boolean"
-        elif annotation is list or (hasattr(annotation, "__origin__") and annotation.__origin__ is list):
-            prop["type"] = "array"
-        else:
-            prop["type"] = "string"
+        annotation = resolved_hints.get(param_name, param.annotation)
+        prop = _json_schema_for_annotation(annotation)
 
         if param.default is not inspect.Parameter.empty:
-            if param.default is not None:
-                prop["default"] = param.default
+            prop["default"] = _json_schema_default(param.default)
         else:
             required.append(param_name)
 

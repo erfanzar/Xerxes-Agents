@@ -17,7 +17,7 @@ The loop is the single sync generator that drives a turn end-to-end: it
 appends the user message, streams from the active provider (Anthropic or any
 OpenAI-compatible endpoint), parses thinking tags, dispatches tool calls
 through the permission system, executes the tools, and feeds results back
-until the model stops requesting tools or :data:`MAX_TOOL_TURNS` is exhausted.
+until the model stops requesting tools or an explicit ``max_tool_turns`` budget is exhausted.
 
 :func:`arun` adapts the sync generator to an async generator by running
 ``next()`` in the default executor. ``_stream_anthropic`` and
@@ -46,6 +46,7 @@ from ..context.compaction_provisioner import (
 )
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
+from ..runtime.iteration_budget import iteration_budget_from_config
 from ..runtime.workflow_memory import capture_user_workflow_memory
 from .events import (
     AgentState,
@@ -363,7 +364,6 @@ def _provision_context_window(
     }
 
 
-MAX_TOOL_TURNS = 50
 LLM_STREAM_RETRY_DELAYS = (5, 5, 5, 5, 5, 5)
 
 _DEFAULT_TOOL_RESULT_SPILL_CHARS = 30_000
@@ -618,11 +618,12 @@ def run(
 ) -> Generator[StreamEvent, None, None]:
     """Drive a full turn: stream LLM output, run tools, and yield stream events.
 
-    Appends the user message to ``state.messages``, then loops up to
-    :data:`MAX_TOOL_TURNS` times: stream a response, parse thinking tags,
-    record token usage and tool calls, gate each tool through the permission
-    system, execute it, and feed the result back. Exits on the first
-    iteration that produces no tool calls.
+    Appends the user message to ``state.messages``, then streams a response,
+    parses thinking tags, records token usage and tool calls, gates each tool
+    through the permission system, executes it, and feeds the result back.
+    Exits on the first iteration that produces no tool calls. Set
+    ``config["max_tool_turns"]`` or ``XERXES_MAX_TOOL_TURNS`` to a positive
+    integer to add an explicit iteration ceiling.
 
     Args:
         user_message: Raw user text appended to the conversation.
@@ -683,7 +684,13 @@ def run(
     if precompacted_initial:
         yield TextChunk("\n[Context compacted before adding the new turn.]\n")
 
-    for _turn in range(MAX_TOOL_TURNS):
+    iteration_budget = iteration_budget_from_config(config)
+    stopped_by_iteration_budget = False
+    while True:
+        if not iteration_budget.try_consume():
+            stopped_by_iteration_budget = True
+            break
+        _turn = iteration_budget.used - 1
         if cancel_check and cancel_check():
             # Surface the cancellation so the caller can render a "stopped"
             # marker instead of treating the silent return as a clean finish.
@@ -1053,13 +1060,13 @@ def run(
                 model=model,
             )
             return
-    else:
-        # The for-else fires when we exhausted MAX_TOOL_TURNS without ever
-        # hitting the ``break`` that fires on "no more tool calls". Without
-        # this branch the run silently stops mid-conversation and looks
-        # identical to a normal completion.
+    if stopped_by_iteration_budget:
+        # Without this branch the run silently stops mid-conversation and
+        # looks identical to a normal completion.
+        assert iteration_budget.max_iterations is not None
         yield TextChunk(
-            f"\n[Stopped: reached max tool turns ({MAX_TOOL_TURNS}). Ask me to continue if there's more to do.]"
+            "\n[Stopped: reached configured max tool turns "
+            f"({iteration_budget.max_iterations}). Ask me to continue if there's more to do.]"
         )
 
 

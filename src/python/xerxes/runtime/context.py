@@ -617,7 +617,7 @@ class PromptContextBuilder:
             or "execute_shell" in tools_section_lower
         ):
             guidance_lines.append(
-                "- Shell tools: Use them for real command execution, environment inspection, tests, and filesystem queries that require current machine state."
+                "- Shell tools: Prefer `exec_command` for command execution because it creates a PTY session that can be polled with `write_stdin`, interrupted, fed input, and closed later. Use `ExecuteShell` only for short blocking one-shot commands."
             )
         if guidance_lines:
             lines.extend(["Tool selection guidance:", *guidance_lines])

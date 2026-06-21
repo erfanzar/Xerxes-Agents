@@ -14,9 +14,8 @@
 """Debug-only sibling of :mod:`xerxes.streaming.loop`.
 
 A stripped-down copy of the production loop kept for diagnostic comparisons:
-no prompt caching, single ``<think>`` tag form, ``get_event_loop()`` instead
-of ``get_running_loop()``, no cancellation surface, and no exhaustion warning
-when ``MAX_TOOL_TURNS`` is reached. Useful for bisecting regressions caused by
+no prompt caching, single ``<think>`` tag form, and ``get_event_loop()``
+instead of ``get_running_loop()``. Useful for bisecting regressions caused by
 the production loop's additional features.
 """
 
@@ -33,6 +32,7 @@ from collections.abc import AsyncGenerator, Callable, Generator
 from dataclasses import dataclass
 from typing import Any
 
+from ..runtime.iteration_budget import iteration_budget_from_config
 from .events import (
     AgentState,
     PermissionRequest,
@@ -172,8 +172,6 @@ def _parse_thinking_tags(
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_TURNS = 50
-
 
 def _request_timeout(config: dict[str, Any]) -> float:
     """Return the provider request timeout in seconds."""
@@ -237,7 +235,8 @@ def run(
         provider_name = "openai"
         provider_cfg = get_provider_config("openai")
 
-    for _turn in range(MAX_TOOL_TURNS):
+    iteration_budget = iteration_budget_from_config(config)
+    while iteration_budget.try_consume():
         if cancel_check and cancel_check():
             return
 

@@ -29,6 +29,8 @@ from ..runtime.profiles import PromptProfile
 SAFE_OPERATOR_TOOLS: frozenset[str] = frozenset(
     {
         "ask_user",
+        "list_terminal_sessions",
+        "parallel_tools",
         "web.time",
         "update_plan",
     }
@@ -38,6 +40,7 @@ HIGH_POWER_OPERATOR_TOOLS: frozenset[str] = frozenset(
     {
         "exec_command",
         "write_stdin",
+        "close_terminal_session",
         "apply_patch",
         "spawn_agent",
         "resume_agent",

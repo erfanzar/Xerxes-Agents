@@ -141,7 +141,10 @@ class OperatorState:
             self._tool_cache = [
                 self._build_exec_command(),
                 self._build_write_stdin(),
+                self._build_list_terminal_sessions(),
+                self._build_close_terminal_session(),
                 self._build_apply_patch(),
+                self._build_parallel_tools(),
                 self._build_spawn_agent(),
                 self._build_resume_agent(),
                 self._build_send_input(),
@@ -218,7 +221,7 @@ class OperatorState:
         @operator_tool(
             "exec_command",
             description=(
-                "Start a persistent PTY-backed shell session that stays alive across calls. "
+                "Start a persistent PTY-backed shell session: an interactive terminal session that stays alive across calls. "
                 "Use it for interactive commands, REPLs, long-running builds, or anything that "
                 "needs follow-up input through write_stdin."
             ),
@@ -230,7 +233,15 @@ class OperatorState:
             max_output_chars: int | None = None,
             login: bool = True,
         ) -> dict[str, tp.Any]:
-            """Spawn a new PTY session and stream its first chunk of output."""
+            """Spawn a new PTY session and stream its first chunk of output.
+
+            Args:
+                cmd: Shell command to launch in a persistent interactive terminal session.
+                workdir: Working directory for the terminal session.
+                yield_time_ms: Soft deadline in milliseconds before returning partial output.
+                max_output_chars: Maximum characters captured in this response.
+                login: Whether to run the shell with login semantics when supported.
+            """
 
             return await asyncio.to_thread(
                 self.pty_manager.create_session,
@@ -261,7 +272,16 @@ class OperatorState:
             close_stdin: bool = False,
             interrupt: bool = False,
         ) -> dict[str, tp.Any]:
-            """Write to an existing PTY session and return any new output."""
+            """Write to an existing PTY session and return any new output.
+
+            Args:
+                session_id: Target PTY session id returned by exec_command.
+                chars: Text to send; leave empty to poll for new output.
+                yield_time_ms: Soft deadline in milliseconds before returning partial output.
+                max_output_chars: Maximum characters captured in this response.
+                close_stdin: Send EOF after writing chars.
+                interrupt: Send SIGINT before writing chars.
+            """
 
             return await asyncio.to_thread(
                 self.pty_manager.write,
@@ -274,6 +294,40 @@ class OperatorState:
             )
 
         return write_stdin
+
+    def _build_list_terminal_sessions(self) -> tp.Callable:
+        """Factory for listing live PTY sessions."""
+
+        @operator_tool(
+            "list_terminal_sessions",
+            description=(
+                "List live PTY-backed terminal sessions started with exec_command, including their "
+                "session ids, original commands, working directories, and running states."
+            ),
+        )
+        def list_terminal_sessions() -> list[dict[str, tp.Any]]:
+            """Return the live terminal sessions owned by this agent session."""
+
+            return self.pty_manager.list_sessions()
+
+        return list_terminal_sessions
+
+    def _build_close_terminal_session(self) -> tp.Callable:
+        """Factory for closing a live PTY session."""
+
+        @operator_tool(
+            "close_terminal_session",
+            description=(
+                "Terminate and forget a PTY-backed terminal session created by exec_command. "
+                "Use this when a long-running command is no longer needed."
+            ),
+        )
+        def close_terminal_session(session_id: str) -> dict[str, tp.Any]:
+            """Close a terminal session by id."""
+
+            return self.pty_manager.close(session_id)
+
+        return close_terminal_session
 
     def _build_apply_patch(self) -> tp.Callable:
         """Factory for the ``apply_patch`` git-apply tool."""
@@ -312,6 +366,116 @@ class OperatorState:
             }
 
         return apply_patch
+
+    def _build_parallel_tools(self) -> tp.Callable:
+        """Factory for bounded parallel read-only tool calls."""
+
+        @operator_tool(
+            "parallel_tools",
+            description=(
+                "Run independent read-only Xerxes tool calls concurrently and return results in input order. "
+                "Only safe inspection tools are allowed; mutating tools, shell execution, and subagents are rejected."
+            ),
+        )
+        async def parallel_tools(calls: list[dict[str, tp.Any]], max_workers: int = 4) -> dict[str, tp.Any]:
+            """Execute safe independent tool calls concurrently.
+
+            Args:
+                calls: List of dictionaries shaped like {"name": "...", "input": {...}}.
+                max_workers: Maximum concurrent calls. Values below 1 are treated as 1.
+
+            Returns:
+                Dictionary with ordered per-call results.
+            """
+
+            if not isinstance(calls, list):
+                raise ValueError("calls must be a list of {name, input} dictionaries")
+            worker_count = max(1, min(int(max_workers), 16))
+            semaphore = asyncio.Semaphore(worker_count)
+
+            async def _run_one(index: int, spec: dict[str, tp.Any]) -> dict[str, tp.Any]:
+                async with semaphore:
+                    return await asyncio.to_thread(self._execute_parallel_readonly_tool, index, spec)
+
+            results = await asyncio.gather(*[_run_one(index, spec) for index, spec in enumerate(calls)])
+            return {"results": list(results), "max_workers": worker_count}
+
+        return parallel_tools
+
+    @staticmethod
+    def _execute_parallel_readonly_tool(index: int, spec: dict[str, tp.Any]) -> dict[str, tp.Any]:
+        """Execute one allowlisted read-only tool call for ``parallel_tools``."""
+
+        from ..streaming.permissions import SAFE_TOOLS
+        from ..tools.agent_memory_tool import (
+            agent_memory_list,
+            agent_memory_read,
+            agent_memory_search,
+            agent_memory_status,
+        )
+
+        readonly_names = {
+            "ReadFile",
+            "ListDir",
+            "GlobTool",
+            "GrepTool",
+            "SystemInfo",
+            "DuckDuckGoSearch",
+            "APIClient",
+            "RSSReader",
+            "URLAnalyzer",
+            "JSONProcessor",
+            "CSVProcessor",
+            "TextProcessor",
+            "Calculator",
+            "StatisticalAnalyzer",
+            "MathematicalFunctions",
+            "UnitConverter",
+            "DateTimeProcessor",
+            "skills_list",
+            "skill_view",
+            "session_search",
+            "search_memory",
+            "get_memory_statistics",
+            "agent_memory_read",
+            "agent_memory_list",
+            "agent_memory_search",
+            "agent_memory_status",
+        }
+
+        if not isinstance(spec, dict):
+            return {"index": index, "ok": False, "error": "call spec must be a dictionary"}
+        name = str(spec.get("name") or "").strip()
+        tool_input = spec.get("input") or spec.get("arguments") or {}
+        if not isinstance(tool_input, dict):
+            return {"index": index, "name": name, "ok": False, "error": "input must be a dictionary"}
+        if name not in readonly_names or name not in SAFE_TOOLS:
+            return {
+                "index": index,
+                "name": name,
+                "ok": False,
+                "error": f"parallel_tools only allows read-only safe tools; rejected {name!r}",
+            }
+
+        direct_handlers: dict[str, tp.Callable[..., tp.Any]] = {
+            "agent_memory_list": agent_memory_list,
+            "agent_memory_read": agent_memory_read,
+            "agent_memory_search": agent_memory_search,
+            "agent_memory_status": agent_memory_status,
+        }
+        try:
+            handler = direct_handlers.get(name)
+            if handler is None:
+                import xerxes.tools as tools_mod
+
+                tool_obj = getattr(tools_mod, name, None)
+                if tool_obj is None:
+                    return {"index": index, "name": name, "ok": False, "error": "tool is not registered"}
+                handler = getattr(tool_obj, "static_call", None) or tool_obj
+            result = handler(**tool_input)
+            return {"index": index, "name": name, "ok": True, "result": result}
+        except Exception as exc:
+            return {"index": index, "name": name, "ok": False, "error": str(exc)}
 
     def _build_spawn_agent(self) -> tp.Callable:
         """Factory for the ``spawn_agent`` subagent-creation tool."""
@@ -376,6 +540,7 @@ class OperatorState:
             target: str | None = None,
             message: str | None = None,
             interrupt: bool = False,
+            id: str | None = None,  # noqa: A002 - public alias for existing callers.
             agent_id: str | None = None,
             handle_id: str | None = None,
             task_description: str | None = None,
@@ -384,7 +549,7 @@ class OperatorState:
 
             if self.subagent_manager is None:
                 raise RuntimeError("Sub-agent manager is not available")
-            resolved_target = target or agent_id or handle_id
+            resolved_target = target or id or agent_id or handle_id
             return await self.subagent_manager.send_input(
                 resolved_target,
                 message=message,
