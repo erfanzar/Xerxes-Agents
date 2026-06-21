@@ -97,6 +97,34 @@ def test_code_mode_uses_coder_agent_spec(monkeypatch) -> None:
     }
 
 
+def test_objective_mode_uses_objective_agent_spec_and_loop_guidance(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_agent_loop(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        captured["mode"] = kwargs["config"]["mode"]
+        captured["tools"] = [schema["name"] for schema in kwargs["tool_schemas"]]
+        yield TurnDone(input_tokens=0, output_tokens=0, model="test-model")
+
+    monkeypatch.setattr(bridge_server, "run_agent_loop", fake_run_agent_loop)
+
+    srv = BridgeServer()
+    srv._stdout = io.StringIO()
+    srv._initialized = True
+    srv.config = {"model": "test-model", "permission_mode": "accept-all"}
+    srv.system_prompt = "base prompt"
+    srv.tool_schemas = populate_registry().tool_schemas()
+
+    srv.handle_query({"text": "beat benchmark", "mode": "objective", "plan_mode": False})
+
+    assert captured["mode"] == "objective"
+    system_prompt = str(captured["system_prompt"])
+    assert "You are an objective runner for hard engineering goals." in system_prompt
+    assert "Do not final-answer with a narrative status while the acceptance criteria are unmet." in system_prompt
+    assert {"ExecuteShell", "WriteFile", "FileEditTool", "SpawnAgents", "TodoWriteTool"} <= set(captured["tools"])
+    assert srv.config["plan_mode"] is False
+
+
 def test_model_tool_can_switch_interaction_mode_and_emit_status() -> None:
     srv = BridgeServer(wire_mode=True)
     srv._stdout = io.StringIO()
@@ -111,3 +139,21 @@ def test_model_tool_can_switch_interaction_mode_and_emit_status() -> None:
     assert srv.config["mode"] == "researcher"
     assert srv.config["plan_mode"] is False
     assert '"mode": "researcher"' in srv._stdout.getvalue()
+    bridge_server.set_event_callback(None)
+
+
+def test_model_tool_can_switch_to_objective_mode() -> None:
+    srv = BridgeServer(wire_mode=True)
+    srv._stdout = io.StringIO()
+    srv._initialized = True
+    srv.config = {"model": "test-model", "mode": "code", "plan_mode": False}
+    bridge_server.set_global_config(srv.config)
+    bridge_server.set_event_callback(srv._on_agent_event)
+
+    result = SetInteractionModeTool.static_call(mode="goal", reason="Benchmark target is measurable")
+
+    assert "objective" in result
+    assert srv.config["mode"] == "objective"
+    assert srv.config["plan_mode"] is False
+    assert '"mode": "objective"' in srv._stdout.getvalue()
+    bridge_server.set_event_callback(None)

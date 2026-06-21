@@ -23,3 +23,11 @@ def test_bootstrap_prompt_prefers_terminal_sessions_for_commands() -> None:
     assert "poll with write_stdin(session_id=..., chars='')" in prompt
     assert "close_terminal_session(session_id=...)" in prompt
     assert "Use ExecuteShell(command=...) only for short blocking one-shot commands." in prompt
+
+
+def test_bootstrap_prompt_teaches_objective_mode_switching() -> None:
+    prompt = _build_system_prompt({})
+
+    assert "- objective: hard-goal loop for measurable outcomes." in prompt
+    assert "Switch modes with SetInteractionModeTool(mode=...)." in prompt
+    assert "Do not final-answer in objective mode while acceptance criteria are unmet" in prompt

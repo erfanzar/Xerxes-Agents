@@ -32,6 +32,7 @@ import sys
 import uuid
 from typing import Any
 
+from ..runtime.interaction_modes import normalize_interaction_mode
 from ..runtime.update import GitUpdateStatus, git_update_status, installed_version
 from .blocks import (
     ApprovalRequestPanel,
@@ -42,6 +43,7 @@ from .blocks import (
     _ThinkingBlock,
     _ToolCallBlock,
 )
+from .console import markdown_to_ansi
 from .engine import BridgeClient
 from .prompt import PersistentPrompt
 from .skin_engine import active_fg, get_active_skin, hex_to_rgb
@@ -909,8 +911,7 @@ class XerxesTUI:
             return
 
         if event.category == "history" and event.type in {"replay_user", "replay_assistant"}:
-            if self._prompt and event.body:
-                self._prompt.append_line(event.body)
+            self._append_replay_message(event.type, event.body)
             return
 
         if event.category == "history" and event.type == "resumed":
@@ -928,6 +929,15 @@ class XerxesTUI:
         self._notification_history.append(block)
         if self._prompt:
             self._prompt.append_line(block.compose())
+
+    def _append_replay_message(self, replay_type: str, body: str) -> None:
+        """Append a resumed transcript message using the same rendering as live turns."""
+        if self._prompt is None or not body:
+            return
+        if replay_type == "replay_assistant":
+            self._prompt.append_line(markdown_to_ansi(body))
+            return
+        self._prompt.append_line(body)
 
     def _clear_visible_transcript(self) -> None:
         """Clear transcript blocks before replaying a different session."""
@@ -1069,7 +1079,7 @@ class XerxesTUI:
             self._prompt.set_models(ids, getattr(self, "_active_model", "") or self._model)
 
     def _on_status_update(self, event: Any) -> None:
-        """Apply a daemon status push (context tokens, plan/research mode) to the footer."""
+        """Apply a daemon status push (context tokens and interaction mode) to the footer."""
         if self._prompt is None:
             return
         self._prompt.set_context(event.context_tokens, event.max_context)
@@ -1077,7 +1087,8 @@ class XerxesTUI:
         self._plan_mode = bool(getattr(event, "plan_mode", self._plan_mode))
         mode = str(getattr(event, "mode", "") or "")
         if mode and mode != "code" and not self._plan_mode:
-            self._activity_mode = "researcher" if mode == "research" else mode
+            self._activity_mode = normalize_interaction_mode(mode)
+            self._user_activity_mode = self._activity_mode
         self._sync_prompt_mode()
 
     def _on_compaction_begin(self) -> None:
@@ -1223,6 +1234,12 @@ class XerxesTUI:
             await self._set_plan_mode(not self._plan_mode if not content else True)
             if content:
                 await self._client.steer(f"/plan {content}")
+        elif cmd in {"/objective", "/goal"}:
+            content = text[len(cmd) :].strip()
+            await self._set_plan_mode(False, mode="objective")
+            self._set_activity_mode("objective", user_selected=True)
+            if content:
+                await self._client.steer(f"{cmd} {content}")
         elif cmd == "/todo":
             await self._handle_todo(text)
         elif cmd == "/clear":
@@ -1364,14 +1381,22 @@ class XerxesTUI:
         return self._activity_mode or "code"
 
     async def _cycle_interaction_mode(self) -> None:
-        """Shift+Tab cycle: code → plan → researcher → code."""
+        """Shift+Tab cycle: code → plan → researcher → objective → code."""
         if self._plan_mode:
             await self._set_plan_mode(False, notify=False, mode="researcher")
             self._set_activity_mode("researcher", user_selected=True)
             return
 
         if self._activity_mode == "researcher":
+            self._set_activity_mode("objective", user_selected=True)
+            if self._client:
+                await self._client._send_jsonrpc(method="set_mode", params={"mode": "objective"})
+            return
+
+        if self._activity_mode == "objective":
             self._set_activity_mode("code", user_selected=True)
+            if self._client:
+                await self._client._send_jsonrpc(method="set_mode", params={"mode": "code"})
             return
 
         await self._set_plan_mode(True, notify=False)
@@ -1409,15 +1434,14 @@ class XerxesTUI:
             user_selected: When ``True``, sticks across turns; otherwise
                 a new turn may reset back to ``"code"``.
         """
-        normalized = (mode or "code").strip().lower()
+        raw = (mode or "code").strip().lower()
+        normalized = normalize_interaction_mode(raw)
         aliases = {
-            "research": "researcher",
-            "coding": "code",
             "agent": "code",
             "general-purpose": "code",
             "plan": "planner",
         }
-        self._activity_mode = aliases.get(normalized, normalized)
+        self._activity_mode = aliases.get(raw, normalized)
         if user_selected:
             self._user_activity_mode = None if self._activity_mode == "code" else self._activity_mode
         self._sync_prompt_mode()
