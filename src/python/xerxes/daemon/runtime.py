@@ -44,9 +44,10 @@ from ..channels.workspace import MarkdownAgentWorkspace
 from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
 from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs, get_active_skills
+from ..operators import OperatorRuntimeConfig, OperatorState
 from ..runtime.agent_memory import AgentMemory
 from ..runtime.bootstrap import bootstrap
-from ..runtime.bridge import build_tool_executor, populate_registry
+from ..runtime.bridge import build_tool_executor, populate_registry, register_operator_tools
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.config_context import set_config as set_global_config
 from ..runtime.interaction_modes import mode_switch_hint, normalize_interaction_mode
@@ -65,6 +66,13 @@ from ..streaming.loop import run as run_agent_loop
 from ..tools.agent_memory_tool import set_active_memory
 from ..tools.agent_meta_tools import set_skill_registry
 from .config import DaemonConfig
+
+_DAEMON_TERMINAL_OPERATOR_TOOLS = {
+    "exec_command",
+    "write_stdin",
+    "list_terminal_sessions",
+    "close_terminal_session",
+}
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -135,6 +143,7 @@ class RuntimeManager:
     system_prompt: str = ""
     tool_executor: Any = None
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
+    operator_state: OperatorState | None = None
     skill_registry: SkillRegistry = field(default_factory=SkillRegistry)
     skills_dir: Path = field(default_factory=lambda: xerxes_subdir("skills"))
 
@@ -183,6 +192,15 @@ class RuntimeManager:
 
         boot = bootstrap(model=str(runtime.get("model", "")), cwd=cwd)
         registry = populate_registry()
+        self.operator_state = OperatorState(
+            OperatorRuntimeConfig(
+                enabled=True,
+                power_tools_enabled=True,
+                shell_default_workdir=str(cwd),
+                allowed_tool_names=set(_DAEMON_TERMINAL_OPERATOR_TOOLS),
+            )
+        )
+        register_operator_tools(registry, self.operator_state, set(_DAEMON_TERMINAL_OPERATOR_TOOLS))
         self.discover_skills()
 
         # Initialise the agent's persistent two-tier memory: global (cross-

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from ..daemon.config import DAEMON_DIR, DaemonConfig, load_config
+from ..daemon.fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from ..streaming.wire_events import (
     GenericWireEvent,
     Notification,
@@ -125,8 +126,8 @@ class BridgeClient:
 
         config = self._daemon_config()
         socket_path = Path(config.socket_path).expanduser()
-        required_protocol = 35
-        if self._daemon_protocol(socket_path) < required_protocol:
+        expected_build_id = daemon_build_id()
+        if not self._daemon_status_is_current(self._daemon_status(socket_path), expected_build_id):
             self._stop_stale_daemon(Path(config.pid_file).expanduser(), socket_path)
         if not self._connect_socket(socket_path):
             argv = [
@@ -149,7 +150,10 @@ class BridgeClient:
                 start_new_session=True,
             )
             deadline = time.monotonic() + 10
-            while time.monotonic() < deadline and self._daemon_protocol(socket_path) < required_protocol:
+            while time.monotonic() < deadline and not self._daemon_status_is_current(
+                self._daemon_status(socket_path),
+                expected_build_id,
+            ):
                 if self._proc.poll() is not None:
                     self._collect_exited_daemon_stderr()
                     break
@@ -555,6 +559,10 @@ class BridgeClient:
 
         Returns ``0`` when no daemon is listening or the response is
         malformed — the caller treats that as ``stale`` and respawns."""
+        return int(self._daemon_status(socket_path).get("daemon_protocol", 0) or 0)
+
+    def _daemon_status(self, socket_path: Path) -> dict[str, Any]:
+        """Probe the daemon health endpoint and return its status payload."""
         sock: socket.socket | None = None
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -576,16 +584,26 @@ class BridgeClient:
                     data = json.loads(raw.decode("utf-8", errors="replace"))
                     if data.get("id") == "health":
                         result = data.get("result", {}) or {}
-                        return int(result.get("daemon_protocol", 0) or 0)
+                        return dict(result) if isinstance(result, dict) else {}
         except Exception:
-            return 0
+            return {}
         finally:
             if sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
-        return 0
+        return {}
+
+    @staticmethod
+    def _daemon_status_is_current(status: dict[str, Any], expected_build_id: str) -> bool:
+        """Return whether a probed daemon matches this client's runtime code."""
+        try:
+            protocol = int(status.get("daemon_protocol", 0) or 0)
+        except (TypeError, ValueError):
+            protocol = 0
+        build_id = str(status.get("daemon_build_id") or "")
+        return protocol >= DAEMON_PROTOCOL_VERSION and build_id == expected_build_id
 
     @staticmethod
     def _stop_stale_daemon(pid_file: Path, socket_path: Path) -> None:

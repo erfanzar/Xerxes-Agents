@@ -46,6 +46,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.styles import Style
 
+from ..bridge.commands import list_commands
 from .skin_engine import active_fg, get_active_skin
 
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -138,38 +139,35 @@ def _mode_style(plan_mode: bool, activity_mode: str) -> str:
     return "\x1b[2m" + active_fg("muted")
 
 
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/help", "Show available commands"),
-    ("/provider", "Setup or switch provider profile"),
-    ("/model", "Switch model"),
-    ("/sampling", "View or set sampling parameters"),
-    ("/compact", "Summarize conversation to free context"),
+_TUI_LOCAL_SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/plan", "Toggle plan mode (or /plan OBJECTIVE)"),
     ("/objective", "Switch to objective mode (or /objective GOAL)"),
-    ("/agents", "List agent types and running agents"),
-    ("/skills", "List available skills"),
-    ("/skill", "Invoke a skill by name"),
-    ("/skill-create", "Create a new skill"),
-    ("/cost", "Show cost summary"),
-    ("/context", "Show context info"),
-    ("/clear", "Clear conversation"),
-    ("/tools", "List available tools"),
-    ("/thinking", "Toggle thinking display"),
-    ("/verbose", "Toggle verbose mode"),
-    ("/debug", "Toggle debug mode"),
-    ("/permissions", "Cycle permission mode"),
-    ("/yolo", "Toggle accept-all permission mode"),
-    ("/config", "Show config"),
-    ("/history", "Show message count"),
-    ("/resume", "Resume a saved session"),
-    ("/btw", "Send a side question while running"),
-    ("/steer", "Inject mid-turn guidance"),
-    ("/cancel", "Cancel the current turn"),
-    ("/cancel-all", "Cancel all running turns"),
+    ("/goal", "Switch to objective mode (alias of /objective)"),
     ("/todo", "Show or edit the TODO list"),
-    ("/skin", "List or switch the TUI skin"),
-    ("/exit", "Exit Xerxes"),
-]
+)
+
+
+def _default_slash_commands() -> list[tuple[str, str]]:
+    commands: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for command in list_commands():
+        if command.gateway_only:
+            continue
+        for name in (command.name, *command.aliases):
+            slash = f"/{name}"
+            if slash in seen:
+                continue
+            seen.add(slash)
+            commands.append((slash, command.description))
+    for slash, description in _TUI_LOCAL_SLASH_COMMANDS:
+        if slash in seen:
+            continue
+        seen.add(slash)
+        commands.append((slash, description))
+    return commands
+
+
+SLASH_COMMANDS: list[tuple[str, str]] = _default_slash_commands()
 
 # Max rows the input box grows to before it starts scrolling internally.
 _INPUT_MAX_ROWS = 10

@@ -19,7 +19,7 @@ multiplexes three listening surfaces — a Unix socket (``SocketChannel``), a
 WebSocket gateway (``WebSocketGateway``), and optional channel webhooks
 (``ChannelWebhookServer``) — onto one async event loop, and dispatches each
 inbound JSON-RPC method to the correct handler. The protocol version exposed
-to clients is :data:`DAEMON_PROTOCOL_VERSION` (currently ``14``); legacy
+to clients is :data:`DAEMON_PROTOCOL_VERSION`; legacy
 ``task.*`` methods now respond with :data:`MIGRATED_ERROR` to nudge callers
 to the new ``session.*`` / ``turn.*`` surface.
 """
@@ -43,6 +43,7 @@ from ..runtime.interaction_modes import normalize_interaction_mode
 from . import slash_commands as _slash_commands
 from .channels import ChannelManager, ChannelWebhookServer
 from .config import DaemonConfig, load_config
+from .fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from .gateway import EmitFn, WebSocketGateway
 from .log import DaemonLogger
 from .provider_flow import ProviderFlowMixin
@@ -53,7 +54,6 @@ from .socket_channel import SocketChannel
 MIGRATED_ERROR = (
     "Old daemon task API was removed; use session.open, turn.submit, turn.cancel, session.list, and runtime.status."
 )
-DAEMON_PROTOCOL_VERSION = 35  # bumped: AskUserQuestionTool now drives the TUI panel via TurnRunner.ask_user_question
 
 SlashCommandsMixin = _slash_commands.SlashCommandsMixin
 _BULK_SLASH_HANDLERS = _slash_commands._BULK_SLASH_HANDLERS
@@ -270,6 +270,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 **self.runtime.status(),
                 "pid": os.getpid(),
                 "daemon_protocol": DAEMON_PROTOCOL_VERSION,
+                "daemon_build_id": daemon_build_id(),
                 "channels": self.channels.list(),
             }
         if method == "runtime.reload":
@@ -446,6 +447,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             "ok": True,
             "session": session.status(),
             "daemon_protocol": DAEMON_PROTOCOL_VERSION,
+            "daemon_build_id": daemon_build_id(),
         }
 
     @staticmethod

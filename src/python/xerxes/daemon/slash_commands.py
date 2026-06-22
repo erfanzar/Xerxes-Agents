@@ -33,7 +33,11 @@ from ..context.compaction_provisioner import CompactionProvisioner, compaction_s
 from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
 from ..llms.registry import get_context_limit
-from ..runtime.project_workspace import ensure_project_agent_workspace, load_project_agent_workspace
+from ..runtime.project_workspace import (
+    ensure_project_agent_workspace,
+    ensure_project_xerxes_md,
+    load_project_agent_workspace,
+)
 from .gateway import EmitFn
 from .runtime import DaemonSession, RuntimeManager, SessionManager, WorkspaceManager, render_session_system_prompt
 
@@ -1061,6 +1065,53 @@ class SlashCommandsMixin:
             emit, "Skin is a TUI-side setting. Use `/skin <name>` in the TUI, or set `XERXES_SKIN=<name>`."
         )
 
+    async def _init_project_context(self, project_dir: Path, emit: EmitFn) -> None:
+        """Create the project bootstrap files that feed runtime context."""
+        xerxes_path, xerxes_action = ensure_project_xerxes_md(project_dir)
+        created = ensure_project_agent_workspace(project_dir)
+        context = load_project_agent_workspace(project_dir)
+        try:
+            self.runtime.reload({"project_dir": str(project_dir)})
+            self._sync_runtime_to_connection_session(emit)
+        except Exception as exc:
+            await self._emit_slash(emit, f"Initialized files, but runtime reload failed: `{exc}`")
+            return
+
+        skills = self.runtime.discover_skills()
+        await emit("init_done", {"skills": skills})
+        created_lines = [f"  `{path.relative_to(project_dir)}`" for path in created]
+        if not created_lines:
+            created_lines = ["  already initialized"]
+        loaded_lines = [f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files]
+        if not loaded_lines:
+            loaded_lines = ["  (none yet)"]
+        lines = [
+            f"Initialized project context at `{project_dir}`.",
+            f"`XERXES.md`: {xerxes_action} (`{xerxes_path.relative_to(project_dir)}`)",
+            "",
+            "Project .agents:",
+            f"  `{context.agents_dir}`",
+            "Created:",
+            *created_lines,
+            "",
+            "Loaded project context:",
+            *loaded_lines,
+            "",
+            f"Reloaded runtime context and {len(skills)} skill(s).",
+        ]
+        await self._emit_slash(emit, "\n".join(lines))
+
+    async def _slash_init(self, args: str, emit: EmitFn) -> None:
+        """Initialize project XERXES.md and .agents context."""
+        session_key = self._connection_session_key(emit)
+        session = self.sessions.get(session_key)
+        if session is None and session_key != self._current_session_key:
+            session = self.sessions.get(self._current_session_key)
+        project_dir = Path(
+            session.project_dir if session is not None else self.config.project_dir or os.getcwd()
+        ).resolve()
+        await self._init_project_context(project_dir, emit)
+
     async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
         """Show or initialize the current project-local agent workspace."""
         session_key = self._connection_session_key(emit)
@@ -1074,22 +1125,7 @@ class SlashCommandsMixin:
 
         action = args.strip().lower()
         if action == "init":
-            created = ensure_project_agent_workspace(project_dir)
-            context = load_project_agent_workspace(project_dir)
-            if getattr(self, "runtime", None) is not None:
-                self.runtime.discover_skills()
-            created_lines = [f"  `{path.relative_to(project_dir)}`" for path in created]
-            if not created_lines:
-                created_lines = ["  already initialized"]
-            lines = [
-                f"Project .agents: `{context.agents_dir}`",
-                "Created:",
-                *created_lines,
-                "",
-                "Loaded project context:",
-                *[f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files],
-            ]
-            await self._emit_slash(emit, "\n".join(lines))
+            await self._init_project_context(project_dir, emit)
             return
 
         if action and action != "status":
@@ -1341,6 +1377,7 @@ _BULK_SLASH_HANDLERS: dict[str, Any] = {
     "sampling": SlashCommandsMixin._slash_sampling,
     "config": SlashCommandsMixin._slash_config,
     "title": SlashCommandsMixin._slash_title,
+    "init": SlashCommandsMixin._slash_init,
     "workspace": SlashCommandsMixin._slash_workspace,
     "save": SlashCommandsMixin._slash_save,
     "personality": SlashCommandsMixin._slash_personality,

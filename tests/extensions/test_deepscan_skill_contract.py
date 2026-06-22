@@ -19,7 +19,8 @@ from pathlib import Path
 
 
 def test_deepscan_skill_requires_project_memory_chunked_reads_and_no_tool_cap() -> None:
-    skill = Path("src/python/xerxes/skills/deepscan/SKILL.md").read_text(encoding="utf-8")
+    skill_path = Path(__file__).resolve().parents[2] / "src" / "python" / "xerxes" / "skills" / "deepscan" / "SKILL.md"
+    skill = skill_path.read_text(encoding="utf-8")
     lowered = skill.lower()
 
     assert "project-scoped agent memory" in lowered

@@ -24,6 +24,7 @@ for one-shot CLI runs.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -97,7 +98,18 @@ def _call_tool_handler(
 
         call_kwargs = _coerce_argument_types(call_kwargs, signature)
 
-    return handler(**call_kwargs)
+    return _resolve_tool_result(handler(**call_kwargs))
+
+
+def _resolve_tool_result(result: Any) -> Any:
+    """Resolve async operator handlers from the synchronous streaming executor."""
+    if not inspect.isawaitable(result):
+        return result
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(result)
+    raise RuntimeError("Cannot execute async tool handler while an event loop is already running")
 
 
 def _coerce_argument_types(
@@ -273,6 +285,30 @@ def populate_registry(
     ]:
         registry.register_command(cmd, description=f"/{cmd} command")
 
+    return registry
+
+
+def register_operator_tools(registry: Any, operator_state: Any, tool_names: set[str] | None = None) -> Any:
+    """Register operator-backed tools into ``registry`` with reflected schemas."""
+    from xerxes.operators.config import SAFE_OPERATOR_TOOLS
+
+    allowed = tool_names or set(getattr(operator_state.config, "allowed_tool_names", set()))
+    for handler in operator_state.build_tools():
+        schema_meta = getattr(handler, "__xerxes_schema__", {}) or {}
+        name = str(schema_meta.get("name") or getattr(handler, "__name__", "")).strip()
+        if not name or name not in allowed:
+            continue
+        description = str(schema_meta.get("description") or getattr(handler, "__doc__", "") or "").strip()
+        schema = _build_tool_schema(name, description, handler, tool_obj=handler)
+        registry.register_tool(
+            name=name,
+            handler=handler,
+            description=description,
+            category=str(getattr(handler, "category", "operator") or "operator"),
+            safe=name in SAFE_OPERATOR_TOOLS,
+            source_hint="operator",
+            schema=schema,
+        )
     return registry
 
 

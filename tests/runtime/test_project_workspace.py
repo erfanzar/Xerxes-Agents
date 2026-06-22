@@ -16,7 +16,12 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 
-from xerxes.runtime.project_workspace import ensure_project_agent_workspace, load_project_agent_workspace
+from xerxes.runtime.project_workspace import (
+    ensure_project_agent_workspace,
+    ensure_project_xerxes_md,
+    load_project_agent_workspace,
+    project_xerxes_md,
+)
 
 
 def test_ensure_project_agent_workspace_creates_layout(tmp_path):
@@ -38,3 +43,37 @@ def test_load_project_agent_workspace_returns_prompt_context(tmp_path):
     assert "# Project Agent Workspace" in context.prompt
     assert "## .agents/ops/OPS.md" in context.prompt
     assert ".agents/skills/" in context.prompt
+
+
+def test_ensure_project_xerxes_md_creates_bootstrap_manifest(tmp_path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo-app"\n', encoding="utf-8")
+
+    path, action = ensure_project_xerxes_md(tmp_path)
+
+    assert action == "created"
+    assert path == project_xerxes_md(tmp_path)
+    body = path.read_text(encoding="utf-8")
+    assert "<!-- XERXES_INIT:BEGIN -->" in body
+    assert "<!-- XERXES_INIT:END -->" in body
+    assert "Name: demo-app" in body
+    assert "Python / uv" in body
+    assert "`uv run pytest`" in body
+    assert ".agents/skills" in body
+    assert "exec_command" in body
+
+
+def test_ensure_project_xerxes_md_preserves_user_content_and_updates_generated_block(tmp_path):
+    path = tmp_path / "XERXES.md"
+    path.write_text("# Manual Notes\n\nkeep this\n", encoding="utf-8")
+
+    first_path, first_action = ensure_project_xerxes_md(tmp_path)
+    second_path, second_action = ensure_project_xerxes_md(tmp_path)
+
+    assert first_path == path.resolve()
+    assert second_path == path.resolve()
+    assert first_action == "updated"
+    assert second_action == "unchanged"
+    body = path.read_text(encoding="utf-8")
+    assert body.startswith("# Manual Notes\n\nkeep this")
+    assert body.count("<!-- XERXES_INIT:BEGIN -->") == 1
+    assert body.count("<!-- XERXES_INIT:END -->") == 1
