@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 from xerxes.runtime.agent_memory import AgentMemory
@@ -348,9 +349,11 @@ def test_steer_drain_injects_user_message_between_tool_iterations() -> None:
     calls = {"n": 0}
     state = loop.AgentState()
     drained: list[list[str]] = []
+    provider_messages: list[list[dict]] = []
 
     def fake_stream(*args, **kwargs):
         calls["n"] += 1
+        provider_messages.append([dict(msg) for msg in kwargs["messages"]])
         if calls["n"] == 1:
             yield {
                 "tool_calls": [
@@ -363,11 +366,10 @@ def test_steer_drain_injects_user_message_between_tool_iterations() -> None:
             yield TextChunk("final")
             yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
 
-    pending = ["please reconsider"]
+    pending_batches = [[], ["please reconsider"], []]
 
     def drain():
-        out = pending[:]
-        pending.clear()
+        out = pending_batches.pop(0) if pending_batches else []
         drained.append(out)
         return out
 
@@ -387,15 +389,56 @@ def test_steer_drain_injects_user_message_between_tool_iterations() -> None:
     finally:
         loop._stream_llm = original
 
-    # drain() ran on both iterations.
-    assert len(drained) == 2
-    assert drained[0] == ["please reconsider"]
-    assert drained[1] == []
+    assert drained == [[], ["please reconsider"], []]
     # The drained steer landed as a synthetic user message between the
     # tool result and the next LLM call.
     user_messages = [m for m in state.messages if m.get("role") == "user"]
     assert any("please reconsider" in m["content"] for m in user_messages)
     assert any("[mid-turn steer from user]" in m["content"] for m in user_messages)
+    assert "please reconsider" not in json.dumps(provider_messages[0])
+    assert "please reconsider" in json.dumps(provider_messages[1])
+
+
+def test_late_steer_after_no_tool_response_is_saved_for_next_turn() -> None:
+    """A steer queued during a final no-tool response must not linger stale."""
+    original = loop._stream_llm
+    state = loop.AgentState()
+    drained: list[list[str]] = []
+    pending_batches = [[], ["make a todo for it"]]
+
+    def fake_stream(*args, **kwargs):
+        yield TextChunk("done")
+        yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    def drain():
+        out = pending_batches.pop(0) if pending_batches else []
+        drained.append(out)
+        return out
+
+    loop._stream_llm = fake_stream
+    try:
+        events = list(
+            loop.run(
+                user_message="finish this",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "",
+                tool_schemas=[],
+                steer_drain=drain,
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    assert drained == [[], ["make a todo for it"]]
+    assert any(
+        isinstance(event, TextChunk) and "Steer saved for next turn: make a todo for it" in event.text
+        for event in events
+    )
+    user_messages = [m for m in state.messages if m.get("role") == "user"]
+    assert any("[steer from user saved for next turn]" in m["content"] for m in user_messages)
+    assert any("make a todo for it" in m["content"] for m in user_messages)
 
 
 def test_agent_event_drain_injects_synthetic_user_message() -> None:

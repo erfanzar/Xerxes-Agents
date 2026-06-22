@@ -911,7 +911,7 @@ class SlashCommandsMixin:
         await emit("steer_input", {"content": content})
         if session.active_turn_id:
             session.pending_steers.put(content)
-            await self._emit_slash(emit, "Steer queued — will land before the next tool round.")
+            await self._emit_slash(emit, "Steer queued — will land before the next provider request.")
         else:
             session.state.messages.append({"role": "user", "content": f"[steer from user]\n{content}"})
             await self._emit_slash(emit, "Steer injected — will land on the next turn.")

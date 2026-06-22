@@ -14,6 +14,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 from xerxes.tui.app import XerxesTUI
 from xerxes.tui.blocks import _ToolCallBlock
 
@@ -21,6 +24,7 @@ from xerxes.tui.blocks import _ToolCallBlock
 class _PromptStub:
     def __init__(self) -> None:
         self.committed: list[tuple[str, str]] = []
+        self.skills: list[str] | None = None
 
     def commit_streaming(self) -> None:
         pass
@@ -43,6 +47,15 @@ class _PromptStub:
     def commit_active_tool(self, tool_call_id: str, final_text: str) -> None:
         self.committed.append((tool_call_id, final_text))
 
+    def set_session(self, *, agent_name: str, model: str, cwd: str, branch: str = "") -> None:
+        pass
+
+    def set_context(self, _current: int, _limit: int) -> None:
+        pass
+
+    def set_skills(self, skills: list[str]) -> None:
+        self.skills = skills
+
 
 def test_agent_tool_result_is_not_rendered_in_tui_history() -> None:
     prompt = _PromptStub()
@@ -53,7 +66,7 @@ def test_agent_tool_result_is_not_rendered_in_tui_history() -> None:
     tui._on_tool_result("tool_1", "large completed sub-agent output", duration_ms=55.0)
 
     assert prompt.committed
-    assert "Used AgentTool" in prompt.committed[0][1]
+    assert "AgentTool" in prompt.committed[0][1]
     assert "55ms" in prompt.committed[0][1]
     assert "large completed sub-agent output" not in prompt.committed[0][1]
 
@@ -85,5 +98,34 @@ def test_tool_block_does_not_leak_markup_tags_for_json_list_args() -> None:
     assert "[/dim]" not in rendered
     assert "[dim]" not in rendered
     assert "Used" not in rendered
-    assert "Using SpawnAgents" in rendered
+    assert "SpawnAgents" in rendered
     assert "({'prompt'" in rendered
+
+
+def test_init_done_clears_skill_completions_when_daemon_sends_empty_list() -> None:
+    prompt = _PromptStub()
+    prompt.skills = ["stale-skill"]
+    tui = XerxesTUI()
+    tui._prompt = prompt  # type: ignore[assignment]
+
+    async def fake_load_models() -> list[str]:
+        return []
+
+    async def drive() -> None:
+        tui._load_models = fake_load_models  # type: ignore[method-assign]
+        tui._on_init_done(
+            SimpleNamespace(
+                session_id="s",
+                model="m",
+                cwd="/tmp",
+                agent_name="default",
+                git_branch="",
+                context_limit=0,
+                skills=[],
+            )
+        )
+        await asyncio.sleep(0)
+
+    asyncio.run(drive())
+
+    assert prompt.skills == []

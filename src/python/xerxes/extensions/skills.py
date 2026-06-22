@@ -152,6 +152,20 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
     body = content
 
     fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)", content, re.DOTALL)
+
+    def _parse_simple_frontmatter(fm_text: str) -> dict[str, tp.Any]:
+        parsed: dict[str, tp.Any] = {}
+        for line in fm_text.strip().splitlines():
+            line = line.strip()
+            if ":" in line:
+                key, _, value = line.partition(":")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if value.startswith("[") and value.endswith("]"):
+                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
+                parsed[key] = value
+        return parsed
+
     if fm_match:
         fm_text = fm_match.group(1)
         body = fm_match.group(2).strip()
@@ -161,15 +175,9 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
 
             metadata_dict = yaml.safe_load(fm_text) or {}
         except ImportError:
-            for line in fm_text.strip().splitlines():
-                line = line.strip()
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    if value.startswith("[") and value.endswith("]"):
-                        value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
-                    metadata_dict[key] = value
+            metadata_dict = _parse_simple_frontmatter(fm_text)
+        except Exception:
+            metadata_dict = _parse_simple_frontmatter(fm_text)
 
     name = metadata_dict.get("name", source_path.parent.name)
 
@@ -268,7 +276,7 @@ class SkillRegistry:
         for directory in directories:
             dir_path = Path(directory)
             if not dir_path.is_dir():
-                logger.warning("Skill directory not found: %s", dir_path)
+                logger.debug("Skill directory not found: %s", dir_path)
                 continue
 
             for skill_file in dir_path.rglob("SKILL.md"):
@@ -385,6 +393,10 @@ def default_skill_discovery_dirs(
     shared_agents = agents_subdir("skills")
     if shared_agents.is_dir():
         roots.append(shared_agents)
+
+    source_checkout = project_root / "src" / "python" / "xerxes" / "skills"
+    if source_checkout.is_dir():
+        roots.append(source_checkout)
 
     bundled = Path(_xerxes_pkg.__file__).parent / "skills"
     if bundled.is_dir():

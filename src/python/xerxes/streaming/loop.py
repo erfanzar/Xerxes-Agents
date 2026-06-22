@@ -541,6 +541,30 @@ def _append_model_visible_messages(
     return compacted
 
 
+def _drain_steers_into_context(
+    state: AgentState,
+    *,
+    steer_drain: Callable[[], list[str]] | None,
+    config: dict[str, Any],
+    model: str,
+    label: str = "[mid-turn steer from user]",
+) -> tuple[list[str], bool]:
+    """Drain queued user steering into model-visible messages."""
+    if steer_drain is None:
+        return [], False
+    pending = steer_drain()
+    if not pending:
+        return [], False
+    joined = "\n\n".join(pending)
+    compacted = _append_model_visible_messages(
+        state,
+        [{"role": "user", "content": f"{label}\n{joined}"}],
+        config=config,
+        model=model,
+    )
+    return pending, compacted
+
+
 def _append_tool_result_message(
     state: AgentState,
     *,
@@ -702,6 +726,17 @@ def run(
             yield TextChunk("\n[Cancelled]")
             return
 
+        pending_steers, steer_compacted = _drain_steers_into_context(
+            state,
+            steer_drain=steer_drain,
+            config=config,
+            model=model,
+        )
+        if pending_steers:
+            if steer_compacted:
+                yield TextChunk("\n[Context compacted before applying steer.]\n")
+            yield TextChunk(f"\n[Steer applied: {pending_steers[0][:80]}{'…' if len(pending_steers[0]) > 80 else ''}]\n")
+
         context_provision = _provision_context_window(state, config=config, model=model)
         if context_provision["compacted"]:
             yield TextChunk(
@@ -739,18 +774,6 @@ def run(
                 model=model,
             )
             return
-
-        if steer_drain is not None:
-            pending = steer_drain()
-            if pending:
-                joined = "\n\n".join(pending)
-                steer_message = {
-                    "role": "user",
-                    "content": f"[mid-turn steer from user]\n{joined}",
-                }
-                if _append_model_visible_messages(state, [steer_message], config=config, model=model):
-                    yield TextChunk("\n[Context compacted before applying steer.]\n")
-                yield TextChunk(f"\n[Steer applied: {pending[0][:80]}{'…' if len(pending[0]) > 80 else ''}]\n")
 
         if agent_event_drain is not None:
             agent_lines = agent_event_drain()
@@ -933,6 +956,19 @@ def run(
                 )
 
         if not tool_calls:
+            late_steers, late_steer_compacted = _drain_steers_into_context(
+                state,
+                steer_drain=steer_drain,
+                config=config,
+                model=model,
+                label="[steer from user saved for next turn]",
+            )
+            if late_steers:
+                if late_steer_compacted:
+                    yield TextChunk("\n[Context compacted before saving steer for next turn.]\n")
+                yield TextChunk(
+                    f"\n[Steer saved for next turn: {late_steers[0][:80]}{'…' if len(late_steers[0]) > 80 else ''}]\n"
+                )
             break
 
         for tc_index, tc in enumerate(tool_calls):

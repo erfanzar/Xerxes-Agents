@@ -113,6 +113,15 @@ def write_file(file_path: str, content: str, create_dirs: bool = True, context_v
     try:
         path = Path(file_path)
 
+        # Capture prior content (empty for a new file) so we can surface a diff
+        # of what changed — a new file shows up as all-additions.
+        old_content = ""
+        if path.exists():
+            try:
+                old_content = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                old_content = ""
+
         if create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -120,7 +129,18 @@ def write_file(file_path: str, content: str, create_dirs: bool = True, context_v
             f.write(content)
 
         lines = content.count("\n") + 1
-        return f"Successfully wrote {len(content)} characters ({lines} lines) to {file_path}"
+        summary = f"Successfully wrote {len(content)} characters ({lines} lines) to {file_path}"
+
+        # Attach a capped unified diff so the TUI can render what was written /
+        # changed. Bounded here so a large write doesn't balloon the result.
+        if old_content != content:
+            diff = create_diff(old_content, content, path.name)
+            if diff and not diff.startswith("Error"):
+                diff_lines = diff.split("\n")
+                if len(diff_lines) > 60:
+                    diff = "\n".join(diff_lines[:60]) + f"\n... ({len(diff_lines) - 60} more lines)"
+                return f"{summary}:\n\n{diff}"
+        return summary
 
     except Exception as e:
         return f"Error writing file: {e!s}"

@@ -268,6 +268,9 @@ class StatusRenderer:
     SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
     THINKING_PREVIEW_LINES = 4
     SUBAGENT_PREVIEW_LINES = 5
+    # Max agent rows shown in the spawned-agent dashboard before collapsing the
+    # rest into a "+N more" line. Running agents are shown first.
+    AGENT_DASHBOARD_MAX_ROWS = 14
     # Slide window over committed history so a long-running session can't
     # grow ``_content_lines`` unbounded. ~2000 entries is a few hours of
     # active use; older lines roll off (the daemon-side session history
@@ -301,7 +304,10 @@ class StatusRenderer:
 
         self._active_tools: dict[str, Callable[[], str]] = {}
 
-        self._subagent_previews: dict[str, str] = {}
+        # Per-agent lane state for the spawned-agent dashboard. Keyed by task_id;
+        # each value is a structured dict {label, agent_type, status, count,
+        # action, result, started_at}. O(agents), never O(calls).
+        self._agent_lanes: dict[str, dict[str, Any]] = {}
         self._todo_items: list[str] = []
 
         self._spinner_frame: int = 0
@@ -528,35 +534,114 @@ class StatusRenderer:
         """Drop every active tool renderer."""
         self._active_tools.clear()
 
-    def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
-        """Set or update the live preview line for a sub-agent.
+    def set_agent_lane(
+        self,
+        task_id: str,
+        *,
+        label: str = "",
+        agent_type: str = "",
+        status: str = "running",
+        count: int = 0,
+        action: str = "",
+        result: str = "",
+    ) -> None:
+        """Create or merge one spawned-agent's lane in the dashboard.
 
-        Args:
-            task_id (str): IN: Sub-agent task identifier (key for the preview).
-            label (str): IN: Display label (e.g., ``"telegram-planner#abc"``).
-            text (str): IN: Latest preview text. Replaces any prior content for
-                the same ``task_id`` — never appended.
-        """
+        Fields merge so out-of-order updates don't clobber state: identity
+        (``label``/``agent_type``) sticks once set, ``count`` only grows, and
+        ``action``/``result`` take the latest non-empty value. ``started_at`` is
+        stamped once for the elapsed clock."""
         if not task_id:
             return
-        self._subagent_previews.pop(task_id, None)
-        self._subagent_previews[task_id] = f"{label}: {text}" if text else label
+        lane = self._agent_lanes.get(task_id)
+        if lane is None:
+            self._agent_lanes[task_id] = {
+                "label": label,
+                "agent_type": agent_type,
+                "status": status or "running",
+                "count": int(count),
+                "action": action,
+                "result": result,
+                "started_at": time.monotonic(),
+            }
+        else:
+            if label:
+                lane["label"] = label
+            if agent_type:
+                lane["agent_type"] = agent_type
+            lane["status"] = status or lane["status"]
+            lane["count"] = max(int(count), int(lane.get("count", 0)))
+            if action:
+                lane["action"] = action
+            if result:
+                lane["result"] = result
         self._mark_dirty()
 
-    def clear_subagent_preview(self, task_id: str) -> None:
-        """Remove the live preview line for a finished sub-agent.
+    def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
+        """Back-compat shim — route a rolling preview into the agent dashboard."""
+        self.set_agent_lane(task_id, label=label, action=text)
 
-        Args:
-            task_id (str): IN: Sub-agent task identifier whose preview to drop.
-        """
-        if self._subagent_previews.pop(task_id, None) is not None:
+    def clear_subagent_preview(self, task_id: str) -> None:
+        """Remove one finished agent's lane from the dashboard."""
+        if self._agent_lanes.pop(task_id, None) is not None:
             self._mark_dirty()
 
     def clear_subagent_previews(self) -> None:
-        """Remove all live sub-agent preview lines."""
-        if self._subagent_previews:
-            self._subagent_previews.clear()
+        """Remove every agent lane (called when a turn ends)."""
+        if self._agent_lanes:
+            self._agent_lanes.clear()
             self._mark_dirty()
+
+    def _render_agent_dashboard(self, spinner_tick: int) -> list[str]:
+        """Render the spawned-agent dashboard: a header + one line per agent.
+
+        Running agents sort first; beyond :data:`AGENT_DASHBOARD_MAX_ROWS` the
+        remainder collapses into a ``+N more`` line so a large fan-out can't own
+        the viewport. Each row shows status, agent name, aggregate call count,
+        the current action (or final result), and elapsed time."""
+        lanes = list(self._agent_lanes.values())
+        total = len(lanes)
+        done = sum(1 for ln in lanes if ln.get("status") != "running")
+        total_calls = sum(int(ln.get("count", 0)) for ln in lanes)
+        sys_fg = active_fg("system")
+        accent_fg = active_fg("accent")
+        warn_fg = active_fg("warn")
+        error_fg = active_fg("error")
+        frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
+
+        out = [f"{sys_fg}⬡ {total} agents{_FG_RESET} \x1b[2m{done}/{total} · {total_calls} calls\x1b[0m"]
+        running = [ln for ln in lanes if ln.get("status") == "running"]
+        finished = [ln for ln in lanes if ln.get("status") != "running"]
+        ordered = running + finished
+        shown = ordered[: self.AGENT_DASHBOARD_MAX_ROWS]
+        now = time.monotonic()
+        for ln in shown:
+            status = ln.get("status", "running")
+            if status == "running":
+                icon, icon_fg, detail = frame, warn_fg, str(ln.get("action", ""))
+            elif status in ("failed", "cancelled"):
+                icon, icon_fg, detail = "✗", error_fg, str(ln.get("result") or status)
+            else:
+                icon, icon_fg, detail = "✓", accent_fg, str(ln.get("result") or "done")
+            name = (ln.get("agent_type") or str(ln.get("label", "")).split("#")[0] or "agent")[:14]
+            count = int(ln.get("count", 0))
+            count_s = f"{count / 1000:.1f}k" if count >= 1000 else str(count)
+            elapsed = self._fmt_elapsed(now - float(ln.get("started_at", now)))
+            detail = " ".join(detail.split())[:46]
+            out.append(
+                f"  {icon_fg}{icon}{_FG_RESET} {sys_fg}{name:<14}{_FG_RESET} "
+                f"\x1b[2m{count_s:>5}\x1b[0m  \x1b[2m{detail}\x1b[0m  \x1b[2m{elapsed}\x1b[0m"
+            )
+        hidden = total - len(shown)
+        if hidden > 0:
+            out.append(f"  \x1b[2m… +{hidden} more\x1b[0m")
+        return out
+
+    @staticmethod
+    def _fmt_elapsed(secs: float) -> str:
+        """Format an elapsed-seconds value as ``Ns`` or ``MmSSs``."""
+        s = max(0, int(secs))
+        return f"{s}s" if s < 60 else f"{s // 60}m{s % 60:02d}s"
 
     def set_todo_items(self, items: list[str]) -> None:
         """Replace the TODO list displayed above the input area."""
@@ -605,11 +690,8 @@ class StatusRenderer:
         if self._thinking_text:
             lines.extend(self._split_render_lines(self._thinking_text))
 
-        if self._subagent_previews:
-            spin_frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
-            tool_fg = active_fg("tool_name")
-            for preview in list(self._subagent_previews.values())[-self.SUBAGENT_PREVIEW_LINES :]:
-                lines.append(f"{tool_fg}{spin_frame}{_FG_RESET} \x1b[2m{tool_fg}↳ {preview}\x1b[0m")
+        if self._agent_lanes:
+            lines.extend(self._render_agent_dashboard(spinner_tick))
 
         streaming = self._streaming_text
         if streaming:
@@ -621,15 +703,22 @@ class StatusRenderer:
         if self._todo_items:
             warn_fg = active_fg("warn")
             accent_fg = active_fg("accent")
-            lines.append(f"\x1b[1m{warn_fg}TODO:\x1b[0m")
-            for _i, item in enumerate(self._todo_items[:10], 1):
-                done = item.startswith("✓")
-                prefix = "✓" if done else "☐"
-                text = item[1:].strip() if done else item
-                glyph_fg = accent_fg if done else warn_fg
-                lines.append(f"  {glyph_fg}{prefix}{_FG_RESET} {text}")
-            if len(self._todo_items) > 10:
-                lines.append(f"  \x1b[2m… and {len(self._todo_items) - 10} more\x1b[0m")
+            muted_fg = active_fg("muted")
+            # Items carry their state as a leading glyph: ``✓`` completed,
+            # ``◐`` in-progress, otherwise pending. Completed rows dim away,
+            # the in-progress row stays bright so the active task stands out.
+            done = sum(1 for it in self._todo_items if it.startswith("✓"))
+            total = len(self._todo_items)
+            lines.append(f"\x1b[1m{warn_fg}TODO\x1b[0m \x1b[2m{done}/{total}\x1b[0m")
+            for item in self._todo_items[:10]:
+                if item.startswith("✓"):
+                    lines.append(f"  {accent_fg}✓{_FG_RESET} \x1b[2m{item[1:].strip()}\x1b[0m")
+                elif item.startswith("◐"):
+                    lines.append(f"  {warn_fg}◐{_FG_RESET} {item[1:].strip()}")
+                else:
+                    lines.append(f"  {muted_fg}☐ {item}{_FG_RESET}")
+            if total > 10:
+                lines.append(f"  \x1b[2m… and {total - 10} more\x1b[0m")
 
         if self._running:
             frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
@@ -980,6 +1069,11 @@ class PersistentPrompt:
         self._active_question: Any = None
         self._active_approval: Any = None
         self._active_resume: Any = None
+
+        # Whose turn last touched history — ``""`` / ``"user"`` / ``"assistant"``
+        # / ``"tool"``. Drives the role captions so a new voice gets a header
+        # only when it actually changes hands (see ``_emit_voice_caption``).
+        self._last_voice: str = ""
 
         self._scroll_y: int | None = None
         self._status_visible_rows = 20
@@ -1427,6 +1521,31 @@ class PersistentPrompt:
         self._status.append_line(line)
         self._invalidate()
 
+    def append_user_message(self, text: str) -> None:
+        """Commit a user turn as a lapis-barred block so it reads as *your* voice.
+
+        Each line carries a ``▌`` gutter in the primary color and a dim ``you``
+        caption, setting the user turn apart from the assistant's flush-left
+        prose and the indented tool band."""
+        bar = f"{active_fg('primary')}▌{_FG_RESET}"
+        self._status.append_line(" ")  # one blank row to open the turn
+        self._status.append_line(f"{bar} {active_fg('primary')}\x1b[2myou\x1b[0m")
+        for raw in (text or "").splitlines() or [text or ""]:
+            self._status.append_line(f"{bar} {raw}")
+        self._last_voice = "user"
+        self._invalidate()
+
+    def _emit_voice_caption(self, voice: str) -> None:
+        """Emit a one-line role caption when the speaking voice changes hands.
+
+        The assistant gets a faint ``xerxes`` caption (in the accent color) the
+        first time it speaks after a user turn or a tool group, so a turn reads
+        as alternating voices instead of one flat stream."""
+        if self._last_voice != voice and voice == "assistant":
+            self._status.append_line(" ")
+            self._status.append_line(f"{active_fg('accent')}xerxes{_FG_RESET}")
+        self._last_voice = voice
+
     def clear_content(self) -> None:
         """Wipe the committed status history and reset scroll to tail-follow."""
         self._status.clear_content()
@@ -1449,6 +1568,7 @@ class PersistentPrompt:
                 rendered = markdown_to_ansi(text)
             except Exception:
                 rendered = text
+            self._emit_voice_caption("assistant")
             self._status.append_line(rendered or text)
         self._invalidate()
 
@@ -1477,11 +1597,35 @@ class PersistentPrompt:
         self._status.pop_active_tool(tool_call_id)
         if final_text:
             self._status.append_line(final_text)
+            self._last_voice = "tool"
         self._invalidate()
 
     def clear_active_tools(self) -> None:
         """Drop every live-tool renderer."""
         self._status.clear_active_tools()
+        self._invalidate()
+
+    def set_agent_lane(
+        self,
+        task_id: str,
+        *,
+        label: str = "",
+        agent_type: str = "",
+        status: str = "running",
+        count: int = 0,
+        action: str = "",
+        result: str = "",
+    ) -> None:
+        """Create or update one spawned-agent's lane in the live dashboard."""
+        self._status.set_agent_lane(
+            task_id,
+            label=label,
+            agent_type=agent_type,
+            status=status,
+            count=count,
+            action=action,
+            result=result,
+        )
         self._invalidate()
 
     def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:

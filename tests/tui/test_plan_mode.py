@@ -341,17 +341,18 @@ def test_status_renderer_trims_blank_edges_from_committed_lines() -> None:
     assert "hello\n" in markup
 
 
-def test_status_renderer_shows_last_five_subagent_previews() -> None:
+def test_status_renderer_agent_dashboard_caps_rows() -> None:
     status = StatusRenderer()
 
-    for idx in range(8):
+    n = StatusRenderer.AGENT_DASHBOARD_MAX_ROWS + 4
+    for idx in range(n):
         status.set_subagent_preview(f"task-{idx}", f"agent-{idx}", f"Tool{idx}")
 
     markup = status._markup()
-    for idx in range(3):
-        assert f"agent-{idx}" not in markup
-    for idx in range(3, 8):
-        assert f"agent-{idx}" in markup
+    assert f"{n} agents" in markup  # aggregate header shows the total
+    assert "+4 more" in markup  # overflow beyond the cap is collapsed
+    assert "agent-0" in markup  # first agents are shown
+    assert f"agent-{n - 1}" not in markup  # last agents fall under the cap
 
 
 def test_status_cursor_uses_current_render_metrics_for_dynamic_content() -> None:

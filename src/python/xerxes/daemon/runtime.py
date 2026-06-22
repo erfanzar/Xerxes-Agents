@@ -29,6 +29,7 @@ import asyncio
 import json
 import os
 import queue
+import re
 import threading
 import uuid
 from collections.abc import Awaitable, Callable
@@ -288,9 +289,11 @@ class RuntimeManager:
         forms for skills that declare sub-commands.
         """
         self.skills_dir.mkdir(parents=True, exist_ok=True)
+        self.skill_registry = SkillRegistry()
         self.skill_registry.discover(
             *default_skill_discovery_dirs(user_skills_dir=self.skills_dir, cwd=self.config.project_dir or os.getcwd())
         )
+        set_skill_registry(self.skill_registry)
         return sorted(self.skill_names_with_subs())
 
     def skill_names_with_subs(self) -> list[str]:
@@ -883,6 +886,7 @@ class TurnRunner:
         self._subagent_buffer_lock = threading.Lock()
         self._subagent_parent_tool: dict[str, str] = {}
         self._subagent_tool_id_fifo: dict[str, list[str]] = {}
+        self._subagent_tool_counts: dict[str, int] = {}
         self._subagent_text_buffers: dict[str, str] = {}
         self._subagent_thinking_buffers: dict[str, str] = {}
         self._current_tool_call_id = ""
@@ -1160,6 +1164,27 @@ class TurnRunner:
                     },
                 )
             finally:
+                late_steers = session.drain_steers()
+                if late_steers:
+                    joined = "\n\n".join(late_steers)
+                    session.state.messages.append(
+                        {"role": "user", "content": f"[steer from user saved for next turn]\n{joined}"}
+                    )
+                    await emit(
+                        "notification",
+                        {
+                            "id": uuid.uuid4().hex[:12],
+                            "category": "slash",
+                            "type": "result",
+                            "severity": "info",
+                            "title": "",
+                            "body": (
+                                "Steer saved for next turn: "
+                                f"{late_steers[0][:80]}{'…' if len(late_steers[0]) > 80 else ''}"
+                            ),
+                            "payload": {},
+                        },
+                    )
                 session.active_turn_id = ""
                 self.sessions.compact_if_needed(session)
                 if session.cancel_requested:
@@ -1273,6 +1298,62 @@ class TurnRunner:
             # tests, for example) should not pick up a stale handle.
             set_active_session(None)
 
+    @staticmethod
+    def _diff_display_blocks(result: Any) -> list[dict[str, Any]]:
+        """Surface an embedded unified diff from a tool result as a ``diff`` display block.
+
+        File-mutating tools (``FileEditTool``, ``write_file``) return their
+        unified diff inline in the result string. We lift it into a structured
+        ``diff`` block so the TUI can render additions/removals instead of
+        collapsing the whole diff into a single 40-char summary line. The probe
+        is tool-agnostic: any result whose lines contain an adjacent
+        ``--- ``/``+++ `` header pair is treated as carrying a diff (the same
+        ``git diff`` a shell command might print also renders nicely). Stringified
+        tool payloads with escaped ``\\n`` never split into real lines, so they
+        cannot false-trigger.
+        """
+        if not isinstance(result, str) or "\n" not in result:
+            return []
+        lines = result.split("\n")
+        for i in range(len(lines) - 1):
+            if lines[i].startswith("--- ") and lines[i + 1].startswith("+++ "):
+                diff = "\n".join(lines[i:]).strip("\n")
+                return [{"type": "diff", "diff": diff, "language": ""}] if diff else []
+        return []
+
+    _TODO_STATUS_BY_MARK: ClassVar[dict[str, str]] = {
+        " ": "pending",
+        "~": "in_progress",
+        "x": "completed",
+        "X": "completed",
+    }
+    _TODO_LINE_RE: ClassVar[re.Pattern[str]] = re.compile(r"\s*\d+\.\s*\[(.)\]\s*(.*)$")
+
+    @classmethod
+    def _todo_display_blocks(cls, result: Any) -> list[dict[str, Any]]:
+        """Surface a ``TodoWriteTool`` result as a structured ``todo`` display block.
+
+        The tool returns a ``# Todo List`` summary whose rows carry ``[ ]`` /
+        ``[~]`` / ``[x]`` status markers. We parse them back into
+        ``{content, status}`` items so the TUI can drive (and live-update) its
+        pinned todo panel instead of collapsing the whole list into a one-line
+        tool summary. Keyed on the ``# Todo List`` header so ordinary tool
+        output can't false-trigger.
+        """
+        if not isinstance(result, str) or not result.lstrip().startswith("# Todo List"):
+            return []
+        items: list[dict[str, str]] = []
+        for line in result.splitlines():
+            match = cls._TODO_LINE_RE.match(line)
+            if match:
+                items.append(
+                    {
+                        "content": match.group(2).strip(),
+                        "status": cls._TODO_STATUS_BY_MARK.get(match.group(1), "pending"),
+                    }
+                )
+        return [{"type": "todo", "items": items}] if items else []
+
     def _run_event_loop(
         self,
         *,
@@ -1315,13 +1396,14 @@ class TurnRunner:
                 )
             elif isinstance(event, ToolEnd):
                 self._sync_session_mode_from_global(session)
+                display_blocks = self._diff_display_blocks(event.result) + self._todo_display_blocks(event.result)
                 push(
                     "tool_result",
                     {
                         "tool_call_id": event.tool_call_id,
                         "return_value": event.result,
                         "duration_ms": event.duration_ms,
-                        "display_blocks": [],
+                        "display_blocks": display_blocks,
                     },
                 )
                 push("status_update", self._status_payload(session, mode=mode, plan_mode=plan_mode))
@@ -1419,7 +1501,13 @@ class TurnRunner:
         data: dict[str, Any],
         push: Callable[[str, dict[str, Any]], None],
     ) -> None:
-        """Fold an ``agent_*`` sub-agent event into compact preview/tool notifications."""
+        """Fold an ``agent_*`` sub-agent event into a per-agent lane update.
+
+        Each emission carries structured lane fields (``status``, ``count``,
+        ``action``, ``result``) on the ``subagent_stream`` notification so the
+        TUI can render a live per-agent dashboard. The per-task call counter is
+        what makes 12 agents by thousands of calls cheap: we count, we never ship
+        the calls themselves."""
         if not event_type.startswith("agent_"):
             return
 
@@ -1430,45 +1518,67 @@ class TurnRunner:
         prefix = f"{agent_name}#{short_id}" if short_id else agent_name
 
         if event_type == "agent_spawn":
-            if task_id and self._current_tool_call_id:
+            if task_id:
                 with self._subagent_buffer_lock:
-                    self._subagent_parent_tool[task_id] = self._current_tool_call_id
-            self._emit_subagent_stream(push, task_id, prefix, f"spawned: {str(data.get('prompt', ''))[:120]}")
+                    self._subagent_tool_counts[task_id] = 0
+                    if self._current_tool_call_id:
+                        self._subagent_parent_tool[task_id] = self._current_tool_call_id
+            self._emit_subagent_stream(
+                push, task_id, prefix, f"spawned: {str(data.get('prompt', ''))[:120]}",
+                agent_type=agent_type, status="running", action="spawned",
+            )
             return
 
         if event_type == "agent_text":
-            self._stream_subagent_chunk(push, task_id, prefix, data.get("text") or "", kind="text")
+            self._stream_subagent_chunk(push, task_id, prefix, data.get("text") or "", kind="text", agent_type=agent_type)
             return
 
         if event_type == "agent_thinking":
-            self._stream_subagent_chunk(push, task_id, prefix, data.get("text") or "", kind="thinking")
+            self._stream_subagent_chunk(
+                push, task_id, prefix, data.get("text") or "", kind="thinking", agent_type=agent_type
+            )
             return
 
         if event_type == "agent_tool_start":
             self._emit_subagent_tool_event(push, task_id, agent_type, data, kind="start")
+            with self._subagent_buffer_lock:
+                self._subagent_tool_counts[task_id] = self._subagent_tool_counts.get(task_id, 0) + 1
             inputs = data.get("inputs") or {}
             key = next(iter(inputs.values()), "") if isinstance(inputs, dict) else ""
-            self._emit_subagent_stream(push, task_id, prefix, f"o {data.get('tool_name', 'tool')}({str(key)[:80]})")
+            tool_name = data.get("tool_name", "tool")
+            self._emit_subagent_stream(
+                push, task_id, prefix, f"o {tool_name}({str(key)[:80]})",
+                agent_type=agent_type, status="running", action=f"{tool_name} {str(key)[:48]}".strip(),
+            )
             return
 
         if event_type == "agent_tool_end":
             self._emit_subagent_tool_event(push, task_id, agent_type, data, kind="end")
             mark = "OK" if data.get("permitted", True) else "DENIED"
+            tool_name = data.get("tool_name", "tool")
             self._emit_subagent_stream(
-                push,
-                task_id,
-                prefix,
-                f"{mark} {data.get('tool_name', 'tool')} - {float(data.get('duration_ms', 0) or 0):.0f}ms",
+                push, task_id, prefix,
+                f"{mark} {tool_name} - {float(data.get('duration_ms', 0) or 0):.0f}ms",
+                agent_type=agent_type, status="running", action=str(tool_name),
             )
             return
 
         if event_type == "agent_done":
+            status = str(data.get("status") or "completed")
+            result = " ".join(str(data.get("result") or "").split())[:160]
+            # Emit the final lane state (status + result) *before* dropping the
+            # counter so the dashboard shows where each agent landed; the lane is
+            # cleared by the TUI when the turn ends.
+            self._emit_subagent_stream(
+                push, task_id, prefix, result or status,
+                agent_type=agent_type, status=status, action=result or status, result=result,
+            )
             with self._subagent_buffer_lock:
                 self._subagent_parent_tool.pop(task_id, None)
                 self._subagent_tool_id_fifo.pop(task_id, None)
                 self._subagent_text_buffers.pop(task_id, None)
                 self._subagent_thinking_buffers.pop(task_id, None)
-            self._emit_subagent_stream(push, task_id, prefix, "")
+                self._subagent_tool_counts.pop(task_id, None)
 
     def _stream_subagent_chunk(
         self,
@@ -1478,8 +1588,9 @@ class TurnRunner:
         text: str,
         *,
         kind: str,
+        agent_type: str = "",
     ) -> None:
-        """Update the rolling preview line for one sub-agent text or thinking chunk."""
+        """Update the per-agent lane's current-action line from a text/thinking chunk."""
         if not text or not task_id:
             return
         buffers = self._subagent_text_buffers if kind == "text" else self._subagent_thinking_buffers
@@ -1495,16 +1606,27 @@ class TurnRunner:
         if len(tail) > cap:
             tail = "..." + tail[-cap:]
         label_suffix = " (thinking)" if kind == "thinking" else ""
-        self._emit_subagent_stream(push, task_id, f"{prefix}{label_suffix}", tail)
+        self._emit_subagent_stream(
+            push, task_id, f"{prefix}{label_suffix}", tail, agent_type=agent_type, status="running", action=tail
+        )
 
-    @staticmethod
     def _emit_subagent_stream(
+        self,
         push: Callable[[str, dict[str, Any]], None],
         task_id: str,
         label: str,
         body: str,
+        *,
+        agent_type: str = "",
+        status: str = "running",
+        action: str = "",
+        result: str = "",
     ) -> None:
-        """Emit a transient ``subagent_stream`` preview notification (empty ``body`` clears)."""
+        """Emit a ``subagent_stream`` notification carrying structured per-agent lane state.
+
+        The ``count`` is read from the live per-task counter so every lane update
+        ships the current call total without the caller threading it through."""
+        count = self._subagent_tool_counts.get(task_id, 0)
         push(
             "notification",
             {
@@ -1514,7 +1636,15 @@ class TurnRunner:
                 "severity": "info",
                 "title": "",
                 "body": body,
-                "payload": {"task_id": task_id, "label": label},
+                "payload": {
+                    "task_id": task_id,
+                    "label": label,
+                    "agent_type": agent_type,
+                    "status": status,
+                    "count": count,
+                    "action": action or body,
+                    "result": result,
+                },
             },
         )
 

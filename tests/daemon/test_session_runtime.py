@@ -22,8 +22,9 @@ from pathlib import Path
 
 import pytest
 from xerxes.daemon.config import DaemonConfig, load_config
-from xerxes.daemon.runtime import SessionManager, TurnRunner, WorkspaceManager
+from xerxes.daemon.runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
 from xerxes.daemon.server import MIGRATED_ERROR, DaemonServer
+from xerxes.streaming.events import TextChunk, TurnDone
 
 
 def test_config_env_refs_and_legacy_env(monkeypatch):
@@ -137,6 +138,45 @@ def test_session_mode_does_not_sync_from_process_global_config(tmp_path):
         assert session.plan_mode is False
     finally:
         runner.close()
+
+
+def test_turn_runner_flushes_pending_steers_before_marking_turn_idle(monkeypatch, tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=tmp_path / "sessions")
+    session = sessions.open("tui:default")
+    runtime = RuntimeManager(cfg)
+    runtime.runtime_config = {"model": "openai/test", "permission_mode": "accept-all", "project_dir": str(tmp_path)}
+    runtime.system_prompt = ""
+    runtime.tool_executor = lambda name, inp: ""
+    runtime.tool_schemas = []
+    runtime.agent_memory = type("Memory", (), {"to_prompt_section": lambda self: ""})()
+    runner = TurnRunner(runtime=runtime, sessions=sessions)
+    session.pending_steers.put("make a todo for it")
+    events: list[tuple[str, dict]] = []
+
+    def fake_run_agent_loop(*args, **kwargs):
+        yield TextChunk("done")
+        yield TurnDone(input_tokens=1, output_tokens=1, tool_calls_count=0, model="openai/test")
+
+    async def emit(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    monkeypatch.setattr("xerxes.daemon.runtime.run_agent_loop", fake_run_agent_loop)
+    try:
+        asyncio.run(runner.run_turn(session, "finish", emit))
+    finally:
+        runner.close()
+
+    assert session.active_turn_id == ""
+    assert session.drain_steers() == []
+    assert any("make a todo for it" in msg.get("content", "") for msg in session.state.messages)
+    assert any(
+        event_type == "notification" and "Steer saved for next turn" in payload.get("body", "")
+        for event_type, payload in events
+    )
 
 
 def test_daemon_runtime_event_updates_current_mode(tmp_path):

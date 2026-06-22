@@ -303,6 +303,10 @@ class XerxesTUI:
         self._activity_mode = "code"
         self._user_activity_mode: str | None = None
         self._todo_items: list[str] = []
+        # True while the pinned todo panel is driven by the agent's TodoWriteTool
+        # (vs the manual ``/todo`` slash command). Agent-driven todos are
+        # turn-scoped and cleared when the next turn starts; user todos persist.
+        self._todo_from_agent = False
 
     async def run(self) -> XerxesTUI:
         """Spawn the bridge, build the prompt, paint the banner, and start loops.
@@ -551,7 +555,7 @@ class XerxesTUI:
         elif isinstance(event, ToolCallPart):
             self._on_tool_call_part(event.arguments_part)
         elif isinstance(event, ToolResult):
-            self._on_tool_result(event.tool_call_id, event.return_value, event.duration_ms)
+            self._on_tool_result(event.tool_call_id, event.return_value, event.duration_ms, event.display_blocks)
         elif isinstance(event, ApprovalRequest):
             self._on_approval_request(event)
         elif isinstance(event, QuestionRequest):
@@ -574,6 +578,12 @@ class XerxesTUI:
         """Allocate fresh content/thinking blocks and flip the prompt to running."""
         if self._prompt:
             self._prompt.set_running(True)
+            # Agent-driven todos are scoped to the turn that produced them —
+            # clear last turn's checklist so a new turn starts clean. Manual
+            # ``/todo`` lists are left untouched.
+            if self._todo_from_agent:
+                self._prompt.clear_todo_items()
+                self._todo_from_agent = False
 
         import uuid
 
@@ -683,18 +693,70 @@ class XerxesTUI:
         if self._active_tool:
             self._active_tool.append_args_part(arguments_part)
 
-    def _on_tool_result(self, tool_call_id: str, return_value: str, duration_ms: float = 0.0) -> None:
+    def _on_tool_result(
+        self,
+        tool_call_id: str,
+        return_value: str,
+        duration_ms: float = 0.0,
+        display_blocks: list[Any] | None = None,
+    ) -> None:
         """Close the matching tool block, render its result, and commit it to history.
 
         Sub-agent / spawn tools intentionally hide their raw return value;
-        the visible block just shows status + duration."""
+        the visible block just shows status + duration. ``display_blocks``
+        carries rich payloads (diffs, todo lists) the daemon attaches to the
+        result; a todo block also drives the pinned todo panel."""
+        todo_strings = self._todo_strings_from_blocks(display_blocks)
         block = self._tool_blocks.get(tool_call_id)
         if block:
-            display_value = "" if block.name in {"AgentTool", "TaskCreateTool", "SpawnAgents"} else return_value
-            block.set_result(display_value, duration_ms=duration_ms)
+            # Hide the raw return value for sub-agents and for todo writes — the
+            # todo panel already shows the list, so the tool line stays a clean
+            # status + duration instead of a truncated dump.
+            hide_result = block.name in {"AgentTool", "TaskCreateTool", "SpawnAgents"} or todo_strings is not None
+            display_value = "" if hide_result else return_value
+            block.set_result(display_value, duration_ms=duration_ms, display_blocks=display_blocks)
             if self._prompt:
                 self._prompt.commit_active_tool(tool_call_id, block.compose())
                 self._prompt.set_spinner_label(self._spinner_verb(1))
+
+        if todo_strings is not None and self._prompt:
+            if todo_strings:
+                self._prompt.set_todo_items(todo_strings)
+                self._todo_from_agent = True
+            else:
+                self._prompt.clear_todo_items()
+                self._todo_from_agent = False
+
+    @staticmethod
+    def _todo_strings_from_blocks(display_blocks: list[Any] | None) -> list[str] | None:
+        """Convert a ``todo`` display block into the panel's prefixed-string rows.
+
+        Returns ``None`` when no todo block is present, so the caller can tell
+        "no todo update this result" apart from "an explicitly empty list".
+        Status is encoded as a leading glyph the panel renderer understands:
+        ``✓`` completed, ``◐`` in-progress, bare text for pending."""
+        for blk in display_blocks or []:
+            btype = blk.get("type") if isinstance(blk, dict) else getattr(blk, "type", "")
+            if btype != "todo":
+                continue
+            items = blk.get("items") if isinstance(blk, dict) else getattr(blk, "items", [])
+            rows: list[str] = []
+            for it in items or []:
+                if isinstance(it, dict):
+                    content = str(it.get("content", "")).strip()
+                    status = it.get("status", "pending")
+                else:
+                    content, status = str(it), "pending"
+                if not content:
+                    continue
+                if status == "completed":
+                    rows.append(f"✓ {content}")
+                elif status == "in_progress":
+                    rows.append(f"◐ {content}")
+                else:
+                    rows.append(content)
+            return rows
+        return None
 
     def _on_subagent_event(self, event: Any) -> None:
         """Attach a nested subagent ToolCall/ToolResult onto its parent block."""
@@ -885,21 +947,24 @@ class XerxesTUI:
     def _on_notification(self, event: Any) -> None:
         """Render an inbound notification, choosing transient vs persistent display.
 
-        ``category == "subagent_stream"`` is treated as a transient live
-        update: the body replaces a per-task preview line beside the
-        spinner (and an empty body clears it). All other notifications
-        are committed to the prompt history as :class:`_NotificationBlock`s."""
+        ``category == "subagent_stream"`` carries structured per-agent lane
+        state (status, call count, current action, result) that drives the live
+        spawned-agent dashboard. All other notifications are committed to the
+        prompt history as :class:`_NotificationBlock`s."""
         if event.category == "subagent_stream":
             payload = getattr(event, "payload", {}) or {}
             task_id = str(payload.get("task_id") or event.id)
-            label = str(payload.get("label") or "")
-            body = (event.body or "").strip()
             if self._prompt is None:
                 return
-            if not body:
-                self._prompt.clear_subagent_preview(task_id)
-            else:
-                self._prompt.set_subagent_preview(task_id, label, body)
+            self._prompt.set_agent_lane(
+                task_id,
+                label=str(payload.get("label") or ""),
+                agent_type=str(payload.get("agent_type") or ""),
+                status=str(payload.get("status") or "running"),
+                count=int(payload.get("count") or 0),
+                action=str(payload.get("action") or (event.body or "")),
+                result=str(payload.get("result") or ""),
+            )
             return
 
         if event.category == "history" and event.type == "resume_begin":
@@ -1038,7 +1103,7 @@ class XerxesTUI:
         if event.context_limit:
             self._prompt.set_context(0, event.context_limit)
 
-        if getattr(event, "skills", None):
+        if hasattr(event, "skills"):
             self._prompt.set_skills(list(event.skills))
 
         # Populate the /model completion dropdown in the background so it's ready
@@ -1113,7 +1178,7 @@ class XerxesTUI:
     def _start_turn(self, text: str) -> None:
         """Display ``text`` and either queue it or kick off a new turn task."""
         if self._prompt:
-            self._prompt.append_line(f"✨ {text}")
+            self._prompt.append_user_message(text)
 
         if self._turn_task is not None and not self._turn_task.done():
             self._queued_inputs.append(text)

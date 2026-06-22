@@ -1,6 +1,6 @@
 ---
 name: prepare-commit-pr
-description: Prepare a commit or pull request safely: staging, checks, branch hygiene, PR summaries, release notes, and avoiding unrelated user changes.
+description: "Prepare a commit or pull request safely: staging, checks, branch hygiene, PR summaries, release notes, and avoiding unrelated user changes."
 tags: [software-development, git, workflow]
 ---
 

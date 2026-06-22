@@ -67,6 +67,23 @@ class TestParseSkillMd:
         assert skill.name == "simple_skill"
         assert skill.instructions == "Do the thing."
 
+    def test_malformed_yaml_frontmatter_falls_back_to_simple_parser(self, tmp_path):
+        content = """---
+name: colon_skill
+description: Do this safely: read, verify, report
+tags: [debug, workflow]
+---
+
+Body.
+"""
+        path = tmp_path / "colon_skill" / "SKILL.md"
+        skill = parse_skill_md(content, path)
+
+        assert skill.name == "colon_skill"
+        assert skill.metadata.description == "Do this safely: read, verify, report"
+        assert skill.metadata.tags == ["debug", "workflow"]
+        assert skill.instructions == "Body."
+
     def test_no_frontmatter_uses_dirname(self, tmp_path):
         skill_dir = tmp_path / "my_skill"
         skill_dir.mkdir()
@@ -172,6 +189,15 @@ class TestSkillRegistry:
         assert roots[0] == tmp_path / ".agents" / "skills"
         assert roots[1] == tmp_path / "skills"
         assert roots[2] == user_skills
+
+    def test_default_discovery_includes_source_checkout_bundled_skills(self, tmp_path):
+        user_skills = tmp_path / "user-skills"
+        source_skills = tmp_path / "src" / "python" / "xerxes" / "skills"
+        source_skills.mkdir(parents=True)
+
+        roots = default_skill_discovery_dirs(user_skills_dir=user_skills, cwd=tmp_path)
+
+        assert source_skills in roots
 
     def test_project_agent_skill_overrides_user_skill(self, tmp_path):
         project_skills = tmp_path / ".agents" / "skills"
