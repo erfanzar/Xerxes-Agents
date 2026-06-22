@@ -64,7 +64,7 @@ TIPS: tuple[str, ...] = (
     "/feedback compaction good|bad helps tune compression thresholds.",
     "/nudge off silences proactive memory/skill nudges.",
     "/memory list inspects durable workspace notes in MEMORY.md.",
-    "/init creates XERXES.md plus the project .agents workspace.",
+    "/init asks the agent to inspect the repo and author XERXES.md.",
     "/soul show inspects the persona prompt; /soul edit opens it in $EDITOR.",
     "Press Ctrl+Z to suspend Xerxes to the background (Unix).",
     "Daemon survives TUI restarts — your session stays warm.",

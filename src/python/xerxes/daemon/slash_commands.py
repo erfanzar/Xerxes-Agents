@@ -33,11 +33,7 @@ from ..context.compaction_provisioner import CompactionProvisioner, compaction_s
 from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
 from ..llms.registry import get_context_limit
-from ..runtime.project_workspace import (
-    ensure_project_agent_workspace,
-    ensure_project_xerxes_md,
-    load_project_agent_workspace,
-)
+from ..runtime.project_workspace import load_project_agent_workspace
 from .gateway import EmitFn
 from .runtime import DaemonSession, RuntimeManager, SessionManager, WorkspaceManager, render_session_system_prompt
 
@@ -1065,44 +1061,60 @@ class SlashCommandsMixin:
             emit, "Skin is a TUI-side setting. Use `/skin <name>` in the TUI, or set `XERXES_SKIN=<name>`."
         )
 
-    async def _init_project_context(self, project_dir: Path, emit: EmitFn) -> None:
-        """Create the project bootstrap files that feed runtime context."""
-        xerxes_path, xerxes_action = ensure_project_xerxes_md(project_dir)
-        created = ensure_project_agent_workspace(project_dir)
-        context = load_project_agent_workspace(project_dir)
+    @staticmethod
+    def _project_init_prompt(project_dir: Path, args: str = "") -> str:
+        """Build the agent-facing project initialization task."""
+        extra = args.strip()
+        requested = f"\nUser request for this init: {extra}\n" if extra else ""
+        return f"""Initialize this repository for Xerxes by running a swarm-backed project discovery.
+
+Project root: `{project_dir}`.{requested}
+You are the setup lead. Do not use a generic template and do not assume the project shape.
+The output must be project-specific enough that a future agent can work here without the user rewriting context.
+
+Mandatory swarm stage:
+- Before writing `XERXES.md` or `.agents/` files, spawn parallel discovery subagents with `SpawnAgents`.
+- Do not cap the swarm with an arbitrary number. Start with the obvious discovery lanes and add more subagents if the repository shape demands it.
+- Cover separate lanes for repository structure, build/test/development commands, architecture and runtime flow, coding conventions and style, existing docs and user intent, repeated workflows that deserve skills, and risks or caveats future agents must know.
+- Give every subagent a concrete scope, root path, expected evidence, and instruction to return concise findings plus file paths it inspected.
+- Use `AwaitAgents`, `TaskGetTool`, or `TaskOutputTool` to collect results. If subagent tools are unavailable, stop and report that `/init` cannot safely produce project context instead of guessing.
+- Synthesize the swarm findings yourself. Do not paste raw subagent transcripts into project files.
+
+Workflow:
+- Inspect the repository from the project root before and during swarm work. Read top-level docs, manifests, CI/config files, existing `AGENTS.md`, existing `XERXES.md`, existing `.agents/`, and any obvious project conventions.
+- If the apparent root is wrong or nested, inspect the parent just enough to identify the real project boundary, then continue from the correct root.
+- Write or update `XERXES.md` only after the swarm findings are synthesized. Base it on actual repository facts: project purpose, build/test commands, runtime conventions, important paths, agent workflow rules, architecture, and project-specific caveats.
+- Create or update `.agents/` only where it adds real value. Design repository-specific skills under `.agents/skills/<skill-name>/SKILL.md` for repeated workflows you can justify from the repo and the swarm results, not placeholder skills.
+- Preserve user-authored content. If a target file exists, read it first and patch it deliberately instead of overwriting it blindly.
+- Prefer `exec_command`/`write_stdin` for shell work, chunked file reads for large files, and project files or project memory for large notes.
+- Finish with a concise report naming each subagent lane, every file you created or changed, and what evidence drove each file.
+"""
+
+    async def _run_project_init_agent(self, project_dir: Path, args: str, emit: EmitFn) -> None:
+        """Delegate project initialization to the active model runtime."""
+        prompt = self._project_init_prompt(project_dir, args)
+        await self._emit_slash(
+            emit,
+            f"Project initialization swarm queued for `{project_dir}`. It will inspect the repo before authoring `XERXES.md`.",
+        )
+        try:
+            await self._submit_turn({"text": prompt, "_internal_slash": True}, emit)
+        except Exception as exc:
+            await self._emit_slash(emit, f"Project initialization turn failed: `{exc}`")
+            return
         try:
             self.runtime.reload({"project_dir": str(project_dir)})
             self._sync_runtime_to_connection_session(emit)
         except Exception as exc:
-            await self._emit_slash(emit, f"Initialized files, but runtime reload failed: `{exc}`")
+            await self._emit_slash(emit, f"Project initialization ran, but runtime reload failed: `{exc}`")
             return
 
         skills = self.runtime.discover_skills()
         await emit("init_done", {"skills": skills})
-        created_lines = [f"  `{path.relative_to(project_dir)}`" for path in created]
-        if not created_lines:
-            created_lines = ["  already initialized"]
-        loaded_lines = [f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files]
-        if not loaded_lines:
-            loaded_lines = ["  (none yet)"]
-        lines = [
-            f"Initialized project context at `{project_dir}`.",
-            f"`XERXES.md`: {xerxes_action} (`{xerxes_path.relative_to(project_dir)}`)",
-            "",
-            "Project .agents:",
-            f"  `{context.agents_dir}`",
-            "Created:",
-            *created_lines,
-            "",
-            "Loaded project context:",
-            *loaded_lines,
-            "",
-            f"Reloaded runtime context and {len(skills)} skill(s).",
-        ]
-        await self._emit_slash(emit, "\n".join(lines))
+        await self._emit_slash(emit, f"Project initialization turn finished. Reloaded {len(skills)} skill(s).")
 
     async def _slash_init(self, args: str, emit: EmitFn) -> None:
-        """Initialize project XERXES.md and .agents context."""
+        """Queue the agent-driven project setup workflow."""
         session_key = self._connection_session_key(emit)
         session = self.sessions.get(session_key)
         if session is None and session_key != self._current_session_key:
@@ -1110,7 +1122,7 @@ class SlashCommandsMixin:
         project_dir = Path(
             session.project_dir if session is not None else self.config.project_dir or os.getcwd()
         ).resolve()
-        await self._init_project_context(project_dir, emit)
+        await self._run_project_init_agent(project_dir, args, emit)
 
     async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
         """Show or initialize the current project-local agent workspace."""
@@ -1125,7 +1137,7 @@ class SlashCommandsMixin:
 
         action = args.strip().lower()
         if action == "init":
-            await self._init_project_context(project_dir, emit)
+            await self._run_project_init_agent(project_dir, "", emit)
             return
 
         if action and action != "status":
@@ -1143,7 +1155,7 @@ class SlashCommandsMixin:
             lines.append("Loaded project context:")
             lines.extend(f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files)
         else:
-            lines.append("Run `/workspace init` to create `.agents/` project context and local skills folders.")
+            lines.append("Run `/init` to have the agent inspect the repo and author project context.")
         await self._emit_slash(emit, "\n".join(lines))
 
     async def _slash_background(self, args: str, emit: EmitFn) -> None:
