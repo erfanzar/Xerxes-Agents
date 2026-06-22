@@ -12,6 +12,10 @@ agent:
     Use this agent for non-trivial software engineering work that may require reading files, editing code, running commands, and returning a compact but technically complete summary to the parent agent.
   allowed_tools:
     - ExecuteShell
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
     - ReadFile
     - WriteFile
     - FileEditTool

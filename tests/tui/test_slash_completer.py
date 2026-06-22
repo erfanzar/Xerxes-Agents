@@ -79,6 +79,9 @@ class TestCommandCompletionUnaffected:
     def test_bare_slash_command_still_completes(self):
         assert "/model" in _texts(_completer(), "/mod")
 
+    def test_init_command_is_available_from_registry(self):
+        assert _texts(_completer(), "/ini")[0] == "/init"
+
     def test_model_without_space_completes_command_not_models(self):
         # No trailing space → still command-name completion, not model args.
         assert _texts(_completer(), "/model") == ["/model"]

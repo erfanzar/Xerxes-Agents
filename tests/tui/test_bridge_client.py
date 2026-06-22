@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from xerxes.core.paths import xerxes_subdir
+from xerxes.daemon.fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from xerxes.streaming.wire_events import Notification
 from xerxes.tui.engine import BridgeClient
 
@@ -87,6 +88,27 @@ def test_bridge_client_fresh_sessions_get_unique_keys() -> None:
     assert first.session_key.startswith("tui:")
     assert second.session_key.startswith("tui:")
     assert first.session_key != second.session_key
+
+
+def test_bridge_client_requires_matching_daemon_build_id() -> None:
+    expected = daemon_build_id()
+
+    assert BridgeClient._daemon_status_is_current(
+        {"daemon_protocol": DAEMON_PROTOCOL_VERSION, "daemon_build_id": expected},
+        expected,
+    )
+    assert not BridgeClient._daemon_status_is_current(
+        {"daemon_protocol": DAEMON_PROTOCOL_VERSION},
+        expected,
+    )
+    assert not BridgeClient._daemon_status_is_current(
+        {"daemon_protocol": DAEMON_PROTOCOL_VERSION, "daemon_build_id": "old-code"},
+        expected,
+    )
+    assert not BridgeClient._daemon_status_is_current(
+        {"daemon_protocol": DAEMON_PROTOCOL_VERSION - 1, "daemon_build_id": expected},
+        expected,
+    )
 
 
 def test_bridge_client_honors_explicit_daemon_socket(monkeypatch, tmp_path) -> None:

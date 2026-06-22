@@ -892,6 +892,7 @@ def run(
         _retry_attempt = 0
         _last_error: Exception | None = None
         _stream_succeeded = False
+        _context_compaction_retry_attempted = False
 
         while _retry_attempt <= _MAX_RETRIES:
             try:
@@ -936,6 +937,16 @@ def run(
                 _last_error = e
                 if _is_context_limit_error(e):
                     logger.error("LLM request exceeded the model context window: %s", e)
+                    if not _context_compaction_retry_attempted and not text and not thinking_text and not tool_calls:
+                        context_retry = _provision_context_window(state, config=config, model=model, force=True)
+                        _context_compaction_retry_attempted = True
+                        if context_retry["compacted"] and not context_retry["blocked"]:
+                            yield TextChunk(
+                                "\n[Context compacted after the provider rejected the request "
+                                f"({context_retry['tokens_before']:,} → {context_retry['tokens_after']:,} tokens). "
+                                "Retrying once.]\n"
+                            )
+                            continue
                     break
                 if _retry_attempt < _MAX_RETRIES:
                     delay = LLM_STREAM_RETRY_DELAYS[_retry_attempt]
@@ -1352,7 +1363,7 @@ def _stream_anthropic(
     """
 
     try:
-        import anthropic
+        import anthropic  # type: ignore
     except ImportError:
         yield TextChunk("[Error: anthropic package not installed]")
         return

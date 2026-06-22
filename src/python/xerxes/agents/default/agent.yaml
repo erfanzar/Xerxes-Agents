@@ -11,6 +11,10 @@ agent:
     - GlobTool
     - GrepTool
     - ExecuteShell
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
     - DuckDuckGoSearch
     - AgentTool
     - SpawnAgents

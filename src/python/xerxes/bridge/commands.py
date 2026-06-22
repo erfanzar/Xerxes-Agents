@@ -119,6 +119,7 @@ COMMAND_REGISTRY: tuple[CommandDef, ...] = (
     CommandDef("reload-mcp", "Reload MCP servers", "tools"),
     CommandDef("browser", "Manage browser sessions", "tools"),
     CommandDef("plugins", "List loaded plugins", "tools"),
+    CommandDef("init", "Initialize project XERXES.md and .agents workspace", "tools"),
     CommandDef("workspace", "Inspect or initialize project .agents workspace", "tools", args_hint="[status|init]"),
     CommandDef("soul", "Show or edit SOUL.md", "tools"),
     CommandDef("agents", "List or select sub-agents", "tools"),

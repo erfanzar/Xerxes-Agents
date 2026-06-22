@@ -16,8 +16,28 @@ from __future__ import annotations
 
 from xerxes.agents.definitions import get_agent_definition
 from xerxes.bridge.server import BridgeServer
-from xerxes.runtime.bridge import populate_registry
+from xerxes.operators import OperatorRuntimeConfig, OperatorState
+from xerxes.runtime.bridge import build_tool_executor, populate_registry, register_operator_tools
 from xerxes.streaming.permissions import SAFE_TOOLS
+
+TERMINAL_OPERATOR_TOOLS = {
+    "exec_command",
+    "write_stdin",
+    "list_terminal_sessions",
+    "close_terminal_session",
+}
+
+
+def _registry_with_terminal_tools():
+    registry = populate_registry()
+    operator_state = OperatorState(
+        OperatorRuntimeConfig(
+            enabled=True,
+            power_tools_enabled=True,
+            allowed_tool_names=set(TERMINAL_OPERATOR_TOOLS),
+        )
+    )
+    return register_operator_tools(registry, operator_state, set(TERMINAL_OPERATOR_TOOLS))
 
 
 def test_agent_registry_excludes_google_search_and_web_scraper() -> None:
@@ -59,8 +79,18 @@ def test_registry_reflects_bool_and_numeric_types() -> None:
     assert shell_props["timeout"]["type"] == "number"
 
 
-def test_root_agent_tool_schemas_follow_default_agent_yaml() -> None:
+def test_tool_executor_accepts_execute_shell_command_argument() -> None:
     registry = populate_registry()
+    executor = build_tool_executor(registry=registry)
+
+    result = executor("ExecuteShell", {"command": "printf hello"})
+
+    assert "missing required parameter" not in result
+    assert "hello" in result
+
+
+def test_root_agent_tool_schemas_follow_default_agent_yaml() -> None:
+    registry = _registry_with_terminal_tools()
     default_agent = get_agent_definition("default")
     filtered = BridgeServer._filter_tool_schemas_for_agent(registry.tool_schemas(), default_agent)
     tool_names = {schema.get("name", "") for schema in filtered}
@@ -69,3 +99,13 @@ def test_root_agent_tool_schemas_follow_default_agent_yaml() -> None:
     assert tool_names == set(default_agent.tools)
     assert "GoogleSearch" not in tool_names
     assert "WebScraper" not in tool_names
+
+
+def test_code_agents_can_use_terminal_sessions() -> None:
+    default_agent = get_agent_definition("default")
+    coder_agent = get_agent_definition("coder")
+
+    assert default_agent is not None
+    assert coder_agent is not None
+    assert TERMINAL_OPERATOR_TOOLS <= set(default_agent.tools)
+    assert TERMINAL_OPERATOR_TOOLS <= set(coder_agent.allowed_tools or [])

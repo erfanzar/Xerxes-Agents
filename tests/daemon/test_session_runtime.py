@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from xerxes.daemon.config import DaemonConfig, load_config
+from xerxes.daemon.fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from xerxes.daemon.runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
 from xerxes.daemon.server import MIGRATED_ERROR, DaemonServer
 from xerxes.streaming.events import TextChunk, TurnDone
@@ -106,7 +107,17 @@ def test_status_payload_uses_session_scoped_interaction_mode(tmp_path):
     )
     sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4)
     session = sessions.open("tui:default")
-    runtime = type("Runtime", (), {"model": "", "runtime_config": {}})()
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "model": "",
+            "runtime_config": {},
+            "system_prompt": "",
+            "tool_schemas": [],
+            "active_skill_prompt": lambda self: "",
+        },
+    )()
     runner = TurnRunner(runtime=runtime, sessions=sessions)
     try:
         runner._set_session_mode(session, "researcher")
@@ -247,6 +258,8 @@ async def test_initialize_uses_connection_session_key_and_runtime_snapshot(tmp_p
     second_session = server.sessions.get("tui:second")
     assert first["ok"] is True
     assert second["ok"] is True
+    assert first["daemon_protocol"] == DAEMON_PROTOCOL_VERSION
+    assert first["daemon_build_id"] == daemon_build_id()
     assert server._connection_sessions[emit_first] == "tui:first"
     assert server._connection_sessions[emit_second] == "tui:second"
     assert first_session is not None
@@ -256,6 +269,26 @@ async def test_initialize_uses_connection_session_key_and_runtime_snapshot(tmp_p
     assert second_session.runtime_config["model"] == "model-b"
     assert any(event_type == "init_done" and payload["model"] == "model-a" for event_type, payload in first_events)
     assert any(event_type == "init_done" and payload["model"] == "model-b" for event_type, payload in second_events)
+
+
+def test_runtime_reload_registers_terminal_operator_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
+    runtime = RuntimeManager(DaemonConfig(project_dir=str(tmp_path)))
+
+    runtime.reload({"model": "gpt-4o"})
+
+    tool_names = {schema["name"] for schema in runtime.tool_schemas}
+    assert {
+        "exec_command",
+        "write_stdin",
+        "list_terminal_sessions",
+        "close_terminal_session",
+    } <= tool_names
+
+    result = runtime.tool_executor("exec_command", {"cmd": "printf hello", "yield_time_ms": 200})
+
+    assert "hello" in result
+    assert "session_id" in result
 
 
 @pytest.mark.asyncio
@@ -273,12 +306,38 @@ async def test_workspace_slash_init_creates_project_agents_layout(tmp_path):
 
     await server._slash_workspace("init", emit)
 
+    assert (tmp_path / "XERXES.md").is_file()
     assert (tmp_path / ".agents" / "AGENTS.md").is_file()
     assert (tmp_path / ".agents" / "skills").is_dir()
     assert session.project_dir == tmp_path.resolve()
-    body = events[-1][1]["body"]
+    body = [payload["body"] for event_type, payload in events if event_type == "notification"][-1]
+    assert "XERXES.md" in body
     assert "Project .agents" in body
     assert "Loaded project context" in body
+
+
+@pytest.mark.asyncio
+async def test_init_slash_creates_xerxes_md_and_project_agents_layout(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    server.sessions.open("tui:default", "xerxes")
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    await server._slash_init("", emit)
+
+    assert (tmp_path / "XERXES.md").is_file()
+    assert (tmp_path / ".agents" / "AGENTS.md").is_file()
+    assert any(event_type == "init_done" for event_type, _ in events)
+    body = [payload["body"] for event_type, payload in events if event_type == "notification"][-1]
+    assert "Initialized project context" in body
+    assert "`XERXES.md`: created" in body
+    assert "Reloaded runtime context" in body
 
 
 @pytest.mark.asyncio

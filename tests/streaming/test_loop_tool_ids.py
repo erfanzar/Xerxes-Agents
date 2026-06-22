@@ -591,6 +591,68 @@ def test_llm_stream_context_limit_error_does_not_retry(monkeypatch) -> None:
     assert any(isinstance(event, TurnDone) for event in events)
 
 
+def test_llm_stream_context_limit_error_forces_compaction_and_retries_once(monkeypatch) -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+    sleeps: list[int] = []
+    summary_inputs: list[list[dict]] = []
+    provider_lengths: list[int] = []
+
+    def summary_agent(messages, _previous_summary):
+        summary_inputs.append(messages)
+        return "compact summary"
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        provider_lengths.append(len(kwargs["messages"]))
+        if calls["n"] == 1:
+            raise ConnectionError("Invalid request: Your request exceeded model token limit")
+        yield TextChunk("done")
+        yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    state = loop.AgentState(
+        messages=[
+            {"role": "user", "content": "old user " * 500},
+            {"role": "assistant", "content": "old assistant " * 500},
+        ]
+    )
+
+    loop._stream_llm = fake_stream
+    monkeypatch.setattr(loop.time, "sleep", sleeps.append)
+    try:
+        events = list(
+            loop.run(
+                user_message="continue",
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "max_context_tokens": 10_000,
+                    "compaction_threshold_tokens": 20_000,
+                    "compaction_target_tokens": 80,
+                    "context_safety_tokens": 0,
+                    "compaction_summary_agent": summary_agent,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+
+    assert calls["n"] == 2
+    assert sleeps == []
+    assert summary_inputs
+    assert provider_lengths == [3, 2]
+    assert "Context compacted after the provider rejected the request" in text
+    assert "Retrying once" in text
+    assert "done" in text
+    assert any(isinstance(event, TurnDone) for event in events)
+
+
 def test_tool_end_duration_reflects_executor_time() -> None:
     original = loop._stream_llm
     calls = {"n": 0}
