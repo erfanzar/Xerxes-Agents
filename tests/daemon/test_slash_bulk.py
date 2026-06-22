@@ -199,7 +199,7 @@ _SMOKE_CASES: list[tuple[str, str]] = [
     ("/sampling", "Sampling"),
     ("/config", "config"),
     ("/title my chat", ""),
-    ("/init", "Initialized project context"),
+    ("/init", "Project initialization swarm queued"),
     ("/workspace", "Agent workspace"),
     ("/save", ""),
     ("/personality", ""),

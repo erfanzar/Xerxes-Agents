@@ -292,7 +292,7 @@ def test_runtime_reload_registers_terminal_operator_tools(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_workspace_slash_init_creates_project_agents_layout(tmp_path):
+async def test_workspace_slash_init_queues_agent_driven_project_setup(tmp_path):
     cfg = DaemonConfig(
         workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
         project_dir=str(tmp_path),
@@ -300,24 +300,42 @@ async def test_workspace_slash_init_creates_project_agents_layout(tmp_path):
     server = DaemonServer(cfg)
     session = server.sessions.open("tui:default", "xerxes")
     events: list[tuple[str, dict]] = []
+    captured: list[dict] = []
 
     async def emit(event_type: str, payload: dict) -> None:
         events.append((event_type, payload))
 
+    async def submit_turn(params: dict, emit_fn) -> dict:
+        captured.append(params)
+        return {"ok": True}
+
+    server._submit_turn = submit_turn  # type: ignore[method-assign]
+    server.runtime.discover_skills = lambda: []  # type: ignore[method-assign]
+
     await server._slash_workspace("init", emit)
 
-    assert (tmp_path / "XERXES.md").is_file()
-    assert (tmp_path / ".agents" / "AGENTS.md").is_file()
-    assert (tmp_path / ".agents" / "skills").is_dir()
+    assert captured
+    prompt = captured[0]["text"]
+    assert captured[0]["_internal_slash"] is True
+    assert "Initialize this repository for Xerxes by running a swarm-backed project discovery." in prompt
+    assert f"Project root: `{tmp_path.resolve()}`" in prompt
+    assert "Do not use a generic template" in prompt
+    assert (
+        "Before writing `XERXES.md` or `.agents/` files, spawn parallel discovery subagents with `SpawnAgents`."
+        in prompt
+    )
+    assert "Do not cap the swarm with an arbitrary number." in prompt
+    assert "Use `AwaitAgents`, `TaskGetTool`, or `TaskOutputTool` to collect results." in prompt
+    assert "Write or update `XERXES.md` only after the swarm findings are synthesized." in prompt
+    assert ".agents/skills/<skill-name>/SKILL.md" in prompt
+    assert not (tmp_path / "XERXES.md").exists()
     assert session.project_dir == tmp_path.resolve()
     body = [payload["body"] for event_type, payload in events if event_type == "notification"][-1]
-    assert "XERXES.md" in body
-    assert "Project .agents" in body
-    assert "Loaded project context" in body
+    assert "Project initialization turn finished" in body
 
 
 @pytest.mark.asyncio
-async def test_init_slash_creates_xerxes_md_and_project_agents_layout(tmp_path):
+async def test_init_slash_submits_project_specific_setup_prompt(tmp_path):
     cfg = DaemonConfig(
         workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
         project_dir=str(tmp_path),
@@ -325,19 +343,32 @@ async def test_init_slash_creates_xerxes_md_and_project_agents_layout(tmp_path):
     server = DaemonServer(cfg)
     server.sessions.open("tui:default", "xerxes")
     events: list[tuple[str, dict]] = []
+    captured: list[dict] = []
 
     async def emit(event_type: str, payload: dict) -> None:
         events.append((event_type, payload))
 
-    await server._slash_init("", emit)
+    async def submit_turn(params: dict, emit_fn) -> dict:
+        captured.append(params)
+        return {"ok": True}
 
-    assert (tmp_path / "XERXES.md").is_file()
-    assert (tmp_path / ".agents" / "AGENTS.md").is_file()
+    server._submit_turn = submit_turn  # type: ignore[method-assign]
+    server.runtime.discover_skills = lambda: ["project-skill"]  # type: ignore[method-assign]
+
+    await server._slash_init("focus on CI and local skills", emit)
+
+    assert captured
+    prompt = captured[0]["text"]
+    assert "User request for this init: focus on CI and local skills" in prompt
+    assert "existing `AGENTS.md`, existing `XERXES.md`, existing `.agents/`" in prompt
+    assert "If subagent tools are unavailable, stop and report" in prompt
+    assert "Write or update `XERXES.md` only after the swarm findings are synthesized." in prompt
+    assert "not placeholder skills" in prompt
+    assert not (tmp_path / "XERXES.md").exists()
     assert any(event_type == "init_done" for event_type, _ in events)
-    body = [payload["body"] for event_type, payload in events if event_type == "notification"][-1]
-    assert "Initialized project context" in body
-    assert "`XERXES.md`: created" in body
-    assert "Reloaded runtime context" in body
+    bodies = [payload["body"] for event_type, payload in events if event_type == "notification"]
+    assert any("Project initialization swarm queued" in body for body in bodies)
+    assert bodies[-1] == "Project initialization turn finished. Reloaded 1 skill(s)."
 
 
 @pytest.mark.asyncio
