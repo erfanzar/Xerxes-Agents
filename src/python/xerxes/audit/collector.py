@@ -50,6 +50,8 @@ class AuditCollector(Protocol):
 class InMemoryCollector:
     """Thread-safe in-memory ring of events, primarily for tests."""
 
+    MAX_IN_MEMORY_EVENTS = 10000
+
     def __init__(self) -> None:
         """Start with an empty event list and an internal lock."""
         self._lock = threading.Lock()
@@ -59,6 +61,9 @@ class InMemoryCollector:
         """Append ``event`` to the in-memory list."""
         with self._lock:
             self._events.append(event)
+            if len(self._events) > self.MAX_IN_MEMORY_EVENTS:
+                self._events = self._events[len(self._events) - self.MAX_IN_MEMORY_EVENTS :]
+
 
     def flush(self) -> None:
         """No buffered state; provided for protocol compatibility."""
@@ -115,9 +120,18 @@ class JSONLSinkCollector:
 
     def close(self) -> None:
         """Flush and, if this collector owns the stream, close it."""
+        if self._stream is None:
+            return
         self.flush()
         if self._owns_stream:
             self._stream.close()
+        self._stream = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
 
 
 class CompositeCollector:

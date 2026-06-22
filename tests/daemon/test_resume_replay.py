@@ -98,6 +98,28 @@ class TestSkillActivationDetection:
         assert not DaemonServer._looks_like_skill_activation("[Skill 'foo' something else]")
 
 
+class TestInternalReplayDetection:
+    def test_runtime_injected_messages_are_internal(self):
+        assert DaemonServer._looks_like_internal_replay_message("[sub-agent events]\n[Agent a] -> ReadFile")
+        assert DaemonServer._looks_like_internal_replay_message("[Workspace guard]\nRisky workspace changes detected")
+        assert DaemonServer._looks_like_internal_replay_message("[Objective gate]\nContinue the hard-goal loop")
+        assert DaemonServer._looks_like_internal_replay_message(
+            "[Previous conversation summary - 12 messages compacted]"
+        )
+
+    def test_old_synthetic_slash_prompts_are_internal(self):
+        assert DaemonServer._looks_like_internal_replay_message(
+            "Please compact this conversation: summarise the relevant"
+        )
+        assert DaemonServer._looks_like_internal_replay_message(
+            "Generate an image matching this brief and report the saved"
+        )
+        assert DaemonServer._looks_like_internal_replay_message("Write a reusable agent skill called **`foo`**.")
+
+    def test_real_user_prompt_is_not_internal(self):
+        assert not DaemonServer._looks_like_internal_replay_message("read changes and give me a commit msg")
+
+
 class TestReplaySessionHistory:
     def test_replays_user_and_assistant_turns(self, tmp_path):
         server = _make_server(tmp_path)
@@ -149,6 +171,28 @@ class TestReplaySessionHistory:
         assert not any("Skill 'autoresearch' activated" in b for b in bodies)
         assert any("actually use the fix variant" in b for b in bodies)
         assert any("Switching to /autoresearch:fix" in b for b in bodies)
+
+    def test_skips_runtime_injected_user_messages(self, tmp_path):
+        server = _make_server(tmp_path)
+        session = server.sessions.open("abc12345")
+        session.state.messages = [
+            {"role": "user", "content": "[sub-agent events]\n[Agent fix] -> ReadFile(file_path=x.py)"},
+            {"role": "user", "content": "[Workspace guard]\nRisky workspace changes detected"},
+            {"role": "user", "content": "Please compact this conversation: summarise the relevant context so far"},
+            {"role": "assistant", "content": "Session Summary\n\n- kept the important parts"},
+            {"role": "user", "content": "status?"},
+            {"role": "assistant", "content": "Current Status"},
+        ]
+        recorder = _Recorder()
+        _run(server._replay_session_history(session, recorder))
+
+        bodies = [h["body"] for h in recorder.histories() if h["type"].startswith("replay_")]
+
+        assert not any("sub-agent events" in b for b in bodies)
+        assert not any("Workspace guard" in b for b in bodies)
+        assert not any("Please compact this conversation" in b for b in bodies)
+        assert any("Session Summary" in b for b in bodies)
+        assert any("status?" in b for b in bodies)
 
     def test_empty_session_just_emits_summary(self, tmp_path):
         server = _make_server(tmp_path)

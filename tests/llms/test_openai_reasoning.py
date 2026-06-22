@@ -13,6 +13,7 @@
 # limitations under the License.
 from types import SimpleNamespace
 
+import pytest
 from xerxes.llms.openai import OpenAILLM
 
 
@@ -109,6 +110,7 @@ def test_stream_completion_extracts_reasoning_from_openai_response_events():
     assert chunks[0]["buffered_reasoning_content"] == "Compare candidate approaches."
 
 
+@pytest.mark.asyncio
 async def test_generate_completion_sends_compat_sampling_params_to_extra_body_for_custom_base_url():
     client = _FakeClient()
     llm = OpenAILLM(model="qwen", base_url="http://localhost:11556/v1/", client=client)
@@ -135,6 +137,7 @@ async def test_generate_completion_sends_compat_sampling_params_to_extra_body_fo
     assert result["extra_body"]["chat_template_kwargs"] == {"enable_thinking": True}
 
 
+@pytest.mark.asyncio
 async def test_generate_completion_keeps_compat_sampling_params_off_official_openai_requests():
     client = _FakeClient()
     llm = OpenAILLM(model="gpt-4o-mini", client=client)
@@ -153,6 +156,7 @@ async def test_generate_completion_keeps_compat_sampling_params_off_official_ope
     assert "repetition_penalty" not in result
 
 
+@pytest.mark.asyncio
 async def test_generate_completion_prefers_async_client_when_available():
     sync_client = _FakeClient()
     async_client = _FakeAsyncClient()
@@ -165,6 +169,7 @@ async def test_generate_completion_prefers_async_client_when_available():
     assert sync_client.chat.completions.calls == []
 
 
+@pytest.mark.asyncio
 async def test_generate_completion_wraps_sync_stream_as_async_iterator():
     class _StreamCompletions:
         def create(self, **kwargs):

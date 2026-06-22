@@ -29,11 +29,13 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..bridge import profiles
+from ..context.compaction_provisioner import CompactionProvisioner, compaction_summary_agent_from_config
 from ..context.window_usage import estimate_context_tokens
 from ..core.paths import xerxes_subdir
+from ..llms.registry import get_context_limit
 from ..runtime.project_workspace import ensure_project_agent_workspace, load_project_agent_workspace
 from .gateway import EmitFn
-from .runtime import DaemonSession, RuntimeManager, SessionManager, WorkspaceManager
+from .runtime import DaemonSession, RuntimeManager, SessionManager, WorkspaceManager, render_session_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +222,18 @@ class SlashCommandsMixin:
         runtime_config = getattr(session, "runtime_config", {}) or self.runtime.runtime_config
         model = str(runtime_config.get("model", "")) or self.runtime.model or ""
         limit = get_context_limit(model) if model else 0
-        used = estimate_context_tokens(session.state.messages, model=model)
+        system_prompt = render_session_system_prompt(
+            self.runtime,
+            session,
+            mode=str(getattr(session, "interaction_mode", runtime_config.get("mode", "code")) or "code"),
+            tolerate_errors=True,
+        )
+        used = estimate_context_tokens(
+            session.state.messages,
+            model=model,
+            system_prompt=system_prompt,
+            tool_schemas=self.runtime.tool_schemas,
+        )
         remaining = max(0, limit - used)
         pct = (used / limit * 100) if limit else 0.0
         await self._emit_slash(
@@ -234,19 +247,66 @@ class SlashCommandsMixin:
         await self._emit_slash(emit, "Statusbar visibility is a TUI-side setting.")
 
     async def _slash_compact(self, args: str, emit: EmitFn) -> None:
-        """Compact the conversation by handing it to the agent with a brief.
+        """Force agent-backed compaction of the active session transcript."""
+        session = self._session_for_emit(emit)
+        if session is None:
+            await self._emit_slash(emit, "No active session to compact.")
+            return
+        if len(session.state.messages) < 2:
+            await self._emit_slash(emit, "Nothing to compact.")
+            return
 
-        We don't run a local summariser — the model can do it cleanly inside a
-        normal turn. The synthetic prompt asks the agent to summarise the
-        thread and then continue with whatever comes next.
-        """
-        prompt = (
-            "Please compact this conversation: summarise the relevant context so far "
-            "in 3-6 bullet points (decisions made, open questions, key file paths) "
-            "and then wait for the user's next instruction. Be terse."
+        runtime_config = dict(getattr(session, "runtime_config", {}) or self.runtime.runtime_config)
+        model = str(runtime_config.get("model", "")) or self.runtime.model
+        if not model:
+            await self._emit_slash(emit, "No model configured. Run `/provider` first.")
+            return
+
+        context_limit = int(
+            runtime_config.get("max_context_tokens")
+            or runtime_config.get("context_limit")
+            or runtime_config.get("max_context")
+            or get_context_limit(model)
+            or 128_000
         )
-        await self._submit_turn({"text": prompt, "_internal_slash": True}, emit)
-        await self._emit_slash(emit, "Compaction turn queued.")
+        threshold_tokens = runtime_config.get("compaction_threshold_tokens")
+        target_tokens = runtime_config.get("compaction_target_tokens")
+        provisioner = CompactionProvisioner(
+            model=model,
+            max_context_tokens=context_limit,
+            threshold_tokens=int(threshold_tokens) if threshold_tokens is not None else None,
+            target_tokens=int(target_tokens) if target_tokens is not None else None,
+            threshold_ratio=float(runtime_config.get("compaction_threshold", 0.75)),
+            target_ratio=float(runtime_config.get("compaction_target", 0.5)),
+            summary_agent=compaction_summary_agent_from_config(model, runtime_config),
+        )
+
+        original_count = len(session.state.messages)
+        result = await asyncio.to_thread(provisioner.compact, session.state.messages, force=True)
+        if not result.compacted:
+            detail = f" ({result.error})" if result.error else ""
+            await self._emit_slash(emit, f"Compaction skipped: {result.reason or 'nothing_to_compact'}{detail}.")
+            return
+
+        session.state.messages = result.messages
+        session.state.metadata["last_compaction"] = {
+            "tokens_before": result.tokens_before,
+            "tokens_after": result.tokens_after,
+            "summarized_count": result.summarized_count,
+            "kept_count": result.kept_count,
+            "max_context_tokens": context_limit,
+        }
+        try:
+            self.sessions.save(session)
+        except Exception as exc:
+            logger.warning("Failed to persist compacted session %s: %s", session.id, exc)
+
+        await self._emit_slash(
+            emit,
+            f"Compacted {original_count} messages -> {len(session.state.messages)} messages. "
+            f"Tokens: {result.tokens_before:,} -> {result.tokens_after:,}.",
+        )
+        await self._emit_status(emit)
 
     async def _slash_update(self, args: str, emit: EmitFn) -> None:
         """Show the installed Xerxes version and release/git update status."""

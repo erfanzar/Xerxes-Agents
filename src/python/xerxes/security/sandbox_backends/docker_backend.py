@@ -14,7 +14,7 @@
 """Docker-based sandbox backend.
 
 Runs the target callable inside a ``docker run --rm -i`` invocation
-against a configured image. The pickled ``(func, args)`` payload is
+against a configured image. The JSON-serialized ``(func, args)`` payload is
 piped over stdin, the JSON result comes back on stdout. Provides
 strong isolation (rootless filesystem, memory cap, optional ``--network
 none``) for any tool the model can call. Falls back gracefully when
@@ -26,7 +26,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import pickle
 import subprocess
 import typing as tp
 
@@ -34,14 +33,40 @@ from ..sandbox import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
+
+def _json_object_hook(obj: dict) -> tp.Any:
+    """Restore special types serialized by the container runner."""
+    t = obj.get("__type__")
+    if t == "bytes":
+        return base64.b64decode(obj["data"])
+    if t == "datetime":
+        from datetime import datetime
+
+        return datetime.fromisoformat(obj["iso"])
+    return obj
+
+
 _CONTAINER_RUNNER = """\
-import base64, json, pickle, sys
+import base64, importlib, functools, json, sys
+from datetime import datetime
+
+def _json_default(obj):
+    if isinstance(obj, bytes):
+        return {"__type__": "bytes", "data": base64.b64encode(obj).decode("utf-8")}
+    if isinstance(obj, datetime):
+        return {"__type__": "datetime", "iso": obj.isoformat()}
+    if isinstance(obj, set):
+        return list(obj)
+    return repr(obj)
 
 payload = base64.b64decode(sys.stdin.read())
-func, args = pickle.loads(payload)
+data = json.loads(payload)
+mod = importlib.import_module(data["func_module"])
+func = functools.reduce(getattr, data["func_name"].split('.'), mod)
+args = data["args"]
 try:
     result = func(**args)
-    out = json.dumps({"ok": True, "value": result}, default=repr)
+    out = json.dumps({"ok": True, "value": result}, default=_json_default)
 except Exception as exc:
     out = json.dumps({"ok": False, "error": str(exc), "type": type(exc).__name__})
 sys.stdout.write(base64.b64encode(out.encode("utf-8")).decode())
@@ -58,14 +83,25 @@ class DockerSandboxBackend:
         self._backend_config = sandbox_config.backend_config
 
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
-        """Pickle ``(func, arguments)``, run it in a container, return the value.
+        """Serialize ``(func, arguments)``, run it in a container, return the value.
 
         Raises ``RuntimeError`` on timeout, non-zero ``docker run`` exit,
         a result-decoding failure, or when the wrapped callable raises
         inside the container."""
 
-        payload = pickle.dumps((func, arguments))
-        encoded_payload = base64.b64encode(payload).decode()
+        func_module = getattr(func, "__module__", None)
+        func_name = getattr(func, "__qualname__", None)
+        if not isinstance(func_module, str) or not isinstance(func_name, str):
+            raise ValueError("Cannot sandbox lambda/partial/built-in functions.")
+
+        payload = json.dumps(
+            {
+                "func_module": func_module,
+                "func_name": func_name,
+                "args": arguments,
+            }
+        )
+        encoded_payload = base64.b64encode(payload.encode("utf-8")).decode()
 
         cmd = self._build_docker_command(tool_name)
         logger.debug("Docker sandbox executing tool %r: %s", tool_name, " ".join(cmd))
@@ -90,7 +126,7 @@ class DockerSandboxBackend:
 
         try:
             result_bytes = base64.b64decode(proc.stdout)
-            result_data: dict = json.loads(result_bytes.decode("utf-8"))
+            result_data: dict = json.loads(result_bytes.decode("utf-8"), object_hook=_json_object_hook)
         except Exception as exc:
             raise RuntimeError(f"Failed to deserialise sandbox result for tool {tool_name!r}: {exc}") from exc
 

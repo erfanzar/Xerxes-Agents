@@ -15,7 +15,7 @@
 
 Runs the target callable in a fresh Python interpreter spawned via
 ``subprocess.run``. The child inherits no Python objects from the
-parent — payload is pickled into base64, the child unpickles and
+parent — payload is JSON-serialized into base64, the child deserializes and
 invokes the callable, and the result is base64-encoded JSON back.
 Provides process isolation, a wall-clock timeout, and (on POSIX)
 an ``RLIMIT_AS`` memory cap; it does NOT provide filesystem or
@@ -28,7 +28,6 @@ import base64
 import json
 import logging
 import os
-import pickle
 import subprocess
 import sys
 import typing as tp
@@ -37,8 +36,31 @@ from ..sandbox import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
+
+def _json_object_hook(obj: dict) -> tp.Any:
+    """Restore special types serialized by the child script."""
+    t = obj.get("__type__")
+    if t == "bytes":
+        return base64.b64decode(obj["data"])
+    if t == "datetime":
+        from datetime import datetime
+
+        return datetime.fromisoformat(obj["iso"])
+    return obj
+
+
 _CHILD_SCRIPT = """\
-import base64, json, os, pickle, sys
+import base64, importlib, functools, json, os, sys
+from datetime import datetime
+
+def _json_default(obj):
+    if isinstance(obj, bytes):
+        return {"__type__": "bytes", "data": base64.b64encode(obj).decode("utf-8")}
+    if isinstance(obj, datetime):
+        return {"__type__": "datetime", "iso": obj.isoformat()}
+    if isinstance(obj, set):
+        return list(obj)
+    return repr(obj)
 
 mem_limit = os.environ.get("_XERXES_MEM_LIMIT_BYTES")
 if mem_limit:
@@ -50,10 +72,13 @@ if mem_limit:
         pass
 
 payload = base64.b64decode(sys.stdin.read())
-func, args = pickle.loads(payload)
+data = json.loads(payload)
+mod = importlib.import_module(data["func_module"])
+func = functools.reduce(getattr, data["func_name"].split('.'), mod)
+args = data["args"]
 try:
     result = func(**args)
-    out = json.dumps({"ok": True, "value": result}, default=repr)
+    out = json.dumps({"ok": True, "value": result}, default=_json_default)
 except Exception as exc:
     out = json.dumps({"ok": False, "error": str(exc), "type": type(exc).__name__})
 sys.stdout.write(base64.b64encode(out.encode("utf-8")).decode())
@@ -69,13 +94,24 @@ class SubprocessSandboxBackend:
         self._config = sandbox_config
 
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
-        """Pickle ``func``/``arguments`` into a child, return the result.
+        """Serialize ``func``/``arguments`` into a child, return the result.
 
         Raises ``RuntimeError`` on timeout, non-zero exit, decoding failure,
         or if the child reports the wrapped callable raised."""
 
-        payload = pickle.dumps((func, arguments))
-        encoded_payload = base64.b64encode(payload).decode()
+        func_module = getattr(func, "__module__", None)
+        func_name = getattr(func, "__qualname__", None)
+        if not isinstance(func_module, str) or not isinstance(func_name, str):
+            raise ValueError("Cannot sandbox lambda/partial/built-in functions.")
+
+        payload = json.dumps(
+            {
+                "func_module": func_module,
+                "func_name": func_name,
+                "args": arguments,
+            }
+        )
+        encoded_payload = base64.b64encode(payload.encode("utf-8")).decode()
 
         env = os.environ.copy()
         mem_bytes = self._config.sandbox_memory_limit_mb * 1024 * 1024
@@ -109,7 +145,7 @@ class SubprocessSandboxBackend:
 
         try:
             result_bytes = base64.b64decode(proc.stdout)
-            result_data: dict = json.loads(result_bytes.decode("utf-8"))
+            result_data: dict = json.loads(result_bytes.decode("utf-8"), object_hook=_json_object_hook)
         except Exception as exc:
             raise RuntimeError(f"Failed to deserialise subprocess sandbox result for tool {tool_name!r}: {exc}") from exc
 

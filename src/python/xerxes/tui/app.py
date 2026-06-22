@@ -53,15 +53,18 @@ from .skin_engine import active_fg, get_active_skin, hex_to_rgb
 logger = logging.getLogger(__name__)
 
 
-def _git_branch(cwd: str | None = None) -> str:
+async def _git_branch(cwd: str | None = None) -> str:
     """Return the active git branch under ``cwd`` (empty on any failure)."""
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=cwd,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
+        return (
+            await asyncio.to_thread(
+                subprocess.check_output,
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=cwd,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
         ).strip()
     except Exception:
         return ""
@@ -319,10 +322,10 @@ class XerxesTUI:
 
         cwd = os.getcwd()
         self._client = BridgeClient(python_executable=self._python_executable, project_dir=cwd)
-        self._client.spawn()
+        await self._client.spawn()
 
         provisional_session = uuid.uuid4().hex[:8]
-        provisional_branch = _git_branch(cwd)
+        provisional_branch = await _git_branch(cwd)
 
         self._prompt = PersistentPrompt(
             on_slash=self._handle_slash,
@@ -361,6 +364,7 @@ class XerxesTUI:
         self._tasks = [consumer, prompt_task]
         if self._model_load_task is not None:
             self._tasks.append(self._model_load_task)
+        self._cleanup_tasks()
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -547,7 +551,11 @@ class XerxesTUI:
         elif isinstance(event, TurnBegin):
             self._on_turn_begin()
         elif isinstance(event, TurnEnd):
-            self._on_turn_end()
+            try:
+                self._on_turn_end()
+            finally:
+                self._turn_done_event.set()
+            return
         elif isinstance(event, StepBegin):
             self._on_step_begin(event.n)
         elif isinstance(event, ToolCall):
@@ -614,6 +622,10 @@ class XerxesTUI:
         if self._prompt:
             self._prompt.commit_streaming()
             self._prompt.clear_thinking()
+            # Drop any agent lanes that outlived their spawn (e.g. a spawn that
+            # errored, or fire-and-forget agents) so the dashboard never leaks
+            # into the next turn.
+            self._prompt.clear_subagent_previews()
             if self._approval_panel is not None:
                 self._prompt.clear_active_approval()
             self._prompt.set_running(False)
@@ -718,6 +730,13 @@ class XerxesTUI:
             if self._prompt:
                 self._prompt.commit_active_tool(tool_call_id, block.compose())
                 self._prompt.set_spinner_label(self._spinner_verb(1))
+                # A blocking spawn tool only returns once its agents are done —
+                # resolve that spawn's dashboard into a committed summary so it
+                # doesn't sit there static while the main agent synthesizes. Scoped
+                # to this tool_call_id so a different spawn's lanes are untouched.
+                # (TaskCreateTool is fire-and-forget — its agent keeps running.)
+                if block.name in {"AgentTool", "SpawnAgents", "PlanTool"}:
+                    self._prompt.collapse_agent_dashboard(tool_call_id)
 
         if todo_strings is not None and self._prompt:
             if todo_strings:
@@ -964,6 +983,7 @@ class XerxesTUI:
                 count=int(payload.get("count") or 0),
                 action=str(payload.get("action") or (event.body or "")),
                 result=str(payload.get("result") or ""),
+                parent=str(payload.get("parent") or ""),
             )
             return
 
@@ -992,6 +1012,8 @@ class XerxesTUI:
             body=event.body,
         )
         self._notification_history.append(block)
+        if len(self._notification_history) > 1000:
+            self._notification_history = self._notification_history[-1000:]
         if self._prompt:
             self._prompt.append_line(block.compose())
 
@@ -1111,6 +1133,7 @@ class XerxesTUI:
         self._active_model = event.model or self._model
         self._model_load_task = asyncio.create_task(self._load_models())
         self._tasks.append(self._model_load_task)
+        self._cleanup_tasks()
 
         if self._banner_start >= 0 and self._banner_line_count > 0 and event.session_id:
             cwd = event.cwd or self._banner_cwd
@@ -1188,6 +1211,11 @@ class XerxesTUI:
         self._turn_task = asyncio.create_task(self._run_turns(text))
         self._turn_task.add_done_callback(self._on_turn_task_done)
         self._tasks.append(self._turn_task)
+        self._cleanup_tasks()
+
+    def _cleanup_tasks(self) -> None:
+        """Remove done/cancelled tasks from the task list to prevent unbounded growth."""
+        self._tasks = [t for t in self._tasks if not t.done()]
 
     async def _run_turns(self, text: str) -> None:
         """Drive turns serially, draining the queued inputs FIFO after each one.
@@ -1216,7 +1244,16 @@ class XerxesTUI:
                     plan_mode=turn_plan_mode,
                     mode=self._current_interaction_mode(),
                 )
-                await self._turn_done_event.wait()
+                await asyncio.wait_for(self._turn_done_event.wait(), timeout=900.0)
+            except TimeoutError as exc:
+                self._approval_panel = None
+                self._current_request_id = None
+                self._pending_approval_request_id = None
+                if self._prompt:
+                    self._prompt.clear_active_approval()
+                    self._prompt.set_running(False)
+                    self._prompt.append_line(f"{active_fg('error')}Turn timed out waiting for completion: {exc}\x1b[39m")
+                break
             except Exception as exc:
                 self._approval_panel = None
                 self._current_request_id = None
@@ -1421,7 +1458,7 @@ class XerxesTUI:
         # Re-spawn the daemon and reconnect
         if self._client:
             try:
-                self._client.spawn()
+                await self._client.spawn()
                 await self._client.initialize(
                     model=self._model,
                     base_url=self._base_url,
@@ -1612,9 +1649,10 @@ class XerxesTUI:
             await asyncio.to_thread(old_client.close)
 
         self._client = BridgeClient(python_executable=self._python_executable, project_dir=os.getcwd())
-        self._client.spawn()
+        await self._client.spawn()
         consumer = asyncio.create_task(self._event_consumer())
         self._tasks.append(consumer)
+        self._cleanup_tasks()
         await self._client.initialize(
             model=self._model,
             base_url=self._base_url,

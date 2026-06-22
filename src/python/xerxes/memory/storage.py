@@ -14,16 +14,17 @@
 """Pluggable key/value backends used by the memory tiers.
 
 Defines the ``MemoryStorage`` ABC and four concrete implementations:
-``SimpleStorage`` (in-process dict), ``FileStorage`` (pickle files
+``SimpleStorage`` (in-process dict), ``FileStorage`` (JSON files
 under a directory), ``SQLiteStorage`` (SQLite with a ``WRITE_MEMORY``
 env guard), and ``RAGStorage`` (decorator that adds embedding-based
 semantic search on top of any other backend)."""
 
+import base64
 import hashlib
 import json
 import logging
-import pickle
 import sqlite3
+import threading
 import typing as tp
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -31,6 +32,20 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj: Any) -> Any:
+    """JSON encoder fallback for non-serialisable types."""
+    if isinstance(obj, bytes):
+        return {"__type__": "bytes", "data": base64.b64encode(obj).decode("ascii")}
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def _json_object_hook(obj: dict[str, Any]) -> Any:
+    """JSON decoder hook that restores bytes objects encoded by _json_default."""
+    if obj.get("__type__") == "bytes":
+        return base64.b64decode(obj["data"])
+    return obj
 
 
 class MemoryStorage(ABC):
@@ -146,9 +161,9 @@ class SimpleStorage(MemoryStorage):
 
 
 class FileStorage(MemoryStorage):
-    """Disk-backed pickle store with an MD5-hashed filename index.
+    """Disk-backed JSON store with an MD5-hashed filename index.
 
-    Each row is pickled to ``<storage_dir>/<md5>.pkl`` and the
+    Each row is serialised to JSON at ``<storage_dir>/<md5>.json`` and the
     key-to-filename map is kept in ``_index.json`` for fast lookup
     and listing."""
 
@@ -158,64 +173,73 @@ class FileStorage(MemoryStorage):
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._index_file = self.storage_dir / "_index.json"
+        self._lock = threading.Lock()
         self._index = self._load_index()
 
     def _load_index(self) -> dict[str, str]:
         """Load the JSON key->filename index from disk, or return empty."""
 
-        if self._index_file.exists():
-            with open(self._index_file, "r") as f:
-                return json.load(f)
-        return {}
+        with self._lock:
+            if self._index_file.exists():
+                try:
+                    with open(self._index_file, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except json.JSONDecodeError:
+                    logger.warning("Corrupt index file %s; starting fresh", self._index_file)
+                    return {}
+            return {}
 
     def _save_index(self) -> None:
         """Write the in-memory key->filename index back to disk."""
 
-        with open(self._index_file, "w") as f:
+        with open(self._index_file, "w", encoding="utf-8") as f:
             json.dump(self._index, f)
 
     def _get_file_path(self, key: str) -> Path:
-        """Return the deterministic pickle path for ``key`` (MD5-named)."""
+        """Return the deterministic JSON path for ``key`` (MD5-named)."""
 
         key_hash = hashlib.md5(key.encode()).hexdigest()
-        return self.storage_dir / f"{key_hash}.pkl"
+        return self.storage_dir / f"{key_hash}.json"
 
     def save(self, key: str, data: Any) -> bool:
-        """Pickle ``data`` to disk and update the index; swallow IO errors."""
+        """JSON-serialise ``data`` to disk and update the index; swallow IO errors."""
 
-        try:
-            file_path = self._get_file_path(key)
-            with open(file_path, "wb") as f:
-                pickle.dump(data, f)
-            self._index[key] = str(file_path.name)
-            self._save_index()
-            return True
-        except Exception:
-            logger.warning("SimpleStorage.save failed for key=%s", key, exc_info=True)
-            return False
+        with self._lock:
+            try:
+                file_path = self._get_file_path(key)
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, default=_json_default)
+                self._index[key] = str(file_path.name)
+                self._save_index()
+                return True
+            except Exception:
+                logger.warning("FileStorage.save failed for key=%s", key, exc_info=True)
+                return False
 
     def load(self, key: str) -> Any | None:
-        """Unpickle the row stored at ``key`` or return ``None``."""
+        """JSON-deserialise the row stored at ``key`` or return ``None``."""
 
-        if key not in self._index:
+        with self._lock:
+            if key not in self._index:
+                return None
+            file_path = self.storage_dir / self._index[key]
+            if file_path.exists():
+                with open(file_path, "r", encoding="utf-8") as f:
+                    return json.load(f, object_hook=_json_object_hook)
             return None
-        file_path = self.storage_dir / self._index[key]
-        if file_path.exists():
-            with open(file_path, "rb") as f:
-                return pickle.load(f)
-        return None
 
     def delete(self, key: str) -> bool:
-        """Unlink the pickle file for ``key`` and remove it from the index."""
+        """Unlink the JSON file for ``key`` and remove it from the index."""
 
-        if key not in self._index:
-            return False
-        file_path = self.storage_dir / self._index[key]
-        if file_path.exists():
-            file_path.unlink()
-        del self._index[key]
-        self._save_index()
-        return True
+        with self._lock:
+            if key not in self._index:
+                return False
+            file_path = self.storage_dir / self._index[key]
+            if file_path.exists():
+                file_path.unlink()
+            del self._index[key]
+            self._save_index()
+            return True
 
     def exists(self, key: str) -> bool:
         """Return True when ``key`` is present in the index."""
@@ -233,17 +257,22 @@ class FileStorage(MemoryStorage):
     def clear(self) -> int:
         """Delete every row tracked by the index and return the count."""
 
-        count = 0
-        for key in list(self._index.keys()):
-            if self.delete(key):
+        with self._lock:
+            count = 0
+            for key in list(self._index.keys()):
+                file_path = self.storage_dir / self._index[key]
+                if file_path.exists():
+                    file_path.unlink()
                 count += 1
-        return count
+            self._index.clear()
+            self._save_index()
+            return count
 
 
 class SQLiteStorage(MemoryStorage):
     """SQLite-backed store gated by the ``WRITE_MEMORY`` env flag.
 
-    When ``WRITE_MEMORY=1`` is set the store writes pickled blobs to a
+    When ``WRITE_MEMORY=1`` is set the store writes JSON blobs to a
     SQLite file at ``db_path``; otherwise it transparently degrades to
     an in-process dict so the rest of the memory subsystem keeps
     functioning during read-only sessions and tests."""
@@ -253,6 +282,7 @@ class SQLiteStorage(MemoryStorage):
 
         import os
 
+        self._lock = threading.Lock()
         self.write_enabled = os.environ.get("WRITE_MEMORY", "0") == "1"
 
         self.db_path = Path(db_path)
@@ -287,11 +317,12 @@ class SQLiteStorage(MemoryStorage):
         """Insert-or-replace the row; route to the dict fallback when not write-enabled."""
 
         if not self.write_enabled:
-            self._memory_storage[key] = data
-            return True
+            with self._lock:
+                self._memory_storage[key] = data
+                return True
 
         try:
-            serialized = pickle.dumps(data)
+            serialized = json.dumps(data, default=_json_default).encode("utf-8")
             now = datetime.now()
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -308,26 +339,28 @@ class SQLiteStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> Any | None:
-        """Unpickle the row at ``key``; return ``None`` if absent."""
+        """JSON-deserialise the row at ``key``; return ``None`` if absent."""
 
         if not self.write_enabled:
-            return self._memory_storage.get(key)
+            with self._lock:
+                return self._memory_storage.get(key)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT data FROM memory WHERE key = ?", (key,))
             row = cursor.fetchone()
             if row:
-                return pickle.loads(row[0])
+                return json.loads(row[0].decode("utf-8"), object_hook=_json_object_hook)
         return None
 
     def delete(self, key: str) -> bool:
         """Delete the row; return True iff one was removed."""
 
         if not self.write_enabled:
-            if key in self._memory_storage:
-                del self._memory_storage[key]
-                return True
-            return False
+            with self._lock:
+                if key in self._memory_storage:
+                    del self._memory_storage[key]
+                    return True
+                return False
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("DELETE FROM memory WHERE key = ?", (key,))
@@ -338,7 +371,8 @@ class SQLiteStorage(MemoryStorage):
         """Return True when a row exists for ``key``."""
 
         if not self.write_enabled:
-            return key in self._memory_storage
+            with self._lock:
+                return key in self._memory_storage
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT 1 FROM memory WHERE key = ? LIMIT 1", (key,))
@@ -348,15 +382,17 @@ class SQLiteStorage(MemoryStorage):
         """Return keys (newest first), optionally filtered by substring."""
 
         if not self.write_enabled:
-            keys = list(self._memory_storage.keys())
-            if pattern:
-                keys = [k for k in keys if pattern in k]
-            return keys
+            with self._lock:
+                keys = list(self._memory_storage.keys())
+                if pattern:
+                    keys = [k for k in keys if pattern in k]
+                return keys
 
         with sqlite3.connect(self.db_path) as conn:
             if pattern:
+                escaped = pattern.replace("%", "\\%").replace("_", "\\_")
                 cursor = conn.execute(
-                    "SELECT key FROM memory WHERE key LIKE ? ORDER BY created_at DESC", (f"%{pattern}%",)
+                    "SELECT key FROM memory WHERE key LIKE ? ESCAPE '\\' ORDER BY created_at DESC", (f"%{escaped}%",)
                 )
             else:
                 cursor = conn.execute("SELECT key FROM memory ORDER BY created_at DESC")
@@ -366,9 +402,10 @@ class SQLiteStorage(MemoryStorage):
         """Truncate the table and return the row count that was removed."""
 
         if not self.write_enabled:
-            count = len(self._memory_storage)
-            self._memory_storage.clear()
-            return count
+            with self._lock:
+                count = len(self._memory_storage)
+                self._memory_storage.clear()
+                return count
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM memory")
@@ -407,6 +444,7 @@ class RAGStorage(MemoryStorage):
             embedding_api_key: Optional API key override for OpenAI.
             embedder: Pre-built embedder object (takes precedence)."""
 
+        self._lock = threading.Lock()
         self.backend = backend or SimpleStorage()
         self.embeddings: dict[str, list[float]] = {}
         self._embedding_model_name = embedding_model
@@ -554,7 +592,8 @@ class RAGStorage(MemoryStorage):
                 text = str(data)
             try:
                 vec = self._compute_embedding(text)
-                self.embeddings[key] = vec
+                with self._lock:
+                    self.embeddings[key] = vec
                 try:
                     self.backend.save(self.EMBEDDING_KEY_PREFIX + key, vec)
                 except Exception:
@@ -646,12 +685,13 @@ class RAGStorage(MemoryStorage):
         query_embedding = self._compute_embedding(query)
         results = []
 
-        for key, embedding in self.embeddings.items():
-            similarity = self._cosine_similarity(query_embedding, embedding)
-            if similarity >= threshold:
-                data = self.backend.load(key)
-                if data:
-                    results.append((key, similarity, data))
+        with self._lock:
+            for key, embedding in self.embeddings.items():
+                similarity = self._cosine_similarity(query_embedding, embedding)
+                if similarity >= threshold:
+                    data = self.backend.load(key)
+                    if data:
+                        results.append((key, similarity, data))
 
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]

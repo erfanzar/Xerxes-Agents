@@ -13,10 +13,12 @@
 # limitations under the License.
 from __future__ import annotations
 
+import pytest
 from xerxes.llms.anthropic import AnthropicLLM
 from xerxes.llms.ollama import OllamaLLM
 
 
+@pytest.mark.asyncio
 async def test_ollama_generate_completion_stream_returns_async_iterator(monkeypatch):
     monkeypatch.setattr(OllamaLLM, "fetch_model_info", lambda self: {})
 
@@ -28,6 +30,7 @@ async def test_ollama_generate_completion_stream_returns_async_iterator(monkeypa
     await llm.close()
 
 
+@pytest.mark.asyncio
 async def test_anthropic_generate_completion_stream_returns_async_iterator(monkeypatch):
     monkeypatch.setattr(AnthropicLLM, "fetch_model_info", lambda self: {})
 

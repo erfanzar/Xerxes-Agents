@@ -44,6 +44,7 @@ from ..context.compaction_provisioner import (
     CompactionProvisioner,
     compaction_summary_agent_from_config,
 )
+from ..context.window_usage import estimate_request_overhead_tokens
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.iteration_budget import iteration_budget_from_config
@@ -226,7 +227,69 @@ def _parse_thinking_tags(
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_STREAM_EXCEPTIONS: tuple[type[Exception], ...] = (ConnectionError, TimeoutError)
+try:
+    import openai
+
+    _RETRYABLE_STREAM_EXCEPTIONS += (openai.APIError,)
+except Exception:
+    pass
+try:
+    import httpx
+
+    _RETRYABLE_STREAM_EXCEPTIONS += (httpx.HTTPError,)
+except Exception:
+    pass
+
 _DEFAULT_CONTEXT_LIMIT = 128_000
+_DEFAULT_CONTEXT_SAFETY_TOKENS = 4_096
+_REQUEST_OVERHEAD_TOKENS_CONFIG_KEY = "_request_overhead_tokens"
+_CONTEXT_LIMIT_ERROR_MARKERS = (
+    "exceeded model token limit",
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+)
+
+
+def _is_context_limit_error(exc: Exception) -> bool:
+    """Return true for provider errors that cannot succeed by retrying unchanged."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _CONTEXT_LIMIT_ERROR_MARKERS)
+
+
+def _context_safety_tokens(config: dict[str, Any], *, max_context_tokens: int | None = None) -> int:
+    """Return the reserved token headroom before the provider hard limit."""
+    explicit = "context_safety_tokens" in config or "context_reserve_tokens" in config
+    raw = config.get("context_safety_tokens", config.get("context_reserve_tokens", _DEFAULT_CONTEXT_SAFETY_TOKENS))
+    try:
+        reserve = max(0, int(raw))
+    except (TypeError, ValueError):
+        reserve = _DEFAULT_CONTEXT_SAFETY_TOKENS
+    if max_context_tokens is None:
+        return reserve
+    max_reserve = max(0, max_context_tokens - 1)
+    if not explicit:
+        max_reserve = min(max_reserve, max(0, int(max_context_tokens * 0.1)))
+    return min(reserve, max_reserve)
+
+
+def _request_overhead_tokens(config: dict[str, Any]) -> int:
+    """Return tokens for request scaffolding outside ``state.messages``."""
+    try:
+        return max(0, int(config.get(_REQUEST_OVERHEAD_TOKENS_CONFIG_KEY) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _effective_context_limit(provisioner: CompactionProvisioner, config: dict[str, Any]) -> int:
+    """Return the request limit after reserving tokenizer/provider slack."""
+    return max(
+        1,
+        provisioner.max_context_tokens
+        - _context_safety_tokens(config, max_context_tokens=provisioner.max_context_tokens),
+    )
 
 
 def _compaction_provisioner(
@@ -292,15 +355,21 @@ def _compact_before_append(
 ) -> bool:
     """Compact existing context before appending ``messages`` when needed."""
     provisioner = _compaction_provisioner(config=config, model=model)
-    provision = provisioner.compact_before_append(state.messages, messages)
+    overhead_tokens = _request_overhead_tokens(config)
+    tokens_before = overhead_tokens + provisioner.count_tokens([*state.messages, *messages])
+    trigger_tokens = min(provisioner.threshold_tokens, _effective_context_limit(provisioner, config))
+    if tokens_before < trigger_tokens:
+        return False
+    provision = provisioner.compact(state.messages, force=True)
     if not provision.compacted:
         return False
     state.messages = provision.messages
     state.total_input_tokens = 0
     state.total_output_tokens = 0
     state.metadata["last_compaction"] = {
-        "tokens_before": provision.tokens_before,
-        "tokens_after": provision.tokens_after,
+        "tokens_before": tokens_before,
+        "tokens_after": overhead_tokens + provisioner.count_tokens([*provision.messages, *messages]),
+        "request_overhead_tokens": overhead_tokens,
         "summarized_count": provision.summarized_count,
         "kept_count": provision.kept_count,
     }
@@ -322,44 +391,58 @@ def _provision_context_window(
     next provider request.
     """
     provisioner = _compaction_provisioner(config=config, model=model)
-    tokens_before = provisioner.count_tokens(state.messages)
-    if not force and tokens_before < provisioner.threshold_tokens:
+    overhead_tokens = _request_overhead_tokens(config)
+    effective_limit = _effective_context_limit(provisioner, config)
+    message_tokens_before = provisioner.count_tokens(state.messages)
+    tokens_before = overhead_tokens + message_tokens_before
+    trigger_tokens = min(provisioner.threshold_tokens, effective_limit)
+    if not force and tokens_before < trigger_tokens:
         return {
             "compacted": False,
             "blocked": False,
             "tokens_before": tokens_before,
             "tokens_after": tokens_before,
             "max_context_tokens": provisioner.max_context_tokens,
+            "effective_context_tokens": effective_limit,
+            "request_overhead_tokens": overhead_tokens,
             "reason": "below_threshold",
         }
 
-    provision = provisioner.compact(state.messages, force=force)
+    provision = provisioner.compact(state.messages, force=force or tokens_before >= effective_limit)
     if provision.compacted:
         state.messages = provision.messages
         state.total_input_tokens = 0
         state.total_output_tokens = 0
+        tokens_after = overhead_tokens + provision.tokens_after
         state.metadata["last_compaction"] = {
-            "tokens_before": provision.tokens_before,
-            "tokens_after": provision.tokens_after,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "request_overhead_tokens": overhead_tokens,
             "summarized_count": provision.summarized_count,
             "kept_count": provision.kept_count,
             "max_context_tokens": provisioner.max_context_tokens,
+            "effective_context_tokens": effective_limit,
         }
         return {
             "compacted": True,
-            "blocked": False,
-            "tokens_before": provision.tokens_before,
-            "tokens_after": provision.tokens_after,
+            "blocked": tokens_after >= effective_limit,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
             "max_context_tokens": provisioner.max_context_tokens,
+            "effective_context_tokens": effective_limit,
+            "request_overhead_tokens": overhead_tokens,
             "reason": provision.reason,
         }
 
+    tokens_after = overhead_tokens + provision.tokens_after
     return {
         "compacted": False,
-        "blocked": tokens_before >= provisioner.max_context_tokens,
+        "blocked": tokens_before >= effective_limit or tokens_after >= effective_limit,
         "tokens_before": tokens_before,
-        "tokens_after": provision.tokens_after,
+        "tokens_after": tokens_after,
         "max_context_tokens": provisioner.max_context_tokens,
+        "effective_context_tokens": effective_limit,
+        "request_overhead_tokens": overhead_tokens,
         "reason": provision.reason,
         "error": provision.error,
     }
@@ -688,6 +771,7 @@ def run(
 
     from xerxes.llms.registry import get_provider_config, resolve_provider
 
+    config = dict(config)
     state.metadata["model"] = config.get("model", "")
     _capture_runtime_workflow_memory(user_message, config=config, depth=depth)
 
@@ -700,6 +784,12 @@ def run(
     except KeyError:
         provider_name = "openai"
         provider_cfg = get_provider_config("openai")
+
+    config[_REQUEST_OVERHEAD_TOKENS_CONFIG_KEY] = estimate_request_overhead_tokens(
+        model=model,
+        system_prompt=system_prompt,
+        tool_schemas=tool_schemas or [],
+    )
 
     initial_user_message = {"role": "user", "content": user_message}
     precompacted_initial = _append_model_visible_messages(
@@ -743,13 +833,13 @@ def run(
                 "\n[Context compacted before the next provider request "
                 f"({context_provision['tokens_before']:,} → {context_provision['tokens_after']:,} tokens).]\n"
             )
-        elif context_provision["blocked"]:
+        if context_provision["blocked"]:
             reason = str(context_provision.get("reason") or "compaction_unavailable")
             detail = str(context_provision.get("error") or "")
             suffix = f" ({detail})" if detail else ""
             yield TextChunk(
                 "\n[Stopped: context window "
-                f"({context_provision['tokens_before']:,}/{context_provision['max_context_tokens']:,} tokens) "
+                f"({context_provision['tokens_after']:,}/{context_provision['max_context_tokens']:,} tokens) "
                 f"exceeded and compaction could not reduce it: {reason}{suffix}.]"
             )
             yield TurnDone(
@@ -842,8 +932,11 @@ def run(
                 _last_error = None
                 _stream_succeeded = True
                 break  # Success — exit retry loop
-            except Exception as e:
+            except _RETRYABLE_STREAM_EXCEPTIONS as e:
                 _last_error = e
+                if _is_context_limit_error(e):
+                    logger.error("LLM request exceeded the model context window: %s", e)
+                    break
                 if _retry_attempt < _MAX_RETRIES:
                     delay = LLM_STREAM_RETRY_DELAYS[_retry_attempt]
                     logger.warning(
@@ -1105,13 +1198,13 @@ def run(
                 "\n[Context compacted after tool results "
                 f"({post_tool_context['tokens_before']:,} → {post_tool_context['tokens_after']:,} tokens).]\n"
             )
-        elif post_tool_context["blocked"]:
+        if post_tool_context["blocked"]:
             reason = str(post_tool_context.get("reason") or "compaction_unavailable")
             detail = str(post_tool_context.get("error") or "")
             suffix = f" ({detail})" if detail else ""
             yield TextChunk(
                 "\n[Stopped: context window "
-                f"({post_tool_context['tokens_before']:,}/{post_tool_context['max_context_tokens']:,} tokens) "
+                f"({post_tool_context['tokens_after']:,}/{post_tool_context['max_context_tokens']:,} tokens) "
                 f"exceeded after tool results and compaction could not reduce it: {reason}{suffix}.]"
             )
             yield TurnDone(
@@ -1431,10 +1524,11 @@ def _stream_openai_compat(
     default_headers = provider_default_headers(provider_name)
     if default_headers:
         client_kwargs["default_headers"] = default_headers
+    http_client = None
     if explicit_base_url:
         import httpx
 
-        client_kwargs["http_client"] = httpx.Client(
+        http_client = httpx.Client(
             timeout=httpx.Timeout(
                 timeout,
                 connect=min(timeout, _request_connect_timeout(config)),
@@ -1442,190 +1536,203 @@ def _stream_openai_compat(
             trust_env=False,
             headers=default_headers or None,
         )
+        client_kwargs["http_client"] = http_client
     client = OpenAI(**client_kwargs)
 
-    oai_messages = messages_to_openai(messages, system=system)
+    def _inner():
+        oai_messages = messages_to_openai(messages, system=system)
 
-    if provider_name == "minimax":
-        normalized: list[dict[str, Any]] = []
-        for msg in oai_messages:
-            role = msg["role"]
-            content = msg.get("content") or ""
-            if role == "system":
-                role = "user"
+        if provider_name == "minimax":
+            normalized: list[dict[str, Any]] = []
+            for msg in oai_messages:
+                role = msg["role"]
+                content = msg.get("content") or ""
+                if role == "system":
+                    role = "user"
 
-            can_merge = (
-                normalized
-                and normalized[-1]["role"] == role
-                and role == "user"
-                and "tool_calls" not in msg
-                and "tool_call_id" not in msg
-                and "tool_calls" not in normalized[-1]
-                and "tool_call_id" not in normalized[-1]
-            )
-            if can_merge:
-                normalized[-1]["content"] += "\n\n" + content
-            else:
-                normalized_msg: dict[str, Any] = {"role": role}
-
-                # Preserve content alongside tool_calls: an assistant turn may
-                # carry both narration text and tool_calls, and dropping the
-                # text corrupts the history MiniMax sees on later turns.
-                if "tool_calls" in msg:
-                    normalized_msg["tool_calls"] = msg["tool_calls"]
-                    if content:
-                        normalized_msg["content"] = content
+                can_merge = (
+                    normalized
+                    and normalized[-1]["role"] == role
+                    and role == "user"
+                    and "tool_calls" not in msg
+                    and "tool_call_id" not in msg
+                    and "tool_calls" not in normalized[-1]
+                    and "tool_call_id" not in normalized[-1]
+                )
+                if can_merge:
+                    normalized[-1]["content"] += "\n\n" + content
                 else:
-                    normalized_msg["content"] = content
-                if "tool_call_id" in msg:
-                    normalized_msg["tool_call_id"] = msg["tool_call_id"]
-                    normalized_msg["content"] = content
-                normalized.append(normalized_msg)
-        oai_messages = normalized
+                    normalized_msg: dict[str, Any] = {"role": role}
 
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": oai_messages,
-        "stream": True,
-    }
-    if tool_schemas:
-        kwargs["tools"] = _tools_to_openai(tool_schemas)
-        kwargs["tool_choice"] = "auto"
-    if config.get("max_tokens"):
-        kwargs["max_tokens"] = config["max_tokens"]
-    for param in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
-        if param in config:
-            kwargs[param] = config[param]
-    extra_body: dict[str, Any] = {}
-    for param in ("top_k", "min_p", "repetition_penalty"):
-        if param in config:
-            extra_body[param] = config[param]
-    if extra_body:
-        kwargs["extra_body"] = extra_body
+                    # Preserve content alongside tool_calls: an assistant turn may
+                    # carry both narration text and tool_calls, and dropping the
+                    # text corrupts the history MiniMax sees on later turns.
+                    if "tool_calls" in msg:
+                        normalized_msg["tool_calls"] = msg["tool_calls"]
+                        if content:
+                            normalized_msg["content"] = content
+                    else:
+                        normalized_msg["content"] = content
+                    if "tool_call_id" in msg:
+                        normalized_msg["tool_call_id"] = msg["tool_call_id"]
+                        normalized_msg["content"] = content
+                    normalized.append(normalized_msg)
+            oai_messages = normalized
 
-    # Reasoning effort (off/low/medium/high) for OpenAI-compatible providers that
-    # honour it (OpenAI o-series, MiniMax, etc.). Set via the ``/thinking`` command.
-    if config.get("thinking") and config.get("reasoning_effort"):
-        kwargs["reasoning_effort"] = config["reasoning_effort"]
-
-    if config.get("debug"):
-        debug_payload = {
+        kwargs: dict[str, Any] = {
             "model": model,
-            "base_url": base_url,
             "messages": oai_messages,
-            "tools": kwargs.get("tools"),
-            "sampling": {
-                k: kwargs[k]
-                for k in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens")
-                if k in kwargs
-            },
+            "stream": True,
         }
-        import os as _os
+        if tool_schemas:
+            kwargs["tools"] = _tools_to_openai(tool_schemas)
+            kwargs["tool_choice"] = "auto"
+        if config.get("max_tokens"):
+            kwargs["max_tokens"] = config["max_tokens"]
+        for param in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
+            if param in config:
+                kwargs[param] = config[param]
+        extra_body: dict[str, Any] = {}
+        for param in ("top_k", "min_p", "repetition_penalty"):
+            if param in config:
+                extra_body[param] = config[param]
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
-        debug_path = _os.path.join(_os.getcwd(), "debug_request.json")
+        # Reasoning effort (off/low/medium/high) for OpenAI-compatible providers that
+        # honour it (OpenAI o-series, MiniMax, etc.). Set via the ``/thinking`` command.
+        if config.get("thinking") and config.get("reasoning_effort"):
+            kwargs["reasoning_effort"] = config["reasoning_effort"]
+
+        if config.get("debug"):
+            debug_payload = {
+                "model": model,
+                "base_url": base_url,
+                "messages": oai_messages,
+                "tools": kwargs.get("tools"),
+                "sampling": {
+                    k: kwargs[k]
+                    for k in ("temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens")
+                    if k in kwargs
+                },
+            }
+            import os as _os
+
+            debug_path = _os.path.join(_os.getcwd(), "debug_request.json")
+            try:
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    json.dump(debug_payload, f, indent=2, ensure_ascii=False, default=str)
+                logger.debug(
+                    "OpenAI request dumped to %s (%d messages, %d tools)",
+                    debug_path,
+                    len(oai_messages),
+                    len(kwargs.get("tools", [])),
+                )
+            except Exception as e:
+                logger.warning("Failed to dump debug request: %s", e)
+
+        text = ""
+        tool_buf: dict[int, dict[str, Any]] = {}
+        in_tok = out_tok = 0
+
+        if provider_name not in {"minimax"}:
+            kwargs["stream_options"] = {"include_usage": True}
         try:
-            with open(debug_path, "w", encoding="utf-8") as f:
-                json.dump(debug_payload, f, indent=2, ensure_ascii=False, default=str)
-            logger.debug(
-                "OpenAI request dumped to %s (%d messages, %d tools)",
-                debug_path,
-                len(oai_messages),
-                len(kwargs.get("tools", [])),
-            )
-        except Exception as e:
-            logger.warning("Failed to dump debug request: %s", e)
-
-    text = ""
-    tool_buf: dict[int, dict[str, Any]] = {}
-    in_tok = out_tok = 0
-
-    if provider_name not in {"minimax"}:
-        kwargs["stream_options"] = {"include_usage": True}
-    try:
-        response_stream = client.chat.completions.create(**kwargs)
-    except BadRequestError:
-        if kwargs.pop("stream_options", None) is not None:
             response_stream = client.chat.completions.create(**kwargs)
-        else:
-            raise
-    for chunk in response_stream:
-        if not chunk.choices:
+        except BadRequestError as e:
+            error_msg = str(e).lower()
+            if "stream_options" in error_msg or "stream options" in error_msg:
+                kwargs_without_stream = kwargs.copy()
+                kwargs_without_stream.pop("stream_options", None)
+                response_stream = client.chat.completions.create(**kwargs_without_stream)
+            else:
+                raise
+        for chunk in response_stream:
+            if not chunk.choices:
+                if hasattr(chunk, "usage") and chunk.usage:
+                    in_tok = chunk.usage.prompt_tokens or in_tok
+                    out_tok = chunk.usage.completion_tokens or out_tok
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning is None:
+                try:
+                    raw = delta.model_extra or {}
+                    reasoning = raw.get("reasoning_content")
+                except (AttributeError, TypeError):
+                    # Provider may omit model_extra; reasoning_content is non-standard/optional.
+                    pass
+            if reasoning is None:
+                try:
+                    raw_choice = chunk.model_extra or {}
+                    reasoning = raw_choice.get("reasoning_content")
+                except (AttributeError, TypeError):
+                    # Provider may omit model_extra; reasoning_content is non-standard/optional.
+                    pass
+            if reasoning:
+                yield ThinkingChunk(reasoning)
+
+            if delta.content:
+                text += delta.content
+                yield TextChunk(delta.content)
+
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_buf:
+                        tool_buf[idx] = {"id": "", "name": "", "args": ""}
+                    if tc.id:
+                        tool_buf[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_buf[idx]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_buf[idx]["args"] += tc.function.arguments
+
             if hasattr(chunk, "usage") and chunk.usage:
                 in_tok = chunk.usage.prompt_tokens or in_tok
                 out_tok = chunk.usage.completion_tokens or out_tok
-            continue
 
-        choice = chunk.choices[0]
-        delta = choice.delta
-
-        reasoning = getattr(delta, "reasoning_content", None)
-        if reasoning is None:
+        tool_calls: list[dict[str, Any]] = []
+        for idx in sorted(tool_buf):
+            v = tool_buf[idx]
             try:
-                raw = delta.model_extra or {}
-                reasoning = raw.get("reasoning_content")
-            except (AttributeError, TypeError):
-                # Provider may omit model_extra; reasoning_content is non-standard/optional.
-                pass
-        if reasoning is None:
-            try:
-                raw_choice = chunk.model_extra or {}
-                reasoning = raw_choice.get("reasoning_content")
-            except (AttributeError, TypeError):
-                # Provider may omit model_extra; reasoning_content is non-standard/optional.
-                pass
-        if reasoning:
-            yield ThinkingChunk(reasoning)
+                inp = json.loads(v["args"]) if v["args"] else {}
+            except json.JSONDecodeError:
+                inp = {"_raw": v["args"]}
+            tool_calls.append(
+                {
+                    "id": v["id"] or f"call_{idx}",
+                    "name": v["name"],
+                    "input": inp,
+                }
+            )
 
-        if delta.content:
-            text += delta.content
-            yield TextChunk(delta.content)
+        if in_tok == 0 or out_tok == 0:
+            from xerxes.core.utils import estimate_messages_tokens
 
-        if delta.tool_calls:
-            for tc in delta.tool_calls:
-                idx = tc.index
-                if idx not in tool_buf:
-                    tool_buf[idx] = {"id": "", "name": "", "args": ""}
-                if tc.id:
-                    tool_buf[idx]["id"] = tc.id
-                if tc.function:
-                    if tc.function.name:
-                        tool_buf[idx]["name"] += tc.function.name
-                    if tc.function.arguments:
-                        tool_buf[idx]["args"] += tc.function.arguments
+            if in_tok == 0:
+                in_tok = estimate_messages_tokens(oai_messages)
+            if out_tok == 0:
+                from xerxes.core.utils import estimate_tokens
 
-        if hasattr(chunk, "usage") and chunk.usage:
-            in_tok = chunk.usage.prompt_tokens or in_tok
-            out_tok = chunk.usage.completion_tokens or out_tok
+                out_tok = estimate_tokens(text)
+        yield {
+            "tool_calls": tool_calls,
+            "in_tokens": in_tok,
+            "out_tokens": out_tok,
+        }
 
-    tool_calls: list[dict[str, Any]] = []
-    for idx in sorted(tool_buf):
-        v = tool_buf[idx]
-        try:
-            inp = json.loads(v["args"]) if v["args"] else {}
-        except json.JSONDecodeError:
-            inp = {"_raw": v["args"]}
-        tool_calls.append(
-            {
-                "id": v["id"] or f"call_{idx}",
-                "name": v["name"],
-                "input": inp,
-            }
-        )
-
-    if in_tok == 0 or out_tok == 0:
-        from xerxes.core.utils import estimate_messages_tokens
-
-        if in_tok == 0:
-            in_tok = estimate_messages_tokens(oai_messages)
-        if out_tok == 0:
-            from xerxes.core.utils import estimate_tokens
-
-            out_tok = estimate_tokens(text)
-    yield {
-        "tool_calls": tool_calls,
-        "in_tokens": in_tok,
-        "out_tokens": out_tok,
-    }
+    try:
+        yield from _inner()
+    finally:
+        if hasattr(client, "close"):
+            client.close()
+        if http_client is not None:
+            http_client.close()
 
 
 def _tools_to_openai(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -4808,7 +4808,7 @@ wheels = [
 
 [[package]]
 name = "xerxes-agent"
-version = "0.2.4.2"
+version = "0.2.5"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

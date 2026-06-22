@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -244,9 +245,13 @@ class ProcessManager(AgentBaseFn):
                 return {"error": "command required for run operation"}
 
             try:
+                args = shlex.split(command)
+                if not args:
+                    return {"error": "command is empty", "stdout": "", "stderr": "", "returncode": "1"}
+
                 process = subprocess.run(
-                    command,
-                    shell=True,
+                    args,
+                    shell=False,
                     capture_output=True,
                     text=True,
                     timeout=30,

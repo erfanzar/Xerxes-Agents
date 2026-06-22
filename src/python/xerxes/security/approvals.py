@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import json
+import os
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -98,7 +99,7 @@ class ApprovalStore:
             try:
                 data = json.loads(persist_path.read_text(encoding="utf-8"))
                 self._records = [ApprovalRecord.from_dict(r) for r in data]
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
                 self._records = []
 
     def add(self, record: ApprovalRecord) -> None:
@@ -144,7 +145,9 @@ class ApprovalStore:
             return
         always = [r for r in self._records if r.scope is ApprovalScope.ALWAYS]
         self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-        self._persist_path.write_text(json.dumps([r.to_dict() for r in always], indent=2), encoding="utf-8")
+        temp = self._persist_path.with_suffix(".tmp")
+        temp.write_text(json.dumps([r.to_dict() for r in always], indent=2), encoding="utf-8")
+        os.replace(temp, self._persist_path)
 
 
 __all__ = ["ApprovalRecord", "ApprovalScope", "ApprovalStore"]

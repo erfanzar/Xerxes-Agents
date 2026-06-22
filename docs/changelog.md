@@ -6,7 +6,14 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.4 — 2026-06-19 (current)
+## 0.2.5 — 2026-06-22 (current)
+
+- Added the bundled `eternal-army` swarm-orchestration skill.
+- Fixed skill discovery refresh for source checkouts and resilient frontmatter parsing.
+- Tightened `/steer` delivery so queued guidance reaches the next provider request or is saved for the next turn.
+- Bumped the package/runtime version to 0.2.5.
+
+## 0.2.4 — 2026-06-19
 
 - Replaced static/clamped tool-result handling with project-memory spillover plus agent-written summaries.
 - Added context-window provisioning before provider calls and after tool batches.

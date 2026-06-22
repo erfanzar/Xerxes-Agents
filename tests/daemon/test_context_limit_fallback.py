@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from xerxes.context.window_usage import estimate_context_tokens
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager, TurnRunner
 from xerxes.streaming.events import AgentState
@@ -77,4 +78,26 @@ def test_status_payload_reports_live_context_not_cumulative_usage(tmp_path):
     payload = runner._status_payload(session, mode="plan", plan_mode=True)
 
     assert payload["context_tokens"] < 100
+    assert payload["max_context"] == 100_000
+
+
+def test_status_payload_counts_system_prompt_and_tool_schemas(tmp_path):
+    runner = _make_runner(tmp_path, {"model": "gpt-4o", "context_limit": 100_000})
+    runner.runtime.system_prompt = "system prompt " * 100
+    runner.runtime.tool_schemas = [
+        {
+            "name": "BigTool",
+            "description": "large schema " * 500,
+            "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+        }
+    ]
+    session = SimpleNamespace(
+        state=AgentState(messages=[{"role": "user", "content": "short prompt"}]),
+        runtime_config={"model": "gpt-4o", "context_limit": 100_000},
+    )
+
+    payload = runner._status_payload(session, mode="code", plan_mode=False)
+    message_only = estimate_context_tokens(session.state.messages, model="gpt-4o")
+
+    assert payload["context_tokens"] > message_only
     assert payload["max_context"] == 100_000

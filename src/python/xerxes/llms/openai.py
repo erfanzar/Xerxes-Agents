@@ -99,9 +99,29 @@ class OpenAILLM(BaseLLM):
             except ImportError as e:
                 raise ImportError("OpenAI library not installed. Install with: pip install openai") from e
 
-            api_key = self.config.api_key or os.getenv("OPENAI_API_KEY")
-            if not api_key and not self.config.base_url:
-                raise ValueError("OpenAI API key not provided and no base URL specified")
+            self._validate_base_url(self.config.base_url)
+
+            api_key = self.config.api_key
+            if not api_key:
+                base_url = self.config.base_url
+                is_official = (
+                    not base_url
+                    or (urlparse(base_url).hostname or "").lower()
+                    in {
+                        "api.openai.com",
+                        "openai.azure.com",
+                    }
+                    or (urlparse(base_url).hostname or "").lower().endswith(".openai.azure.com")
+                )
+                if is_official:
+                    api_key = os.getenv("OPENAI_API_KEY")
+                else:
+                    raise ValueError(
+                        "OpenAI API key must be explicitly provided for custom base_url endpoints. "
+                        "Environment variable fallback is only allowed for official OpenAI/Azure endpoints."
+                    )
+            if not api_key:
+                raise ValueError("OpenAI API key not provided")
 
             self.client = OpenAI(
                 api_key=api_key,
@@ -214,6 +234,7 @@ class OpenAILLM(BaseLLM):
                 merged_extra_body["repetition_penalty"] = compat_repetition_penalty
 
         filtered_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        self._filter_dangerous_kwargs(filtered_kwargs)
         params.update(filtered_kwargs)
 
         config_extra_params = {k: v for k, v in self.config.extra_params.items() if k != "extra_body"}

@@ -140,7 +140,7 @@ class WebhookChannel(Channel):
 
         Returns:
             503 when ``start`` has not been called, 400 when ``_parse_inbound``
-            raises, otherwise 200.
+            raises, 500 when a handler raises, otherwise 200.
         """
         if self._handler is None:
             return WebhookResponse(status=503, body="channel not started")
@@ -149,12 +149,14 @@ class WebhookChannel(Channel):
         except Exception:
             logger.warning("%s failed to parse inbound", self.name, exc_info=True)
             return WebhookResponse(status=400, body="invalid payload")
+        any_failed = False
         for msg in messages:
             try:
                 await self._handler(msg)
             except Exception:
+                any_failed = True
                 logger.warning("%s inbound handler raised", self.name, exc_info=True)
-        return WebhookResponse(status=200, body="ok")
+        return WebhookResponse(status=500 if any_failed else 200, body="ok")
 
     @abstractmethod
     def _parse_inbound(self, headers: dict[str, str], body: bytes) -> list[ChannelMessage]:

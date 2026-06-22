@@ -20,10 +20,16 @@ registration, and runs uvicorn in :meth:`run`.
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from xerxes import Xerxes
 from xerxes.cortex import CortexAgent
@@ -78,6 +84,85 @@ class XerxesAPIServer:
             description="OpenAI-compatible API server for Xerxes agents with optional Cortex support",
             version="2.0.0",
         )
+
+        # ---- Security middleware ----
+        # CORS
+        _cors_origins = os.getenv("XERXES_API_CORS_ORIGINS", "*")
+        origins = [o.strip() for o in _cors_origins.split(",")] if _cors_origins != "*" else ["*"]
+        allow_creds = True
+        if origins == ["*"]:
+            allow_creds = False
+            logging.getLogger(__name__).warning(
+                "CORS wildcard origins detected; disabling allow_credentials for security"
+            )
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=allow_creds,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        # Request body size limit
+        _max_body_mb = int(os.getenv("XERXES_API_MAX_BODY_SIZE_MB", "10"))
+        _max_body_bytes = _max_body_mb * 1024 * 1024
+
+        class ContentLengthLimitMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                content_length = request.headers.get("content-length")
+                if content_length:
+                    try:
+                        length = int(content_length)
+                    except ValueError:
+                        return Response("Bad Request", status_code=400)
+                    if length > _max_body_bytes:
+                        return Response("Request body too large", status_code=413)
+                return await call_next(request)
+
+        self.app.add_middleware(ContentLengthLimitMiddleware)
+
+        # Rate limiting (simple in-memory)
+        _rpm = int(os.getenv("XERXES_API_RATE_LIMIT_RPM", "60"))
+
+        class RateLimitMiddleware(BaseHTTPMiddleware):
+            def __init__(self, app, requests_per_minute: int = 60):
+                super().__init__(app)
+                self.requests_per_minute = requests_per_minute
+                self._store: dict[str, list[float]] = {}
+
+            async def dispatch(self, request: Request, call_next):
+                xff = request.headers.get("x-forwarded-for")
+                if xff:
+                    client = xff.split(",")[0].strip()
+                else:
+                    client = request.client.host if request.client else "unknown"
+                now = time.time()
+                window = 60.0
+                self._store.setdefault(client, [])
+                self._store[client] = [t for t in self._store[client] if now - t < window]
+                if len(self._store[client]) >= self.requests_per_minute:
+                    return Response("Rate limit exceeded", status_code=429)
+                self._store[client].append(now)
+                return await call_next(request)
+
+        self.app.add_middleware(RateLimitMiddleware, requests_per_minute=_rpm)
+
+        # Auth middleware (optional)
+        _auth_enabled = os.getenv("XERXES_API_AUTH_ENABLED", "false").lower() in ("true", "1", "yes")
+        _api_key = os.getenv("XERXES_API_KEY", "")
+
+        if _auth_enabled and _api_key:
+
+            class AuthMiddleware(BaseHTTPMiddleware):
+                async def dispatch(self, request: Request, call_next):
+                    if request.url.path in ("/health", "/docs", "/openapi.json", "/redoc"):
+                        return await call_next(request)
+                    auth = request.headers.get("authorization", "")
+                    if not auth.startswith("Bearer ") or auth[7:] != _api_key:
+                        return Response("Unauthorized", status_code=401)
+                    return await call_next(request)
+
+            self.app.add_middleware(AuthMiddleware)
 
         self.completion_service: CompletionService | None = None
         if self.xerxes:

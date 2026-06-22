@@ -20,9 +20,9 @@ database as the data and a brute-force cosine scan is fast enough
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
-import pickle
 import sqlite3
 import typing as tp
 from pathlib import Path
@@ -31,6 +31,20 @@ from .embedders import Embedder, cosine_similarity, get_default_embedder
 from .storage import MemoryStorage
 
 logger = logging.getLogger(__name__)
+
+
+def _json_default(obj: tp.Any) -> tp.Any:
+    """JSON encoder fallback for non-serialisable types."""
+    if isinstance(obj, bytes):
+        return {"__type__": "bytes", "data": base64.b64encode(obj).decode("ascii")}
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+def _json_object_hook(obj: dict[str, tp.Any]) -> tp.Any:
+    """JSON decoder hook that restores bytes objects encoded by _json_default."""
+    if obj.get("__type__") == "bytes":
+        return base64.b64decode(obj["data"])
+    return obj
 
 
 class SQLiteVectorStorage(MemoryStorage):
@@ -78,9 +92,9 @@ class SQLiteVectorStorage(MemoryStorage):
         but does not match similarity queries."""
 
         try:
-            payload = pickle.dumps(data)
+            payload = json.dumps(data, default=_json_default).encode("utf-8")
         except Exception:
-            logger.warning("Failed to pickle data for key=%s", key)
+            logger.warning("Failed to JSON-serialise data for key=%s", key)
             return False
         if isinstance(data, str):
             text = data
@@ -107,16 +121,16 @@ class SQLiteVectorStorage(MemoryStorage):
             return False
 
     def load(self, key: str) -> tp.Any | None:
-        """Unpickle the row at ``key`` or return ``None`` if missing/corrupt."""
+        """JSON-deserialise the row at ``key`` or return ``None`` if missing/corrupt."""
 
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute("SELECT data FROM vectors WHERE key = ?", (key,)).fetchone()
         if not row:
             return None
         try:
-            return pickle.loads(row[0])
+            return json.loads(row[0].decode("utf-8"), object_hook=_json_object_hook)
         except Exception:
-            logger.warning("Failed to unpickle data for key=%s", key)
+            logger.warning("Failed to JSON-deserialise data for key=%s", key)
             return None
 
     def delete(self, key: str) -> bool:
@@ -139,9 +153,10 @@ class SQLiteVectorStorage(MemoryStorage):
 
         with sqlite3.connect(self.db_path) as conn:
             if pattern:
+                escaped = pattern.replace("%", "\\%").replace("_", "\\_")
                 cur = conn.execute(
-                    "SELECT key FROM vectors WHERE key LIKE ? ORDER BY created_at DESC",
-                    (f"%{pattern}%",),
+                    "SELECT key FROM vectors WHERE key LIKE ? ESCAPE '\\' ORDER BY created_at DESC",
+                    (f"%{escaped}%",),
                 )
             else:
                 cur = conn.execute("SELECT key FROM vectors ORDER BY created_at DESC")
@@ -191,7 +206,7 @@ class SQLiteVectorStorage(MemoryStorage):
                 if sim < threshold:
                     continue
                 try:
-                    data = pickle.loads(data_blob)
+                    data = json.loads(data_blob.decode("utf-8"), object_hook=_json_object_hook)
                 except Exception:
                     continue
                 results.append((key, sim, data))

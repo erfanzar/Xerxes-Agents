@@ -192,7 +192,7 @@ _SMOKE_CASES: list[tuple[str, str]] = [
     ("/new", "New session"),
     ("/stop", ""),
     ("/cancel-all", "Cancelled"),
-    ("/compact", "Compaction"),
+    ("/compact", "No active session"),
     ("/btw hello", "Steer"),
     ("/steer hello", "Steer"),
     ("/model", "fake-model"),

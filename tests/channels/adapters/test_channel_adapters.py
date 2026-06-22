@@ -261,7 +261,7 @@ class TestMatrix:
         http = CapturingHTTP()
         c = MatrixChannel("https://m.example", "tok", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="matrix", room_id="!r:m")))
-        assert "/rooms/!r:m/send/m.room.message/" in http.calls[0]["url"]
+        assert "/rooms/%21r%3Am/send/m.room.message/" in http.calls[0]["url"]
         assert http.calls[0]["json"]["msgtype"] == "m.text"
 
 

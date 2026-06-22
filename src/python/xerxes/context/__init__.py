@@ -61,7 +61,7 @@ from .tool_result_pruner import (
     prune_tool_result,
 )
 from .tool_result_storage import DEFAULT_INLINE_LIMIT_CHARS, ToolResultStorage
-from .window_usage import estimate_context_tokens
+from .window_usage import estimate_context_tokens, estimate_request_overhead_tokens, request_scaffolding_messages
 
 __all__ = [
     "COMPACTION_REFERENCE_PREFIX",
@@ -90,10 +90,12 @@ __all__ = [
     "build_repo_map",
     "compaction_summary_agent_from_config",
     "estimate_context_tokens",
+    "estimate_request_overhead_tokens",
     "get_compaction_strategy",
     "naive_summarizer",
     "prune_messages",
     "prune_tool_result",
     "render_messages_for_summary",
     "repair_tool_message_sequence",
+    "request_scaffolding_messages",
 ]

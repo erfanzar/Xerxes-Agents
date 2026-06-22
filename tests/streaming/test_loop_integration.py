@@ -307,6 +307,87 @@ class TestBudgetEnforcement:
         assert state.metadata["last_compaction"]["tokens_before"] > state.metadata["last_compaction"]["tokens_after"]
         self._assert_valid_tool_sequence(state.messages)
 
+    def test_context_provision_counts_system_and_tool_schema_overhead_before_request(self, fake_llm):
+        fake_llm.add_text("Ready.")
+        state = AgentState(
+            messages=[
+                {"role": "user", "content": "old " * 100},
+                {"role": "assistant", "content": "prior " * 80},
+            ]
+        )
+        config = {
+            "model": "gpt-4o",
+            "permission_mode": "accept-all",
+            "max_context_tokens": 10_000,
+            "compaction_threshold_tokens": 300,
+            "compaction_target_tokens": 120,
+            "context_safety_tokens": 0,
+            "compaction_summary_agent": self._summary_agent,
+        }
+        tool_schemas = [
+            {
+                "name": "BigTool",
+                "description": "large schema " * 800,
+                "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+            }
+        ]
+
+        events = list(
+            run(
+                user_message="Continue",
+                state=state,
+                config=config,
+                system_prompt="system prompt " * 100,
+                tool_executor=lambda _name, _inp: "ok",
+                tool_schemas=tool_schemas,
+            )
+        )
+
+        text = _text(events)
+        assert (
+            "Context compacted before adding the new turn" in text
+            or "Context compacted before the next provider request" in text
+        )
+        assert "Ready." in text
+        assert fake_llm.call_count == 1
+        assert state.metadata["last_compaction"]["request_overhead_tokens"] > 0
+        assert state.metadata["last_compaction"]["tokens_before"] > config["compaction_threshold_tokens"]
+
+    def test_context_overhead_blocks_before_provider_when_compaction_unavailable(self, fake_llm):
+        fake_llm.add_text("Should not run.")
+        state = AgentState(messages=[{"role": "user", "content": "old " * 20}])
+        config = {
+            "model": "gpt-4o",
+            "permission_mode": "accept-all",
+            "max_context_tokens": 200,
+            "compaction_threshold_tokens": 150,
+            "context_safety_tokens": 0,
+            "compaction_summary_agent": False,
+        }
+        tool_schemas = [
+            {
+                "name": "HugeTool",
+                "description": "huge schema " * 500,
+                "input_schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+            }
+        ]
+
+        events = list(
+            run(
+                user_message="Continue",
+                state=state,
+                config=config,
+                system_prompt="system prompt " * 100,
+                tool_executor=lambda _name, _inp: "ok",
+                tool_schemas=tool_schemas,
+            )
+        )
+
+        text = _text(events)
+        assert "exceeded and compaction could not reduce it" in text
+        assert "Should not run." not in text
+        assert fake_llm.call_count == 0
+
     def test_context_stops_after_tool_results_when_compaction_unavailable(self, fake_llm):
         fake_llm.add_tool_call("ReadFile", {"file_path": "a.py"}, call_id="c1")
         fake_llm.add_text("Done.")

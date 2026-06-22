@@ -22,6 +22,7 @@ refresh the (short-lived) WeCom access token externally.
 from __future__ import annotations
 
 import typing as tp
+import urllib.parse
 
 from .._helpers import WebhookChannel, http_post, parse_json_body
 from ..types import ChannelMessage, MessageDirection
@@ -114,7 +115,7 @@ class WeComChannel(WebhookChannel):
                 ``room_id`` becomes ``touser``; ``text`` is the body.
         """
         token = self._resolve_token()
-        url = f"{self.api_base}/cgi-bin/message/send?access_token={token}"
+        url = f"{self.api_base}/cgi-bin/message/send?access_token={urllib.parse.quote(token, safe='')}"
         body = {
             "touser": message.channel_user_id or message.room_id,
             "msgtype": "text",

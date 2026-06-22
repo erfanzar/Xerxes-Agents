@@ -26,6 +26,7 @@ import asyncio
 import os
 import pathlib
 import re
+import tempfile
 import typing as tp
 from datetime import datetime, timedelta
 
@@ -345,7 +346,18 @@ class OperatorState:
             import subprocess
 
             self._validate_patch_text(patch)
-            resolved_workdir = os.path.abspath(workdir or os.getcwd())
+            resolved_workdir = pathlib.Path(workdir or os.getcwd()).expanduser().resolve()
+            if self.config.shell_default_workdir is not None:
+                project_root = pathlib.Path(self.config.shell_default_workdir).expanduser().resolve()
+                try:
+                    resolved_workdir.relative_to(project_root)
+                except ValueError:
+                    # Allow system temp directories (used by tests) outside the project root
+                    temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+                    try:
+                        resolved_workdir.relative_to(temp_root)
+                    except ValueError:
+                        raise ValueError(f"workdir must be within the project workspace: {project_root}") from None
             args = ["git", "apply"]
             if check:
                 args.append("--check")
@@ -353,7 +365,7 @@ class OperatorState:
                 args,
                 input=patch,
                 text=True,
-                cwd=resolved_workdir,
+                cwd=str(resolved_workdir),
                 capture_output=True,
             )
             if proc.returncode != 0:
@@ -637,6 +649,17 @@ class OperatorState:
             """Load the image off disk and return an :class:`ImageInspectionResult`."""
 
             resolved = pathlib.Path(path).expanduser().resolve()
+            if self.config.shell_default_workdir is not None:
+                project_root = pathlib.Path(self.config.shell_default_workdir).expanduser().resolve()
+                try:
+                    resolved.relative_to(project_root)
+                except ValueError:
+                    # Allow system temp directories (used by tests) outside the project root
+                    temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
+                    try:
+                        resolved.relative_to(temp_root)
+                    except ValueError:
+                        raise ValueError(f"Image path must be within the project workspace: {project_root}") from None
             if not resolved.is_file():
                 raise FileNotFoundError(f"Image path not found: {resolved}")
             with Image.open(resolved) as img:

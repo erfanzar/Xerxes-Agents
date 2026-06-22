@@ -396,7 +396,7 @@ class CortexTask:
 
             if json_data:
                 try:
-                    pydantic_output = self.output_json.parse_obj(json_data)
+                    pydantic_output = self.output_json.model_validate(json_data)
                     validation_results["output_json"] = True
                 except ValidationError as e:
                     validation_results["output_json"] = False
@@ -407,7 +407,7 @@ class CortexTask:
 
         if self.output_pydantic:
             try:
-                pydantic_output = self.output_pydantic.parse_raw(output)
+                pydantic_output = self.output_pydantic.model_validate_json(output)
                 validation_results["output_pydantic"] = True
             except ValidationError as e:
                 validation_results["output_pydantic"] = False
@@ -437,7 +437,7 @@ class CortexTask:
         """Return ``True`` only when every declared dependency has output."""
 
         for dep in self.dependencies:
-            if not dep.output:
+            if dep.output is None:
                 return False
         return True
 
@@ -456,24 +456,35 @@ class CortexTask:
 
         return True
 
-    def _get_human_input(self) -> str:
-        """Block on ``input()`` and re-prompt until ``input_validator`` accepts."""
+    def _get_human_input(self, max_retries: int = 10) -> str:
+        """Block on ``input()`` and re-prompt until ``input_validator`` accepts.
+
+        Args:
+            max_retries: Maximum number of validation attempts before raising.
+
+        Raises:
+            RuntimeError: If input validation fails after ``max_retries`` attempts.
+        """
 
         prompt = self.human_input_prompt or "Please provide input for this task: "
+        attempts = 0
 
         while True:
             user_input = input(f"\n🤔 {prompt}")
 
             if self.input_validator:
+                attempts += 1
                 try:
                     if self.input_validator(user_input):
                         return user_input
                     else:
                         print("❌ Input validation failed. Please try again.")
-                        continue
                 except Exception as e:
                     print(f"❌ Input validation error: {e}. Please try again.")
-                    continue
+
+                if attempts >= max_retries:
+                    raise RuntimeError(f"Input validation failed after {max_retries} attempts")
+                continue
 
             return user_input
 
@@ -575,6 +586,13 @@ class CortexTask:
         Returns a :class:`CortexTaskOutput` on success, or
         ``(StreamerBuffer, Thread)`` when ``use_streaming`` is ``True``.
 
+        .. note::
+            The ``timeout`` attribute is a soft timeout. It is checked at
+            the top of each retry iteration and after ``agent.execute()``
+            returns, but it cannot forcibly interrupt a blocking call
+            inside the agent. Set ``timeout_behavior`` to ``"fail"`` or
+            ``"continue"`` to control the outcome when the limit is hit.
+
         Raises:
             ValueError: When no agent is assigned or dependencies are
                 unsatisfied.
@@ -619,6 +637,22 @@ class CortexTask:
             "delegations": 0,
             "retry_count": 0,
         }
+
+        timeout_triggered = False
+        timeout_timer: threading.Timer | None = None
+
+        if self.timeout:
+            log_warning(
+                f"Task timeout is set to {self.timeout}s, but this is a soft timeout. "
+                "Blocking agent.execute() calls may not be interrupted and could exceed the limit."
+            )
+
+            def _on_timeout():
+                nonlocal timeout_triggered
+                timeout_triggered = True
+
+            timeout_timer = threading.Timer(self.timeout, _on_timeout)
+            timeout_timer.start()
 
         while retries <= self.max_retries:
             try:
@@ -686,6 +720,9 @@ class CortexTask:
                     setattr(buffer, "task", self)
                     setattr(buffer, "agent", self.agent)
 
+                    if timeout_timer is not None:
+                        timeout_timer.cancel()
+
                     return buffer, thread
 
                 if self.agent.allow_delegation:
@@ -702,6 +739,14 @@ class CortexTask:
                         if (executed[0].get_result is not None)
                         else str(executed[0])
                     )
+
+                if timeout_triggered:
+                    if self.timeout_behavior == "fail":
+                        raise TimeoutError(f"Task timeout after {self.timeout}s")
+                    elif self.timeout_behavior == "continue":
+                        if timeout_timer is not None:
+                            timeout_timer.cancel()
+                        break
 
                 final_delegations = getattr(self.agent, "_delegation_count", 0)
                 self._execution_stats["delegations"] = final_delegations - initial_delegations
@@ -798,6 +843,9 @@ class CortexTask:
                     self.description[:50] + "..." if len(self.description) > 50 else self.description, execution_time
                 )
 
+                if timeout_timer is not None:
+                    timeout_timer.cancel()
+
                 return task_output
 
             except Exception as e:
@@ -817,6 +865,9 @@ class CortexTask:
                 else:
                     log_error(f"Task failed after all retries: {e!s}")
                     break
+
+        if timeout_timer is not None:
+            timeout_timer.cancel()
 
         execution_time = time.time() - start_time
         failure_output = CortexTaskOutput(

@@ -93,7 +93,7 @@ class SshSandboxBackend:
         if env:
             for k, v in env.items():
                 remote_parts.append(f"export {shlex.quote(k)}={shlex.quote(v)}")
-        remote_parts.append(command)
+        remote_parts.append(shlex.quote(command))
         argv.append(" && ".join(remote_parts))
         proc = subprocess.run(
             argv,

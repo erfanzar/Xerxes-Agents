@@ -113,7 +113,7 @@ def test_welcome_banner_includes_version_head_and_updates() -> None:
         model="kimi-for-coding",
         session_id="session-1",
         cwd="/tmp/xerxes",
-        version="0.2.4",
+        version="0.2.5",
         git_status=GitUpdateStatus(
             is_git=True,
             branch="main",
@@ -125,7 +125,7 @@ def test_welcome_banner_includes_version_head_and_updates() -> None:
     )
 
     assert "Version:" in banner
-    assert "v0.2.4" in banner
+    assert "v0.2.5" in banner
     assert "HEAD:" in banner
     assert "abc1234" in banner
     assert "4 ahead available (origin/main def5678)" in banner

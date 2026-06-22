@@ -71,6 +71,9 @@ class GeminiLLM(BaseLLM):
                 "Google GenerativeAI library not installed. Install with: pip install google-generativeai"
             ) from e
 
+        if self.config.base_url:
+            self._validate_base_url(self.config.base_url)
+
         api_key = self.config.api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError("Gemini API key not provided")
@@ -133,14 +136,30 @@ class GeminiLLM(BaseLLM):
 
         use_stream = stream if stream is not None else self.config.stream
 
+        self._filter_dangerous_kwargs(kwargs)
+
+        request_options = {"timeout": self.config.timeout} if self.config.timeout else None
+
         try:
             if use_stream:
-                return client.generate_content(content, generation_config=generation_config, stream=True, **kwargs)
+                return client.generate_content(
+                    content,
+                    generation_config=generation_config,
+                    stream=True,
+                    request_options=request_options,
+                    **kwargs,
+                )
             else:
-                response = client.generate_content(content, generation_config=generation_config, stream=False, **kwargs)
+                response = client.generate_content(
+                    content,
+                    generation_config=generation_config,
+                    stream=False,
+                    request_options=request_options,
+                    **kwargs,
+                )
                 return response
         except Exception as e:
-            raise RuntimeError(f"Gemini API request failed: {e}") from e
+            raise RuntimeError(f"Gemini API request failed: {self._sanitize_error(e)}") from e
 
     def _format_messages_for_gemini(self, messages: list[dict[str, str]]) -> str:
         """Convert OpenAI-style message list to a Gemini-formatted string.

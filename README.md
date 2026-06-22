@@ -17,7 +17,7 @@ A coding agent that runs in your terminal. Pure-Python runtime with a `prompt_to
 › xerxes
 
 ╭────────────────────────────────────────────────────────╮
-│ Xerxes (v0.2.4)                                       │
+│ Xerxes (v0.2.5)                                       │
 ├────────────────────────────────────────────────────────┤
 │ model:  claude-opus-4-7                               │
 │ dir:    ~/Projects/myapp                               │

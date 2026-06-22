@@ -556,6 +556,41 @@ def test_llm_stream_retry_uses_six_fixed_delay_stages(monkeypatch) -> None:
     assert any(isinstance(event, TurnDone) for event in events)
 
 
+def test_llm_stream_context_limit_error_does_not_retry(monkeypatch) -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+    sleeps: list[int] = []
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        raise ConnectionError("Invalid request: Your request exceeded model token limit")
+        yield
+
+    loop._stream_llm = fake_stream
+    monkeypatch.setattr(loop.time, "sleep", sleeps.append)
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=loop.AgentState(),
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+
+    assert calls["n"] == 1
+    assert sleeps == []
+    assert "Retrying in" not in text
+    assert "exceeded model token limit" in text
+    assert any(isinstance(event, TurnDone) for event in events)
+
+
 def test_tool_end_duration_reflects_executor_time() -> None:
     original = loop._stream_llm
     calls = {"n": 0}

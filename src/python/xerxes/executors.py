@@ -684,7 +684,7 @@ class FunctionExecutor:
                         turn_id=audit_turn_id,
                     )
                 break
-            except Exception as e:
+            except (OSError, ConnectionError) as e:
                 traceback.print_exc()
                 call.retry_count += 1
                 call.error = str(e)
@@ -697,7 +697,7 @@ class FunctionExecutor:
                         turn_id=audit_turn_id,
                     )
                 if attempt < call.max_retries:
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(min(2**attempt, 30))
 
         if call.status != ExecutionStatus.SUCCESS:
             call.status = ExecutionStatus.FAILURE
@@ -875,7 +875,7 @@ class FunctionExecutor:
     async def _run_function_with_timeout(self, func: tp.Callable, args: dict, timeout: float | None) -> tp.Any:
         """Run a function with an optional timeout."""
 
-        if timeout:
+        if timeout is not None:
             return await asyncio.wait_for(self._run_function(func, args), timeout=timeout)
         return await self._run_function(func, args)
 
@@ -1136,7 +1136,7 @@ class EnhancedFunctionExecutor(FunctionExecutor):
     ) -> tp.Any:
         """Run a function with timeout, using the thread pool for sync functions."""
 
-        timeout = timeout or self.default_timeout
+        timeout = timeout if timeout is not None else self.default_timeout
 
         try:
             if asyncio.iscoroutinefunction(func):
@@ -1148,7 +1148,7 @@ class EnhancedFunctionExecutor(FunctionExecutor):
 
         except TimeoutError:
             raise XerxesTimeoutError(get_callable_public_name(func), timeout) from None
-        except Exception as e:
+        except (OSError, ConnectionError) as e:
             raise FunctionExecutionError(get_callable_public_name(func), str(e), original_error=e) from e
 
     async def execute_with_retry(
@@ -1252,6 +1252,8 @@ class EnhancedFunctionExecutor(FunctionExecutor):
                     setattr(call, "execution_time", time.time() - start_time)
                 logger.error(f"Function {func_name} failed: {e}")
 
+            except (MemoryError, RecursionError, SystemExit, KeyboardInterrupt):
+                raise
             except Exception as e:
                 call.result = f"Unexpected error: {e}"
                 if hasattr(call, "status"):

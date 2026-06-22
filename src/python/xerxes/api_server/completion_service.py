@@ -146,12 +146,17 @@ class CompletionService:
         function yields nothing when :meth:`Xerxes.run` short-circuits
         to a :class:`ResponseResult` (no streaming available).
         """
+        loop = asyncio.get_event_loop()
         usage_info = None
-        stream_result = self.xerxes.run(
-            messages=messages,
-            agent_id=agent,
-            stream=True,
-            apply_functions=True,
+        stream_result = await loop.run_in_executor(
+            None,
+            self.xerxes.run,
+            None,
+            None,
+            messages,
+            agent,
+            True,
+            True,
         )
         if isinstance(stream_result, ResponseResult):
             return

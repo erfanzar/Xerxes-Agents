@@ -19,6 +19,7 @@ views over their tools / resources / prompts, and routes ``call_tool`` /
 requested capability.
 """
 
+import threading
 from typing import Any
 
 from ..logging.console import get_logger
@@ -34,6 +35,7 @@ class MCPManager:
 
         self.servers: dict[str, MCPClient] = {}
         self.logger = get_logger()
+        self._lock = threading.Lock()
 
     async def add_server(self, config: MCPServerConfig) -> bool:
         """Build, connect, and register a new server; return ``True`` on success.
@@ -41,19 +43,20 @@ class MCPManager:
         Already-registered or disabled configs are skipped (returning ``False``).
         """
 
-        if config.name in self.servers:
-            self.logger.warning(f"MCP server {config.name} already exists")
-            return False
-
-        if not config.enabled:
-            self.logger.info(f"MCP server {config.name} is disabled, skipping")
-            return False
+        with self._lock:
+            if config.name in self.servers:
+                self.logger.warning(f"MCP server {config.name} already exists")
+                return False
+            if not config.enabled:
+                self.logger.info(f"MCP server {config.name} is disabled, skipping")
+                return False
 
         client = MCPClient(config)
         success = await client.connect()
 
         if success:
-            self.servers[config.name] = client
+            with self._lock:
+                self.servers[config.name] = client
             self.logger.info(f"Added MCP server: {config.name}")
             return True
         else:
@@ -63,44 +66,62 @@ class MCPManager:
     async def remove_server(self, name: str) -> None:
         """Disconnect and drop the named server (no-op if absent)."""
 
-        if name in self.servers:
-            await self.servers[name].disconnect()
-            del self.servers[name]
+        with self._lock:
+            client = self.servers.pop(name, None)
+        if client is not None:
+            await client.disconnect()
             self.logger.info(f"Removed MCP server: {name}")
 
     def get_all_tools(self) -> list[MCPTool]:
         """Return every connected server's :attr:`MCPClient.tools` flattened together."""
 
+        with self._lock:
+            servers = list(self.servers.values())
         tools = []
-        for client in self.servers.values():
-            tools.extend(client.tools)
+        seen = set()
+        for client in servers:
+            for tool in client.tools:
+                if tool.name in seen:
+                    self.logger.warning(
+                        f"Duplicate tool name '{tool.name}' from different MCP servers; first registration wins"
+                    )
+                else:
+                    seen.add(tool.name)
+                    tools.append(tool)
         return tools
 
     def get_all_resources(self) -> list[MCPResource]:
         """Return every connected server's :attr:`MCPClient.resources` flattened together."""
 
+        with self._lock:
+            servers = list(self.servers.values())
         resources = []
-        for client in self.servers.values():
+        for client in servers:
             resources.extend(client.resources)
         return resources
 
     def get_all_prompts(self) -> list[MCPPrompt]:
         """Return every connected server's :attr:`MCPClient.prompts` flattened together."""
 
+        with self._lock:
+            servers = list(self.servers.values())
         prompts = []
-        for client in self.servers.values():
+        for client in servers:
             prompts.extend(client.prompts)
         return prompts
 
     def get_server(self, name: str) -> MCPClient | None:
         """Return the registered client for ``name``, or ``None``."""
 
-        return self.servers.get(name)
+        with self._lock:
+            return self.servers.get(name)
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """Route ``tool_name`` to the first server that published it; raises ``ValueError`` if none."""
 
-        for client in self.servers.values():
+        with self._lock:
+            servers = list(self.servers.values())
+        for client in servers:
             for tool in client.tools:
                 if tool.name == tool_name:
                     return await client.call_tool(tool_name, arguments)
@@ -110,7 +131,9 @@ class MCPManager:
     async def read_resource(self, uri: str) -> Any:
         """Route ``uri`` to the server that publishes it; raises ``ValueError`` if none."""
 
-        for client in self.servers.values():
+        with self._lock:
+            servers = list(self.servers.values())
+        for client in servers:
             for resource in client.resources:
                 if resource.uri == uri:
                     return await client.read_resource(uri)
@@ -120,7 +143,9 @@ class MCPManager:
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Route prompt ``name`` to the server that exposes it; raises ``ValueError`` if none."""
 
-        for client in self.servers.values():
+        with self._lock:
+            servers = list(self.servers.values())
+        for client in servers:
             for prompt in client.prompts:
                 if prompt.name == name:
                     return await client.get_prompt(name, arguments)
@@ -130,21 +155,34 @@ class MCPManager:
     async def disconnect_all(self) -> None:
         """Disconnect every registered client and clear the registry."""
 
-        for client in list(self.servers.values()):
-            await client.disconnect()
-        self.servers.clear()
-        self.logger.info("Disconnected from all MCP servers")
+        with self._lock:
+            clients = list(self.servers.values())
+            self.servers.clear()
+        errors = []
+        for client in clients:
+            try:
+                await client.disconnect()
+            except Exception as e:
+                errors.append(e)
+                self.logger.warning(f"Failed to disconnect MCP client: {e}")
+        if errors:
+            self.logger.warning(f"disconnect_all completed with {len(errors)} errors")
+        else:
+            self.logger.info("Disconnected from all MCP servers")
 
     def list_servers(self) -> list[str]:
         """Return the names of every currently-registered server."""
 
-        return list(self.servers.keys())
+        with self._lock:
+            return list(self.servers.keys())
 
     def get_capabilities_summary(self) -> dict[str, Any]:
         """Return ``{server_name: {tools, resources, prompts}}`` counts for each registered server."""
 
+        with self._lock:
+            items = list(self.servers.items())
         summary = {}
-        for name, client in self.servers.items():
+        for name, client in items:
             summary[name] = {
                 "tools": len(client.tools),
                 "resources": len(client.resources),

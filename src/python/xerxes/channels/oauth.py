@@ -38,6 +38,19 @@ if tp.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True if ``exc`` is a network or server error worth retrying."""
+    try:
+        import httpx
+    except ImportError:
+        return False
+    if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
+    return False
+
+
 @dataclass
 class OAuthProvider:
     """Static configuration describing one OAuth 2.0 identity provider.
@@ -400,21 +413,44 @@ class OAuthClient:
             Parsed response, either from JSON or from query-string decoding.
 
         Raises:
+            ValueError: ``url`` does not use HTTPS.
             RuntimeError: ``httpx`` is needed but not installed.
         """
+        if not url.startswith("https://"):
+            raise ValueError("OAuth token URL must use HTTPS")
         if self._http is not None:
-            response = self._http(url, data=data)
-            return response if isinstance(response, dict) else json.loads(response)
+            for attempt in range(3):
+                try:
+                    response = self._http(url, data=data)
+                    return response if isinstance(response, dict) else json.loads(response)
+                except Exception as exc:
+                    if not _is_transient_error(exc):
+                        raise
+                    if attempt == 2:
+                        raise RuntimeError(f"OAuth POST failed after 3 attempts: {exc}") from exc
+                    delay = 2**attempt
+                    logger.warning("OAuth POST attempt %d failed, retrying in %ds", attempt + 1, delay)
+                    time.sleep(delay)
         try:
             import httpx
         except ImportError as exc:
             raise RuntimeError("httpx is required for OAuthClient HTTP calls; install with `pip install httpx`") from exc
-        resp = httpx.post(url, data=data, timeout=15.0)
-        resp.raise_for_status()
-        try:
-            return resp.json()
-        except Exception:
-            return dict(urllib.parse.parse_qsl(resp.text))
+        for attempt in range(3):
+            try:
+                resp = httpx.post(url, data=data, timeout=15.0, follow_redirects=False)
+                resp.raise_for_status()
+                try:
+                    return resp.json()
+                except Exception:
+                    return dict(urllib.parse.parse_qsl(resp.text))
+            except Exception as exc:
+                if not _is_transient_error(exc):
+                    raise
+                if attempt == 2:
+                    raise RuntimeError(f"OAuth POST failed after 3 attempts: {exc}") from exc
+                delay = 2**attempt
+                logger.warning("OAuth POST attempt %d failed, retrying in %ds", attempt + 1, delay)
+                time.sleep(delay)
 
     def _token_from_payload(self, payload: dict[str, tp.Any]) -> OAuthToken:
         """Build an ``OAuthToken`` from a raw token-endpoint response.
