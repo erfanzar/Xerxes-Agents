@@ -65,8 +65,6 @@ class ExternalMemoryProviderBase(MemoryProvider):
         """Mark the provider as not yet initialised."""
         self._initialized = False
 
-    # ----- availability + lifecycle ----------------------------------------
-
     def is_available(self) -> bool:
         """Return True when every required env var is set and module importable."""
         if self.required_module is not None and importlib.util.find_spec(self.required_module) is None:
@@ -83,8 +81,6 @@ class ExternalMemoryProviderBase(MemoryProvider):
     def shutdown(self) -> None:
         """Clear the initialisation flag; subclasses extend with backend teardown."""
         self._initialized = False
-
-    # ----- tool surface -----------------------------------------------------
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """Return the four standard tool schemas (add/search/list/remove) prefixed by ``namespace_label``."""
@@ -149,8 +145,6 @@ class ExternalMemoryProviderBase(MemoryProvider):
             return {"ok": True, "action": action, "result": payload, "ts": _now()}
         except Exception as exc:
             return {"ok": False, "error": str(exc), "action": action}
-
-    # ----- subclass hook ----------------------------------------------------
 
     def _call_upstream(
         self, action: str, arguments: dict[str, Any]

@@ -78,8 +78,6 @@ class VoiceKeyHandler:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _output_dir: Path = field(default_factory=lambda: xerxes_subdir_safe("voice"))
 
-    # ---------------------------- state queries
-
     @property
     def state(self) -> VoiceState:
         """Return the current handler state under the internal lock."""
@@ -89,8 +87,6 @@ class VoiceKeyHandler:
     def is_recording(self) -> bool:
         """Return ``True`` while audio capture is in progress."""
         return self.state is VoiceState.RECORDING
-
-    # ---------------------------- transitions
 
     def start_recording(self) -> None:
         """Begin a new recording session.

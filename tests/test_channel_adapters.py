@@ -37,8 +37,6 @@ from xerxes.channels.adapters import (
     WhatsAppChannel,
 )
 
-# ─── Helpers ───────────────────────────────────────────────────────────
-
 
 class CapturingHTTP:
     def __init__(self, response=None):
@@ -62,9 +60,6 @@ def _start(channel):
 
 def _post(channel, headers, body):
     return asyncio.run(channel.handle_webhook(headers, body))
-
-
-# ─── Telegram ──────────────────────────────────────────────────────────
 
 
 class TestTelegram:
@@ -96,9 +91,6 @@ class TestTelegram:
         assert "sendMessage" in http.calls[0]["url"]
 
 
-# ─── Discord ───────────────────────────────────────────────────────────
-
-
 class TestDiscord:
     def test_inbound(self):
         c = DiscordChannel("BOT")
@@ -114,9 +106,6 @@ class TestDiscord:
         c = DiscordChannel("BOT", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="discord", room_id="C1")))
         assert http.calls[0]["headers"]["Authorization"] == "Bot BOT"
-
-
-# ─── Slack ─────────────────────────────────────────────────────────────
 
 
 class TestSlack:
@@ -152,9 +141,6 @@ class TestSlack:
         assert http.calls[0]["headers"]["Authorization"] == "Bearer xoxb-tok"
 
 
-# ─── Email ─────────────────────────────────────────────────────────────
-
-
 class TestEmail:
     def test_inbound(self):
         c = EmailChannel(from_address="bot@ex.com")
@@ -173,9 +159,6 @@ class TestEmail:
         c = EmailChannel(from_address="bot@ex.com", smtp_sender=fake)
         asyncio.run(c.send(ChannelMessage(text="reply", channel="email", room_id="user@x")))
         assert sent == [("bot@ex.com", "user@x", "Re:", "reply")]
-
-
-# ─── Matrix ────────────────────────────────────────────────────────────
 
 
 class TestMatrix:
@@ -206,9 +189,6 @@ class TestMatrix:
         assert http.calls[0]["json"]["msgtype"] == "m.text"
 
 
-# ─── Mattermost ────────────────────────────────────────────────────────
-
-
 class TestMattermost:
     def test_inbound(self):
         c = MattermostChannel("https://mm.example", "tok")
@@ -222,9 +202,6 @@ class TestMattermost:
         c = MattermostChannel("https://mm.example", "tok", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="mattermost", room_id="C")))
         assert http.calls[0]["json"]["channel_id"] == "C"
-
-
-# ─── SMS (Twilio) ──────────────────────────────────────────────────────
 
 
 class TestSMS:
@@ -241,9 +218,6 @@ class TestSMS:
         c = TwilioSMSChannel("AC", "tok", "+15550000000", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="sms", room_id="+1")))
         assert "twilio.com" in http.calls[0]["url"]
-
-
-# ─── WhatsApp ──────────────────────────────────────────────────────────
 
 
 class TestWhatsApp:
@@ -265,9 +239,6 @@ class TestWhatsApp:
         assert body["to"] == "+1"
 
 
-# ─── Signal ────────────────────────────────────────────────────────────
-
-
 class TestSignal:
     def test_inbound(self):
         c = SignalChannel("http://signal-cli", "+15550000000")
@@ -286,9 +257,6 @@ class TestSignal:
         assert body["recipients"] == ["+2"]
 
 
-# ─── DingTalk ──────────────────────────────────────────────────────────
-
-
 class TestDingTalk:
     def test_inbound(self):
         c = DingTalkChannel("https://oapi.dingtalk.example/robot/send")
@@ -302,9 +270,6 @@ class TestDingTalk:
         c = DingTalkChannel("https://wh", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="dingtalk")))
         assert http.calls[0]["json"]["msgtype"] == "text"
-
-
-# ─── Feishu ────────────────────────────────────────────────────────────
 
 
 class TestFeishu:
@@ -330,9 +295,6 @@ class TestFeishu:
         assert http.calls[0]["headers"]["Authorization"] == "Bearer fresh"
 
 
-# ─── WeCom ─────────────────────────────────────────────────────────────
-
-
 class TestWeCom:
     def test_inbound(self):
         c = WeComChannel("tok", agent_id=1000)
@@ -346,9 +308,6 @@ class TestWeCom:
         c = WeComChannel("tok", agent_id=1000, http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="wecom", channel_user_id="U")))
         assert http.calls[0]["json"]["touser"] == "U"
-
-
-# ─── BlueBubbles ───────────────────────────────────────────────────────
 
 
 class TestBlueBubbles:
@@ -368,9 +327,6 @@ class TestBlueBubbles:
         assert "password=secret" in http.calls[0]["url"]
 
 
-# ─── Home Assistant ────────────────────────────────────────────────────
-
-
 class TestHomeAssistant:
     def test_inbound(self):
         c = HomeAssistantChannel("http://ha", "tok")
@@ -384,9 +340,6 @@ class TestHomeAssistant:
         c = HomeAssistantChannel("http://ha", "tok", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="home_assistant")))
         assert "/persistent_notification/create" in http.calls[0]["url"]
-
-
-# ─── Common contract ──────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(

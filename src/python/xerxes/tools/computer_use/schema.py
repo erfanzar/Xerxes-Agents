@@ -65,7 +65,6 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                     "without opening the native menu (no focus steal)."
                 ),
             },
-            # ── capture ────────────────────────────────────────────
             "mode": {
                 "type": "string",
                 "enum": ["som", "vision", "ax"],
@@ -109,7 +108,6 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "minimum": 1,
                 "maximum": 1000,
             },
-            # ── click / drag / scroll targeting ────────────────────
             "element": {
                 "type": "integer",
                 "description": (
@@ -124,7 +122,6 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "type": "integer",
                 "description": "Pixel Y coordinate (logical px).",
             },
-            # ── drag ───────────────────────────────────────────────
             "start_element": {
                 "type": "integer",
                 "description": "Start element index for drag.",
@@ -149,7 +146,6 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "type": "integer",
                 "description": "End Y coordinate for drag.",
             },
-            # ── scroll ─────────────────────────────────────────────
             "dx": {
                 "type": "integer",
                 "description": "Horizontal scroll amount (positive = right).",
@@ -160,7 +156,6 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "description": "Vertical scroll amount (positive = down).",
                 "default": 0,
             },
-            # ── keyboard ───────────────────────────────────────────
             "text": {
                 "type": "string",
                 "description": "Text to type (for action='type').",
@@ -180,13 +175,11 @@ COMPUTER_USE_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": "Value to set (for action='set_value').",
             },
-            # ── wait ───────────────────────────────────────────────
             "ms": {
                 "type": "integer",
                 "description": "Milliseconds to wait (for action='wait').",
                 "default": 1000,
             },
-            # ── capture_after ──────────────────────────────────────
             "capture_after": {
                 "type": "boolean",
                 "description": (

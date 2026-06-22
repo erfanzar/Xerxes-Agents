@@ -287,13 +287,10 @@ def markdown_to_ansi(text: str, *, columns: int | None = None) -> str:
 def print_markdown(text: str, *, file: IO[str] | None = None) -> None:
     """Print Markdown ``text`` via the shared Rich console (or ``file`` if given)."""
     console = _get_rich_console()
-    md = RichMarkdown(
-        text,
-        code_theme="monokai",
-        verify_code_blocks=False,
-    )
+    md = RichMarkdown(text, code_theme="monokai")
     if file:
-        console.print(md, file=file)
+        file_console = RichConsole(file=file)
+        file_console.print(md)
     else:
         console.print(md)
 

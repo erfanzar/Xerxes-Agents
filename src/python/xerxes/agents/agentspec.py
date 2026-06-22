@@ -27,7 +27,7 @@ import copy
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 try:
     import yaml
@@ -391,7 +391,7 @@ def _load_agent_spec_recursive(path: Path) -> AgentSpec:
 
     if not _is_inherit(spec.subagents):
         if spec.subagents is not None:
-            merged.subagents = {**(merged.subagents or {}), **spec.subagents}
+            merged.subagents = {**(merged.subagents or {}), **cast(dict[str, SubagentSpec], spec.subagents)}
         else:
             merged.subagents = None
 

@@ -28,8 +28,6 @@ from xerxes.tools.agent_meta_tools import (
     skills_list,
 )
 
-# ── mixture_of_agents ────────────────────────────────────────────────
-
 
 class TestMoA:
     def test_no_members_returns_error(self):
@@ -74,9 +72,6 @@ class TestMoA:
         assert out["answers"]["b"] == "ok"
 
 
-# ── session_search ───────────────────────────────────────────────────
-
-
 class TestSessionSearchAlias:
     def test_no_searcher_returns_empty(self):
         set_session_searcher(None)
@@ -96,9 +91,6 @@ class TestSessionSearchAlias:
             assert captured == {"query": "hello", "limit": 3, "agent_id": "a", "session_id": "s"}
         finally:
             set_session_searcher(None)
-
-
-# ── skill_*  ─────────────────────────────────────────────────────────
 
 
 @pytest.fixture

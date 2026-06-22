@@ -100,8 +100,6 @@ class SnapshotManager:
             (shadow / ".git" / "info").mkdir(parents=True, exist_ok=True)
             (shadow / ".git" / "info" / "exclude").write_text(".xerxes/snapshots/**\n")
 
-    # ---------------------------- public surface
-
     def snapshot(self, label: str = "") -> SnapshotRecord:
         """Commit the current workspace state to the shadow repo."""
         self._ensure_repo()

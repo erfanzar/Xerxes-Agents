@@ -23,8 +23,6 @@ from xerxes.security.path_security import PathEscape, resolve_within, safe_path
 from xerxes.security.redact import LoggingFilter, redact_payload, redact_string
 from xerxes.security.url_safety import check_url, is_url_safe
 
-# ---------------------------- redact ---------------------------------------
-
 
 class TestRedactString:
     def test_openai_token_redacted(self):
@@ -80,9 +78,6 @@ class TestLoggingFilter:
         assert "sk-abcdefghij" not in record.msg
 
 
-# ---------------------------- url_safety -----------------------------------
-
-
 class TestUrlSafety:
     def test_public_url_allowed(self):
         assert is_url_safe("https://example.com/api") is True
@@ -112,9 +107,6 @@ class TestUrlSafety:
         assert "private" in decision.reason
 
 
-# ---------------------------- path_security --------------------------------
-
-
 class TestPathSecurity:
     def test_resolve_within_ok(self, tmp_path):
         out = resolve_within(tmp_path, "subdir/file.txt")
@@ -131,9 +123,6 @@ class TestPathSecurity:
 
     def test_safe_path_returns_none_on_escape(self, tmp_path):
         assert safe_path(tmp_path, "../escape") is None
-
-
-# ---------------------------- approvals ------------------------------------
 
 
 class TestApprovals:

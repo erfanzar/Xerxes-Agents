@@ -427,25 +427,25 @@ def apply_update(*, dry_run: bool = False, git: bool = False) -> dict[str, objec
     if managed_python is not None:
         source = git_update_source() if git else managed_venv_update_source()
         if shutil.which("uv"):
-            argv = ["uv", "pip", "install", "--python", str(managed_python), "--upgrade"]
+            managed_argv = ["uv", "pip", "install", "--python", str(managed_python), "--upgrade"]
             if git:
-                argv.extend(["--reinstall-package", "xerxes-agent", "--refresh-package", "xerxes-agent"])
-            argv.append(source)
+                managed_argv.extend(["--reinstall-package", "xerxes-agent", "--refresh-package", "xerxes-agent"])
+            managed_argv.append(source)
         else:
-            argv = [str(managed_python), "-m", "pip", "install", "--upgrade"]
+            managed_argv = [str(managed_python), "-m", "pip", "install", "--upgrade"]
             if git:
-                argv.append("--force-reinstall")
-            argv.append(source)
+                managed_argv.append("--force-reinstall")
+            managed_argv.append(source)
         if dry_run:
-            return {"ok": True, "mode": "managed_venv", "argv": argv, "dry_run": True}
+            return {"ok": True, "mode": "managed_venv", "argv": managed_argv, "dry_run": True}
         try:
-            proc = subprocess.run(argv, capture_output=True, text=True)
+            proc = subprocess.run(managed_argv, capture_output=True, text=True)
         except FileNotFoundError as exc:
-            return {"ok": False, "mode": "managed_venv", "argv": argv, "error": str(exc)}
+            return {"ok": False, "mode": "managed_venv", "argv": managed_argv, "error": str(exc)}
         return {
             "ok": proc.returncode == 0,
             "mode": "managed_venv",
-            "argv": argv,
+            "argv": managed_argv,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
         }

@@ -64,8 +64,6 @@ class AcpAgentRunner:
         self._q_lock = threading.Lock()
         self._ctx = threading.local()
 
-    # ----- list providers (wired into AcpServer) ---------------------------
-
     def list_tools(self) -> list[dict[str, Any]]:
         """Return the live OpenAI-shaped tool schemas."""
         return list(self._runtime.tool_schemas)
@@ -90,8 +88,6 @@ class AcpAgentRunner:
     def active_model(self) -> str:
         """The runtime's active model id."""
         return self._runtime.model
-
-    # ----- prompt execution -------------------------------------------------
 
     def run_prompt(self, *, session: AcpSession, text: str, emit: EmitFn | None = None, **_: Any) -> dict[str, Any]:
         """Run one turn for ``session`` and stream ACP events via ``emit``.
@@ -177,8 +173,6 @@ class AcpAgentRunner:
         allowed = req.allowed
         board.drop(req.id)
         return bool(allowed and not session.cancelled)
-
-    # ----- interactive AskUserQuestion (routed to the ACP client) ----------
 
     def ask_user_question(self, question: str) -> str:
         """Blocking callback for ``AskUserQuestionTool`` — ask the ACP client.

@@ -97,11 +97,9 @@ class ComputerUseBackend(ABC):
         Used by check_fn gating and by the post-setup wizard.
         """
 
-    # ── Capture ─────────────────────────────────────────────────────
     @abstractmethod
     def capture(self, mode: str = "som", app: str | None = None) -> CaptureResult: ...
 
-    # ── Pointer actions ─────────────────────────────────────────────
     @abstractmethod
     def click(
         self,
@@ -169,7 +167,6 @@ class ComputerUseBackend(ABC):
         capture_after: bool = False,
     ) -> ActionResult: ...
 
-    # ── Keyboard actions ────────────────────────────────────────────
     @abstractmethod
     def type(self, text: str, capture_after: bool = False) -> ActionResult: ...
 
@@ -179,7 +176,6 @@ class ComputerUseBackend(ABC):
     @abstractmethod
     def set_value(self, value: str, element: int | None = None, capture_after: bool = False) -> ActionResult: ...
 
-    # ── Wait / App management ─────────────────────────────────────
     @abstractmethod
     def wait(self, ms: int = 1000) -> ActionResult: ...
 

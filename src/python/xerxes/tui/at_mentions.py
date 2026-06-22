@@ -225,9 +225,6 @@ class AtMentionCompleter(Completer):
                 return
 
 
-# ---------------------------- expansion ------------------------------------
-
-
 _TOKEN_RE = re.compile(r"@(?:file|folder|git|url):[^\s]+|@diff\b|@staged\b")
 
 

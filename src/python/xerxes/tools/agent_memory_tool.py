@@ -53,9 +53,6 @@ def active_memory() -> AgentMemory | None:
 _NOT_CONFIGURED = {"ok": False, "error": "agent memory not configured for this session"}
 
 
-# ---------------------------- tool surface ---------------------------------
-
-
 def agent_memory_read(scope: str, path: str) -> dict[str, Any]:
     """Read a memory file. ``scope`` is ``"global"`` or ``"project"``."""
     if _current is None:

@@ -19,17 +19,45 @@ Extracted from bridge/server.py as a mixin.
 from __future__ import annotations
 
 import os
+import queue
 import sys
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 from ..bridge import profiles
-from ..extensions.skills import activate_skill, default_skill_discovery_dirs
+from ..extensions.skills import SkillRegistry, activate_skill, default_skill_discovery_dirs
 from ..llms.registry import calc_cost, resolve_provider
 from ..runtime.bridge import populate_registry
 from ..runtime.config_context import set_config as set_global_config
+from ..runtime.cost_tracker import CostTracker
+from ..streaming.events import AgentState
 
 
 class SlashHandlerMixin:
     """Slash command dispatch and individual command handlers."""
+
+    config: dict[str, Any]
+    cost_tracker: CostTracker
+    state: AgentState
+    tool_schemas: list[dict[str, Any]]
+    _active_question_id: str
+    _question_queue: queue.Queue[dict[str, Any]]
+    _session_cwd: str
+    _skill_registry: SkillRegistry
+    _skills_dir: Path
+    _wire_mode: bool
+    _auto_switch_stale_model: Callable[[list[str]], str]
+    _drain_queue: Callable[[queue.Queue[dict[str, Any]]], None]
+    _emit: Callable[[str, dict[str, Any] | None], None]
+    _emit_wire_event: Callable[[str, dict[str, Any]], None]
+    _emit_wire_question_request: Callable[[list[dict[str, Any]]], str]
+    _provider_create_interactive: Callable[[], str]
+    _run_context_compaction: Callable[..., Any]
+    _switch_model: Callable[[str], None]
+    _wait_for_question_response: Callable[[], str]
+    handle_provider_select: Callable[[dict[str, Any]], None]
+    handle_query: Callable[..., None]
 
     def _run_slash(self, cmd: str, args: str) -> str:
         """Dispatch a leading-slash command to the matching built-in handler.

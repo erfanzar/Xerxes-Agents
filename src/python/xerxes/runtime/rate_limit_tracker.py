@@ -140,12 +140,12 @@ class RateLimitTracker:
             if (parsed := _parse_int(v)) is not None:
                 state.remaining_tokens = parsed
             v = self._pluck(headers, self.HEADER_RESET)
-            if (parsed := _parse_float(v)) is not None:
-                state.reset_at = now + parsed
+            if (parsed_float := _parse_float(v)) is not None:
+                state.reset_at = now + parsed_float
             v = self._pluck(headers, self.HEADER_RETRY_AFTER)
-            if (parsed := _parse_float(v)) is not None:
-                state.retry_after = parsed
-                state.retry_after_until = now + parsed
+            if (parsed_float := _parse_float(v)) is not None:
+                state.retry_after = parsed_float
+                state.retry_after_until = now + parsed_float
             state.last_updated = now
             return state
 

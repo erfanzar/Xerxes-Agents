@@ -439,8 +439,6 @@ class SessionManager:
         self._store_dir = store_dir or xerxes_subdir("sessions")
         self._store_dir.mkdir(parents=True, exist_ok=True)
 
-    # ---------------------------- persistence helpers -----------------------
-
     def _session_path(self, session_id: str) -> Path:
         """Return the on-disk JSON path for ``session_id``."""
         return self._store_dir / f"{session_id}.json"
@@ -641,8 +639,6 @@ class SessionManager:
             except FileNotFoundError:
                 pass
             raise
-
-    # ---------------------------- main API ----------------------------------
 
     def open(self, session_key: str = "default", agent_id: str | None = None) -> DaemonSession:
         """Return (or create) the live :class:`DaemonSession` for ``session_key``.
@@ -1133,7 +1129,8 @@ class TurnRunner:
             try:
                 while True:
                     item_task = asyncio.create_task(queue.get())
-                    done, _pending = await asyncio.wait({item_task, future}, return_when=asyncio.FIRST_COMPLETED)
+                    wait_set: set[asyncio.Future[Any]] = {item_task, future}
+                    done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                     if item_task in done:
                         item = item_task.result()
                         if item is not None:

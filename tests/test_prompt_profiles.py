@@ -21,8 +21,6 @@ from xerxes.runtime.context import PromptContextBuilder
 from xerxes.runtime.profiles import PromptProfile, PromptProfileConfig, get_profile_config
 from xerxes.security.sandbox import SandboxConfig, SandboxMode
 
-# ── PromptProfile enum ───────────────────────────────────────────────
-
 
 class TestPromptProfileEnum:
     def test_full_value(self):
@@ -44,9 +42,6 @@ class TestPromptProfileEnum:
             PromptProfile.MINIMAL,
             PromptProfile.NONE,
         }
-
-
-# ── get_profile_config ───────────────────────────────────────────────
 
 
 class TestGetProfileConfig:
@@ -111,9 +106,6 @@ class TestGetProfileConfig:
         assert prefix == ("You are Xerxes, a runtime-managed AI agent operating inside a controlled tool environment.")
 
 
-# ── PromptProfileConfig defaults ─────────────────────────────────────
-
-
 class TestPromptProfileConfigDefaults:
     def test_defaults_match_full(self):
         cfg = PromptProfileConfig()
@@ -134,9 +126,6 @@ class TestPromptProfileConfigDefaults:
         assert cfg.include_runtime_info is False
         assert cfg.include_guardrails is False
         assert cfg.max_tools_listed == 5
-
-
-# ── Profile-aware prompt assembly ────────────────────────────────────
 
 
 def _make_builder_with_everything() -> PromptContextBuilder:
@@ -344,9 +333,6 @@ class TestNoneProfile:
         assert "[Tooling]" not in prefix
         assert "[Safety]" not in prefix
         assert "[Runtime]" not in prefix
-
-
-# ── Truncation edge cases ────────────────────────────────────────────
 
 
 class TestTruncation:

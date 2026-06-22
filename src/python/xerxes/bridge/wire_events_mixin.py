@@ -25,12 +25,32 @@ from pathlib import Path
 from typing import Any
 
 from ..context.window_usage import estimate_context_tokens
+from ..extensions.skills import SkillRegistry
 from ..llms.registry import get_context_limit
+from ..streaming.events import AgentState
 from ..streaming.wire_events import to_kimi_event_name
 
 
 class WireEventMixin:
     """Methods that emit structured wire events to the connected client."""
+
+    config: dict[str, Any]
+    state: AgentState
+    _current_tool_call_id: str
+    _out_lock: Any
+    _session_cwd: str
+    _session_id: str
+    _skill_registry: SkillRegistry
+    _stdout: Any
+    _step_count: int
+    _subagent_buffer_lock: Any
+    _subagent_parent_tool: dict[str, str]
+    _subagent_text_buffers: dict[str, str]
+    _subagent_thinking_buffers: dict[str, str]
+    _subagent_tool_id_fifo: dict[str, list[str]]
+    _suppress_buf: list[str]
+    _suppressing_tag: bool
+    _wire_mode: bool
 
     def _emit_wire_tool_start(self, tool_call_id: str, name: str, arguments: dict[str, Any]) -> None:
         """Emit a ``tool_call`` start event, synthesising an id if the provider omits one.

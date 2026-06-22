@@ -639,22 +639,6 @@ class TaskUpdateTool(AgentBaseFn):
         return SendMessageTool.static_call(target=task_id, message=message)
 
 
-# ---------------------------------------------------------------------------
-# Async sub-agent orchestration — the main agent uses these to coordinate
-# background sub-agents without blocking on them. The lifecycle is:
-#   1. Spawn with ``wait=False`` (AgentTool / TaskCreateTool / SpawnAgents).
-#   2. Optionally call ``AwaitAgents`` to sleep until they finish (or until
-#      the user wakes us with a steer / new prompt, or until a timeout).
-#   3. Use ``CheckAgentMessages`` to drain notifications, or rely on the
-#      streaming-loop auto-drain that splices them into the conversation
-#      between iterations.
-#   4. ``PeekAgent`` shows what a specific sub-agent is doing right now —
-#      current tool, recent output, idle time.
-#   5. ``ResetAgent`` cancels and re-spawns with the same (or a fresh)
-#      prompt; ``TaskStopTool`` cancels without re-spawn.
-# ---------------------------------------------------------------------------
-
-
 class AwaitAgents(AgentBaseFn):
     """Sleep until tracked sub-agents finish, the user wakes us, or timeout.
 
@@ -704,11 +688,14 @@ class AwaitAgents(AgentBaseFn):
         mgr = _get_agent_manager()
         ids_input = agent_ids
         if isinstance(ids_input, str):
+            raw_ids = ids_input
             try:
-                parsed = _json.loads(ids_input)
-                ids_input = parsed if isinstance(parsed, list) else [ids_input]
+                parsed = _json.loads(raw_ids)
+                ids_input = parsed if isinstance(parsed, list) else [raw_ids]
             except Exception:
-                ids_input = [s.strip() for s in ids_input.split(",") if s.strip()]
+                ids_input = [s.strip() for s in raw_ids.split(",") if s.strip()]
+        if not isinstance(ids_input, list):
+            ids_input = [str(ids_input)]
 
         watched: list[str] = []
         if ids_input:

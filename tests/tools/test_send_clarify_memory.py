@@ -18,8 +18,6 @@ from __future__ import annotations
 from xerxes.tools import memory_crud, send_message_tool
 from xerxes.tools.clarify_tool import StaticAsker, clarify
 
-# ---------------------------- send_message ---------------------------------
-
 
 class TestSendMessage:
     def test_missing_platform(self):
@@ -65,9 +63,6 @@ class TestSendMessage:
         assert captured["payload"]["reply_to"] == "m456"
 
 
-# ---------------------------- clarify --------------------------------------
-
-
 class TestClarify:
     def test_empty_question(self):
         out = clarify(question="")
@@ -99,9 +94,6 @@ class TestClarify:
         out = clarify(question="?", asker=asker)
         assert out["skipped"] is True
         assert out["answered"] is False
-
-
-# ---------------------------- memory CRUD ----------------------------------
 
 
 class TestMemoryCrud:

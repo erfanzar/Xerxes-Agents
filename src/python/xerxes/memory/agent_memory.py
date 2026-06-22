@@ -76,8 +76,6 @@ class AgentMemory:
         }
         return defaults.get(key, "")
 
-    # ── Read ──────────────────────────────────────────────────────
-
     def read(self, key: str) -> str:
         """Read a memory file by key."""
         filename = _AGENT_MEMORY_FILES.get(key)
@@ -91,8 +89,6 @@ class AgentMemory:
     def read_all(self) -> dict[str, str]:
         """Read all memory files."""
         return {key: self.read(key) for key in _AGENT_MEMORY_FILES}
-
-    # ── Write ─────────────────────────────────────────────────────
 
     def write(self, key: str, content: str) -> None:
         """Overwrite a memory file."""
@@ -123,8 +119,6 @@ class AgentMemory:
             return False
         path.write_text(content.replace(old_text, new_text, 1))
         return True
-
-    # ── Project Context Integration ───────────────────────────────
 
     def sync_project_context(self, cwd: Path | None = None) -> None:
         """Read AGENTS.md, XERXES.md, USER.md from project and update memory."""
@@ -161,8 +155,6 @@ class AgentMemory:
                 except Exception:
                     continue
         return ""
-
-    # ── Learning from Interactions ────────────────────────────────
 
     def learn_from_interaction(
         self,
@@ -237,8 +229,6 @@ class AgentMemory:
                             break
                     break
             self.write("skill_journal", "\n".join(lines))
-
-    # ── System Prompt Integration ─────────────────────────────────
 
     def get_system_prompt_addendum(self) -> str:
         """Return memory content formatted for injection into system prompt."""
