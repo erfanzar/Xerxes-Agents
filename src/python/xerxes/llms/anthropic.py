@@ -312,11 +312,12 @@ class AnthropicLLM(BaseLLM):
                 block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
                 if block_type == "tool_use":
                     index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
-                    tool_blocks[index] = {
-                        "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
-                        "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
-                        "partial_json": "",
-                    }
+                    if isinstance(index, int):
+                        tool_blocks[index] = {
+                            "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
+                            "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
+                            "partial_json": "",
+                        }
             elif event_type == "content_block_delta":
                 delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
                 delta_type = delta.get("type") if isinstance(delta, dict) else getattr(delta, "type", None)
@@ -325,7 +326,7 @@ class AnthropicLLM(BaseLLM):
                     partial = (
                         delta.get("partial_json", "") if isinstance(delta, dict) else getattr(delta, "partial_json", "")
                     )
-                    if index in tool_blocks:
+                    if isinstance(index, int) and index in tool_blocks:
                         tool_blocks[index]["partial_json"] += partial or ""
                 else:
                     text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
@@ -335,7 +336,7 @@ class AnthropicLLM(BaseLLM):
                         chunk_data["buffered_content"] = buffered_content
             elif event_type == "content_block_stop":
                 index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
-                block = tool_blocks.get(index)
+                block = tool_blocks.get(index) if isinstance(index, int) else None
                 if block and block.get("name"):
                     function_calls.append(
                         {
@@ -398,11 +399,12 @@ class AnthropicLLM(BaseLLM):
                     block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
                     if block_type == "tool_use":
                         index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
-                        tool_blocks[index] = {
-                            "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
-                            "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
-                            "partial_json": "",
-                        }
+                        if isinstance(index, int):
+                            tool_blocks[index] = {
+                                "id": block.get("id") if isinstance(block, dict) else getattr(block, "id", None),
+                                "name": block.get("name") if isinstance(block, dict) else getattr(block, "name", None),
+                                "partial_json": "",
+                            }
                 elif event_type == "content_block_delta":
                     delta = event.get("delta", {}) if isinstance(event, dict) else getattr(event, "delta", {})
                     delta_type = delta.get("type") if isinstance(delta, dict) else getattr(delta, "type", None)
@@ -413,7 +415,7 @@ class AnthropicLLM(BaseLLM):
                             if isinstance(delta, dict)
                             else getattr(delta, "partial_json", "")
                         )
-                        if index in tool_blocks:
+                        if isinstance(index, int) and index in tool_blocks:
                             tool_blocks[index]["partial_json"] += partial or ""
                     else:
                         text = delta.get("text", "") if isinstance(delta, dict) else getattr(delta, "text", "")
@@ -423,7 +425,7 @@ class AnthropicLLM(BaseLLM):
                             chunk_data["buffered_content"] = buffered_content
                 elif event_type == "content_block_stop":
                     index = event.get("index") if isinstance(event, dict) else getattr(event, "index", None)
-                    block = tool_blocks.get(index)
+                    block = tool_blocks.get(index) if isinstance(index, int) else None
                     if block and block.get("name"):
                         function_calls.append(
                             {

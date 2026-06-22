@@ -375,6 +375,8 @@ def _session_token_budget(config: dict[str, Any]) -> int | None:
     value = config.get("max_budget_tokens")
     if value in (None, "", 0):
         return None
+    if value is None:
+        return None
     budget = int(value)
     return budget if budget > 0 else None
 

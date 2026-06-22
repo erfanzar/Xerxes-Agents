@@ -21,6 +21,7 @@ Resolution is merged with the built-in registry from
 
 from __future__ import annotations
 
+import builtins
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -126,7 +127,7 @@ class SlashPluginRegistry:
         with self._lock:
             return sorted(self._plugins.values(), key=lambda p: p.command.name)
 
-    def all_commands(self) -> list[CommandDef]:
+    def all_commands(self) -> builtins.list[CommandDef]:
         """Return built-in plus plugin commands merged into one sorted list."""
         seen = {c.name for c in COMMAND_REGISTRY}
         plugin_cmds = [p.command for p in self.list() if p.command.name not in seen]

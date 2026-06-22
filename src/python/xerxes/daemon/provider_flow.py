@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..bridge import profiles
 from .gateway import EmitFn
+from .runtime import RuntimeManager
 
 
 class ProviderFlowMixin:
@@ -56,6 +59,11 @@ class ProviderFlowMixin:
         "lmstudio",
         "custom",
     )
+    runtime: RuntimeManager
+    _provider_flow: dict[str, Any] | None
+    _emit_init_done: Callable[[EmitFn], Awaitable[None]]
+    _emit_slash: Callable[[EmitFn, str], Awaitable[None]]
+    _sync_runtime_to_connection_session: Callable[[EmitFn], None]
 
     async def _emit_provider_edit_panel(self, emit: EmitFn) -> None:
         """Ask which profile + field to edit + the new value (batched)."""

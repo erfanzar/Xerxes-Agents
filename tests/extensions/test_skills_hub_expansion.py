@@ -26,8 +26,6 @@ from xerxes.extensions.skill_sources import (
 from xerxes.extensions.skill_sources.base import SkillBundle
 from xerxes.extensions.skills_sync import ManifestEntry, install_bundle, sync_manifest
 
-# ---------------------------- LocalSkillSource -----------------------------
-
 
 class TestLocalSource:
     def _seed(self, tmp_path):
@@ -58,9 +56,6 @@ class TestLocalSource:
         s = LocalSkillSource(self._seed(tmp_path))
         with pytest.raises(KeyError):
             s.fetch("ghost")
-
-
-# ---------------------------- GitHubSkillSource ----------------------------
 
 
 class TestGitHubSource:
@@ -96,9 +91,6 @@ class TestGitHubSource:
         assert s.search("x") == []
 
 
-# ---------------------------- OfficialSkillSource --------------------------
-
-
 class TestOfficialSource:
     def test_search_returns_results(self):
         def handler(req):
@@ -129,9 +121,6 @@ class TestOfficialSource:
 class TestAgentskillsIO:
     def test_name(self):
         assert AgentskillsIOSource().name == "agentskills.io"
-
-
-# ---------------------------- sync -----------------------------------------
 
 
 class TestSync:

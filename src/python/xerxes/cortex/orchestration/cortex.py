@@ -330,8 +330,8 @@ class Cortex:
             if callable(original):
                 setattr(memory, name, make_guarded(original))
 
-        memory._cortex_thread_guarded = True
-        memory._cortex_memory_lock = lock
+        setattr(memory, "_cortex_thread_guarded", True)
+        setattr(memory, "_cortex_memory_lock", lock)
 
     def _run_async_coro(self, coro):
         """Run ``coro`` from synchronous code, even inside a live event loop.
@@ -449,10 +449,14 @@ class Cortex:
                         )
                     )
 
-                    buffer.cortex_output = CortexOutput(
-                        raw_output=result,
-                        task_outputs=self.task_outputs,
-                        execution_time=execution_time,
+                    setattr(
+                        buffer,
+                        "cortex_output",
+                        CortexOutput(
+                            raw_output=result,
+                            task_outputs=self.task_outputs,
+                            execution_time=execution_time,
+                        ),
                     )
 
                     log_success(f"Cortex execution completed in {execution_time:.2f}s")
@@ -567,16 +571,18 @@ class Cortex:
             except Exception as e:  # validation must never abort the stream
                 validation_results = {"validation_error": str(e)}
 
-        if getattr(task, "output_file", None):
+        output_file = getattr(task, "output_file", None)
+        if output_file:
             try:
-                with open(task.output_file, "w") as f:
+                with open(output_file, "w") as f:
                     f.write(output)
             except Exception as e:  # a write failure must not abort the run
-                self.logger.error(f"❌ Failed to write task output_file {task.output_file}: {e}")
+                self.logger.error(f"❌ Failed to write task output_file {output_file}: {e}")
 
-        if getattr(task, "save_to_memory", False) and getattr(task, "memory", None):
+        memory = getattr(task, "memory", None)
+        if getattr(task, "save_to_memory", False) and memory is not None:
             try:
-                task.memory.save_task_result(
+                memory.save_task_result(
                     task_description=task.description,
                     result=output,
                     agent_role=agent.role,

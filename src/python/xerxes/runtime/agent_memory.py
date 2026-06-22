@@ -211,8 +211,6 @@ class AgentMemory:
         if self.project_dir is None and self.project_root is not None:
             object.__setattr__(self, "project_dir", project_memory_dir_for(self.project_root))
 
-    # ---------------------------- discovery ----------------------------
-
     def has_project_scope(self) -> bool:
         """Return ``True`` when this instance has a usable project scope."""
         return self.project_dir is not None
@@ -249,8 +247,6 @@ class AgentMemory:
         yield self.global_dir
         if self.project_dir is not None:
             yield self.project_dir
-
-    # ---------------------------- read / write -------------------------
 
     def _resolve_inside(self, scope: AgentMemoryScope, rel: str) -> Path:
         """Resolve ``rel`` under ``scope``'s root and reject escapes.
@@ -444,8 +440,6 @@ class AgentMemory:
                     return hits
         return hits
 
-    # ---------------------------- prompt section -----------------------
-
     def to_prompt_section(self, *, max_bytes_per_file: int = 4_000) -> str:
         """Render the persistent-memory protocol plus current file contents.
 
@@ -593,8 +587,6 @@ class AgentMemory:
             "record the NEW value so a later recall can't hand back the stale one.\n"
         )
         return "\n".join(sections).rstrip() + "\n"
-
-    # ---------------------------- export -------------------------------
 
     def status(self) -> dict[str, Any]:
         """Return a small dict summarising configured directories and file counts."""

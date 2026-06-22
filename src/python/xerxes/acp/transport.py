@@ -63,8 +63,6 @@ class StdioJsonRpcServer:
         self._workers: set[threading.Thread] = set()
         self._running = True
 
-    # ----- wire helpers -----------------------------------------------------
-
     def _send(self, obj: dict[str, Any]) -> None:
         """Serialise ``obj`` as one JSON line to stdout (thread-safe)."""
         line = json.dumps(obj, default=str)
@@ -82,8 +80,6 @@ class StdioJsonRpcServer:
 
     def _notify(self, method: str, params: dict[str, Any]) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
-
-    # ----- main loop --------------------------------------------------------
 
     def serve_forever(self) -> None:
         """Read JSON-RPC lines until EOF, dispatching each request."""
@@ -171,8 +167,6 @@ class StdioJsonRpcServer:
             if req_id is not None:
                 self._error(req_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
 
-    # ----- prompt (runs on a worker thread) ---------------------------------
-
     def _start_prompt(self, req_id: Any, params: dict[str, Any]) -> None:
         """Validate the session, then stream the prompt on a worker thread."""
         session_id = str(params.get("session_id", ""))
@@ -181,7 +175,8 @@ class StdioJsonRpcServer:
         if session is None:
             self._error(req_id, _INVALID_REQUEST, f"unknown session: {session_id}")
             return
-        if self._runner is None:
+        runner = self._runner
+        if runner is None:
             self._error(req_id, _INTERNAL_ERROR, "no agent runner wired")
             return
 
@@ -190,7 +185,7 @@ class StdioJsonRpcServer:
 
         def work() -> None:
             try:
-                summary = self._runner.run_prompt(session=session, text=text, emit=emit)
+                summary = runner.run_prompt(session=session, text=text, emit=emit)
                 self._result(req_id, summary)
             except Exception as exc:
                 logger.warning("ACP prompt worker failed: %s", exc)

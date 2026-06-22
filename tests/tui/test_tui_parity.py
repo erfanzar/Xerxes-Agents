@@ -61,10 +61,6 @@ from xerxes.tui.status_bar import StatusSnapshot, format_status
 from xerxes.tui.tips import TIPS, random_tip, tip_of_the_day
 from xerxes.tui.voice_keys import VoiceKeyHandler, VoiceState
 
-# ============================================================================
-# Gap 1 — Multiline input
-# ============================================================================
-
 
 class TestMultilineInput:
     def test_default_config_multiline(self):
@@ -93,11 +89,6 @@ class TestMultilineInput:
         assert len(kb.bindings) == 3
 
 
-# ============================================================================
-# Gap 2 — Auto-suggest + Gap 3 — FileHistory persistence
-# ============================================================================
-
-
 class TestAutoSuggestAndHistory:
     def test_auto_suggest_enabled(self):
         buf = build_input_buffer(InputBufferConfig(auto_suggest=True, history_path=None))
@@ -124,11 +115,6 @@ class TestAutoSuggestAndHistory:
         items = list(buf.history.load_history_strings())
         assert "first prompt" in items
         assert hist_path.exists()
-
-
-# ============================================================================
-# Gap 4 — Reasoning tag suppression
-# ============================================================================
 
 
 class TestReasoningFilter:
@@ -183,11 +169,6 @@ class TestReasoningFilter:
         assert "incomplete" in t
 
 
-# ============================================================================
-# Gap 5 — Status bar
-# ============================================================================
-
-
 class TestStatusBar:
     def test_default_snapshot(self):
         s = StatusSnapshot()
@@ -233,11 +214,6 @@ class TestStatusBar:
         assert "manual" in out
 
 
-# ============================================================================
-# Gap 6 — Welcome tips
-# ============================================================================
-
-
 class TestTips:
     def test_at_least_150_tips(self):
         assert len(TIPS) >= 150
@@ -258,11 +234,6 @@ class TestTips:
 
     def test_tips_are_strings(self):
         assert all(isinstance(t, str) and t for t in TIPS)
-
-
-# ============================================================================
-# Gap 7 — Skin branding
-# ============================================================================
 
 
 class TestSkinBranding:
@@ -290,11 +261,6 @@ class TestSkinBranding:
         engine = SkinEngine()
         names = set(engine.available())
         assert {"default", "high-contrast", "dim", "ares", "mono", "slate", "daylight"}.issubset(names)
-
-
-# ============================================================================
-# Gap 8 — Voice mode key binding
-# ============================================================================
 
 
 class TestVoiceKeyHandler:
@@ -358,11 +324,6 @@ class TestVoiceKeyHandler:
         assert h.state is VoiceState.IDLE
 
 
-# ============================================================================
-# Gap 9 — Clipboard image attach
-# ============================================================================
-
-
 class TestAttachmentBuffer:
     def test_capture_no_image(self, tmp_path):
         buf = AttachmentBuffer(capture_image=lambda d: None, store_dir=tmp_path)
@@ -400,11 +361,6 @@ class TestAttachmentBuffer:
         drained = buf.drain()
         assert len(drained) == 1
         assert buf.pending() == []
-
-
-# ============================================================================
-# Gap 10 — Modal panel navigation + Gap 11 — Approval timer + Gap 12 — 5-option
-# ============================================================================
 
 
 class TestPanelSelection:
@@ -469,11 +425,6 @@ class TestApprovalCountdown:
         c.start(lambda: None)
         assert 4.0 < c.remaining() <= 5.0
         c.cancel()
-
-
-# ============================================================================
-# Gap 13 — @-mentions
-# ============================================================================
 
 
 class TestAtMentions:
@@ -548,11 +499,6 @@ class TestAtMentions:
         assert "url" in kinds
 
 
-# ============================================================================
-# Gap 14 — Context bar
-# ============================================================================
-
-
 class TestContextBar:
     def test_empty_when_zero(self):
         assert context_bar(used=0, window=200_000, width=10) == "░" * 10
@@ -568,11 +514,6 @@ class TestContextBar:
     def test_with_pct(self):
         out = context_bar_with_pct(used=50_000, window=200_000, width=20)
         assert "25.0%" in out
-
-
-# ============================================================================
-# Gap 15 — /rollback diff [n]
-# ============================================================================
 
 
 class TestSnapshotDiff:
@@ -613,11 +554,6 @@ class TestSnapshotDiff:
         mgr = SnapshotManager(ws, shadow_root=shadow)
         with pytest.raises(KeyError):
             diff_against_snapshot(mgr, "ghost-id")
-
-
-# ============================================================================
-# Gap 16 — Background sessions
-# ============================================================================
 
 
 class TestBackgroundSessions:
@@ -690,11 +626,6 @@ class TestBackgroundSessions:
         mgr.shutdown(timeout=2.0)
 
 
-# ============================================================================
-# Gap 17 — Compact banner
-# ============================================================================
-
-
 class TestBanner:
     def test_full_banner_includes_logo(self):
         data = BannerData(
@@ -729,11 +660,6 @@ class TestBanner:
         # Banner stays within reasonable bounds.
         for line in out.splitlines():
             assert len(line) <= 100
-
-
-# ============================================================================
-# Gap 18 — Plugin-registered slash commands
-# ============================================================================
 
 
 class TestSlashPlugins:

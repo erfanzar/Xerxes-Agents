@@ -78,7 +78,7 @@ def read_file(
 
         selected_lines = lines[start_line - 1 : end_line]
 
-        result = []
+        result: list[str] = []
         for i, line in enumerate(selected_lines, start=start_line):
             result.append(f"{i:6d} | {line.rstrip()}")
 
@@ -623,7 +623,7 @@ def apply_diff(original: str, diff: str, context_variables: dict | None = None) 
         lines = original.splitlines(keepends=True)
         diff_lines = diff.splitlines()
 
-        result = []
+        result: list[str] = []
         current_line = 0
         prev_body_prefix = ""
 

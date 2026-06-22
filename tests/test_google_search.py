@@ -33,9 +33,6 @@ def _restore_config():
     set_google_search_client(None)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────
-
-
 class _Resp:
     def __init__(self, payload=None, text=None, status_code=200):
         self._payload = payload
@@ -60,9 +57,6 @@ class _FakeHTTP:
     def get(self, url, headers=None, params=None):
         self.calls.append({"url": url, "headers": headers, "params": params})
         return self.response
-
-
-# ── API mode ──────────────────────────────────────────────────────────
 
 
 class TestApiMode:
@@ -122,9 +116,6 @@ class TestApiMode:
         assert out["engine"] == "google_api"
         assert "error" in out
         assert out["results"] == []
-
-
-# ── Scrape mode ───────────────────────────────────────────────────────
 
 
 _FAKE_HTML = """
@@ -200,9 +191,6 @@ class TestScrapeMode:
         set_google_search_client(http)
         GoogleSearch.static_call(query="x", n_results=999)
         assert http.calls[0]["params"]["num"] == "30"
-
-
-# ── Public registry ───────────────────────────────────────────────────
 
 
 class TestRegistryWiring:

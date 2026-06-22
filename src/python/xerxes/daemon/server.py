@@ -116,14 +116,14 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         # and the next plain user message is consumed as the missing argument
         # rather than dispatched as a chat turn. ``/cancel`` clears the parked
         # state.
-        self._pending_slash_arg: tuple[str, str] | None = None
+        self._pending_slash_arg: Any = None
         # Multi-step ``/skill-create`` interview state. Each entry from
         # ``_SKILL_CREATE_STEPS`` is asked one at a time; once every key is
         # filled the synthesized draft turn is submitted to the agent.
-        self._pending_skill_create: dict[str, Any] | None = None
+        self._pending_skill_create: Any = None
         # Active ``/provider`` interactive panel state (``main``/``add``/
         # ``edit``/``remove`` step). Resolved by ``question_response``.
-        self._provider_flow: dict[str, Any] | None = None
+        self._provider_flow: Any = None
 
         # Hook ``AskUserQuestionTool`` to the live TurnRunner so a tool
         # call from inside any agent turn lights up the TUI's interactive
@@ -252,8 +252,8 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if method == "session.list":
             return {"ok": True, "sessions": self.sessions.list()}
         if method == "session.status":
-            session = self.sessions.get(str(params.get("session_key") or self._connection_session_key(emit)))
-            return {"ok": bool(session), "session": session.status() if session else None}
+            status_session = self.sessions.get(str(params.get("session_key") or self._connection_session_key(emit)))
+            return {"ok": bool(status_session), "session": status_session.status() if status_session else None}
         if method == "turn.submit":
             return await self._submit_turn(params, emit)
         if method in {"turn.cancel", "cancel"}:
@@ -608,7 +608,11 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             turn_owners[session_key] = emit
         turn_task = self._track_task(self.turns.run_turn(session, text, emit, mode=mode, plan_mode=plan_mode))
         if turn_owners is not None and hasattr(turn_task, "add_done_callback"):
-            turn_task.add_done_callback(lambda _t, key=session_key, e=emit: self._release_turn_owner(key, e))
+
+            def release_owner(_task: asyncio.Task[Any], key: str = session_key, e: EmitFn = emit) -> None:
+                self._release_turn_owner(key, e)
+
+            turn_task.add_done_callback(release_owner)
         return {"ok": True, "session": session.status(), "turn_task": turn_task}
 
     def _release_turn_owner(self, session_key: str, emit: EmitFn) -> None:
@@ -975,11 +979,6 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 "payload": {},
             },
         )
-
-    # ============================================================
-    # Bulk slash handlers — one per registered command. Each returns
-    # nothing; they emit user-facing output via ``self._emit_slash``.
-    # ============================================================
 
 
 def main() -> None:

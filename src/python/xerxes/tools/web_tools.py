@@ -422,7 +422,10 @@ class URLAnalyzer(AgentBaseFn):
                 og_tags: dict[str, str] = {}
                 for meta in soup.find_all("meta", property=re.compile(r"^og:")):
                     meta_tag = cast(Tag, meta)
-                    og_tags[meta_tag["property"]] = meta_tag.get("content", "")
+                    prop = meta_tag.get("property")
+                    content = meta_tag.get("content", "")
+                    if isinstance(prop, str):
+                        og_tags[prop] = str(content or "")
                 if og_tags:
                     result["open_graph"] = og_tags
 

@@ -79,9 +79,6 @@ class OAuthClient:
         return _refresh(self._config, token=token, client=self._http)
 
 
-# ---------------------------- provider presets -----------------------------
-
-
 def github_pat_preset(client_id: str) -> OAuthConfig:
     """OAuth config for the standard GitHub user-token flow."""
     return OAuthConfig(

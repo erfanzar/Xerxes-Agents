@@ -88,8 +88,6 @@ class CronScheduler:
                 logger.exception("CronScheduler tick failed")
             self._stop.wait(self._sleep_seconds)
 
-    # ---------------------------- public surface
-
     def tick(self, *, now: datetime | None = None) -> list[str]:
         """Fire every due job; return ids of jobs that ran this tick.
 

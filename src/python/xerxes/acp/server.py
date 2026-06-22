@@ -94,8 +94,6 @@ class AcpServer:
         self._models = model_list_provider or (lambda: [])
         self.capabilities = capabilities or ServerCapabilities()
 
-    # ----- core RPCs --------------------------------------------------------
-
     def initialize(self, client_info: dict[str, Any] | None = None) -> dict[str, Any]:
         """Handle the ACP ``initialize`` handshake.
 
@@ -153,8 +151,6 @@ class AcpServer:
         ok = self.sessions.drop(session_id)
         return {"ok": ok}
 
-    # ----- prompt + streaming ----------------------------------------------
-
     def prompt(self, session_id: str, text: str, **kwargs: Any) -> Any:
         """Dispatch a prompt to the wired ``prompt_handler``.
 
@@ -170,8 +166,6 @@ class AcpServer:
         """Wrap an internal StreamEvent for transport."""
         acp_event = event if isinstance(event, AcpEvent) else to_acp_event(event)
         return acp_event.to_wire()
-
-    # ----- approvals --------------------------------------------------------
 
     def request_permission(
         self,

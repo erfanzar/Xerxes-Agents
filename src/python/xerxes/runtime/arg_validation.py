@@ -166,10 +166,13 @@ def validate_and_format_error(
     """
 
     if isinstance(arguments, str):
+        raw_arguments = arguments
         try:
-            arguments = json.loads(arguments)
+            arguments = json.loads(raw_arguments)
         except json.JSONDecodeError:
-            return f"{tool_name}: arguments are not valid JSON: {arguments[:200]}"
+            return f"{tool_name}: arguments are not valid JSON: {raw_arguments[:200]}"
+    if not isinstance(arguments, dict):
+        return f"{tool_name}: arguments must be a JSON object."
     result = validate_tool_arguments(tool_name, arguments, schema)
     return result.error if not result.ok else None
 

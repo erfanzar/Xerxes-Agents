@@ -54,9 +54,6 @@ CheckFn = Callable[[], Diagnosis]
 """Callable signature for a doctor check: takes no args, returns :class:`Diagnosis`."""
 
 
-# ---------------------------- individual checks ----------------------------
-
-
 def check_python_version() -> Diagnosis:
     """Verify the interpreter is Python 3.11 or newer."""
     v = sys.version_info

@@ -52,7 +52,9 @@ def _provider_openai(prompt: str, params: dict[str, Any]) -> bytes:
         size=params.get("size", "1024x1024"),
         response_format="b64_json",
     )
-    return base64.b64decode(resp.data[0].b64_json)  # type: ignore[no-any-return]
+    if not resp.data or not resp.data[0].b64_json:
+        raise RuntimeError("OpenAI image generation returned no image data")
+    return base64.b64decode(resp.data[0].b64_json)
 
 
 def _provider_fal(prompt: str, params: dict[str, Any]) -> bytes:

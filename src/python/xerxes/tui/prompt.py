@@ -1008,7 +1008,7 @@ class PersistentPrompt:
             always_hide_cursor=True,
         )
 
-        self._status_control.mouse_handler = self._on_status_mouse
+        self._status_control.mouse_handler = self._on_status_mouse  # type: ignore[method-assign]
 
         self._buffer_control = BufferControl(
             buffer=self._input_buffer,

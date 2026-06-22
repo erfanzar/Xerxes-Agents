@@ -87,9 +87,6 @@ def check(plan: str, feature: str, *, real_if: Callable[[], bool] | None = None,
     return deco
 
 
-# ---------------------------- helpers ------------------------------------------
-
-
 def _has_env(*names: str) -> bool:
     return all(os.environ.get(n) for n in names)
 
@@ -115,9 +112,6 @@ def _online() -> bool:
     if _INTERNET_CACHE is None:
         _INTERNET_CACHE = _internet_reachable()
     return _INTERNET_CACHE
-
-
-# ---------------------------- checks per plan ----------------------------------
 
 
 @check("01", "Workspace ensure() creates AGENTS/SOUL/USER/MEMORY/TOOLS")
@@ -1076,11 +1070,6 @@ def plan_32_msg_tools():
     return f"send_message routed to {captured['platform']}/{captured['recipient']}; clarify+memory CRUD ok"
 
 
-# ============================================================================
-# TUI surface checks
-# ============================================================================
-
-
 @check("TUI-1", "Multiline input buffer (Alt+Enter newline, Enter submit)")
 def tui_multiline():
     from xerxes.tui.input_buffer import InputBufferConfig, build_input_buffer, build_multiline_key_bindings
@@ -1360,9 +1349,6 @@ def tui_slash_plugins():
     names = {c.name for c in merged}
     _slash_registry()._plugins.clear()
     return f"plugin registered + resolved; merged registry size={len(merged)}; includes 'my_plugin_cmd'={('my_plugin_cmd' in names)}"
-
-
-# ---------------------------- runner ------------------------------------------
 
 
 CHECKS: list[Callable] = [

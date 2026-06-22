@@ -39,6 +39,7 @@ from typing import Any
 
 from ..daemon.config import DAEMON_DIR, DaemonConfig, load_config
 from ..streaming.wire_events import (
+    GenericWireEvent,
     Notification,
     WireEvent,
     event_from_dict,
@@ -86,7 +87,7 @@ class BridgeClient:
         """
         self._python = python_executable or sys.executable
         self._project_dir = _resolve_project_dir(project_dir)
-        self._proc: subprocess.Popen[bytes, bytes] | None = None
+        self._proc: subprocess.Popen[bytes] | None = None
         self._sock: socket.socket | None = None
         self._socket_reader: Any = None
         self._socket_writer: Any = None
@@ -466,7 +467,7 @@ class BridgeClient:
         params: dict[str, Any],
         *,
         timeout: float = 10.0,
-    ) -> WireEvent:
+    ) -> GenericWireEvent:
         """Send a JSON-RPC request and await the correlated response.
 
         Raises ``RuntimeError`` if the daemon doesn't reply within
@@ -621,6 +622,7 @@ class BridgeClient:
             event_type = payload.get("type", "")
             event_data = payload.get("payload", {}) or {}
             try:
+                wire_event: WireEvent
                 if event_type == "notification":
                     wire_event = Notification(**event_data)
                 else:

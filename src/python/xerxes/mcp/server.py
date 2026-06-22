@@ -86,9 +86,6 @@ def _redact(obj: Any) -> Any:
     return obj
 
 
-# ----- the 10 tools as plain callables --------------------------------------
-
-
 @dataclass
 class XerxesMcpServer:
     """In-process implementation of the 10 MCP tools.
@@ -215,8 +212,6 @@ class XerxesMcpServer:
             return []
         return [_redact(c) for c in self.bridge.list_channels()]
 
-
-# ----- public tool table ----------------------------------------------------
 
 MCP_TOOLS: tuple[dict[str, Any], ...] = (
     {

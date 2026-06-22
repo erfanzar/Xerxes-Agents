@@ -21,13 +21,26 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..streaming.events import AgentState
+
 
 class SessionMixin:
     """Session save/load, message sanitization, and history replay."""
+
+    SESSIONS_DIR: Path
+    config: dict[str, Any]
+    state: AgentState
+    tool_executor: Callable[[str, dict[str, Any]], Any] | None
+    _pending_resume_replays: list[dict[str, Any]]
+    _session_cwd: str
+    _session_id: str
+    _wire_mode: bool
+    _emit_wire_notification: Callable[..., None]
 
     def _sanitize_resumed_messages(
         cls,
@@ -268,17 +281,17 @@ class SessionMixin:
             )
 
         by_tid: dict[str, dict[str, Any]] = {}
-        for entry in replays:
-            tid = entry.get("tool_call_id") or ""
+        for replay in replays:
+            tid = replay.get("tool_call_id") or ""
             if tid:
-                by_tid[tid] = entry
+                by_tid[tid] = replay
 
         for msg in self.state.messages:
             if msg.get("role") != "tool":
                 continue
             if msg.get("content") != self._RESUME_STUB_CONTENT:
                 continue
-            tid = msg.get("tool_call_id", "")
+            tid = str(msg.get("tool_call_id", ""))
             entry = by_tid.get(tid)
             if entry is None:
                 continue

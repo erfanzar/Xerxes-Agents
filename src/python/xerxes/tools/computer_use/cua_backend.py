@@ -38,6 +38,7 @@ import re
 import shutil
 import sys
 import threading
+from collections.abc import Coroutine
 from typing import Any
 
 from .backend import (
@@ -49,10 +50,6 @@ from .backend import (
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Version pinning
-# ---------------------------------------------------------------------------
 
 PINNED_CUA_DRIVER_VERSION = os.environ.get("XERXES_CUA_DRIVER_VERSION", "0.5.0")
 
@@ -80,11 +77,6 @@ _ELEMENT_LINE_RE = re.compile(
     r'^\s*(?:-\s+)?\[(\d+)\]\s+(\w+)(?:\s+"([^"]*)"|(?:\s+\(\d+\))?\s+id=([^\s\[\]]*))?',
     re.MULTILINE,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _is_macos() -> bool:
@@ -134,11 +126,6 @@ def _b64_from_png_bytes(png_bytes: bytes) -> str:
     return base64.b64encode(png_bytes).decode("ascii")
 
 
-# ---------------------------------------------------------------------------
-# CuaBackend
-# ---------------------------------------------------------------------------
-
-
 class CuaBackend(ComputerUseBackend):
     """Sync wrapper around the async cua-driver MCP client.
 
@@ -152,8 +139,6 @@ class CuaBackend(ComputerUseBackend):
         self._session: Any = None  # mcp.ClientSession
         self._tools: list[dict[str, Any]] = []
         self._started = False
-
-    # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
         if self._started:
@@ -187,8 +172,6 @@ class CuaBackend(ComputerUseBackend):
 
     def is_available(self) -> bool:
         return _is_macos() and cua_driver_binary_available()
-
-    # ── Internal async plumbing ─────────────────────────────────────
 
     async def _connect(self) -> None:
         """Spawn cua-driver and initialize the MCP session."""
@@ -254,16 +237,12 @@ class CuaBackend(ComputerUseBackend):
             "is_error": getattr(result, "isError", False),
         }
 
-    # ── Public sync API ───────────────────────────────────────────
-
-    def _run(self, coro: asyncio.Coroutine) -> Any:
+    def _run(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """Marshal an async call onto the background loop."""
         if self._loop is None:
             raise RuntimeError("CuaBackend not started")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=30)
-
-    # ── Capture ─────────────────────────────────────────────────────
 
     def capture(self, mode: str = "som", app: str | None = None) -> CaptureResult:
         args: dict[str, Any] = {"mode": mode}
@@ -299,8 +278,6 @@ class CuaBackend(ComputerUseBackend):
             elements=elements,
             png_bytes_len=len(base64.b64decode(png_b64)) if png_b64 else 0,
         )
-
-    # ── Pointer actions ─────────────────────────────────────────────
 
     def click(
         self,
@@ -447,8 +424,6 @@ class CuaBackend(ComputerUseBackend):
             message=result.get("text", ""),
         )
 
-    # ── Keyboard actions ────────────────────────────────────────────
-
     def type(self, text: str, capture_after: bool = False) -> ActionResult:
         args: dict[str, Any] = {"text": text}
         if capture_after:
@@ -483,8 +458,6 @@ class CuaBackend(ComputerUseBackend):
             action="set_value",
             message=result.get("text", ""),
         )
-
-    # ── Wait / App management ─────────────────────────────────────
 
     def wait(self, ms: int = 1000) -> ActionResult:
         result = self._run(self._call_tool("wait", {"ms": ms}))

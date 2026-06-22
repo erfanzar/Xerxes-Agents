@@ -28,7 +28,7 @@ JSON-RPC envelope dataclasses.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 
 @dataclass(frozen=True)
@@ -672,7 +672,7 @@ WireEventType = (
 )
 
 
-_WIRE_EVENT_REGISTRY: dict[str, type[WireEvent]] = {
+_WIRE_EVENT_REGISTRY: dict[str, type[Any]] = {
     "init_done": InitDone,
     "turn_begin": TurnBegin,
     "turn_end": TurnEnd,
@@ -804,7 +804,7 @@ def event_from_dict(data: dict[str, Any]) -> WireEvent:
             payload["event"] = event_from_dict(nested_payload)
         elif nested_type is not None:
             payload["event"] = event_from_dict(nested)
-    return cls(**payload)
+    return cast(WireEvent, cls(**payload))
 
 
 def event_to_dict(event: WireEvent) -> dict[str, Any]:

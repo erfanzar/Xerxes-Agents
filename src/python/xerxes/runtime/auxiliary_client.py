@@ -117,8 +117,6 @@ class AuxiliaryClient:
             duration_ms=duration_ms,
         )
 
-    # ---------------------------- canned shapes
-
     def summarize(self, messages: list[dict[str, Any]], *, budget_tokens: int | None = None) -> str:
         """Produce a concise summary of ``messages`` suitable for context compaction.
 

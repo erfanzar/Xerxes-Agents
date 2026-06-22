@@ -22,8 +22,6 @@ import httpx
 import pytest
 from xerxes.runtime import doctor, setup_wizard, update
 
-# ---------------------------- doctor ---------------------------------------
-
 
 class TestDoctor:
     def test_python_check_passes_for_supported(self):
@@ -61,9 +59,6 @@ class TestDoctor:
 
         assert doctor.has_failures([Diagnosis("x", "ok", "")]) is False
         assert doctor.has_failures([Diagnosis("x", "fail", "")]) is True
-
-
-# ---------------------------- update ---------------------------------------
 
 
 class TestUpdate:
@@ -251,9 +246,6 @@ class TestUpdate:
 
         assert status.is_git is False
         assert update.format_git_update_status(status) == "not a git checkout"
-
-
-# ---------------------------- setup wizard ---------------------------------
 
 
 class TestSetupWizard:

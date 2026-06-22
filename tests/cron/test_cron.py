@@ -20,8 +20,6 @@ from datetime import UTC, datetime
 import pytest
 from xerxes.cron import CronJob, CronScheduler, DeliveryTarget, JobStore, next_fire_at, route_output
 
-# ---------------------------- next_fire_at ---------------------------------
-
 
 class TestNextFireAt:
     def test_invalid_schedule(self):
@@ -51,9 +49,6 @@ class TestNextFireAt:
         out = next_fire_at("0 9 * * 0", base)
         assert out.isoweekday() == 7  # Sunday
         assert out.hour == 9
-
-
-# ---------------------------- JobStore -------------------------------------
 
 
 class TestJobStore:
@@ -93,9 +88,6 @@ class TestJobStore:
         assert store.get("abc").prompt == "second"
 
 
-# ---------------------------- delivery -------------------------------------
-
-
 class TestDelivery:
     def test_archive_only_when_platform_none(self, tmp_path):
         sent = []
@@ -122,9 +114,6 @@ class TestDelivery:
             sender=lambda p, r, c: sent.append((p, r, c)),
         )
         assert sent == [("telegram", "123", "Daily digest")]
-
-
-# ---------------------------- scheduler ------------------------------------
 
 
 class TestCronScheduler:

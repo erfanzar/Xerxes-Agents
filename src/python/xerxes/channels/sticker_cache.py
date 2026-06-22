@@ -99,8 +99,6 @@ class StickerCache:
         ]
         self._index_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    # ---------------------------- public surface
-
     def get(self, platform: str, sticker_id: str) -> StickerRecord | None:
         """Look up a cached sticker and mark it as most recently used.
 

@@ -129,8 +129,6 @@ class ContextCompressor:
         self._summarizer = summarizer
         self._token_counter = token_counter or SmartTokenCounter(model=model)
 
-    # ---------------------------- token counting
-
     def _count(self, messages: list[dict[str, Any]]) -> int:
         """Token count for a list of messages via the bound counter."""
         return int(self._token_counter.count_tokens(messages))
@@ -146,8 +144,6 @@ class ContextCompressor:
     def should_compact(self, messages: list[dict[str, Any]]) -> bool:
         """Return ``True`` when ``messages`` exceed the compaction threshold."""
         return self._count(messages) >= self.threshold_tokens()
-
-    # ---------------------------- summary helpers
 
     def _summary_budget(self, compressed_token_count: int) -> int:
         """Return the per-summary token budget, clamped to min/max bounds."""
@@ -165,8 +161,6 @@ class ContextCompressor:
         body = new_summary.strip()
         merged = body if not prior_summary else f"{prior_summary.strip()}\n\n---\n\n{body}"
         return f"{COMPACTION_REFERENCE_PREFIX}\n\n{merged}"
-
-    # ---------------------------- the algorithm
 
     def compress(self, messages: list[dict[str, Any]]) -> CompressionResult:
         """Run pre-prune + middle-summarize and return a :class:`CompressionResult`.

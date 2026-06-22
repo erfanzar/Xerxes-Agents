@@ -81,9 +81,6 @@ def _remove(path: Path, entry_id: int) -> dict[str, Any]:
     return {"ok": True, "id": entry_id, "content": removed}
 
 
-# ---------------------------- public surface -------------------------------
-
-
 def memory_add(workspace_path: Path, content: str) -> dict[str, Any]:
     """Append ``content`` to ``MEMORY.md`` inside ``workspace_path``."""
     return _add(workspace_path / "MEMORY.md", content)

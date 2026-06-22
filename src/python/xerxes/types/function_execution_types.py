@@ -168,6 +168,7 @@ class AgentCapability:
         performance_score: A relative performance multiplier for load balancing (default 1.0).
     """
 
+    FUNCTION_CALLING: tp.ClassVar[AgentCapability]
     name: str
     description: str
     function_names: list[str] = field(default_factory=list)

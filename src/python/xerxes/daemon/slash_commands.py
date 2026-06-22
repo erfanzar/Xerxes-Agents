@@ -24,14 +24,16 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..bridge import profiles
 from ..context.window_usage import estimate_context_tokens
+from ..core.paths import xerxes_subdir
 from ..runtime.project_workspace import ensure_project_agent_workspace, load_project_agent_workspace
 from .gateway import EmitFn
-from .runtime import DaemonSession
+from .runtime import DaemonSession, RuntimeManager, SessionManager, WorkspaceManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,29 @@ class SlashCommandsMixin:
     The main router is :meth:`_handle_slash` which dispatches to individual
     ``_slash_*`` methods based on the command name.
     """
+
+    config: Any
+    runtime: RuntimeManager
+    sessions: SessionManager
+    workspaces: WorkspaceManager
+    channels: Any
+    _current_session_key: str
+    _current_mode: str
+    _current_plan_mode: bool
+    _pending_slash_arg: tuple[str, str] | None
+    _pending_skill_create: dict[str, Any] | None
+    _background_tasks: set[Any]
+    _connection_session_key: Callable[[EmitFn], str]
+    _emit_init_done: Callable[[EmitFn], Awaitable[None]]
+    _emit_slash: Callable[[EmitFn, str], Awaitable[None]]
+    _emit_status: Callable[[EmitFn], Awaitable[None]]
+    _git_branch: Callable[[Path | None], str]
+    _replay_session_history: Callable[[DaemonSession, EmitFn], Awaitable[None]]
+    _resolve_context_limit: Callable[[], int]
+    _submit_turn: Callable[[dict[str, Any], EmitFn], Awaitable[dict[str, Any]]]
+    _sync_runtime_to_connection_session: Callable[[EmitFn], None]
+    _track_task: Callable[[Awaitable[Any]], Any]
+    shutdown: Callable[[], Awaitable[None]]
 
     def _session_key_for_emit(self, emit: EmitFn) -> str:
         """Return the session key attached to this slash-command connection."""
@@ -124,29 +149,27 @@ class SlashCommandsMixin:
 
     async def _slash_plugins(self, args: str, emit: EmitFn) -> None:
         """List loaded plugins and their slash registrations."""
-        try:
-            from ..extensions.plugins import list_loaded_plugins
-        except Exception:
-            list_loaded_plugins = None  # type: ignore[assignment]
+        plugins: list[Any] = []
         try:
             from ..extensions.slash_plugins import registered_slashes
         except Exception:
-            registered_slashes = None  # type: ignore[assignment]
+            slashes = []
+        else:
+            slashes = registered_slashes()
 
         lines = ["Plugins:"]
-        plugins = list_loaded_plugins() if list_loaded_plugins else []
         if plugins:
             for p in plugins:
-                name = getattr(p, "name", str(p))
+                meta = getattr(p, "meta", None)
+                name = getattr(meta, "name", str(p))
                 lines.append(f"  `{name}`")
         else:
             lines.append("  (no plugins loaded)")
-        slashes = registered_slashes() if registered_slashes else []
         if slashes:
             lines.append("")
             lines.append("Plugin slash commands:")
             for s in slashes:
-                lines.append(f"  `/{s.name}` — {getattr(s, 'description', '')}")
+                lines.append(f"  `/{s.command.name}` — {s.command.description}")
         await self._emit_slash(emit, "\n".join(lines))
 
     def _help_text(self) -> str:
@@ -544,14 +567,12 @@ class SlashCommandsMixin:
             return
 
         if cmd == "skill":
-            await self._slash_skill(args, emit)
+            await cast(Any, self)._slash_skill(args, emit)
             return
 
         if cmd == "skill-create":
-            await self._slash_skill_create(args, emit)
+            await cast(Any, self)._slash_skill_create(args, emit)
             return
-
-        # ---- permission / mode toggles -----------------------------------
 
         if cmd == "yolo":
             new_mode = self.runtime.toggle_yolo()
@@ -581,8 +602,6 @@ class SlashCommandsMixin:
             new_value = self.runtime.toggle_flag(cmd)
             await self._emit_slash(emit, f"{original_cmd.title()}: {new_value}")
             return
-
-        # ---- info commands ------------------------------------------------
 
         if cmd == "help":
             await self._emit_slash(emit, self._help_text())
@@ -616,7 +635,7 @@ class SlashCommandsMixin:
             return
 
         if cmd == "provider":
-            await self._slash_provider(args, emit)
+            await cast(Any, self)._slash_provider(args, emit)
             return
 
         if cmd in {"exit", "quit", "q"}:
@@ -629,15 +648,12 @@ class SlashCommandsMixin:
             await self._emit_slash(emit, "Cleared.")
             return
 
-        # ---- omnibus handler for the rest of COMMAND_REGISTRY ----------------
         # Dispatched via ``_BULK_SLASH_HANDLERS`` so adding a command means one
         # line in the registry + one line in the dispatch table below.
         handler = _BULK_SLASH_HANDLERS.get(cmd)
         if handler is not None:
             await handler(self, args, emit)
             return
-
-        # ---- skill-name shorthand (supports ``/skill:sub``) --------------
 
         # ``/autoresearch:fix`` should resolve to the autoresearch skill with
         # the ``fix`` subcommand. We split before looking up the skill so a
@@ -671,7 +687,7 @@ class SlashCommandsMixin:
                 composed = f"{skill_name}:{args}"
             else:
                 composed = skill_name
-            await self._slash_skill(composed, emit, run_now=True)
+            await cast(Any, self)._slash_skill(composed, emit, run_now=True)
             return
 
         # If the command is in the registry but slipped through every branch
@@ -838,16 +854,17 @@ class SlashCommandsMixin:
     async def _slash_reload_mcp(self, args: str, emit: EmitFn) -> None:
         """Reload MCP server connections."""
         try:
-            from ..mcp.manager import reload_mcp_servers
+            from ..mcp import MCPManager
         except Exception:
             await self._emit_slash(emit, "MCP support not available in this build.")
             return
-        try:
-            count = reload_mcp_servers()
-        except Exception as exc:
-            await self._emit_slash(emit, f"MCP reload failed: `{exc}`")
+        if not issubclass(MCPManager, object):
+            await self._emit_slash(emit, "MCP support not available in this build.")
             return
-        await self._emit_slash(emit, f"Reloaded {count} MCP server connection(s).")
+        await self._emit_slash(
+            emit,
+            "MCP reload is not wired to a daemon-owned MCP registry yet. Restart Xerxes after changing MCP config.",
+        )
 
     async def _slash_history(self, args: str, emit: EmitFn) -> None:
         """Show message and turn counts for the active session."""
@@ -1063,7 +1080,6 @@ class SlashCommandsMixin:
             return
         await self._emit_slash(emit, f"Rolled back to snapshot `{target}`.")
 
-    # ----- bulk dispatch table for the rest of COMMAND_REGISTRY ------------------
     # Mapping cmd name → bound-method-style callable so a single
     # ``handler(self, args, emit)`` line in ``_handle_slash`` covers everything.
     # Aliases are duplicated here so resolving the canonical name still hits the
@@ -1089,8 +1105,9 @@ class SlashCommandsMixin:
         try:
             from ..agents.definitions import list_agent_definitions
         except Exception:
-            list_agent_definitions = None  # type: ignore[assignment]
-        defs = list_agent_definitions() if list_agent_definitions else []
+            defs = []
+        else:
+            defs = list_agent_definitions()
         lines = [f"Agents ({len(defs)}):"]
         for d in defs:
             name = getattr(d, "name", str(d))
@@ -1098,7 +1115,7 @@ class SlashCommandsMixin:
             lines.append(f"  `{name}` — {descr[:80]}")
         # Running subagent tasks, if the runtime exposes them.
         try:
-            mgr = self.runtime.subagent_manager  # may not exist
+            mgr = cast(Any, self.runtime).subagent_manager
             tasks = [t for t in mgr.tasks.values() if t.status in {"pending", "running"}]
         except Exception:
             tasks = []
@@ -1171,7 +1188,7 @@ class SlashCommandsMixin:
     async def _slash_cron(self, args: str, emit: EmitFn) -> None:
         """List cron jobs (sub-commands ``add``/``remove``/``run`` deferred to JSON-RPC)."""
         try:
-            from ..cron import jobs as cron_jobs
+            from ..cron import JobStore
         except Exception:
             await self._emit_slash(emit, "Cron support not available in this build.")
             return
@@ -1179,7 +1196,7 @@ class SlashCommandsMixin:
         action = sub[0].lower() if sub else "list"
         if action in ("", "list"):
             try:
-                items = cron_jobs.list_jobs()
+                items = JobStore(xerxes_subdir("cron") / "jobs.json").list_jobs()
             except Exception as exc:
                 await self._emit_slash(emit, f"Cron list failed: `{exc}`")
                 return

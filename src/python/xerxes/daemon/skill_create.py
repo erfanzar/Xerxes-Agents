@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..extensions.skills import activate_skill, inject_skill_config, skill_matches_platform
 from .gateway import EmitFn
+from .runtime import DaemonSession, RuntimeManager
 
 _SKILL_CREATE_STEPS: tuple[tuple[str, str, bool], ...] = (
     (
@@ -57,6 +60,17 @@ class SkillCreateMixin:
     for a skill name and description, then launches a drafting session.
     Mixed into :class:`DaemonServer`.
     """
+
+    runtime: RuntimeManager
+    _current_mode: str
+    _current_plan_mode: bool
+    _pending_skill_create: dict[str, Any] | None
+    _pending_slash_arg: tuple[str, str] | None
+    _emit_slash: Callable[[EmitFn, str], Awaitable[None]]
+    _session_for_emit: Callable[[EmitFn], DaemonSession | None]
+    _session_key_for_emit: Callable[[EmitFn], str]
+    _submit_turn: Callable[[dict[str, Any], EmitFn], Awaitable[dict[str, Any]]]
+    _track_task: Callable[[Awaitable[Any]], Any]
 
     async def _slash_skill(self, args: str, emit: EmitFn, *, run_now: bool = True) -> None:
         """Activate (and optionally invoke) a registered skill by name.

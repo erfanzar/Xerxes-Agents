@@ -28,8 +28,6 @@ from xerxes.training.batch_runner import (
 )
 from xerxes.training.trajectory_compressor import TrajectoryCompressor
 
-# ---------------------------- trajectory compressor -------------------------
-
 
 class TestTrajectoryCompressor:
     def _msgs(self, n: int):
@@ -85,9 +83,6 @@ class TestTrajectoryCompressor:
         c.compress_one = boom  # type: ignore[assignment]
         run = c.run([{"id": "a", "messages": self._msgs(2)}])
         assert run.errors and run.errors[0][1] == "synthetic"
-
-
-# ---------------------------- batch runner ---------------------------------
 
 
 class TestBatchRunner:

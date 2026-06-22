@@ -146,9 +146,6 @@ class TestPromptContextBuilder:
         assert ctx.bootstrap_section == ""
 
 
-# ── Profile-aware building ────────────────────────────────────────────
-
-
 class TestPromptContextBuilderProfiles:
     """Tests for profile-aware prompt building (backward compatibility + new profiles)."""
 

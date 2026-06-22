@@ -148,6 +148,7 @@ class SoundDeviceRecorder(VoiceRecorder):
                 dtype="int16",
                 callback=callback,
             )
+            assert self._stream is not None
             self._stream.start()
             self._active = True
 

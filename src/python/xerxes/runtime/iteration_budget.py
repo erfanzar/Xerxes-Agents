@@ -134,7 +134,7 @@ def iteration_budget_from_config(
     A missing, empty, zero, or negative value means uncapped.
     """
 
-    raw = config.get(key)
+    raw: Any = config.get(key)
     if raw in (None, ""):
         raw = os.environ.get(env_var)
     if raw in (None, ""):

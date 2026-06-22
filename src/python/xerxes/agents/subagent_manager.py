@@ -477,8 +477,6 @@ class SubAgentManager:
                 },
             )
 
-    # ----- event bus + wait_for -------------------------------------------
-
     def post_event(
         self,
         task: SubAgentTask,

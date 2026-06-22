@@ -38,11 +38,6 @@ def memory(tmp_path):
     return mem
 
 
-# ============================================================================
-# AgentMemory core
-# ============================================================================
-
-
 class TestEnsure:
     def test_creates_canonical_files_in_both_scopes(self, memory):
         for scope_dir in (memory.global_dir, memory.project_dir):
@@ -182,11 +177,6 @@ class TestListAndSearch:
         assert memory.search("autoresearch")
 
 
-# ============================================================================
-# Prompt section
-# ============================================================================
-
-
 class TestPromptSection:
     def test_includes_both_scope_paths(self, memory):
         out = memory.to_prompt_section()
@@ -318,11 +308,6 @@ class TestExperiencesWorkflow:
         assert hits and hits[0]["path"] == "EXPERIENCES.md"
 
 
-# ============================================================================
-# Tool wrappers
-# ============================================================================
-
-
 class TestToolWrappers:
     def setup_method(self):
         agent_memory_tool.set_active_memory(None)
@@ -384,11 +369,6 @@ class TestToolWrappers:
         out = agent_memory_tool.agent_memory_write("global", "../escape.md", "boom")
         assert out["ok"] is False
         assert "escapes" in out["error"]
-
-
-# ============================================================================
-# Daemon system-prompt injection (regression)
-# ============================================================================
 
 
 class TestDaemonInjection:

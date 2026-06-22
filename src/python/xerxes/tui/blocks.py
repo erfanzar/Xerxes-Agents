@@ -107,10 +107,11 @@ def _extract_key_argument(arguments: str | dict[str, Any]) -> str:
     back to the first non-empty value. Output is always truncated to
     keep the live tool line single-row."""
     if isinstance(arguments, str):
+        raw_arguments = arguments
         try:
-            arguments = json.loads(arguments)
+            arguments = json.loads(raw_arguments)
         except Exception:
-            return arguments[:60] if arguments else ""
+            return raw_arguments[:60] if raw_arguments else ""
 
     if not isinstance(arguments, dict):
         return str(arguments)[:60]

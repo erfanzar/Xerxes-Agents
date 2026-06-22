@@ -307,8 +307,9 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
     def _system_prompt_for_mode(self, mode: str) -> str:
         """Return the mode-specific system prompt with the mode-switching hint appended."""
         agent_def = self._agent_definition_for_mode(mode)
-        if agent_def is not None and getattr(agent_def, "system_prompt", ""):
-            prompt = str(agent_def.system_prompt).rstrip()
+        prompt_value = getattr(agent_def, "system_prompt", None) if agent_def is not None else None
+        if isinstance(prompt_value, str) and prompt_value:
+            prompt = prompt_value.rstrip()
         else:
             prompt = self.system_prompt.rstrip()
 
