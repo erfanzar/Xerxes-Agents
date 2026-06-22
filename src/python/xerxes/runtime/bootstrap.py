@@ -172,6 +172,18 @@ def bootstrap(
     )
 
     t0 = time.monotonic()
+    project_agent_workspace = _load_project_agent_workspace(working_dir)
+    result.context["project_agent_workspace"] = project_agent_workspace
+    result.stages.append(
+        BootstrapStage(
+            name="project_agent_workspace",
+            status="ok" if project_agent_workspace else "skipped",
+            detail=f"{len(project_agent_workspace)} chars" if project_agent_workspace else "No .agents workspace found",
+            duration_ms=(time.monotonic() - t0) * 1000,
+        )
+    )
+
+    t0 = time.monotonic()
     if commands:
         for name, handler in commands.items():
             result.registry.register_command(name, handler=handler)
@@ -296,6 +308,17 @@ def _load_xerxes_md(cwd: Path) -> str:
     return "\n\n".join(parts)
 
 
+def _load_project_agent_workspace(cwd: Path) -> str:
+    """Load the project-local ``.agents`` workspace prompt section."""
+    try:
+        from xerxes.runtime.project_workspace import load_project_agent_workspace
+
+        return load_project_agent_workspace(cwd).prompt
+    except Exception:
+        logger.debug("Failed to read project .agents workspace", exc_info=True)
+        return ""
+
+
 def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
     """Render the default Xerxes system prompt from a bootstrap context dict."""
 
@@ -384,6 +407,10 @@ def _build_system_prompt(context: dict[str, Any], extra: str = "") -> str:
     xerxes_md = context.get("xerxes_md", "")
     if xerxes_md:
         parts.extend(["", "# Project Context", xerxes_md])
+
+    project_agent_workspace = context.get("project_agent_workspace", "")
+    if project_agent_workspace:
+        parts.extend(["", project_agent_workspace])
 
     if extra:
         parts.extend(["", extra])

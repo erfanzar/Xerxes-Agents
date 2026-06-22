@@ -127,12 +127,13 @@ class SkillCreateMixin:
         else:
             trigger = f"Execute the '{name}' skill now."
         skill_message = f"[Skill '{name}' activated]{config_block}\n\n{prompt_section}\n\nUser request: {trigger}"
+        session = self._session_for_emit(emit)
         await self._submit_turn(
             {
-                "session_key": self._current_session_key,
+                "session_key": self._session_key_for_emit(emit),
                 "text": skill_message,
-                "mode": self._current_mode,
-                "plan_mode": self._current_plan_mode,
+                "mode": session.interaction_mode if session is not None else self._current_mode,
+                "plan_mode": session.plan_mode if session is not None else self._current_plan_mode,
             },
             emit,
         )
@@ -152,7 +153,7 @@ class SkillCreateMixin:
         if not safe_name:
             # No slug yet — park for the name prompt; we'll start the scope
             # interview after the user answers that.
-            self._pending_slash_arg = ("skill-create", self._current_session_key)
+            self._pending_slash_arg = ("skill-create", self._session_key_for_emit(emit))
             await self._emit_slash(
                 emit,
                 "What should this skill be called? Type a short kebab-case slug "
@@ -296,7 +297,7 @@ class SkillCreateMixin:
         target_dir = self.runtime.skills_dir / safe_name
         target_dir.mkdir(parents=True, exist_ok=True)
         self._pending_skill_create = {
-            "session_key": self._current_session_key,
+            "session_key": self._session_key_for_emit(emit),
             "name": safe_name,
             "target_path": str(target_dir / "SKILL.md"),
             "answers": {},

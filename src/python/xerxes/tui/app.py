@@ -1086,9 +1086,9 @@ class XerxesTUI:
         self._prompt.set_reasoning_effort(str(getattr(event, "reasoning_effort", "") or "off"))
         self._plan_mode = bool(getattr(event, "plan_mode", self._plan_mode))
         mode = str(getattr(event, "mode", "") or "")
-        if mode and mode != "code" and not self._plan_mode:
+        if mode and not self._plan_mode:
             self._activity_mode = normalize_interaction_mode(mode)
-            self._user_activity_mode = self._activity_mode
+            self._user_activity_mode = None if self._activity_mode == "code" else self._activity_mode
         self._sync_prompt_mode()
 
     def _on_compaction_begin(self) -> None:

@@ -15,7 +15,7 @@
 
 from pathlib import Path
 
-from xerxes.extensions.skills import Skill, SkillMetadata, SkillRegistry, parse_skill_md
+from xerxes.extensions.skills import Skill, SkillMetadata, SkillRegistry, default_skill_discovery_dirs, parse_skill_md
 
 SAMPLE_SKILL_MD = """---
 name: web_research
@@ -163,6 +163,28 @@ class TestSkillRegistry:
         registry = SkillRegistry()
         discovered = registry.discover("/nonexistent/path")
         assert discovered == []
+
+    def test_default_discovery_prefers_project_agents_skills(self, tmp_path):
+        user_skills = tmp_path / "user-skills"
+
+        roots = default_skill_discovery_dirs(user_skills_dir=user_skills, cwd=tmp_path)
+
+        assert roots[0] == tmp_path / ".agents" / "skills"
+        assert roots[1] == tmp_path / "skills"
+        assert roots[2] == user_skills
+
+    def test_project_agent_skill_overrides_user_skill(self, tmp_path):
+        project_skills = tmp_path / ".agents" / "skills"
+        user_skills = tmp_path / "user-skills"
+        self._create_skill_dir(project_skills, "same", "---\nname: same\n---\nproject version")
+        self._create_skill_dir(user_skills, "same", "---\nname: same\n---\nuser version")
+
+        registry = SkillRegistry()
+        registry.discover(*default_skill_discovery_dirs(user_skills_dir=user_skills, cwd=tmp_path))
+
+        skill = registry.get("same")
+        assert skill is not None
+        assert skill.source_path == project_skills / "same" / "SKILL.md"
 
 
 SKILL_WITH_DEPS_MD = """---

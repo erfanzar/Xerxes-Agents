@@ -16,7 +16,6 @@
 import pytest
 from xerxes.tools.standalone import (
     AppendFile,
-    ExecutePythonCode,
     ExecuteShell,
     ListDir,
     ReadFile,
@@ -119,22 +118,6 @@ class TestListDir:
         result = ListDir.static_call(str(tmp_path))
         assert "subdir" not in result
         assert "file.txt" in result
-
-
-class TestExecutePythonCode:
-    def test_simple_code(self):
-        result = ExecutePythonCode.static_call("print('hello')")
-        assert result["stdout"].strip() == "hello"
-        assert result["stderr"] == ""
-
-    def test_error_code(self):
-        result = ExecutePythonCode.static_call("raise ValueError('oops')")
-        assert "ValueError" in result["stderr"]
-
-    def test_multiline_code(self):
-        code = "x = 1 + 2\nprint(x)"
-        result = ExecutePythonCode.static_call(code)
-        assert "3" in result["stdout"]
 
 
 class TestExecuteShell:

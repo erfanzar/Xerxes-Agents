@@ -1,10 +1,16 @@
-# Copyright 2026 Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Regression coverage for ``/steer`` and ``/btw`` actually reaching the loop.
 
 The bulk smoke test only checks that *some* "Steer" string comes back to the
@@ -121,6 +127,21 @@ def test_direct_steer_rpc_without_active_turn_lands_on_connection_session_messag
     assert len(target.state.messages) == 1
     assert "use the simpler path" in target.state.messages[0]["content"]
     assert any(et == "steer_input" for (et, _) in rec.events)
+
+
+def test_slash_steer_uses_connection_session_not_current_fallback(daemon):
+    current = _make_session(active_turn="wrong-turn")
+    current.key = "tui:default"
+    target = _make_session(active_turn="turn-abc")
+    target.key = "tui:target"
+    daemon.sessions = _Sessions({"tui:default": current, "tui:target": target})
+
+    rec = _Recorder()
+    daemon._connection_sessions = {rec: "tui:target"}
+    _run(daemon._slash_steer("course-correct now", rec))
+
+    assert target.drain_steers() == ["course-correct now"]
+    assert current.drain_steers() == []
 
 
 def test_steer_without_active_turn_lands_on_messages(daemon):

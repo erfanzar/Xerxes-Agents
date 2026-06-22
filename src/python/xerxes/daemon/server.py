@@ -1,6 +1,16 @@
 # Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Daemon JSON-RPC dispatcher and lifecycle owner.
 
 :class:`DaemonServer` is the single process that the TUI, remote websocket
@@ -150,7 +160,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             loop.call_soon_threadsafe(self._broadcast_event, event_type, payload)
 
         self.turns.set_event_sink(emit_daemon_event)
-        self._agent_event_callback = self.turns.handle_agent_event
+        self._agent_event_callback = self._handle_runtime_event
         set_event_callback(self._agent_event_callback)
 
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -223,12 +233,13 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             # Resolve the session bound to *this* connection rather than the
             # shared ``_current_session_key`` so a concurrent client's turn
             # can't redirect this prompt into its own session.
+            mode, plan_mode = self._connection_mode(emit)
             return await self._submit_turn(
                 {
                     "session_key": self._connection_session_key(emit),
                     "text": params.get("user_input", ""),
-                    "mode": params.get("mode", self._current_mode),
-                    "plan_mode": params.get("plan_mode", self._current_plan_mode),
+                    "mode": params.get("mode", mode),
+                    "plan_mode": params.get("plan_mode", plan_mode),
                 },
                 emit,
             )
@@ -263,6 +274,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             }
         if method == "runtime.reload":
             self.runtime.reload(params)
+            self._sync_runtime_to_connection_session(emit)
             await self._emit_status(emit)
             return {"ok": True, **self.runtime.status()}
         if method == "channel.list":
@@ -276,13 +288,11 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             return {"ok": True}
         if method == "set_plan_mode":
             enabled = bool(params.get("enabled", params.get("plan_mode", False)))
-            self._current_mode = normalize_interaction_mode(params.get("mode", self._current_mode), plan_mode=enabled)
-            self._current_plan_mode = self._current_mode == "plan"
+            self._set_connection_mode(emit, params.get("mode", self._connection_mode(emit)[0]), plan_mode=enabled)
             await self._emit_status(emit)
             return {"ok": True}
         if method == "set_mode":
-            self._current_mode = normalize_interaction_mode(params.get("mode", self._current_mode))
-            self._current_plan_mode = self._current_mode == "plan"
+            self._set_connection_mode(emit, params.get("mode", self._connection_mode(emit)[0]))
             await self._emit_status(emit)
             return {"ok": True}
         if method == "permission_response":
@@ -327,6 +337,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 str(params.get("provider", "")),
             )
             self.runtime.reload()
+            self._sync_runtime_to_connection_session(emit)
             await self._emit_init_done(emit)
             return {"ok": True, "profile": profile}
         if method == "provider_list":
@@ -335,6 +346,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             ok = profiles.set_active(str(params.get("name", "")))
             if ok:
                 self.runtime.reload()
+                self._sync_runtime_to_connection_session(emit)
                 await self._emit_init_done(emit)
             return {"ok": ok}
         if method == "provider_delete":
@@ -345,6 +357,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 # falls back to env vars / nothing).
                 try:
                     self.runtime.reload()
+                    self._sync_runtime_to_connection_session(emit)
                 except Exception:
                     pass
                 await self._emit_init_done(emit)
@@ -353,6 +366,22 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             self._track_task(self.shutdown())
             return {"ok": True}
         return {"ok": False, "error": f"Unknown method: {method}"}
+
+    def _handle_runtime_event(self, event_type: str, data: dict[str, Any]) -> None:
+        """Handle process-global tool/subagent events emitted from worker threads."""
+        if event_type == "interaction_mode_changed":
+            mode = normalize_interaction_mode(data.get("mode"), plan_mode=bool(data.get("plan_mode", False)))
+            session_key = str(data.get("session_key") or "")
+            session = self.sessions.get(session_key) if session_key else None
+            if session is not None:
+                self._apply_session_mode(session, mode)
+            else:
+                self._current_mode = mode
+                self._current_plan_mode = mode == "plan"
+                self.runtime.runtime_config["mode"] = mode
+                self.runtime.runtime_config["plan_mode"] = self._current_plan_mode
+            return
+        self.turns.handle_agent_event(event_type, data)
 
     async def _initialize(self, params: dict[str, Any], emit: EmitFn) -> dict[str, Any]:
         """Handle ``initialize`` — bind the client to a session, emit ``init_done``.
@@ -369,14 +398,16 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         overrides["project_dir"] = str(project_dir)
         self.runtime.reload(overrides)
         resume_id = str(params.get("resume_session_id") or "").strip()
-        self._current_session_key = resume_id or "tui:default"
+        requested_key = str(params.get("session_key") or "").strip()
+        session_key = resume_id or requested_key or f"tui:{uuid.uuid4().hex[:12]}"
+        self._current_session_key = session_key
         # Bind this session to the originating connection so its ``prompt``
         # calls resolve to the right session even while other clients are
         # connected to the same daemon. ``getattr`` guards test fixtures that
         # build the server via ``__new__`` and skip ``__init__``.
         conn_sessions = getattr(self, "_connection_sessions", None)
         if conn_sessions is not None:
-            conn_sessions[emit] = self._current_session_key
+            conn_sessions[emit] = session_key
         # Daemon is long-lived; the in-memory ``SessionManager._sessions``
         # slot for ``tui:default`` outlives any single TUI connection.
         # When the user launches ``xerxes`` *without* ``-r`` they expect a
@@ -384,16 +415,22 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         # previous session's messages. Evict the slot first so ``open``
         # synthesises a new one.
         if not resume_id:
-            self.sessions.evict("tui:default")
-        session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
+            self.sessions.evict(session_key)
+        session = self.sessions.open(session_key, self.workspaces.default_agent_id)
+        session.runtime_config = dict(self.runtime.runtime_config)
+        self._apply_session_mode(
+            session,
+            session.runtime_config.get("mode", session.interaction_mode),
+            bool(session.runtime_config.get("plan_mode", session.plan_mode)),
+        )
         await emit(
             "init_done",
             {
-                "model": self.runtime.model,
+                "model": str(session.runtime_config.get("model", "")) or self.runtime.model,
                 "session_id": session.id,
                 "cwd": str(project_dir),
                 "git_branch": self._git_branch(project_dir),
-                "context_limit": self._resolve_context_limit(),
+                "context_limit": self._resolve_context_limit(session.runtime_config),
                 "agent_name": session.agent_id,
                 "skills": self.runtime.discover_skills(),
             },
@@ -431,6 +468,47 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if conn_sessions is None:
             return self._current_session_key
         return conn_sessions.get(emit, self._current_session_key)
+
+    def _connection_mode(self, emit: EmitFn) -> tuple[str, bool]:
+        """Return the interaction mode attached to this connection's session."""
+        session = self.sessions.get(self._connection_session_key(emit))
+        if session is None:
+            return self._current_mode, self._current_plan_mode
+        return session.interaction_mode, session.plan_mode
+
+    @staticmethod
+    def _apply_session_mode(session: Any, mode: Any, plan_mode: bool = False) -> tuple[str, bool]:
+        """Write mode fields onto a session and its runtime-config snapshot."""
+        normalized = normalize_interaction_mode(mode, plan_mode=plan_mode)
+        session.interaction_mode = normalized
+        session.plan_mode = normalized == "plan"
+        runtime_config = dict(getattr(session, "runtime_config", {}) or {})
+        runtime_config["mode"] = normalized
+        runtime_config["plan_mode"] = session.plan_mode
+        session.runtime_config = runtime_config
+        return session.interaction_mode, session.plan_mode
+
+    def _set_connection_mode(self, emit: EmitFn, mode: Any, *, plan_mode: bool = False) -> tuple[str, bool]:
+        """Set mode for the session attached to ``emit`` and update fallback fields."""
+        session = self.sessions.open(self._connection_session_key(emit), self.workspaces.default_agent_id)
+        if not session.runtime_config:
+            session.runtime_config = dict(self.runtime.runtime_config)
+        mode, plan_mode = self._apply_session_mode(session, mode, plan_mode)
+        self._current_mode = mode
+        self._current_plan_mode = plan_mode
+        return mode, plan_mode
+
+    def _sync_runtime_to_connection_session(self, emit: EmitFn) -> None:
+        """Copy the current runtime config onto the caller's session snapshot."""
+        session = self.sessions.open(self._connection_session_key(emit), self.workspaces.default_agent_id)
+        previous_mode = session.interaction_mode
+        previous_plan_mode = session.plan_mode
+        session.runtime_config = dict(self.runtime.runtime_config)
+        self._apply_session_mode(
+            session,
+            session.runtime_config.get("mode", previous_mode),
+            bool(session.runtime_config.get("plan_mode", previous_plan_mode)),
+        )
 
     async def _submit_turn(self, params: dict[str, Any], emit: EmitFn) -> dict[str, Any]:
         """Queue a new turn on the resolved session and stream events to ``emit``."""
@@ -498,12 +576,16 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         # No active intercept — a normal chat turn requires non-empty text.
         if not text:
             return {"ok": False, "error": "Empty prompt"}
-        if not self.runtime.model:
-            return {"ok": False, "error": "No model configured. Run /provider first or set XERXES_MODEL."}
         agent_id = str(params.get("agent_id") or self.workspaces.default_agent_id)
-        plan_mode = bool(params.get("plan_mode", self._current_plan_mode))
-        mode = normalize_interaction_mode(params.get("mode") or self._current_mode or "code", plan_mode=plan_mode)
+        default_mode, default_plan_mode = self._connection_mode(emit)
+        plan_mode = bool(params.get("plan_mode", default_plan_mode))
+        mode = normalize_interaction_mode(params.get("mode") or default_mode or "code", plan_mode=plan_mode)
         plan_mode = mode == "plan"
+        session = self.sessions.open(session_key, agent_id)
+        if not session.runtime_config:
+            session.runtime_config = dict(self.runtime.runtime_config)
+        if not str(session.runtime_config.get("model", "")):
+            return {"ok": False, "error": "No model configured. Run /provider first or set XERXES_MODEL."}
         # Keep this connection's binding current, but DON'T overwrite the
         # shared ``_current_session_key`` when the caller carried an explicit
         # session key — doing so is exactly the cross-client clobber bug. We
@@ -517,7 +599,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             self._current_session_key = session_key
         self._current_mode = mode
         self._current_plan_mode = plan_mode
-        session = self.sessions.open(session_key, agent_id)
+        self._apply_session_mode(session, mode, plan_mode)
         # Record the connection that owns this turn so an interactive
         # ``question_request`` (which TurnRunner emits through the broadcast
         # sink) gets routed back to it instead of every client.
@@ -568,14 +650,17 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
     async def _emit_status(self, emit: EmitFn) -> None:
         """Push a ``status_update`` reflecting the current session's token usage and mode."""
         session = self.sessions.open(self._connection_session_key(emit), self.workspaces.default_agent_id)
+        runtime_config = session.runtime_config or self.runtime.runtime_config
         await emit(
             "status_update",
             {
-                "context_tokens": estimate_context_tokens(session.state.messages, model=self.runtime.model),
-                "max_context": self._resolve_context_limit(),
+                "context_tokens": estimate_context_tokens(
+                    session.state.messages, model=str(runtime_config.get("model", "")) or self.runtime.model
+                ),
+                "max_context": self._resolve_context_limit(runtime_config),
                 "mcp_status": {},
-                "plan_mode": self._current_plan_mode,
-                "mode": self._current_mode,
+                "plan_mode": session.plan_mode,
+                "mode": session.interaction_mode,
                 "reasoning_effort": self.runtime.reasoning_state()["effort"],
             },
         )
@@ -825,11 +910,17 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         await emit(
             "init_done",
             {
-                "model": getattr(self.runtime, "model", ""),
+                "model": (
+                    str(getattr(session, "runtime_config", {}).get("model", ""))
+                    if session is not None
+                    else getattr(self.runtime, "model", "")
+                ),
                 "session_id": session.id if session else "",
                 "cwd": str(project_dir),
                 "git_branch": git_branch,
-                "context_limit": self._resolve_context_limit(),
+                "context_limit": self._resolve_context_limit(
+                    getattr(session, "runtime_config", {}) if session is not None else None
+                ),
                 "agent_name": (session.agent_id if session else default_agent),
                 "skills": skills,
             },
@@ -842,7 +933,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         except Exception:
             pass
 
-    def _resolve_context_limit(self) -> int:
+    def _resolve_context_limit(self, runtime_config: dict[str, Any] | None = None) -> int:
         """Return the active model's context window in tokens.
 
         Resolution order:
@@ -852,7 +943,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
           3. The active provider's default context_limit from the registry.
           4. ``0`` as a last resort (renders as ``0/0`` in the TUI).
         """
-        cfg = self.runtime.runtime_config
+        cfg = runtime_config or self.runtime.runtime_config
         override = cfg.get("context_limit") or cfg.get("max_context")
         if override:
             try:
@@ -862,7 +953,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         try:
             from ..llms.registry import get_context_limit
 
-            model = getattr(self.runtime, "model", "") or ""
+            model = str(cfg.get("model", "")) or getattr(self.runtime, "model", "") or ""
             if model:
                 return int(get_context_limit(model))
         except Exception:

@@ -1,6 +1,16 @@
 # Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Runtime, session, workspace, and turn execution managers for the daemon.
 
 This module is the daemon's core: :class:`RuntimeManager` owns provider
@@ -38,7 +48,8 @@ from ..runtime.bootstrap import bootstrap
 from ..runtime.bridge import build_tool_executor, populate_registry
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
 from ..runtime.config_context import set_config as set_global_config
-from ..runtime.interaction_modes import mode_switch_hint
+from ..runtime.interaction_modes import mode_switch_hint, normalize_interaction_mode
+from ..runtime.project_workspace import load_project_agent_workspace
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
@@ -277,7 +288,9 @@ class RuntimeManager:
         forms for skills that declare sub-commands.
         """
         self.skills_dir.mkdir(parents=True, exist_ok=True)
-        self.skill_registry.discover(*default_skill_discovery_dirs(user_skills_dir=self.skills_dir))
+        self.skill_registry.discover(
+            *default_skill_discovery_dirs(user_skills_dir=self.skills_dir, cwd=self.config.project_dir or os.getcwd())
+        )
         return sorted(self.skill_names_with_subs())
 
     def skill_names_with_subs(self) -> list[str]:
@@ -332,6 +345,8 @@ class DaemonSession:
         lock: Asyncio lock serialising turns on this session.
         cancel_requested: Set true to tell the streaming loop to stop early.
         active_turn_id: Current turn id while one is running.
+        interaction_mode: Active session-scoped mode reported to clients.
+        plan_mode: Whether ``interaction_mode`` is currently plan mode.
         pending_steers: Thread-safe queue of ``/steer`` strings drained by
             the streaming loop between tool iterations.
     """
@@ -345,6 +360,9 @@ class DaemonSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_requested: bool = False
     active_turn_id: str = ""
+    interaction_mode: str = "code"
+    plan_mode: bool = False
+    runtime_config: dict[str, Any] = field(default_factory=dict)
     pending_steers: queue.Queue[str] = field(default_factory=queue.Queue)
 
     def drain_steers(self) -> list[str]:
@@ -366,6 +384,9 @@ class DaemonSession:
             "workspace": str(self.workspace.path),
             "cwd": str(self.project_dir),
             "active_turn_id": self.active_turn_id,
+            "mode": self.interaction_mode,
+            "plan_mode": self.plan_mode,
+            "model": str(self.runtime_config.get("model", "")),
             "messages": len(self.state.messages),
             "turn_count": self.state.turn_count,
             "input_tokens": self.state.total_input_tokens,
@@ -598,6 +619,8 @@ class SessionManager:
             "updated_at": datetime.now(UTC).isoformat(),
             "messages": session.state.messages,
             "turn_count": session.state.turn_count,
+            "interaction_mode": session.interaction_mode,
+            "plan_mode": session.plan_mode,
             "total_input_tokens": session.state.total_input_tokens,
             "total_output_tokens": session.state.total_output_tokens,
             "metadata": metadata,
@@ -656,7 +679,13 @@ class SessionManager:
                 agent_id=str(loaded.get("agent_id") or agent),
                 workspace=workspace,
                 project_dir=self._record_project_dir(loaded),
+                interaction_mode=normalize_interaction_mode(
+                    loaded.get("interaction_mode") or loaded.get("mode") or "code",
+                    plan_mode=bool(loaded.get("plan_mode", False)),
+                ),
+                plan_mode=bool(loaded.get("plan_mode", False)),
             )
+            session.plan_mode = session.interaction_mode == "plan"
             state = session.state
             # Repair any orphaned tool calls from a mid-turn crash so resume
             # doesn't 400 (see _repair_tool_pairs).
@@ -944,6 +973,28 @@ class TurnRunner:
         except Exception:
             pass
 
+    def _set_session_mode(
+        self,
+        session: DaemonSession,
+        mode: Any,
+        plan_mode: bool = False,
+        *,
+        publish: bool = False,
+    ) -> tuple[str, bool]:
+        """Update the session-scoped interaction mode and optionally publish it globally."""
+        normalized = normalize_interaction_mode(mode, plan_mode=plan_mode)
+        session.interaction_mode = normalized
+        session.plan_mode = normalized == "plan"
+        if publish:
+            session.runtime_config = dict(session.runtime_config or self.runtime.runtime_config)
+            session.runtime_config["mode"] = normalized
+            session.runtime_config["plan_mode"] = session.plan_mode
+        return session.interaction_mode, session.plan_mode
+
+    def _sync_session_mode_from_global(self, session: DaemonSession) -> tuple[str, bool]:
+        """Return the session-scoped mode after model tools mutate the session."""
+        return session.interaction_mode, session.plan_mode
+
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         """Install the daemon-level event sink used by background sub-agents."""
         self._event_sink = sink
@@ -1065,6 +1116,7 @@ class TurnRunner:
         turn_id = uuid.uuid4().hex[:12]
         output_parts: list[str] = []
         async with session.lock:
+            mode, plan_mode = self._set_session_mode(session, mode, plan_mode, publish=True)
             session.cancel_requested = False
             session.active_turn_id = turn_id
             await emit("turn_begin", {"user_input": text})
@@ -1152,10 +1204,21 @@ class TurnRunner:
             memory_section = self.runtime.agent_memory.to_prompt_section()
         except Exception:
             memory_section = ""
+        try:
+            project_workspace_section = load_project_agent_workspace(session.project_dir).prompt
+        except Exception:
+            project_workspace_section = ""
+        base_system_prompt = self.runtime.system_prompt.rstrip()
+        live_project_workspace_section = (
+            project_workspace_section
+            if project_workspace_section and project_workspace_section not in base_system_prompt
+            else ""
+        )
         system_prompt = "\n\n".join(
             part
             for part in (
-                self.runtime.system_prompt.rstrip(),
+                base_system_prompt,
+                live_project_workspace_section,
                 workspace_context.prompt,
                 memory_section,
                 self.runtime.active_skill_prompt(),
@@ -1163,9 +1226,10 @@ class TurnRunner:
             )
             if part
         )
-        config = dict(self.runtime.runtime_config)
+        config = dict(session.runtime_config or self.runtime.runtime_config)
         config["mode"] = mode
         config["plan_mode"] = plan_mode
+        session.runtime_config = dict(config)
 
         # Bind the session to this worker thread so tools can find it. The
         # cursor tracks the last mailbox seq we auto-injected so the drain
@@ -1253,6 +1317,7 @@ class TurnRunner:
                     },
                 )
             elif isinstance(event, ToolEnd):
+                self._sync_session_mode_from_global(session)
                 push(
                     "tool_result",
                     {
@@ -1262,6 +1327,7 @@ class TurnRunner:
                         "display_blocks": [],
                     },
                 )
+                push("status_update", self._status_payload(session, mode=mode, plan_mode=plan_mode))
                 if self._current_tool_call_id == event.tool_call_id:
                     self._current_tool_call_id = ""
             elif isinstance(event, PermissionRequest):
@@ -1291,6 +1357,7 @@ class TurnRunner:
                     with self._permission_lock:
                         self._permission_waiters.pop(request_id, None)
             elif isinstance(event, TurnDone):
+                self._sync_session_mode_from_global(session)
                 push("status_update", self._status_payload(session, mode=mode, plan_mode=plan_mode))
                 self._emit_change_guard_if_needed(session, push)
                 # Persist the session so /resume + `xerxes -r <id>` actually
@@ -1550,18 +1617,20 @@ class TurnRunner:
 
     def _status_payload(self, session: DaemonSession, *, mode: str, plan_mode: bool) -> dict[str, Any]:
         """Build the ``status_update`` payload for ``session``."""
+        status_mode = str(getattr(session, "interaction_mode", mode) or mode)
+        status_plan_mode = bool(getattr(session, "plan_mode", plan_mode))
         return {
             "context_tokens": estimate_context_tokens(
                 session.state.messages,
-                model=self.runtime.model or str(self.runtime.runtime_config.get("model", "")),
+                model=str(session.runtime_config.get("model", "")) or self.runtime.model,
             ),
-            "max_context": self._resolve_context_limit(),
+            "max_context": self._resolve_context_limit(session.runtime_config),
             "mcp_status": {},
-            "plan_mode": plan_mode,
-            "mode": mode,
+            "plan_mode": status_plan_mode,
+            "mode": status_mode,
         }
 
-    def _resolve_context_limit(self) -> int:
+    def _resolve_context_limit(self, runtime_config: dict[str, Any] | None = None) -> int:
         """Resolve the model's context window for the status bar.
 
         Prefers an explicit ``context_limit`` / ``max_context`` from runtime
@@ -1571,7 +1640,7 @@ class TurnRunner:
         bar used to render ``0/0`` when no override was set; this guarantees
         a useful denominator even on fresh installs.
         """
-        cfg = self.runtime.runtime_config
+        cfg = runtime_config or self.runtime.runtime_config
         explicit = cfg.get("context_limit", cfg.get("max_context", 0)) or 0
         if explicit:
             try:

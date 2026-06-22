@@ -24,10 +24,12 @@ import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import Any
 
 from ..bridge import profiles
 from ..context.window_usage import estimate_context_tokens
+from ..runtime.project_workspace import ensure_project_agent_workspace, load_project_agent_workspace
 from .gateway import EmitFn
 from .runtime import DaemonSession
 
@@ -41,9 +43,20 @@ class SlashCommandsMixin:
     ``_slash_*`` methods based on the command name.
     """
 
+    def _session_key_for_emit(self, emit: EmitFn) -> str:
+        """Return the session key attached to this slash-command connection."""
+        try:
+            return self._connection_session_key(emit)
+        except Exception:
+            return self._current_session_key
+
+    def _session_for_emit(self, emit: EmitFn) -> DaemonSession | None:
+        """Return the session attached to this slash-command connection."""
+        return self.sessions.get(self._session_key_for_emit(emit))
+
     async def _slash_soul(self, args: str, emit: EmitFn) -> None:
         """Show the path to the workspace's SOUL.md (or memory soul file)."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -64,7 +77,7 @@ class SlashCommandsMixin:
 
     async def _slash_cost(self, args: str, emit: EmitFn) -> None:
         """Show the running USD cost for the active session."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -72,7 +85,11 @@ class SlashCommandsMixin:
             cost = session.state.cost
         except Exception:
             cost = 0.0
-        await self._emit_slash(emit, f"Estimated cost: `${cost:.4f}` (model: `{self.runtime.model}`).")
+        model = (
+            str((getattr(session, "runtime_config", {}) or self.runtime.runtime_config).get("model", ""))
+            or self.runtime.model
+        )
+        await self._emit_slash(emit, f"Estimated cost: `${cost:.4f}` (model: `{model}`).")
 
     async def _slash_fast(self, args: str, emit: EmitFn) -> None:
         """Toggle fast-mode (cheaper auxiliary model for summaries/titles/etc.)."""
@@ -94,7 +111,7 @@ class SlashCommandsMixin:
 
     async def _slash_save(self, args: str, emit: EmitFn) -> None:
         """Force-persist the active session to disk right now."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session to save.")
             return
@@ -171,13 +188,14 @@ class SlashCommandsMixin:
 
     async def _slash_budget(self, args: str, emit: EmitFn) -> None:
         """Show context-window usage and remaining headroom."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
         from ..llms.registry import get_context_limit
 
-        model = self.runtime.model or ""
+        runtime_config = getattr(session, "runtime_config", {}) or self.runtime.runtime_config
+        model = str(runtime_config.get("model", "")) or self.runtime.model or ""
         limit = get_context_limit(model) if model else 0
         used = estimate_context_tokens(session.state.messages, model=model)
         remaining = max(0, limit - used)
@@ -382,7 +400,7 @@ class SlashCommandsMixin:
 
     async def _slash_insights(self, args: str, emit: EmitFn) -> None:
         """Show top tools by call count from the session's execution log."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -401,7 +419,7 @@ class SlashCommandsMixin:
 
     async def _slash_branch(self, args: str, emit: EmitFn) -> None:
         """Branch / fork the current session — saves a copy under a new id."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session to branch.")
             return
@@ -427,7 +445,7 @@ class SlashCommandsMixin:
 
     async def _slash_retry(self, args: str, emit: EmitFn) -> None:
         """Resend the most recent user message after dropping the failed reply."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None or not session.state.messages:
             await self._emit_slash(emit, "Nothing to retry.")
             return
@@ -451,7 +469,7 @@ class SlashCommandsMixin:
 
     async def _slash_undo(self, args: str, emit: EmitFn) -> None:
         """Drop the last user/assistant turn pair from the active session."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None or not session.state.messages:
             await self._emit_slash(emit, "Nothing to undo.")
             return
@@ -475,7 +493,7 @@ class SlashCommandsMixin:
 
     async def _slash_personality(self, args: str, emit: EmitFn) -> None:
         """Show the path to the workspace's persona file."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -721,11 +739,12 @@ class SlashCommandsMixin:
         managed separately via ``/provider``.
         """
         target = args.strip()
+        session = self._session_for_emit(emit)
+        cfg = (getattr(session, "runtime_config", {}) if session is not None else None) or self.runtime.runtime_config
         if not target:
-            cfg = self.runtime.runtime_config
             base_url = str(cfg.get("base_url", ""))
             api_key = str(cfg.get("api_key", ""))
-            active = self.runtime.model or "(none)"
+            active = str(cfg.get("model", "")) or self.runtime.model or "(none)"
             lines = [
                 f"Active model: `{active}`",
                 f"Base URL:     `{base_url or '(provider default)'}`",
@@ -745,14 +764,12 @@ class SlashCommandsMixin:
         # Validate against the provider's catalogue (best-effort): reject an
         # unknown id rather than silently binding a model that 404s at call time.
         # If the catalogue can't be fetched, we skip validation and allow it.
-        base_url = str(self.runtime.runtime_config.get("base_url", ""))
+        base_url = str(cfg.get("base_url", ""))
         if base_url:
             from ..llms.registry import bare_model
 
             try:
-                available = await asyncio.to_thread(
-                    profiles.fetch_models, base_url, str(self.runtime.runtime_config.get("api_key", ""))
-                )
+                available = await asyncio.to_thread(profiles.fetch_models, base_url, str(cfg.get("api_key", "")))
             except Exception:
                 available = []
             if available and not ({target, bare_model(target)} & set(available)):
@@ -766,6 +783,7 @@ class SlashCommandsMixin:
                 return
         try:
             self.runtime.reload({"model": target})
+            self._sync_runtime_to_connection_session(emit)
         except Exception as exc:
             await self._emit_slash(emit, f"Failed to switch model: `{exc}`")
             return
@@ -776,6 +794,7 @@ class SlashCommandsMixin:
         """Reload tools + skills from disk without restarting the daemon."""
         try:
             self.runtime.reload({})
+            self._sync_runtime_to_connection_session(emit)
         except Exception as exc:
             await self._emit_slash(emit, f"Reload failed: `{exc}`")
             return
@@ -788,7 +807,7 @@ class SlashCommandsMixin:
 
     async def _slash_usage(self, args: str, emit: EmitFn) -> None:
         """Show token usage for the active session (alias-ish for /context)."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -832,7 +851,7 @@ class SlashCommandsMixin:
 
     async def _slash_history(self, args: str, emit: EmitFn) -> None:
         """Show message and turn counts for the active session."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet.")
             return
@@ -845,13 +864,14 @@ class SlashCommandsMixin:
 
     async def _slash_stop(self, args: str, emit: EmitFn) -> None:
         """Cancel the currently in-flight tool / turn in this session."""
-        cancelled = self.sessions.cancel(self._current_session_key)
+        cancelled = self.sessions.cancel(self._session_key_for_emit(emit))
         await self._emit_slash(emit, "Cancelled." if cancelled else "Nothing running to cancel.")
 
     async def _slash_new(self, args: str, emit: EmitFn) -> None:
         """Drop the cached session and start fresh — like a clean re-launch."""
-        self.sessions.evict(self._current_session_key)
-        session = self.sessions.open(self._current_session_key, self.workspaces.default_agent_id)
+        session_key = self._session_key_for_emit(emit)
+        self.sessions.evict(session_key)
+        session = self.sessions.open(session_key, self.workspaces.default_agent_id)
         await self._emit_slash(emit, f"New session `{session.id}` started. Scrollback cleared on TUI side.")
 
     async def _steer_session(self, session_key: str, args: str, emit: EmitFn) -> None:
@@ -881,7 +901,7 @@ class SlashCommandsMixin:
 
     async def _slash_steer(self, args: str, emit: EmitFn) -> None:
         """Inject a steering hint into the current slash-command session."""
-        await self._steer_session(self._current_session_key, args, emit)
+        await self._steer_session(self._session_key_for_emit(emit), args, emit)
 
     async def _slash_paste(self, args: str, emit: EmitFn) -> None:
         """Paste is TUI-side; ack with a hint."""
@@ -908,7 +928,7 @@ class SlashCommandsMixin:
 
     async def _slash_title(self, args: str, emit: EmitFn) -> None:
         """Set or clear the current session's title."""
-        session = self.sessions.get(self._current_session_key)
+        session = self._session_for_emit(emit)
         if session is None:
             await self._emit_slash(emit, "No active session yet — start chatting first.")
             return
@@ -965,15 +985,52 @@ class SlashCommandsMixin:
         )
 
     async def _slash_workspace(self, args: str, emit: EmitFn) -> None:
-        """Show the current project directory and the agent workspace path."""
-        session = self.sessions.get(self._current_session_key)
+        """Show or initialize the current project-local agent workspace."""
+        session_key = self._connection_session_key(emit)
+        session = self.sessions.get(session_key)
+        if session is None and session_key != self._current_session_key:
+            session = self.sessions.get(self._current_session_key)
         ws_path = str(session.workspace.path) if session is not None else "(no session)"
-        project_dir = str(session.project_dir) if session is not None else str(self.config.project_dir or os.getcwd())
+        project_dir = Path(
+            session.project_dir if session is not None else self.config.project_dir or os.getcwd()
+        ).resolve()
+
+        action = args.strip().lower()
+        if action == "init":
+            created = ensure_project_agent_workspace(project_dir)
+            context = load_project_agent_workspace(project_dir)
+            if getattr(self, "runtime", None) is not None:
+                self.runtime.discover_skills()
+            created_lines = [f"  `{path.relative_to(project_dir)}`" for path in created]
+            if not created_lines:
+                created_lines = ["  already initialized"]
+            lines = [
+                f"Project .agents: `{context.agents_dir}`",
+                "Created:",
+                *created_lines,
+                "",
+                "Loaded project context:",
+                *[f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files],
+            ]
+            await self._emit_slash(emit, "\n".join(lines))
+            return
+
+        if action and action != "status":
+            await self._emit_slash(emit, "Usage: `/workspace [status|init]`.")
+            return
+
+        context = load_project_agent_workspace(project_dir)
         lines = [
             f"Project dir:    `{project_dir}`",
             f"Agent workspace: `{ws_path}`",
             f"Agent id:        `{(session.agent_id if session else self.workspaces.default_agent_id)}`",
+            f"Project .agents: `{context.agents_dir}` ({'ready' if context.prompt else 'not initialized'})",
         ]
+        if context.loaded_files:
+            lines.append("Loaded project context:")
+            lines.extend(f"  `{path.relative_to(project_dir)}`" for path in context.loaded_files)
+        else:
+            lines.append("Run `/workspace init` to create `.agents/` project context and local skills folders.")
         await self._emit_slash(emit, "\n".join(lines))
 
     async def _slash_background(self, args: str, emit: EmitFn) -> None:

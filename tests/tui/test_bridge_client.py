@@ -1,3 +1,17 @@
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import asyncio
@@ -66,6 +80,15 @@ def test_bridge_client_project_daemon_paths_are_isolated(monkeypatch, tmp_path) 
     assert first_config.pid_file != second_config.pid_file
 
 
+def test_bridge_client_fresh_sessions_get_unique_keys() -> None:
+    first = BridgeClient()
+    second = BridgeClient()
+
+    assert first.session_key.startswith("tui:")
+    assert second.session_key.startswith("tui:")
+    assert first.session_key != second.session_key
+
+
 def test_bridge_client_honors_explicit_daemon_socket(monkeypatch, tmp_path) -> None:
     socket_path = tmp_path / "explicit.sock"
     monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
@@ -126,6 +149,7 @@ async def test_initialize_defaults_to_accept_all_permissions(monkeypatch) -> Non
                 "api_key": "",
                 "permission_mode": "accept-all",
                 "resume_session_id": "",
+                "session_key": client.session_key,
                 "project_dir": client._project_dir,
             },
             None,

@@ -112,7 +112,13 @@ def daemon(tmp_path):
     server._submit_turn_real = DaemonServer._submit_turn.__get__(server)
     server._submit_turn = _fake_submit_turn  # type: ignore[assignment]
     server.captured_submit = captured_submit  # type: ignore[attr-defined]
-    return server
+    try:
+        yield server
+    finally:
+        for coro in pending_post_turn:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
 
 
 def _run(coro):
