@@ -71,6 +71,12 @@ class OAuthToken:
     expires_at: float | None = None
     scopes: tuple[str, ...] = field(default_factory=tuple)
 
+    def __post_init__(self):
+        if not self.access_token:
+            raise ValueError("access_token must not be empty or None")
+        if not self.token_type:
+            raise ValueError("token_type must not be empty")
+
     def is_expired(self, *, skew_seconds: float = 30.0) -> bool:
         """True when the token expires within ``skew_seconds``; tokens without an expiry never expire."""
         if self.expires_at is None:
@@ -86,12 +92,16 @@ class OAuthToken:
     @classmethod
     def from_response(cls, payload: dict[str, Any]) -> OAuthToken:
         """Construct a token from the provider's ``/token`` response body."""
+        try:
+            access_token = payload["access_token"]
+        except KeyError:
+            raise KeyError("OAuth token response missing required 'access_token'") from None
         expires_in = payload.get("expires_in")
         expires_at = time.time() + float(expires_in) if expires_in else None
         scope = payload.get("scope", "")
         scopes = tuple(scope.split()) if scope else ()
         return cls(
-            access_token=payload["access_token"],
+            access_token=access_token,
             refresh_token=payload.get("refresh_token"),
             token_type=payload.get("token_type", "Bearer"),
             expires_at=expires_at,

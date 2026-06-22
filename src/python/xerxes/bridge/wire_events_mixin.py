@@ -331,7 +331,17 @@ class WireEventMixin:
         """Emit a ``status_update`` summarising token usage and the active mode."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
-        context_tokens = estimate_context_tokens(self.state.messages, model=model)
+        mode = str(self.config.get("mode", "code"))
+        system_prompt = str(getattr(self, "system_prompt", ""))
+        prompt_for_mode = getattr(self, "_system_prompt_for_mode", None)
+        if callable(prompt_for_mode):
+            system_prompt = prompt_for_mode(mode)
+        context_tokens = estimate_context_tokens(
+            self.state.messages,
+            model=model,
+            system_prompt=system_prompt,
+            tool_schemas=list(getattr(self, "tool_schemas", [])),
+        )
         self._emit_wire_event(
             "status_update",
             {
@@ -339,7 +349,7 @@ class WireEventMixin:
                 "max_context": context_limit,
                 "mcp_status": {},
                 "plan_mode": self.config.get("plan_mode", False),
-                "mode": self.config.get("mode", "code"),
+                "mode": mode,
                 "reasoning_effort": self.config.get("reasoning_effort", "off"),
             },
         )

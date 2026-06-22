@@ -307,6 +307,19 @@ class OfficialSkillSource(SkillSource):
         return results
 
 
+def _sanitize_skill_name(skill_name: str) -> str:
+    """Validate that ``skill_name`` is a plain name with no path traversal.
+
+    Raises:
+        ValueError: If the name contains path separators or parent references.
+    """
+    if not skill_name or skill_name in (".", ".."):
+        raise ValueError(f"Invalid skill name: {skill_name!r}")
+    if "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+        raise ValueError(f"Invalid skill name: {skill_name!r} contains path separators")
+    return skill_name
+
+
 def _ensure_hub_dirs() -> None:
     """Create ``HUB_DIR`` and ``QUARANTINE_DIR`` if they do not exist."""
     HUB_DIR.mkdir(parents=True, exist_ok=True)
@@ -381,7 +394,7 @@ class SkillsHub:
             logger.warning("Failed to fetch skill from %s: %s", uri, exc)
             return f"[Error] Failed to fetch {uri}: {exc}"
 
-        skill_name = bundle["name"]
+        skill_name = _sanitize_skill_name(bundle["name"])
         target_dir = SKILLS_DIR / skill_name
 
         if target_dir.exists() and not force:
@@ -405,6 +418,7 @@ class SkillsHub:
     def uninstall(self, skill_name: str) -> str:
         """Remove ``skill_name`` from disk and clear its lock entry."""
 
+        skill_name = _sanitize_skill_name(skill_name)
         target_dir = SKILLS_DIR / skill_name
         if not target_dir.exists():
             return f"[Error] Skill '{skill_name}' is not installed."
@@ -416,6 +430,21 @@ class SkillsHub:
             _save_lock(lock)
         _audit("uninstall", skill_name)
         return f"Uninstalled skill '{skill_name}'"
+
+    def approve_skill(self, skill_name: str) -> str:
+        """Restore a quarantined skill to the active skills directory."""
+
+        skill_name = _sanitize_skill_name(skill_name)
+        quarantined = QUARANTINE_DIR / skill_name
+        if not quarantined.exists():
+            return f"[Error] Skill '{skill_name}' not found in quarantine."
+
+        target = SKILLS_DIR / skill_name
+        if target.exists():
+            shutil.rmtree(target)
+        quarantined.rename(target)
+        _audit("approve", skill_name)
+        return f"Approved and activated skill '{skill_name}'"
 
     def list_installed(self) -> list[dict[str, Any]]:
         """Return summary dicts for every skill recorded in the lock file."""

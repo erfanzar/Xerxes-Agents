@@ -183,6 +183,31 @@ class MCPClient:
                 self.logger.error(f"Process poll: {self.process.poll()}")
             return False
 
+    @staticmethod
+    def _validate_mcp_url(url: str) -> str | None:
+        """Validate an MCP server URL. Returns error message or None if valid."""
+        import ipaddress
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return "Invalid URL format"
+        if parsed.scheme not in ("http", "https"):
+            return "URL scheme must be http or https"
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return "URL must have a host"
+        if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return "Private/localhost addresses are not allowed"
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+                return "Private IP addresses are not allowed"
+        except ValueError:
+            pass
+        return None
+
     async def _connect_sse(self) -> bool:
         """Connect via the SDK's Server-Sent Events transport (requires the optional ``mcp`` package)."""
 
@@ -191,6 +216,11 @@ class MCPClient:
 
         if not self.config.url:
             self.logger.error(f"No URL specified for SSE MCP server {self.config.name}")
+            return False
+
+        err = self._validate_mcp_url(self.config.url)
+        if err:
+            self.logger.error(f"MCP URL validation failed for {self.config.name}: {err}")
             return False
 
         try:
@@ -236,6 +266,11 @@ class MCPClient:
 
         if not self.config.url:
             self.logger.error(f"No URL specified for Streamable HTTP MCP server {self.config.name}")
+            return False
+
+        err = self._validate_mcp_url(self.config.url)
+        if err:
+            self.logger.error(f"MCP URL validation failed for {self.config.name}: {err}")
             return False
 
         try:

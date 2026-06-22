@@ -103,9 +103,8 @@ class EmailChannel(WebhookChannel):
         """Send one email — via ``smtp_sender`` when set, otherwise ``smtplib``.
 
         When ``smtp_user`` is non-empty the SMTP path attempts STARTTLS
-        (best-effort, ignored on failure) and authenticates before
-        ``send_message``. If ``smtplib`` is unavailable the call logs a
-        warning and returns without sending.
+        and authenticates before ``send_message``. If ``smtplib`` is
+        unavailable the call logs a warning and returns without sending.
 
         Args:
             message: Outbound message. ``room_id`` or ``channel_user_id``
@@ -114,6 +113,7 @@ class EmailChannel(WebhookChannel):
 
         Raises:
             ValueError: Neither ``room_id`` nor ``channel_user_id`` is set.
+            RuntimeError: STARTTLS failed when credentials are configured.
         """
         to_addr = message.room_id or message.channel_user_id
         if not to_addr:
@@ -136,7 +136,7 @@ class EmailChannel(WebhookChannel):
             if self.smtp_user:
                 try:
                     smtp.starttls()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    raise RuntimeError(f"STARTTLS failed for {self.smtp_host}:{self.smtp_port}") from exc
                 smtp.login(self.smtp_user, self.smtp_password)
             smtp.send_message(msg)

@@ -24,12 +24,15 @@ prepended to the system prompt before every channel turn.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from ..core.paths import xerxes_subdir
 from ..security.prompt_scanner import scan_context_content
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_WORKSPACE = xerxes_subdir("agents", "default")
 
@@ -201,6 +204,11 @@ class MarkdownAgentWorkspace:
         self.ensure()
         now = when or datetime.now()
         target = self.path / "memory" / f"{now.date().isoformat()}.md"
+        max_note_size = 1024 * 1024  # 1MB
+        if target.exists() and target.stat().st_size > max_note_size:
+            archive = target.with_suffix(".archive.md")
+            target.rename(archive)
+            logger.warning(f"Daily note {target} exceeded {max_note_size} bytes, archived to {archive}")
         if not target.exists():
             target.write_text(f"# {now.date().isoformat()}\n\n", encoding="utf-8")
         with target.open("a", encoding="utf-8") as handle:
@@ -215,6 +223,10 @@ class MarkdownAgentWorkspace:
         gains entries for files that contributed real content.
         """
         if not path.exists() or not path.is_file():
+            return
+        max_size = 10 * 1024 * 1024  # 10MB
+        if path.stat().st_size > max_size:
+            logger.warning(f"File {path} exceeds max size {max_size}, skipping")
             return
         try:
             raw = path.read_text(encoding="utf-8")

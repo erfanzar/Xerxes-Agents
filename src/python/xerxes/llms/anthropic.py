@@ -39,6 +39,8 @@ ANTHROPIC_CONTEXT_LENGTHS = {
     "claude-sonnet-4": 200000,
 }
 
+MAX_SSE_LINE_SIZE = 10 * 1024 * 1024  # 10 MB
+
 httpx: Any
 try:
     import httpx
@@ -91,6 +93,8 @@ class AnthropicLLM(BaseLLM):
         Reads the API key from the ANTHROPIC_API_KEY environment variable and
         configures the base URL and headers for all requests.
         """
+
+        self._validate_base_url(self.config.base_url)
 
         api_key = self.config.api_key or os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -153,6 +157,7 @@ class AnthropicLLM(BaseLLM):
         if stop or self.config.stop:
             payload["stop_sequences"] = stop or self.config.stop
 
+        self._filter_dangerous_kwargs(kwargs)
         payload.update(kwargs)
         payload.update(self.config.extra_params)
 
@@ -167,7 +172,7 @@ class AnthropicLLM(BaseLLM):
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPError as e:
-            raise RuntimeError(f"Anthropic API request failed: {e}") from e
+            raise RuntimeError(f"Anthropic API request failed: {self._sanitize_error(e)}") from e
 
     async def _stream_completion(self, payload: dict) -> AsyncIterator[dict]:
         """Yield streaming events from the Anthropic API.
@@ -185,6 +190,8 @@ class AnthropicLLM(BaseLLM):
         async with self.client.stream("POST", "/v1/messages", json=payload) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
+                if len(line) > MAX_SSE_LINE_SIZE:
+                    raise RuntimeError(f"SSE line exceeded maximum size of {MAX_SSE_LINE_SIZE} bytes")
                 if line.startswith("data: "):
                     data = line[6:]
                     if data != "[DONE]":

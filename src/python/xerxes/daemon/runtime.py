@@ -398,6 +398,51 @@ class DaemonSession:
         }
 
 
+def render_session_system_prompt(
+    runtime: RuntimeManager,
+    session: DaemonSession,
+    *,
+    mode: str,
+    tolerate_errors: bool = False,
+) -> str:
+    """Build the provider-visible system prompt for a daemon session."""
+    try:
+        workspace_context = session.workspace.load_context()
+    except Exception:
+        if not tolerate_errors:
+            raise
+        workspace_prompt = ""
+    else:
+        workspace_prompt = workspace_context.prompt
+
+    try:
+        memory_section = runtime.agent_memory.to_prompt_section()
+    except Exception:
+        memory_section = ""
+    try:
+        project_workspace_section = load_project_agent_workspace(session.project_dir).prompt
+    except Exception:
+        project_workspace_section = ""
+    base_system_prompt = runtime.system_prompt.rstrip()
+    live_project_workspace_section = (
+        project_workspace_section
+        if project_workspace_section and project_workspace_section not in base_system_prompt
+        else ""
+    )
+    return "\n\n".join(
+        part
+        for part in (
+            base_system_prompt,
+            live_project_workspace_section,
+            workspace_prompt,
+            memory_section,
+            runtime.active_skill_prompt(),
+            mode_switch_hint(mode),
+        )
+        if part
+    )
+
+
 class WorkspaceManager:
     """Materialise per-agent Markdown workspaces under ``$XERXES_HOME/agents``."""
 
@@ -1218,36 +1263,7 @@ class TurnRunner:
         from ..runtime.session_context import set_active_session
         from ..tools.claude_tools import _get_agent_manager
 
-        workspace_context = session.workspace.load_context()
-        # Inject the agent's persistent memory (global + project) so the
-        # model can read its own notes at every turn. The agent updates
-        # these files via agent_memory_* tools.
-        try:
-            memory_section = self.runtime.agent_memory.to_prompt_section()
-        except Exception:
-            memory_section = ""
-        try:
-            project_workspace_section = load_project_agent_workspace(session.project_dir).prompt
-        except Exception:
-            project_workspace_section = ""
-        base_system_prompt = self.runtime.system_prompt.rstrip()
-        live_project_workspace_section = (
-            project_workspace_section
-            if project_workspace_section and project_workspace_section not in base_system_prompt
-            else ""
-        )
-        system_prompt = "\n\n".join(
-            part
-            for part in (
-                base_system_prompt,
-                live_project_workspace_section,
-                workspace_context.prompt,
-                memory_section,
-                self.runtime.active_skill_prompt(),
-                mode_switch_hint(mode),
-            )
-            if part
-        )
+        system_prompt = render_session_system_prompt(self.runtime, session, mode=mode)
         config = dict(session.runtime_config or self.runtime.runtime_config)
         config["mode"] = mode
         config["plan_mode"] = plan_mode
@@ -1524,13 +1540,20 @@ class TurnRunner:
                     if self._current_tool_call_id:
                         self._subagent_parent_tool[task_id] = self._current_tool_call_id
             self._emit_subagent_stream(
-                push, task_id, prefix, f"spawned: {str(data.get('prompt', ''))[:120]}",
-                agent_type=agent_type, status="running", action="spawned",
+                push,
+                task_id,
+                prefix,
+                f"spawned: {str(data.get('prompt', ''))[:120]}",
+                agent_type=agent_type,
+                status="running",
+                action="spawned",
             )
             return
 
         if event_type == "agent_text":
-            self._stream_subagent_chunk(push, task_id, prefix, data.get("text") or "", kind="text", agent_type=agent_type)
+            self._stream_subagent_chunk(
+                push, task_id, prefix, data.get("text") or "", kind="text", agent_type=agent_type
+            )
             return
 
         if event_type == "agent_thinking":
@@ -1547,8 +1570,13 @@ class TurnRunner:
             key = next(iter(inputs.values()), "") if isinstance(inputs, dict) else ""
             tool_name = data.get("tool_name", "tool")
             self._emit_subagent_stream(
-                push, task_id, prefix, f"o {tool_name}({str(key)[:80]})",
-                agent_type=agent_type, status="running", action=f"{tool_name} {str(key)[:48]}".strip(),
+                push,
+                task_id,
+                prefix,
+                f"o {tool_name}({str(key)[:80]})",
+                agent_type=agent_type,
+                status="running",
+                action=f"{tool_name} {str(key)[:48]}".strip(),
             )
             return
 
@@ -1557,9 +1585,13 @@ class TurnRunner:
             mark = "OK" if data.get("permitted", True) else "DENIED"
             tool_name = data.get("tool_name", "tool")
             self._emit_subagent_stream(
-                push, task_id, prefix,
+                push,
+                task_id,
+                prefix,
                 f"{mark} {tool_name} - {float(data.get('duration_ms', 0) or 0):.0f}ms",
-                agent_type=agent_type, status="running", action=str(tool_name),
+                agent_type=agent_type,
+                status="running",
+                action=str(tool_name),
             )
             return
 
@@ -1570,8 +1602,14 @@ class TurnRunner:
             # counter so the dashboard shows where each agent landed; the lane is
             # cleared by the TUI when the turn ends.
             self._emit_subagent_stream(
-                push, task_id, prefix, result or status,
-                agent_type=agent_type, status=status, action=result or status, result=result,
+                push,
+                task_id,
+                prefix,
+                result or status,
+                agent_type=agent_type,
+                status=status,
+                action=result or status,
+                result=result,
             )
             with self._subagent_buffer_lock:
                 self._subagent_parent_tool.pop(task_id, None)
@@ -1644,6 +1682,9 @@ class TurnRunner:
                     "count": count,
                     "action": action or body,
                     "result": result,
+                    # The spawn tool-call this agent belongs to, so the TUI can
+                    # scope/collapse each spawn's dashboard independently.
+                    "parent": self._subagent_parent_tool.get(task_id, ""),
                 },
             },
         )
@@ -1746,12 +1787,20 @@ class TurnRunner:
         """Build the ``status_update`` payload for ``session``."""
         status_mode = str(getattr(session, "interaction_mode", mode) or mode)
         status_plan_mode = bool(getattr(session, "plan_mode", plan_mode))
+        system_prompt = render_session_system_prompt(
+            self.runtime,
+            session,
+            mode=status_mode,
+            tolerate_errors=True,
+        )
         return {
             "context_tokens": estimate_context_tokens(
                 session.state.messages,
-                model=str(session.runtime_config.get("model", "")) or self.runtime.model,
+                model=str(getattr(session, "runtime_config", {}).get("model", "")) or self.runtime.model,
+                system_prompt=system_prompt,
+                tool_schemas=self.runtime.tool_schemas,
             ),
-            "max_context": self._resolve_context_limit(session.runtime_config),
+            "max_context": self._resolve_context_limit(getattr(session, "runtime_config", None)),
             "mcp_status": {},
             "plan_mode": status_plan_mode,
             "mode": status_mode,

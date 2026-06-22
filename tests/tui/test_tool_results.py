@@ -47,6 +47,9 @@ class _PromptStub:
     def commit_active_tool(self, tool_call_id: str, final_text: str) -> None:
         self.committed.append((tool_call_id, final_text))
 
+    def collapse_agent_dashboard(self, parent: str = "") -> None:
+        pass
+
     def set_session(self, *, agent_name: str, model: str, cwd: str, branch: str = "") -> None:
         pass
 

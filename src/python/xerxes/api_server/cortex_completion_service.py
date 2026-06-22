@@ -397,7 +397,11 @@ class CortexCompletionService:
 
             result = cortex.kickoff(use_streaming=True, streamer_buffer=streamer_buffer, log_process=False)
             if isinstance(result, tuple):
-                result[-1].join()
+                try:
+                    result[-1].join(timeout=300.0)
+                except TimeoutError:
+                    if self.verbose and self.logger:
+                        self.logger.error("Task mode thread join timed out after 300s")
             return ""
 
         except Exception as e:
@@ -452,7 +456,11 @@ class CortexCompletionService:
                 streamer_buffer=streamer_buffer,
             )
             if isinstance(result, tuple):
-                result[-1].join()
+                try:
+                    result[-1].join(timeout=300.0)
+                except TimeoutError:
+                    if self.verbose and self.logger:
+                        self.logger.error("Instruction mode thread join timed out after 300s")
             return ""
 
         except Exception as e:

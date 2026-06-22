@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import tempfile
 import typing as tp
+import urllib.parse
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,19 @@ class BrowserPageState:
     url: str
     title: str = ""
     link_map: dict[int, str] = field(default_factory=dict)
+
+
+def _validate_browser_url(url: str) -> None:
+    """Reject disallowed URL schemes that could read local files or execute code.
+
+    Raises:
+        ValueError: When the URL scheme is not http or https.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(
+            f"URL scheme '{parsed.scheme}' is not allowed. Only http:// and https:// are permitted."
+        )
 
 
 class BrowserManager:
@@ -87,6 +101,7 @@ class BrowserManager:
 
         page, state = await self._resolve_page(url=url, ref_id=ref_id)
         if url is not None:
+            _validate_browser_url(url)
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(wait_ms)
             state.url = page.url
@@ -130,6 +145,7 @@ class BrowserManager:
             href = state.link_map.get(link_id)
             if href is None:
                 raise ValueError(f"Link id {link_id} not found for page {ref_id}")
+            _validate_browser_url(href)
             await page.goto(href, wait_until="domcontentloaded")
         elif selector:
             await page.locator(selector).first.click()
@@ -170,7 +186,18 @@ class BrowserManager:
         """
 
         page = self._require_page(ref_id)
-        screenshot_path = path or self._default_screenshot_path(ref_id)
+        if path is not None:
+            screenshot_path = Path(path).resolve()
+            allowed_dir = Path(self._screenshot_dir or tempfile.gettempdir()).resolve()
+            try:
+                screenshot_path.relative_to(allowed_dir)
+            except ValueError:
+                raise ValueError(
+                    f"Screenshot path must be within the allowed directory: {allowed_dir}"
+                ) from None
+            screenshot_path = str(screenshot_path)
+        else:
+            screenshot_path = self._default_screenshot_path(ref_id)
         await page.screenshot(path=screenshot_path, full_page=full_page)
         return {"ref_id": ref_id, "path": screenshot_path, "full_page": full_page}
 

@@ -1,6 +1,6 @@
 [project]
 name = "xerxes-agent"
-version = "0.2.4.2"
+version = "0.2.5"
 description = "Agents for intelligence and coordination"
 authors = [{ name = "Erfan Zare Chavoshi", email = "Erfanzare810@gmail.com" }]
 license = { text = "Apache-2.0" }

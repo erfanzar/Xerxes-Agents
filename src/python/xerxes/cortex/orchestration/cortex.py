@@ -333,12 +333,20 @@ class Cortex:
         setattr(memory, "_cortex_thread_guarded", True)
         setattr(memory, "_cortex_memory_lock", lock)
 
-    def _run_async_coro(self, coro):
+    def _run_async_coro(self, coro, timeout: float = 300.0):
         """Run ``coro`` from synchronous code, even inside a live event loop.
 
         Uses :func:`asyncio.run` when no loop is active; otherwise dispatches
         the coroutine to a one-shot thread-pool so the outer loop is not
         disturbed.
+
+        Args:
+            coro: The coroutine to run.
+            timeout: Maximum seconds to wait for the coroutine to complete.
+                Defaults to 300 seconds.
+
+        Raises:
+            TimeoutError: If the coroutine does not complete within ``timeout``.
         """
 
         try:
@@ -349,7 +357,10 @@ class Cortex:
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(lambda: asyncio.run(coro)).result()
+            try:
+                return pool.submit(lambda: asyncio.run(coro)).result(timeout=timeout)
+            except concurrent.futures.TimeoutError as exc:
+                raise TimeoutError(f"Coroutine did not complete within {timeout}s") from exc
 
     def _interpolate_inputs(self, inputs: dict[str, Any]) -> None:
         """Apply template substitutions to every agent, the manager, and tasks."""
@@ -611,7 +622,7 @@ class Cortex:
     def _run_sequential(self) -> str:
         """Run every task in declaration order, threading outputs as context.
 
-        Each task can declare ``dependencies`` (looked up by description in
+        Each task can declare ``dependencies`` (looked up by task identity in
         ``self.task_outputs``) and a ``chain`` link that may insert a
         follow-up task based on the output. The final string is the last
         task's output.
@@ -629,7 +640,7 @@ class Cortex:
             if hasattr(task, "dependencies") and task.dependencies:
                 for dep_task in task.dependencies:
                     for completed_task in self.task_outputs:
-                        if completed_task.task.description == dep_task.description:
+                        if completed_task.task is dep_task:
                             if dep_task.agent is not None:
                                 task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
                             break
@@ -688,7 +699,7 @@ class Cortex:
             if hasattr(task, "dependencies") and task.dependencies:
                 for dep_task in task.dependencies:
                     for completed_task in self.task_outputs:
-                        if completed_task.task.description == dep_task.description:
+                        if completed_task.task is dep_task:
                             if dep_task.agent is not None:
                                 task_context.append(f"Previous Task ({dep_task.agent.role}): {completed_task.output}")
                             break
@@ -817,7 +828,8 @@ class Cortex:
             if max_workers is not None:
                 max_workers = max(1, max_workers)
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 if independent_tasks:
                     results = await asyncio.gather(
                         *[run_task_async(task, [], executor, streamer_buffer) for task in independent_tasks]
@@ -829,6 +841,8 @@ class Cortex:
                     result = await run_task_async(task, context_outputs, executor, streamer_buffer)
                     self.task_outputs.append(result)
                     context_outputs.append(result.output)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
             return self.task_outputs[-1].output if self.task_outputs else ""
 
@@ -882,6 +896,7 @@ class Cortex:
             raise RuntimeError(f"Manager agent failed to create valid execution plan: {e}") from e
 
         completed_tasks: dict[int, str] = {}
+        skipped_tasks: set[int] = set()
 
         if "execution_plan" not in plan:
             raise ValueError("Manager plan missing 'execution_plan' key")
@@ -894,6 +909,7 @@ class Cortex:
                 self.logger.warning(
                     f"⚠️ Skipping invalid task_id {task_plan['task_id']} (valid range: 1-{len(self.tasks)})"
                 )
+                skipped_tasks.add(task_plan["task_id"])
                 continue
 
             task = self.tasks[task_id]
@@ -916,10 +932,20 @@ class Cortex:
 
             context = []
             if "dependencies" in task_plan:
+                skip_due_to_missing_dep = False
                 for dep_id in task_plan["dependencies"]:
+                    if dep_id in skipped_tasks:
+                        self.logger.warning(
+                            f"⚠️ Task {task_id + 1} depends on skipped task {dep_id}; skipping this task too."
+                        )
+                        skip_due_to_missing_dep = True
+                        break
                     if dep_id not in completed_tasks:
                         raise ValueError(f"Task {task_id + 1} depends on task {dep_id} which hasn't been completed yet")
                     context.append(completed_tasks[dep_id])
+                if skip_due_to_missing_dep:
+                    skipped_tasks.add(task_id + 1)
+                    continue
 
             log_agent_start(assigned_agent.role)
             task_output = task.execute(context if context else None)
@@ -1370,11 +1396,11 @@ class Cortex:
                 elif task.agent is not None:
                     _agents.append(task.agent)
 
-            seen: set = set()
+            seen_ids: set[int] = set()
             agents = []
             for a in _agents:
-                if a not in seen:
-                    seen.add(a)
+                if id(a) not in seen_ids:
+                    seen_ids.add(id(a))
                     agents.append(a)
         return Cortex(
             agents=agents,

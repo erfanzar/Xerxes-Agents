@@ -46,7 +46,7 @@ from .config import DaemonConfig, load_config
 from .gateway import EmitFn, WebSocketGateway
 from .log import DaemonLogger
 from .provider_flow import ProviderFlowMixin
-from .runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
+from .runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager, render_session_system_prompt
 from .skill_create import SkillCreateMixin
 from .socket_channel import SocketChannel
 
@@ -655,11 +655,21 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         """Push a ``status_update`` reflecting the current session's token usage and mode."""
         session = self.sessions.open(self._connection_session_key(emit), self.workspaces.default_agent_id)
         runtime_config = session.runtime_config or self.runtime.runtime_config
+        mode = str(getattr(session, "interaction_mode", runtime_config.get("mode", "code")) or "code")
+        system_prompt = render_session_system_prompt(
+            self.runtime,
+            session,
+            mode=mode,
+            tolerate_errors=True,
+        )
         await emit(
             "status_update",
             {
                 "context_tokens": estimate_context_tokens(
-                    session.state.messages, model=str(runtime_config.get("model", "")) or self.runtime.model
+                    session.state.messages,
+                    model=str(runtime_config.get("model", "")) or self.runtime.model,
+                    system_prompt=system_prompt,
+                    tool_schemas=self.runtime.tool_schemas,
                 ),
                 "max_context": self._resolve_context_limit(runtime_config),
                 "mcp_status": {},
@@ -826,7 +836,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 continue
             # Skill activations are auto-injected — they're not a user turn,
             # they're noise from the model's perspective.
-            if role == "user" and self._looks_like_skill_activation(text):
+            if role == "user" and self._looks_like_internal_replay_message(text):
                 continue
             body = f"✨ {text}" if role == "user" else text
             await emit(
@@ -873,15 +883,33 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         return str(content or "").strip()
 
     @staticmethod
-    def _looks_like_skill_activation(text: str) -> bool:
-        """True when ``text`` is one of the ``[Skill 'X' activated]`` injections.
-
-        Those headers are emitted by the skill dispatcher when the user types
-        ``/skill_name`` — they're not real user input and shouldn't show in
-        the replay.
-        """
+    def _looks_like_internal_replay_message(text: str) -> bool:
+        """True when a provider-visible user message should stay out of replay."""
         head = text.lstrip()[:64]
-        return head.startswith("[Skill") and "activated" in head
+        if head.startswith("[Skill") and "activated" in head:
+            return True
+        internal_prefixes = (
+            "[sub-agent events]",
+            "[mid-turn steer from user]",
+            "[steer from user]",
+            "[steer from user saved for next turn]",
+            "[Workspace guard]",
+            "[Objective gate]",
+            "[Previous conversation summary",
+        )
+        if any(head.startswith(prefix) for prefix in internal_prefixes):
+            return True
+        synthetic_slash_prefixes = (
+            "Please compact this conversation:",
+            "Write a reusable agent skill called",
+            "Generate an image matching this brief",
+        )
+        return any(text.lstrip().startswith(prefix) for prefix in synthetic_slash_prefixes)
+
+    @staticmethod
+    def _looks_like_skill_activation(text: str) -> bool:
+        """True when ``text`` is one of the ``[Skill 'X' activated]`` injections."""
+        return DaemonServer._looks_like_internal_replay_message(text)
 
     async def _emit_init_done(self, emit: EmitFn) -> None:
         """Re-emit ``init_done`` so the TUI refreshes its banner / status bar.

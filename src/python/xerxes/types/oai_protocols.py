@@ -26,6 +26,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+MAX_TOKENS_LIMIT = 1_000_000
+
 
 class OpenAIBaseModel(BaseModel):
     """Pydantic base for OpenAI-compatible protocol objects.
@@ -222,7 +224,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     model: str
     messages: list[ChatMessage]
-    max_tokens: int = 128
+    max_tokens: int = Field(default=128, ge=1, le=MAX_TOKENS_LIMIT)
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
@@ -348,7 +350,7 @@ class CompletionRequest(OpenAIBaseModel):
 
     model: str
     prompt: str | list[str]
-    max_tokens: int = 128
+    max_tokens: int = Field(default=128, ge=1, le=MAX_TOKENS_LIMIT)
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0

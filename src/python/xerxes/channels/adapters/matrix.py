@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 import typing as tp
+import urllib.parse
 
 from .._helpers import WebhookChannel, http_post, parse_json_body
 from ..types import ChannelMessage, MessageDirection
@@ -97,7 +98,8 @@ class MatrixChannel(WebhookChannel):
                 ``text`` the body.
         """
         txn = f"xerxes-{int(time.time() * 1000)}"
-        url = f"{self.homeserver_url}/_matrix/client/v3/rooms/{message.room_id}/send/m.room.message/{txn}"
+        room_id = urllib.parse.quote(message.room_id, safe="")
+        url = f"{self.homeserver_url}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{txn}"
         body = {"msgtype": "m.text", "body": message.text}
         http_post(
             url,

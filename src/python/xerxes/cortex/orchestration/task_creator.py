@@ -42,6 +42,14 @@ if typing.TYPE_CHECKING:
     from xerxes.cortex.orchestration.cortex import Cortex
 
 
+def _safe_xml_fromstring(xml_content: str) -> Any:
+    """Parse XML while disabling entity expansion to prevent XML bomb attacks."""
+    if "<!DOCTYPE" in xml_content or "<!ENTITY" in xml_content:
+        raise ValueError("XML contains DTD/ENTITY declarations; rejected for security")
+    parser = ET.XMLParser(resolve_entities=False)
+    return ET.fromstring(xml_content, parser=parser)
+
+
 @dataclass
 class TaskDefinition:
     """A declarative description of a single task within a creation plan.
@@ -307,7 +315,7 @@ Respond ONLY with the XML plan, no additional text.
             else:
                 xml_content = xml_response
 
-            root = ET.fromstring(xml_content)
+            root = _safe_xml_fromstring(xml_content)
 
             _objective = root.find("objective")
             _approach = root.find("approach")

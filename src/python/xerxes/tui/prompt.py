@@ -308,6 +308,9 @@ class StatusRenderer:
         # each value is a structured dict {label, agent_type, status, count,
         # action, result, started_at}. O(agents), never O(calls).
         self._agent_lanes: dict[str, dict[str, Any]] = {}
+        # task_ids of agents whose spawn has been collapsed — late events for
+        # them are ignored so a racing ``done`` can't resurrect a lane.
+        self._retired_agents: set[str] = set()
         self._todo_items: list[str] = []
 
         self._spinner_frame: int = 0
@@ -544,37 +547,52 @@ class StatusRenderer:
         count: int = 0,
         action: str = "",
         result: str = "",
+        parent: str = "",
     ) -> None:
         """Create or merge one spawned-agent's lane in the dashboard.
 
         Fields merge so out-of-order updates don't clobber state: identity
-        (``label``/``agent_type``) sticks once set, ``count`` only grows, and
-        ``action``/``result`` take the latest non-empty value. ``started_at`` is
-        stamped once for the elapsed clock."""
-        if not task_id:
+        (``label``/``agent_type``/``parent``) sticks once set, ``count`` only
+        grows, and ``action``/``result`` take the latest non-empty value.
+        ``started_at`` is stamped once for the elapsed clock. Updates for an
+        already-collapsed (retired) agent are ignored so a racing ``done`` event
+        can't resurrect its lane after the spawn summary was committed."""
+        if not task_id or task_id in self._retired_agents:
             return
+        now = time.monotonic()
+        terminal = bool(status) and status != "running"
         lane = self._agent_lanes.get(task_id)
         if lane is None:
             self._agent_lanes[task_id] = {
                 "label": label,
                 "agent_type": agent_type,
+                "parent": parent,
                 "status": status or "running",
                 "count": int(count),
                 "action": action,
                 "result": result,
-                "started_at": time.monotonic(),
+                "started_at": now,
+                "finished_at": now if terminal else None,
             }
         else:
             if label:
                 lane["label"] = label
             if agent_type:
                 lane["agent_type"] = agent_type
+            if parent:
+                lane["parent"] = parent
             lane["status"] = status or lane["status"]
             lane["count"] = max(int(count), int(lane.get("count", 0)))
             if action:
                 lane["action"] = action
             if result:
                 lane["result"] = result
+            # Freeze the elapsed clock the instant an agent reaches a terminal
+            # state — a finished agent must not keep counting up.
+            if terminal and lane.get("finished_at") is None:
+                lane["finished_at"] = now
+            elif not terminal:
+                lane["finished_at"] = None
         self._mark_dirty()
 
     def set_subagent_preview(self, task_id: str, label: str, text: str) -> None:
@@ -587,10 +605,39 @@ class StatusRenderer:
             self._mark_dirty()
 
     def clear_subagent_previews(self) -> None:
-        """Remove every agent lane (called when a turn ends)."""
-        if self._agent_lanes:
+        """Remove every agent lane and retire-set (called when a turn ends)."""
+        if self._agent_lanes or self._retired_agents:
             self._agent_lanes.clear()
+            self._retired_agents.clear()
             self._mark_dirty()
+
+    def collapse_agent_dashboard(self, parent: str = "") -> None:
+        """Resolve a finished spawn into a one-line summary committed to history.
+
+        Called when a spawn tool returns. The tool only returns once its agents
+        are done, so the matching lanes collapse *unconditionally* — a lane still
+        showing "running" just means its ``done`` event is racing behind the tool
+        result. Only this spawn's lanes (``parent`` == the tool_call_id) are
+        taken, so a concurrent spawn's dashboard is untouched; with no ``parent``
+        every lane collapses (back-compat). Collapsed agents are retired so a
+        late event can't resurrect their lane after the summary is committed."""
+        if parent:
+            ids = [tid for tid, ln in self._agent_lanes.items() if ln.get("parent") == parent]
+        else:
+            ids = list(self._agent_lanes.keys())
+        if not ids:
+            return
+        group = [self._agent_lanes[tid] for tid in ids]
+        total = len(group)
+        failed = sum(1 for ln in group if ln.get("status") in ("failed", "cancelled"))
+        total_calls = sum(int(ln.get("count", 0)) for ln in group)
+        summary = f"{total - failed} done" + (f", {failed} failed" if failed else "")
+        line = f"{active_fg('accent')}✓ {total} agents{_FG_RESET} \x1b[2m{summary} · {total_calls} calls\x1b[0m"
+        self._content_lines.extend(self._split_render_lines(line))
+        for tid in ids:
+            self._agent_lanes.pop(tid, None)
+            self._retired_agents.add(tid)
+        self._mark_dirty()
 
     def _render_agent_dashboard(self, spinner_tick: int) -> list[str]:
         """Render the spawned-agent dashboard: a header + one line per agent.
@@ -609,7 +656,10 @@ class StatusRenderer:
         error_fg = active_fg("error")
         frame = self.SPINNER_FRAMES[spinner_tick % len(self.SPINNER_FRAMES)]
 
-        out = [f"{sys_fg}⬡ {total} agents{_FG_RESET} \x1b[2m{done}/{total} · {total_calls} calls\x1b[0m"]
+        all_done = total > 0 and done == total
+        head_icon = "✓" if all_done else "⬡"
+        head_fg = accent_fg if all_done else sys_fg
+        out = [f"{head_fg}{head_icon} {total} agents{_FG_RESET} \x1b[2m{done}/{total} · {total_calls} calls\x1b[0m"]
         running = [ln for ln in lanes if ln.get("status") == "running"]
         finished = [ln for ln in lanes if ln.get("status") != "running"]
         ordered = running + finished
@@ -619,17 +669,23 @@ class StatusRenderer:
             status = ln.get("status", "running")
             if status == "running":
                 icon, icon_fg, detail = frame, warn_fg, str(ln.get("action", ""))
+                name_open, name_close = sys_fg, _FG_RESET
             elif status in ("failed", "cancelled"):
                 icon, icon_fg, detail = "✗", error_fg, str(ln.get("result") or status)
+                name_open, name_close = "\x1b[2m", "\x1b[22m"
             else:
                 icon, icon_fg, detail = "✓", accent_fg, str(ln.get("result") or "done")
+                name_open, name_close = "\x1b[2m", "\x1b[22m"
             name = (ln.get("agent_type") or str(ln.get("label", "")).split("#")[0] or "agent")[:14]
             count = int(ln.get("count", 0))
             count_s = f"{count / 1000:.1f}k" if count >= 1000 else str(count)
-            elapsed = self._fmt_elapsed(now - float(ln.get("started_at", now)))
+            # Finished agents show their frozen elapsed; only running agents tick.
+            end_at = ln.get("finished_at")
+            ref = float(end_at) if end_at is not None else now
+            elapsed = self._fmt_elapsed(ref - float(ln.get("started_at", ref)))
             detail = " ".join(detail.split())[:46]
             out.append(
-                f"  {icon_fg}{icon}{_FG_RESET} {sys_fg}{name:<14}{_FG_RESET} "
+                f"  {icon_fg}{icon}{_FG_RESET} {name_open}{name:<14}{name_close} "
                 f"\x1b[2m{count_s:>5}\x1b[0m  \x1b[2m{detail}\x1b[0m  \x1b[2m{elapsed}\x1b[0m"
             )
         hidden = total - len(shown)
@@ -1615,6 +1671,7 @@ class PersistentPrompt:
         count: int = 0,
         action: str = "",
         result: str = "",
+        parent: str = "",
     ) -> None:
         """Create or update one spawned-agent's lane in the live dashboard."""
         self._status.set_agent_lane(
@@ -1625,6 +1682,7 @@ class PersistentPrompt:
             count=count,
             action=action,
             result=result,
+            parent=parent,
         )
         self._invalidate()
 
@@ -1641,6 +1699,11 @@ class PersistentPrompt:
     def clear_subagent_previews(self) -> None:
         """Drop every subagent preview line."""
         self._status.clear_subagent_previews()
+        self._invalidate()
+
+    def collapse_agent_dashboard(self, parent: str = "") -> None:
+        """Resolve a finished spawn into a committed one-line summary."""
+        self._status.collapse_agent_dashboard(parent)
         self._invalidate()
 
     def set_todo_items(self, items: list[str]) -> None:
@@ -1683,7 +1746,10 @@ class PersistentPrompt:
         # invalidate so a final state change always reaches the screen.
         if self._pending_invalidate is not None:
             return
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
         delay = self._INVALIDATE_MIN_INTERVAL - gap
         self._pending_invalidate = loop.call_later(delay, self._flush_invalidate)
 

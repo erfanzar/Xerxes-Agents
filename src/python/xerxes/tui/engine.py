@@ -109,7 +109,7 @@ class BridgeClient:
         """Connection-local session key used for this TUI client."""
         return self._session_key
 
-    def spawn(self) -> None:
+    async def spawn(self) -> None:
         """Connect to the daemon, launching one if needed, and start reader threads.
 
         Stops a stale daemon (older protocol) before launching a fresh
@@ -153,7 +153,7 @@ class BridgeClient:
                 if self._proc.poll() is not None:
                     self._collect_exited_daemon_stderr()
                     break
-                time.sleep(0.1)
+                await asyncio.sleep(0.1)
             self._connect_socket(socket_path)
             if self._sock is None:
                 raise RuntimeError(self._daemon_ready_error())
@@ -169,6 +169,11 @@ class BridgeClient:
     def close(self) -> None:
         """Tear down the socket and reader handles; safe to call multiple times."""
         self._running = False
+        if self._proc is not None and self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except Exception:
+                pass
         for handle in (self._socket_reader, self._socket_writer):
             try:
                 if handle:
@@ -644,8 +649,10 @@ class BridgeClient:
                 self._loop.call_soon_threadsafe(lambda f, ev: f.set_result(ev), future, wire_event)
 
     def __enter__(self) -> BridgeClient:
-        """Spawn the daemon on context entry and return ``self``."""
-        self.spawn()
+        """Return ``self`` for use as a synchronous context manager.
+
+        Callers must invoke :meth:`spawn` separately (it is now async).
+        """
         return self
 
     def __exit__(self, *args: Any) -> None:

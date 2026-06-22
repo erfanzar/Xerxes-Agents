@@ -20,10 +20,39 @@ Parses inbound webhook payloads and sends iMessage replies through the
 
 from __future__ import annotations
 
+import logging
+import re
 import typing as tp
+import urllib.parse
 
 from .._helpers import WebhookChannel, http_post, parse_json_body
 from ..types import ChannelMessage, MessageDirection
+
+logger = logging.getLogger(__name__)
+
+
+class _BlueBubblesPasswordRedactor(logging.Filter):
+    """Redact BlueBubbles password query parameters from log records."""
+
+    _PASSWORD_RE = re.compile(r"password=[^&\s]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "password=" in msg and self._PASSWORD_RE.search(msg):
+            record.msg = self._PASSWORD_RE.sub("password=[REDACTED]", msg)
+            record.args = ()
+        return True
+
+
+# Install on likely loggers so URLs with passwords don't leak in debug output.
+for _name in ("httpx", "httpcore", "xerxes.channels"):
+    _logger = logging.getLogger(_name)
+    if not getattr(_logger, "_xerxes_bluebubbles_redactor_installed", False):
+        _logger.addFilter(_BlueBubblesPasswordRedactor())
+        _logger._xerxes_bluebubbles_redactor_installed = True  # type: ignore[attr-defined]
 
 
 class BlueBubblesChannel(WebhookChannel):
@@ -97,6 +126,7 @@ class BlueBubblesChannel(WebhookChannel):
             message: Outbound message. ``room_id`` is the iMessage chat GUID
                 and ``text`` the body.
         """
-        url = f"{self.server_url}/api/v1/message/text?password={self.password}"
+        params = {"password": self.password}
+        url = f"{self.server_url}/api/v1/message/text?{urllib.parse.urlencode(params)}"
         body = {"chatGuid": message.room_id, "message": message.text, "method": "private-api"}
         http_post(url, json_body=body, http_client=self._http)

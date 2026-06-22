@@ -63,6 +63,14 @@ if TYPE_CHECKING:
     from .task import CortexTask
 
 
+def _safe_xml_fromstring(xml_content: str) -> Any:
+    """Parse XML while disabling entity expansion to prevent XML bomb attacks."""
+    if "<!DOCTYPE" in xml_content or "<!ENTITY" in xml_content:
+        raise ValueError("XML contains DTD/ENTITY declarations; rejected for security")
+    parser = ET.XMLParser(resolve_entities=False)
+    return ET.fromstring(xml_content, parser=parser)
+
+
 @dataclass
 class PlanStep:
     """A single step within an execution plan.
@@ -395,7 +403,7 @@ Respond ONLY with the XML plan, no additional text.
             else:
                 xml_content = xml_response
 
-            root = ET.fromstring(xml_content)
+            root = _safe_xml_fromstring(xml_content)
 
             _objective = root.find("objective")
             _complexity = root.find("complexity")

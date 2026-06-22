@@ -399,7 +399,8 @@ class SubAgentManager:
         """
         if min_concurrent <= self.max_concurrent:
             return True
-        self._pool.shutdown(wait=False, cancel_futures=False)
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
         self.max_concurrent = min_concurrent
         self._pool = ThreadPoolExecutor(max_workers=min_concurrent)
         return True
@@ -1026,7 +1027,19 @@ class SubAgentManager:
         for task in self.tasks.values():
             if task.status in ("running", "pending"):
                 task._cancel_flag = True
-        self._pool.shutdown(wait=True)
+        if self._pool is not None:
+            self._pool.shutdown(wait=True)
+            self._pool = None
+
+    def close(self) -> None:
+        """Shut down the pool cleanly and release resources."""
+        self.shutdown()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def summary(self) -> str:
         """Return a Markdown overview suitable for the ``/agents`` view."""

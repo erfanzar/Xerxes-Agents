@@ -24,6 +24,7 @@ Example:
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -251,6 +252,8 @@ class ExecuteShell(AgentBaseFn):
     """Execute shell commands in a subprocess.
 
     Runs shell commands with configurable timeout and working directory.
+    Commands are safely split with ``shlex.split`` and executed with
+    ``shell=False``.
 
     Example:
         >>> ExecuteShell.static_call(command="ls -la")
@@ -294,10 +297,19 @@ class ExecuteShell(AgentBaseFn):
                 t = ExecuteShell.DEFAULT_TIMEOUT_SECS
             effective = None if t <= 0 else t
 
+        args = shlex.split(command)
+        if not args:
+            return {
+                "error": "command is empty",
+                "stdout": "",
+                "stderr": "",
+                "returncode": "1",
+            }
+
         try:
             proc = subprocess.run(
-                command,
-                shell=True,
+                args,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=effective,

@@ -25,6 +25,7 @@ Endpoints:
 * ``GET  /health`` — server health and registered agent count.
 """
 
+import logging
 import time
 
 from fastapi import APIRouter, HTTPException
@@ -37,6 +38,8 @@ from .completion_service import CompletionService
 from .converters import MessageConverter
 from .cortex_completion_service import CortexCompletionService
 from .models import HealthResponse, ModelInfo, ModelsResponse
+
+logger = logging.getLogger(__name__)
 
 
 class ChatRouter:
@@ -89,7 +92,8 @@ class ChatRouter:
             except HTTPException:
                 raise
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e)) from e
+                logger.exception("Unhandled exception in chat_completions")
+                raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 class ModelsRouter:
@@ -165,8 +169,11 @@ class CortexChatRouter:
                 else:
                     return await self.cortex_completion_service.create_completion(messages_history, request)
 
+            except HTTPException:
+                raise
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e)) from e
+                logger.exception("Unhandled exception in cortex_chat_completions")
+                raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 class UnifiedChatRouter:
@@ -229,7 +236,7 @@ class UnifiedChatRouter:
                     if not self.cortex_completion_service:
                         raise HTTPException(status_code=404, detail="Cortex is not enabled on this server")
 
-                    request.model = self._normalize_cortex_model(original_model)
+                    request = request.model_copy(update={"model": self._normalize_cortex_model(original_model)})
 
                     messages_history = MessageConverter.convert_openai_to_xerxes(request.messages)
 
@@ -272,4 +279,5 @@ class UnifiedChatRouter:
             except HTTPException:
                 raise
             except Exception as e:
-                raise HTTPException(status_code=500, detail=str(e)) from e
+                logger.exception("Unhandled exception in unified_chat_completions")
+                raise HTTPException(status_code=500, detail="Internal server error") from e

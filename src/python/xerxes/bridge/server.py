@@ -33,15 +33,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import queue
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from ..context.compaction_provisioner import (
     CompactionProvisioner,
@@ -106,6 +109,7 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
     """
 
     SESSIONS_DIR = xerxes_subdir("sessions")
+    _MAX_SUPPRESS_BUF_SIZE = 10000
 
     def __init__(self, wire_mode: bool = False) -> None:
         """Build state, registries, and IO locks.
@@ -211,7 +215,12 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         """Emit a legacy ``state`` event summarising tokens, cost, and message count."""
         model = self.config.get("model", "")
         context_limit = get_context_limit(model)
-        context_tokens = estimate_context_tokens(self.state.messages, model=model)
+        context_tokens = estimate_context_tokens(
+            self.state.messages,
+            model=model,
+            system_prompt=self._system_prompt_for_mode(str(self.config.get("mode", "code"))),
+            tool_schemas=self.tool_schemas,
+        )
         remaining = max(0, context_limit - context_tokens)
         self._emit(
             "state",
@@ -233,6 +242,23 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             },
         )
 
+    def _check_suppress_overflow(self, *, wire_mode: bool = False) -> None:
+        """If _suppress_buf exceeds max size, flush it as regular text and reset."""
+        joined = "".join(self._suppress_buf)
+        if len(joined) > self._MAX_SUPPRESS_BUF_SIZE:
+            logger.warning(
+                "Suppress buffer overflow (%d chars); flushing as regular text",
+                len(joined),
+            )
+            self._suppressing_tag = False
+            buf = "".join(self._suppress_buf)
+            self._suppress_buf.clear()
+            if buf.strip():
+                if wire_mode:
+                    self._emit_wire_event("text_part", {"text": buf})
+                else:
+                    self._emit("text_chunk", {"text": buf})
+
     def _emit_text(self, text: str) -> None:
         """Emit a legacy ``text_chunk`` event, eliding any ``<function=...>...</function>`` payloads.
 
@@ -249,6 +275,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 self._suppress_buf.clear()
                 if after.strip():
                     self._emit("text_chunk", {"text": after})
+                return
+            self._check_suppress_overflow(wire_mode=False)
             return
 
         if "<function=" in text:
@@ -265,6 +293,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 self._suppress_buf.clear()
                 if after.strip():
                     self._emit("text_chunk", {"text": after})
+                return
+            self._check_suppress_overflow(wire_mode=False)
             return
 
         stripped = text.strip()
@@ -274,6 +304,50 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             return
 
         self._emit("text_chunk", {"text": text})
+
+    def _emit_wire_text(self, text: str) -> None:
+        """Emit one ``text_part`` event, eliding inline ``<function>`` payloads.
+
+        Overrides the mixin to add buffer-overflow protection.
+        """
+        if self._suppressing_tag:
+            self._suppress_buf.append(text)
+            joined = "".join(self._suppress_buf)
+            if "</function>" in joined:
+                after = joined.split("</function>", 1)[1]
+                self._suppressing_tag = False
+                self._suppress_buf.clear()
+                if after.strip():
+                    self._emit_wire_event("text_part", {"text": after})
+                return
+            self._check_suppress_overflow(wire_mode=True)
+            return
+
+        if "<function=" in text:
+            before, _, rest = text.partition("<function=")
+            if before.strip():
+                self._emit_wire_event("text_part", {"text": before})
+            self._suppressing_tag = True
+            self._suppress_buf.clear()
+            self._suppress_buf.append("<function=" + rest)
+            joined = "".join(self._suppress_buf)
+            if "</function>" in joined:
+                after = joined.split("</function>", 1)[1]
+                self._suppressing_tag = False
+                self._suppress_buf.clear()
+                if after.strip():
+                    self._emit_wire_event("text_part", {"text": after})
+                return
+            self._check_suppress_overflow(wire_mode=True)
+            return
+
+        stripped = text.strip()
+        if not stripped:
+            return
+        if stripped.startswith('{"name":') and '"arguments"' in stripped:
+            return
+
+        self._emit_wire_event("text_part", {"text": text})
 
     def _on_agent_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Handle a runtime callback event (mode change, sub-agent activity, ...).
@@ -391,10 +465,15 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         self.config["project_dir"] = str(project_root)
 
         if base_url and not params.get("model", ""):
-            try:
-                available = profiles.fetch_models(base_url, api_key)
-            except Exception:
+            validation_error = self._validate_fetch_url(base_url)
+            if validation_error:
+                logger.warning("fetch_models blocked for URL %r: %s", base_url, validation_error)
                 available = []
+            else:
+                try:
+                    available = profiles.fetch_models(base_url, api_key)
+                except Exception:
+                    available = []
             self._auto_switch_stale_model(available)
 
         boot = bootstrap(model=self.config["model"], cwd=project_root)
@@ -451,14 +530,56 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             try:
                 from ..mcp import MCPManager, MCPServerConfig
 
+                # Validate MCP server config before use
+                _cmd = server_config.get("command", "")
+                _args = server_config.get("args", [])
+                _url = server_config.get("url", "")
+                _transport = server_config.get("transport", "stdio")
+                if _transport == "stdio":
+                    if not _cmd:
+                        raise ValueError("MCP stdio transport requires a command")
+                    if not isinstance(_args, list) or not all(isinstance(a, str) for a in _args):
+                        raise ValueError("MCP args must be a list of strings")
+                    # Reject shell metacharacters and path traversal
+                    _bad_chars = set('|&;<>$()`"')
+                    if any(c in _cmd for c in _bad_chars):
+                        raise ValueError(f"MCP command contains shell metacharacters: {_cmd}")
+                    if ".." in _cmd or _cmd.startswith("/") is False:
+                        # Require absolute path or a simple basename
+                        import shutil
+
+                        if shutil.which(_cmd) is None and not Path(_cmd).is_absolute():
+                            raise ValueError(f"MCP command not found in PATH and not absolute: {_cmd}")
+                elif _transport in ("sse", "streamable_http", "http"):
+                    if not _url:
+                        raise ValueError("MCP HTTP transport requires a URL")
+                    parsed = urlparse(_url)
+                    if parsed.scheme not in ("http", "https"):
+                        raise ValueError(f"MCP URL scheme must be http or https: {_url}")
+                    hostname = (parsed.hostname or "").lower()
+                    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+                        raise ValueError(f"MCP URL points to localhost/loopback: {_url}")
+                    try:
+                        addr = ipaddress.ip_address(hostname)
+                        if (
+                            addr.is_private
+                            or addr.is_loopback
+                            or addr.is_link_local
+                            or addr.is_multicast
+                            or addr.is_reserved
+                        ):
+                            raise ValueError(f"MCP URL points to private/reserved IP: {_url}")
+                    except ValueError:
+                        pass  # Not an IP, that's fine
+
                 manager = MCPManager()
                 cfg = MCPServerConfig(
                     name=server_config.get("name", ""),
-                    command=server_config.get("command", ""),
-                    args=server_config.get("args", []),
+                    command=_cmd,
+                    args=_args,
                     env=server_config.get("env"),
-                    url=server_config.get("url"),
-                    transport=server_config.get("transport", "stdio"),
+                    url=_url,
+                    transport=_transport,
                     enabled=server_config.get("enabled", True),
                 )
 
@@ -874,15 +995,23 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
             except queue.Empty:
                 break
 
-    def _wait_for_permission(self) -> bool:
+    def _wait_for_permission(self, max_wait_seconds: float = 300.0) -> bool:
         """Block the query thread until the TUI answers; ``True`` means approved (incl. for-session).
 
         Responses whose ``request_id`` does not match the active prompt are
         discarded so a stale verdict (e.g. one that arrived after a cancel)
         cannot auto-resolve an unrelated permission request.
         """
+        deadline = time.monotonic() + max_wait_seconds
         while True:
             if self._cancel:
+                self._active_permission_id = ""
+                return False
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "Permission wait timed out after %.0f seconds; denying",
+                    max_wait_seconds,
+                )
                 self._active_permission_id = ""
                 return False
             try:
@@ -958,17 +1087,25 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         self.handle_provider_save({"name": name, "base_url": base_url, "api_key": api_key, "model": model})
         return f"Created and switched to profile '{name}'  (model: {model})"
 
-    def _wait_for_question_response(self) -> str:
+    def _wait_for_question_response(self, max_wait_seconds: float = 300.0) -> str:
         """Block the query thread until the TUI returns an answer.
 
         Responses whose ``request_id`` does not match the active prompt are
         discarded so a stale answer (e.g. one that arrived after a cancel)
         cannot be consumed as the answer to an unrelated question.
         """
+        deadline = time.monotonic() + max_wait_seconds
         while True:
             if self._cancel:
                 self._active_question_id = ""
                 return "[cancelled]"
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "Question wait timed out after %.0f seconds; returning empty",
+                    max_wait_seconds,
+                )
+                self._active_question_id = ""
+                return ""
             try:
                 msg = self._question_queue.get(timeout=0.1)
                 params = msg.get("params", {})
@@ -1016,12 +1153,43 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         plist = profiles.list_profiles()
         self._emit("provider_list", {"profiles": plist})
 
+    @staticmethod
+    def _validate_fetch_url(base_url: str) -> str | None:
+        """Validate a user-provided base_url for SSRF protection.
+
+        Returns an error message string if invalid, or ``None`` if valid.
+        """
+        try:
+            parsed = urlparse(base_url)
+        except Exception:
+            return "Invalid URL format"
+        if parsed.scheme not in ("http", "https"):
+            return "URL scheme must be http or https"
+        hostname = parsed.hostname
+        if not hostname:
+            return "URL must have a host"
+        hostname_lower = hostname.lower()
+        if hostname_lower in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            return "Private/localhost addresses are not allowed"
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+                return "Private IP addresses are not allowed"
+        except ValueError:
+            # Not an IP address, that's fine
+            pass
+        return None
+
     def handle_fetch_models(self, params: dict[str, Any]) -> None:
         """Emit ``models_list`` for ``params["base_url"]`` using :func:`profiles.fetch_models`."""
         base_url = params.get("base_url", "")
         api_key = params.get("api_key", "")
         if not base_url:
             self._emit_error("base_url is required for fetch_models")
+            return
+        validation_error = self._validate_fetch_url(base_url)
+        if validation_error:
+            self._emit_error(f"fetch_models blocked: {validation_error}")
             return
         try:
             models = profiles.fetch_models(base_url, api_key)

@@ -22,10 +22,26 @@ overrides pass through ``generate_completion`` kwargs.
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
+
+MAX_TOKENS_LIMIT = 1_000_000
+DANGEROUS_KWARGS = frozenset(
+    {
+        "messages",
+        "model",
+        "api_key",
+        "base_url",
+        "headers",
+        "organization",
+        "project",
+    }
+)
 
 
 @dataclass
@@ -227,8 +243,65 @@ class BaseLLM(ABC):
         if self.config.max_tokens <= 0:
             raise ValueError("max_tokens must be positive")
 
+        if self.config.max_tokens > MAX_TOKENS_LIMIT:
+            raise ValueError(f"max_tokens must be <= {MAX_TOKENS_LIMIT:,}")
+
         if self.config.top_p <= 0 or self.config.top_p > 1:
             raise ValueError("top_p must be between 0 and 1")
+
+    def _validate_base_url(self, url: str | None) -> None:
+        """Validate base_url to prevent SSRF attacks.
+
+        Raises:
+            ValueError: If the URL scheme is not http/https, the host is
+                localhost, or the host resolves to a private IP address.
+        """
+        if not url:
+            return
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"base_url must use http:// or https:// scheme, got: {parsed.scheme}")
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            raise ValueError(f"base_url must have a valid host: {url}")
+        if hostname in ("localhost", "localhost.localdomain", "127.0.0.1"):
+            raise ValueError(f"base_url must not point to localhost: {url}")
+        try:
+            ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            pass
+        else:
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise ValueError(f"base_url must not point to a private IP address: {url}")
+
+    @staticmethod
+    def _filter_dangerous_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Reject kwargs that contain dangerous keys that could overwrite core request params.
+
+        Raises:
+            ValueError: If any dangerous keys are present in kwargs.
+        """
+        dangerous = DANGEROUS_KWARGS & kwargs.keys()
+        if dangerous:
+            raise ValueError(f"Dangerous kwargs not allowed: {sorted(dangerous)}")
+        return kwargs
+
+    @staticmethod
+    def _sanitize_error(err: Exception) -> str:
+        """Sanitize exception message to remove potential API keys.
+
+        Replaces common authorization/header patterns with [REDACTED].
+        """
+        msg = str(err)
+        patterns = (
+            (r'x-api-key["\']?\s*[:=]\s*["\']?[^"\']+', "x-api-key: [REDACTED]"),
+            (r'Authorization["\']?\s*[:=]\s*["\']?[^"\']+', "Authorization: [REDACTED]"),
+            (r'api_key["\']?\s*[:=]\s*["\']?[^"\']+', "api_key: [REDACTED]"),
+            (r'api-key["\']?\s*[:=]\s*["\']?[^"\']+', "api-key: [REDACTED]"),
+        )
+        for pattern, replacement in patterns:
+            msg = re.sub(pattern, replacement, msg, flags=re.IGNORECASE)
+        return msg
 
     async def __aenter__(self):
         """Return ``self`` so ``async with`` blocks bind the client."""

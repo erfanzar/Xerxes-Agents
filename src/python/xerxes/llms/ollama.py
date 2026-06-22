@@ -24,8 +24,11 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
+from urllib.parse import urlparse
 
 from .base import BaseLLM, LLMConfig
+
+MAX_SSE_LINE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 httpx: Any
 try:
@@ -72,6 +75,11 @@ class OllamaLLM(BaseLLM):
 
     def _initialize_client(self) -> None:
         """Initialize the httpx AsyncClient for the Ollama API endpoint."""
+
+        if self.config.base_url:
+            parsed = urlparse(self.config.base_url)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(f"base_url must use http:// or https:// scheme, got: {parsed.scheme}")
 
         self.client = httpx.AsyncClient(
             base_url=self.config.base_url or "",
@@ -142,6 +150,7 @@ class OllamaLLM(BaseLLM):
 
         if "options" in kwargs:
             payload["options"].update(kwargs.pop("options"))
+        self._filter_dangerous_kwargs(kwargs)
         payload.update(kwargs)
 
         try:
@@ -153,7 +162,7 @@ class OllamaLLM(BaseLLM):
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPError as e:
-            raise RuntimeError(f"Ollama API request failed: {e}") from e
+            raise RuntimeError(f"Ollama API request failed: {self._sanitize_error(e)}") from e
 
     async def _stream_completion(self, endpoint: str, payload: dict) -> AsyncIterator[dict]:
         """Yield streaming response lines from the Ollama API.
@@ -170,6 +179,8 @@ class OllamaLLM(BaseLLM):
         async with self.client.stream("POST", endpoint, json=payload) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
+                if len(line) > MAX_SSE_LINE_SIZE:
+                    raise RuntimeError(f"SSE line exceeded maximum size of {MAX_SSE_LINE_SIZE} bytes")
                 if line:
                     yield json.loads(line)
 
