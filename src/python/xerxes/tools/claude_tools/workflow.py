@@ -192,25 +192,35 @@ class SetInteractionModeTool(AgentBaseFn):
         """
         from ...runtime.config_context import emit_event, get_config, set_config
         from ...runtime.interaction_modes import MODE_ALIASES
+        from ...runtime.session_context import get_active_session
 
         normalized = MODE_ALIASES.get((mode or "").strip().lower())
         if normalized is None:
             return "Error: mode must be one of code, researcher, plan, or objective."
 
-        config = get_config()
-        config["mode"] = normalized
-        config["plan_mode"] = normalized == "plan"
-        set_config(config)
+        session = get_active_session()
+        event_data = {
+            "mode": normalized,
+            "plan_mode": normalized == "plan",
+            "reason": reason,
+            "source": "model",
+        }
+        if session is not None:
+            session.interaction_mode = normalized
+            session.plan_mode = normalized == "plan"
+            runtime_config = dict(getattr(session, "runtime_config", {}) or get_config())
+            runtime_config["mode"] = normalized
+            runtime_config["plan_mode"] = normalized == "plan"
+            session.runtime_config = runtime_config
+            event_data["session_key"] = str(getattr(session, "key", "") or "")
+            event_data["session_id"] = str(getattr(session, "id", "") or "")
+        else:
+            config = get_config()
+            config["mode"] = normalized
+            config["plan_mode"] = normalized == "plan"
+            set_config(config)
 
-        emit_event(
-            "interaction_mode_changed",
-            {
-                "mode": normalized,
-                "plan_mode": normalized == "plan",
-                "reason": reason,
-                "source": "model",
-            },
-        )
+        emit_event("interaction_mode_changed", event_data)
         note = f" Reason: {reason}" if reason else ""
         return f"Interaction mode switched to {normalized}.{note}"
 

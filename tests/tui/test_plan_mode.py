@@ -1,3 +1,17 @@
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import pytest
@@ -209,16 +223,29 @@ def test_activity_mode_infers_subagent_type_from_agent_tool() -> None:
     )
 
 
-def test_status_update_keeps_non_plan_activity_mode() -> None:
+def test_status_update_without_mode_keeps_non_plan_activity_mode() -> None:
     tui = XerxesTUI()
     prompt = _PromptStub()
     tui._prompt = prompt  # type: ignore[assignment]
 
     tui._set_activity_mode("researcher")
-    tui._on_status_update(StatusUpdate(context_tokens=1, max_context=100, plan_mode=False))
+    tui._on_status_update(StatusUpdate(context_tokens=1, max_context=100, plan_mode=False, mode=""))
 
     assert tui._plan_mode is False
     assert prompt.activity_mode == "researcher"
+
+
+def test_status_update_accepts_explicit_code_mode() -> None:
+    tui = XerxesTUI()
+    prompt = _PromptStub()
+    tui._prompt = prompt  # type: ignore[assignment]
+
+    tui._set_activity_mode("researcher", user_selected=True)
+    tui._on_status_update(StatusUpdate(context_tokens=1, max_context=100, plan_mode=False, mode="code"))
+
+    assert tui._plan_mode is False
+    assert prompt.activity_mode == "code"
+    assert tui._user_activity_mode is None
 
 
 def test_status_update_makes_model_selected_objective_mode_sticky() -> None:

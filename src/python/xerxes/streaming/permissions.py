@@ -15,8 +15,8 @@
 
 Every tool call passes through :func:`check_permission` before execution. The
 gate consults a hand-curated allowlist (:data:`SAFE_TOOLS`), pattern-matches
-shell commands against safe/dangerous regex sets, and applies extra rules
-for :func:`ExecutePythonCode` and any destructive file-writing tools.
+shell commands against safe/dangerous regex sets, and applies extra rules for
+destructive file-writing tools.
 
 The mode (:class:`PermissionMode`) decides whether the gate is a hard answer
 (``ACCEPT_ALL`` / ``MANUAL``) or merely a fast-path approval for known-safe
@@ -151,9 +151,8 @@ def check_permission(
     """Decide whether a tool call may proceed without user prompting.
 
     In ``AUTO`` mode the gate auto-approves any tool in :data:`SAFE_TOOLS`,
-    delegates bash/shell calls to :func:`is_safe_bash`, blocks Python code
-    that touches the filesystem or shells out, and refuses all file-writing
-    tools so they always escalate. ``ACCEPT_ALL`` and ``MANUAL`` short-circuit
+    delegates bash/shell calls to :func:`is_safe_bash`, and refuses all
+    file-writing tools so they always escalate. ``ACCEPT_ALL`` and ``MANUAL`` short-circuit
     to ``True`` / ``False`` respectively. ``PLAN`` is a strict read-only mode:
     only :data:`SAFE_TOOLS` and safe read-only shell commands are approved,
     and everything else is hard-denied without prompting — the agent should
@@ -224,8 +223,7 @@ def format_permission_description(tool_call: dict[str, Any]) -> str:
     """Render a one-line description of a tool call for the approval UI.
 
     Shell tools display the command, write/edit tools display the target
-    file path, ExecutePythonCode shows a code preview, and generic tools fall
-    back to ``Name(first-arg)``.
+    file path, and generic tools fall back to ``Name(first-arg)``.
     """
 
     name = tool_call.get("name", "")

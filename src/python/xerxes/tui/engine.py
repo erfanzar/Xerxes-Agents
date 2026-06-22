@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -100,6 +101,12 @@ class BridgeClient:
         self._model: str = ""
         self._initialized = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._session_key = f"tui:{uuid.uuid4().hex[:12]}"
+
+    @property
+    def session_key(self) -> str:
+        """Connection-local session key used for this TUI client."""
+        return self._session_key
 
     def spawn(self) -> None:
         """Connect to the daemon, launching one if needed, and start reader threads.
@@ -262,6 +269,7 @@ class BridgeClient:
                 "api_key": api_key,
                 "permission_mode": permission_mode,
                 "resume_session_id": resume_session_id,
+                "session_key": resume_session_id or self._session_key,
                 "project_dir": self._project_dir,
             },
         )

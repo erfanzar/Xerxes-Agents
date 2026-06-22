@@ -1,3 +1,17 @@
+# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import json
 import queue
@@ -82,6 +96,149 @@ def test_session_load_migrates_old_workspace_cwd_to_current_project(tmp_path):
     session = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=store_dir).open("abcd1234")
 
     assert session.project_dir == project.resolve()
+
+
+def test_status_payload_uses_session_scoped_interaction_mode(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4)
+    session = sessions.open("tui:default")
+    runtime = type("Runtime", (), {"model": "", "runtime_config": {}})()
+    runner = TurnRunner(runtime=runtime, sessions=sessions)
+    try:
+        runner._set_session_mode(session, "researcher")
+
+        payload = runner._status_payload(session, mode="code", plan_mode=False)
+
+        assert payload["mode"] == "researcher"
+        assert payload["plan_mode"] is False
+        assert session.status()["mode"] == "researcher"
+    finally:
+        runner.close()
+
+
+def test_session_mode_does_not_sync_from_process_global_config(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4)
+    session = sessions.open("tui:default")
+    runtime = type("Runtime", (), {"model": "", "runtime_config": {}})()
+    runner = TurnRunner(runtime=runtime, sessions=sessions)
+    try:
+        runner._set_session_mode(session, "researcher", publish=True)
+
+        runner._sync_session_mode_from_global(session)
+
+        assert session.interaction_mode == "researcher"
+        assert session.plan_mode is False
+    finally:
+        runner.close()
+
+
+def test_daemon_runtime_event_updates_current_mode(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    server._current_mode = "researcher"
+    server._current_plan_mode = False
+
+    server._handle_runtime_event("interaction_mode_changed", {"mode": "code", "plan_mode": False})
+
+    assert server._current_mode == "code"
+    assert server._current_plan_mode is False
+    assert server.runtime.runtime_config["mode"] == "code"
+
+
+def test_daemon_runtime_event_updates_only_named_session(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    first = server.sessions.open("tui:first", "xerxes")
+    second = server.sessions.open("tui:second", "xerxes")
+    first.interaction_mode = "researcher"
+    second.interaction_mode = "code"
+
+    server._handle_runtime_event(
+        "interaction_mode_changed",
+        {"mode": "objective", "plan_mode": False, "session_key": "tui:first"},
+    )
+
+    assert first.interaction_mode == "objective"
+    assert second.interaction_mode == "code"
+
+
+@pytest.mark.asyncio
+async def test_initialize_uses_connection_session_key_and_runtime_snapshot(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    server.runtime.discover_skills = lambda: []
+    server._git_branch = lambda cwd=None: ""
+
+    def reload_runtime(overrides=None):
+        runtime = {"permission_mode": "accept-all", "model": ""}
+        runtime.update(overrides or {})
+        server.runtime.runtime_config = runtime
+
+    server.runtime.reload = reload_runtime  # type: ignore[method-assign]
+    first_events: list[tuple[str, dict]] = []
+    second_events: list[tuple[str, dict]] = []
+
+    async def emit_first(event_type: str, payload: dict) -> None:
+        first_events.append((event_type, payload))
+
+    async def emit_second(event_type: str, payload: dict) -> None:
+        second_events.append((event_type, payload))
+
+    first = await server._initialize({"session_key": "tui:first", "model": "model-a"}, emit_first)
+    second = await server._initialize({"session_key": "tui:second", "model": "model-b"}, emit_second)
+
+    first_session = server.sessions.get("tui:first")
+    second_session = server.sessions.get("tui:second")
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert server._connection_sessions[emit_first] == "tui:first"
+    assert server._connection_sessions[emit_second] == "tui:second"
+    assert first_session is not None
+    assert second_session is not None
+    assert first_session is not second_session
+    assert first_session.runtime_config["model"] == "model-a"
+    assert second_session.runtime_config["model"] == "model-b"
+    assert any(event_type == "init_done" and payload["model"] == "model-a" for event_type, payload in first_events)
+    assert any(event_type == "init_done" and payload["model"] == "model-b" for event_type, payload in second_events)
+
+
+@pytest.mark.asyncio
+async def test_workspace_slash_init_creates_project_agents_layout(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    session = server.sessions.open("tui:default", "xerxes")
+    events: list[tuple[str, dict]] = []
+
+    async def emit(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    await server._slash_workspace("init", emit)
+
+    assert (tmp_path / ".agents" / "AGENTS.md").is_file()
+    assert (tmp_path / ".agents" / "skills").is_dir()
+    assert session.project_dir == tmp_path.resolve()
+    body = events[-1][1]["body"]
+    assert "Project .agents" in body
+    assert "Loaded project context" in body
 
 
 @pytest.mark.asyncio

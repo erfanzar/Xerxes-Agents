@@ -227,6 +227,7 @@ class ProviderFlowMixin:
                 return
             try:
                 self.runtime.reload({})
+                self._sync_runtime_to_connection_session(emit)
             except Exception:
                 pass
             switched = profiles.get_active_profile() or {}
@@ -363,6 +364,7 @@ class ProviderFlowMixin:
                 )
             try:
                 self.runtime.reload({})
+                self._sync_runtime_to_connection_session(emit)
             except Exception:
                 pass
             shown = "***redacted***" if field == "api_key" else value
@@ -385,6 +387,7 @@ class ProviderFlowMixin:
                 return
             try:
                 self.runtime.reload({})
+                self._sync_runtime_to_connection_session(emit)
             except Exception:
                 pass
             await self._emit_slash(emit, f"Removed profile `{target}`.")
@@ -453,6 +456,7 @@ class ProviderFlowMixin:
             return
         try:
             self.runtime.reload({})
+            self._sync_runtime_to_connection_session(emit)
         except Exception:
             pass
         saved = next(
@@ -605,6 +609,7 @@ class ProviderFlowMixin:
                 return
             try:
                 self.runtime.reload({})
+                self._sync_runtime_to_connection_session(emit)
             except Exception:
                 pass
             switched = profiles.get_active_profile() or {}

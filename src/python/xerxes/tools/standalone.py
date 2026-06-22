@@ -25,7 +25,6 @@ Example:
 from __future__ import annotations
 
 import subprocess
-import sys
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -248,59 +247,6 @@ class ListDir(AgentBaseFn):
         return sorted(entries)
 
 
-class ExecutePythonCode(AgentBaseFn):
-    """Execute Python code in a subprocess and return captured output."""
-
-    DEFAULT_TIMEOUT_SECS: float = 30.0
-
-    @staticmethod
-    def static_call(
-        code: str,
-        timeout: float | None = None,
-        **context_variables,
-    ) -> dict[str, str]:
-        """Execute Python code with the current interpreter.
-
-        Args:
-            code: Python source to execute.
-            timeout: Timeout in seconds. Defaults to 30 seconds. Set to 0 for no timeout.
-            **context_variables: Additional context passed through to downstream calls.
-
-        Returns:
-            Dictionary with ``stdout``, ``stderr``, and ``returncode``.
-        """
-        if timeout is None:
-            effective = ExecutePythonCode.DEFAULT_TIMEOUT_SECS
-        else:
-            try:
-                parsed = float(timeout)
-            except (TypeError, ValueError):
-                parsed = ExecutePythonCode.DEFAULT_TIMEOUT_SECS
-            effective = None if parsed <= 0 else parsed
-
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-c", code],
-                capture_output=True,
-                text=True,
-                timeout=effective,
-            )
-            return {
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "returncode": str(proc.returncode),
-            }
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            cap = f"{effective:.0f}s" if effective is not None else "no-cap"
-            return {
-                "stdout": stdout,
-                "stderr": (stderr + f"\n[ExecutePythonCode] code timed out after {cap}").strip(),
-                "returncode": "124",
-            }
-
-
 class ExecuteShell(AgentBaseFn):
     """Execute shell commands in a subprocess.
 
@@ -411,7 +357,6 @@ class AppendFile(AgentBaseFn):
 
 __all__ = (
     "AppendFile",
-    "ExecutePythonCode",
     "ExecuteShell",
     "ListDir",
     "ReadFile",

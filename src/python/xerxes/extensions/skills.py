@@ -363,20 +363,21 @@ def default_skill_discovery_dirs(
     user_skills_dir: str | Path | None = None,
     cwd: str | Path | None = None,
 ) -> list[Path]:
-    """Return bundled, user, shared-agent, and project skill roots.
+    """Return project, user, shared-agent, and bundled skill roots.
 
-    The Xerxes user-skill directory is always included. ``~/.agents/skills`` is
-    included as an additional shared directory when it exists, so it does not
-    replace ``$XERXES_HOME/skills``.
+    Higher-priority roots come first because :class:`SkillRegistry` keeps the
+    first skill for a name. Project-local ``.agents/skills`` can therefore
+    override shared or bundled skills without mutating user/global installs.
     """
 
     import xerxes as _xerxes_pkg
     from xerxes.core.paths import agents_subdir, xerxes_subdir
+    from xerxes.runtime.project_workspace import project_agent_skills_dir
 
     roots: list[Path] = []
-    bundled = Path(_xerxes_pkg.__file__).parent / "skills"
-    if bundled.is_dir():
-        roots.append(bundled)
+    project_root = Path.cwd() if cwd is None else Path(cwd).expanduser()
+    roots.append(project_agent_skills_dir(project_root))
+    roots.append(project_root / "skills")
 
     primary = Path(user_skills_dir).expanduser() if user_skills_dir is not None else xerxes_subdir("skills")
     roots.append(primary)
@@ -385,8 +386,9 @@ def default_skill_discovery_dirs(
     if shared_agents.is_dir():
         roots.append(shared_agents)
 
-    project_root = Path.cwd() if cwd is None else Path(cwd).expanduser()
-    roots.append(project_root / "skills")
+    bundled = Path(_xerxes_pkg.__file__).parent / "skills"
+    if bundled.is_dir():
+        roots.append(bundled)
 
     ordered: list[Path] = []
     seen: set[Path] = set()
