@@ -86,6 +86,24 @@ def _drive(server, command: str, *, captured: dict | None = None) -> dict:
     return captured
 
 
+def test_slash_skills_emits_listing_and_refreshes_completions(tmp_path):
+    server = _make_server(tmp_path)
+    _write_skill(server.runtime.skills_dir, "local-skill")
+
+    events: list[tuple[str, dict]] = []
+
+    async def emit(et, payload):
+        events.append((et, payload))
+
+    asyncio.new_event_loop().run_until_complete(server._handle_slash("/skills", emit))
+
+    slash_bodies = [payload.get("body", "") for et, payload in events if et == "notification"]
+    init_skills = [payload.get("skills", []) for et, payload in events if et == "init_done"]
+    assert any("Skills (" in body and "/local-skill" in body for body in slash_bodies)
+    assert init_skills
+    assert "local-skill" in init_skills[-1]
+
+
 class TestSubcommandTrigger:
     def test_autoresearch_learn_includes_canonical_form(self, tmp_path):
         server = _make_server(tmp_path)

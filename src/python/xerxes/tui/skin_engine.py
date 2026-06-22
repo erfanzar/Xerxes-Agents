@@ -62,6 +62,8 @@ _DEFAULT_ROLES: dict[str, str] = {
     "tool_name": "#a9c7ff",  # pale azure — tool-call labels
     "system": "#c77dff",  # royal violet — system / meta voice
     "muted": "#7b97b5",  # cool slate — de-emphasized text
+    "diff_add": "#3fb950",  # added lines in a code diff
+    "diff_del": "#e0556b",  # removed lines in a code diff (shares carmine with error)
 }
 
 _DEFAULT_BRANDING: dict[str, str] = {
@@ -112,6 +114,8 @@ _BUILTIN_SKINS: dict[str, dict[str, str]] = {
         "tool_name": "#bbbbbb",
         "system": "#bbbbbb",
         "muted": "#666666",
+        "diff_add": "#dddddd",
+        "diff_del": "#888888",
     },
     "slate": {
         **_DEFAULT_ROLES,
@@ -266,7 +270,17 @@ class SkinEngine:
 
 # Canonical role names a renderer may request from the active skin. Kept here so
 # the console tag-parser and other consumers share one vocabulary.
-ROLE_NAMES: tuple[str, ...] = ("primary", "accent", "warn", "error", "tool_name", "system", "muted")
+ROLE_NAMES: tuple[str, ...] = (
+    "primary",
+    "accent",
+    "warn",
+    "error",
+    "tool_name",
+    "system",
+    "muted",
+    "diff_add",
+    "diff_del",
+)
 
 _active_skin: Skin | None = None
 

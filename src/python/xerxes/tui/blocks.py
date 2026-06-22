@@ -418,6 +418,13 @@ class _ToolCallBlock:
     MAX_RESULT_LINES = 1
     MAX_SUBAGENT_TOOL_LINES = 5
     MAX_RESULT_CHARS = 40  # single-line cap for tool output; collapsed + truncated with "..."
+    # Tool calls are an "actions" band — indented one step under the assistant's
+    # prose so the eye groups them apart from the model's voice.
+    INDENT = "  "
+    # Capped-preview diff: show this many changed lines inline, then a
+    # "… N more lines" marker. Keeps an edit-heavy turn scannable without
+    # flooding the viewport; the full diff stays in the result payload.
+    MAX_DIFF_LINES = 12
 
     def __init__(self, block_id: str, tool_call_id: str, name: str, arguments: str | None) -> None:
         """Start a running block; ``arguments`` is fed into the incremental lexer."""
@@ -432,6 +439,9 @@ class _ToolCallBlock:
         self._args_lexer = _ToolCallLexer()
         self._sub_tool_calls: list[_SubToolCall] = []
         self._sub_tool_calls_shown = 0
+        # Rich display blocks attached to the tool result (currently diffs).
+        # Arrive over the wire as plain dicts; may also be dataclasses locally.
+        self._display_blocks: list[Any] = []
 
     @property
     def key_arg(self) -> str:
@@ -451,16 +461,28 @@ class _ToolCallBlock:
         self._arguments = (self._arguments or "") + chunk
         self._args_lexer.append(chunk)
 
-    def set_result(self, result: str, duration_ms: float) -> None:
-        """Record the tool's return value and flip ``_status`` to done."""
+    def set_result(self, result: str, duration_ms: float, display_blocks: list[Any] | None = None) -> None:
+        """Record the tool's return value and flip ``_status`` to done.
+
+        ``display_blocks`` carries rich payloads (diffs) the daemon attaches to
+        the result; they render below the one-line summary."""
         self._result = result
         self._duration_ms = duration_ms
         self._status = "done"
+        if display_blocks:
+            self._display_blocks = list(display_blocks)
 
     def append_sub_tool_call(self, tool_call_id: str, name: str, key_arg: str) -> _SubToolCall:
-        """Register a nested sub-call and return the created :class:`_SubToolCall`."""
+        """Register a nested sub-call and return the created :class:`_SubToolCall`.
+
+        The retained list is bounded: ``compose`` only ever renders the last few
+        sub-calls, so a subagent making thousands of calls must not grow this
+        list without limit (it previously did — an O(calls) leak per spawn)."""
         sub = _SubToolCall(tool_call_id=tool_call_id, name=name, key_arg=key_arg)
         self._sub_tool_calls.append(sub)
+        cap = self.MAX_SUBAGENT_TOOL_LINES * 2
+        if len(self._sub_tool_calls) > cap:
+            del self._sub_tool_calls[:-cap]
         return sub
 
     def finish_sub_tool_call(self, tool_call_id: str, result: str, duration_ms: float) -> None:
@@ -475,18 +497,67 @@ class _ToolCallBlock:
         self._subagent_id = agent_id
         self._subagent_type = subagent_type
 
+    @staticmethod
+    def _block_field(block: Any, key: str) -> Any:
+        """Read ``key`` from a display block that may be a wire dict or a dataclass."""
+        if isinstance(block, dict):
+            return block.get(key)
+        return getattr(block, key, None)
+
+    def _diff_text(self) -> str | None:
+        """Return the unified-diff text from the first attached diff block, if any."""
+        for block in self._display_blocks:
+            if self._block_field(block, "type") == "diff":
+                diff = self._block_field(block, "diff")
+                if diff:
+                    return str(diff)
+        return None
+
+    @staticmethod
+    def _diff_counts(diff_text: str) -> tuple[int, int]:
+        """Count added / removed body lines, skipping the ``+++`` / ``---`` headers."""
+        adds = dels = 0
+        for ln in diff_text.splitlines():
+            if ln.startswith("+") and not ln.startswith("+++"):
+                adds += 1
+            elif ln.startswith("-") and not ln.startswith("---"):
+                dels += 1
+        return adds, dels
+
+    def _compose_diff_markup(self, diff_text: str) -> list[str]:
+        """Render a capped, colorized preview of ``diff_text`` as indented markup lines."""
+        gutter = f"{self.INDENT}  [muted]│[/muted] "
+        body: list[tuple[str, str]] = []
+        for raw in diff_text.splitlines():
+            if raw.startswith(("--- ", "+++ ")):
+                continue  # file headers — the path is already shown on the tool line
+            if raw.startswith("@@"):
+                body.append(("hunk", raw))
+            elif raw.startswith("+"):
+                body.append(("add", raw))
+            elif raw.startswith("-"):
+                body.append(("del", raw))
+            else:
+                body.append(("ctx", raw))
+        shown = body[: self.MAX_DIFF_LINES]
+        hidden = len(body) - len(shown)
+        role = {"add": "diff_add", "del": "diff_del", "hunk": "muted", "ctx": "dim"}
+        out = [f"{gutter}[{role[kind]}]{_markup_safe(text)}[/{role[kind]}]" for kind, text in shown]
+        if hidden > 0:
+            out.append(f"{gutter}[muted]… {hidden} more line(s)[/muted]")
+        return out
+
     def compose(self) -> str:
-        """Render an ultra-compact single-line tool call with status icon.
+        """Render the tool call: an indented status line plus an optional diff body.
 
-        Format::
+        The line lives in the "actions" band — indented one step under the
+        assistant's prose so it reads as a tool invocation, not the model's
+        voice::
 
-            {icon} {name} ({key_arg}) — {truncated_result} — {duration}
+            ✓ {name} ({key_arg}) — {summary} — {duration}
 
-        Examples::
-
-            ✓ ReadFile (src/foo.py) — import os; import sys; from... — 12ms
-            ✗ ReadFile (bad.txt) — Error: file not found — 1ms
-            ○ ExecuteShell (ls -la) — ... — 0s
+        When the result carries a diff, the summary becomes ``+N -M`` and a
+        capped, colorized diff preview is rendered beneath it.
         """
         from .console import _prompt_text_to_ansi
 
@@ -508,7 +579,11 @@ class _ToolCallBlock:
 
         line = f"[{icon_color}]{icon}[/{icon_color}] [tool_name]{name}[/tool_name] ([dim]{key_arg}[/dim])"
 
-        if self._status == "done" and self._result:
+        diff_text = self._diff_text() if self._status == "done" else None
+        if diff_text:
+            adds, dels = self._diff_counts(diff_text)
+            line += f" — [diff_add]+{adds}[/diff_add] [diff_del]-{dels}[/diff_del]"
+        elif self._status == "done" and self._result:
             collapsed = _markup_safe(self._result).replace("\n", " ").strip()
             while "  " in collapsed:
                 collapsed = collapsed.replace("  ", " ")
@@ -518,16 +593,14 @@ class _ToolCallBlock:
         elif self._status == "running":
             line += " — [dim]…[/dim]"
 
-        line += f" — {duration}"
+        line += f" — [dim]{duration}[/dim]"
 
-        sub_lines: list[str] = []
+        out_lines = [self.INDENT + _prompt_text_to_ansi(line)]
+        if diff_text:
+            out_lines.extend(_prompt_text_to_ansi(markup) for markup in self._compose_diff_markup(diff_text))
         for sub in self._sub_tool_calls[-self.MAX_SUBAGENT_TOOL_LINES :]:
-            sub_lines.append(sub.compose())
-
-        rendered = _prompt_text_to_ansi(line)
-        if sub_lines:
-            rendered = rendered + "\n" + "\n".join(sub_lines)
-        return rendered
+            out_lines.append(self.INDENT + sub.compose())
+        return "\n".join(out_lines)
 
 
 class _NotificationBlock:
