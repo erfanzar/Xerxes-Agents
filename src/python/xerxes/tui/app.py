@@ -151,6 +151,172 @@ def _logo_gradient(base_hex: str, rows: int) -> list[str]:
     return out
 
 
+# Slash commands surfaced in the banner panel alongside skills (label, hint).
+_BANNER_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/init", "set up a project"),
+    ("/provider", "pick a model"),
+    ("/resume", "reopen a session"),
+    ("/skin", "theme"),
+    ("/help", ""),
+)
+# Agent/dev skills pulled to the front of the panel, in this order.
+_BANNER_FEATURED: tuple[str, ...] = (
+    "eternal-army",
+    "xerxes-agent",
+    "plan",
+    "deepscan",
+    "autoresearch",
+    "systematic-debugging",
+)
+# Hand-tuned short blurbs for the featured skills (their real descriptions are
+# multi-sentence paragraphs that truncate poorly).
+_BANNER_DESC_OVERRIDE: dict[str, str] = {
+    "eternal-army": "swarm of subagents for a big task",
+    "xerxes-agent": "multi-agent delegation",
+    "plan": "a mandate before acting",
+    "deepscan": "deep codebase scan + docs",
+    "autoresearch": "autonomous iteration loop",
+    "systematic-debugging": "scientific bug hunts",
+}
+_BANNER_SKILLS_CACHE: tuple[tuple[str, str, bool], ...] | None = None
+
+
+def _discover_banner_skills() -> tuple[tuple[str, str, bool], ...]:
+    """Return ``(name, one-line description, featured)`` for every usable skill.
+
+    Loaded once from the skill registry — noise/auto-generated skills filtered,
+    featured agent skills first then the rest alphabetical. Cached because the
+    banner renders more than once per launch and the registry is stable for the
+    session."""
+    global _BANNER_SKILLS_CACHE
+    if _BANNER_SKILLS_CACHE is not None:
+        return _BANNER_SKILLS_CACHE
+    try:
+        from ..core.paths import xerxes_subdir
+        from ..extensions.skills import SkillRegistry, default_skill_discovery_dirs
+
+        registry = SkillRegistry()
+        registry.discover(*default_skill_discovery_dirs(user_skills_dir=xerxes_subdir("skills")))
+        skills = registry.get_all()
+    except Exception:
+        _BANNER_SKILLS_CACHE = ()
+        return _BANNER_SKILLS_CACHE
+
+    # Filter auto-generated junk: "save this prompt as a skill" artifacts read
+    # like sentences (conversational prefixes, 6+ hyphenated words).
+    noise_prefixes = (
+        "execute-the-",
+        "go-to-",
+        "can-",
+        "could-",
+        "please-",
+        "how-",
+        "what-",
+        "i-want",
+        "lets-",
+        "give-me",
+        "fix-those",
+        "update-on",
+    )
+    noise_exact = {"godmode"}
+    clean: list[tuple[str, str]] = []
+    for skill in skills:
+        meta = getattr(skill, "metadata", None)
+        name = str(getattr(meta, "name", "") or getattr(skill, "name", "") or "")
+        if not name or name in noise_exact or name.startswith(noise_prefixes) or name.count("-") >= 5:
+            continue
+        desc = _BANNER_DESC_OVERRIDE.get(name) or " ".join(str(getattr(meta, "description", "") or "").split())
+        clean.append((name, desc))
+
+    featured = [(n, d) for n, d in clean if n in _BANNER_FEATURED]
+    featured.sort(key=lambda t: _BANNER_FEATURED.index(t[0]))
+    rest = sorted((t for t in clean if t[0] not in _BANNER_FEATURED), key=lambda t: t[0])
+    _BANNER_SKILLS_CACHE = tuple([(n, d, True) for n, d in featured] + [(n, d, False) for n, d in rest])
+    return _BANNER_SKILLS_CACHE
+
+
+def _skills_panel_lines(width: int, height: int) -> list[str]:
+    """Render the banner's skill/command panel as exactly ``height`` ANSI lines.
+
+    Each line is padded to ``width`` printable columns (blank rows are spaces) so
+    the box border stays aligned. Skills pack into as many columns as ``width``
+    allows; overflow collapses to a ``+N more`` line. Returns all-blank rows when
+    too narrow or the registry is empty, so the caller renders the plain banner."""
+    blank = [" " * width for _ in range(height)]
+    skills = _discover_banner_skills()
+    if width < 32 or height < 6 or not skills:
+        return blank
+
+    accent = active_fg("accent")
+    gold = active_fg("warn")
+    system = active_fg("system")
+    reset = "\x1b[39m"
+    dim = "\x1b[2m"
+    undim = "\x1b[22m"
+
+    def line(colored: str, plain_len: int) -> str:
+        return colored + " " * max(0, width - plain_len)
+
+    out: list[str] = []
+    # Title (skin help-header label) + count.
+    title = get_active_skin().label("help_header") or "Skills"
+    count = f"  {len(skills)} skills"
+    if len(title) + len(count) > width:
+        count = ""
+    out.append(line(f"{system}\x1b[1m{title}{undim}{reset}{dim}{count}{undim}{reset}", len(title) + len(count)))
+
+    # Key-commands strip.
+    seg = f"{dim}commands{undim}{reset}  "
+    seg_len = len("commands  ")
+    for cname, cdesc in _BANNER_COMMANDS:
+        piece_len = len(cname) + (len(cdesc) + 1 if cdesc else 0) + 2
+        if seg_len + piece_len > width:
+            break
+        seg += f"{gold}{cname}{reset} {dim}{cdesc}{undim}{reset}  " if cdesc else f"{gold}{cname}{reset}  "
+        seg_len += piece_len
+    out.append(line(seg, seg_len))
+    out.append(line("", 0))  # spacer
+
+    # Skill grid — pack into as many columns as fit.
+    col_gap = 2
+    n_cols = max(1, min(3, (width + col_gap) // (40 + col_gap)))
+    cell_w = (width - (n_cols - 1) * col_gap) // n_cols
+    grid_rows = max(0, height - len(out) - 1)  # reserve a row for "+N more"
+    capacity = grid_rows * n_cols
+    shown = skills[:capacity]
+    overflow = len(skills) - len(shown)
+
+    for r in range(grid_rows):
+        row = ""
+        for c in range(n_cols):
+            idx = r * n_cols + c
+            if idx < len(shown):
+                name, desc, feat = shown[idx]
+                star = "★ " if feat else "  "
+                nm = "/" + name
+                if len(nm) > cell_w - 4:
+                    nm = nm[: cell_w - 5] + "…"
+                budget = max(0, cell_w - (len(star) + len(nm) + 1))
+                short = desc if len(desc) <= budget else (desc[: budget - 1] + "…" if budget > 0 else "")
+                star_c = f"{gold}{star}{reset}" if feat else star
+                cell = f"{star_c}{accent}{nm}{reset} {dim}{short}{undim}{reset}"
+                cell_plain = len(star) + len(nm) + 1 + len(short)
+            else:
+                cell, cell_plain = "", 0
+            cell += " " * max(0, cell_w - cell_plain)
+            row += cell + (" " * col_gap if c < n_cols - 1 else "")
+        out.append(line(row, n_cols * cell_w + (n_cols - 1) * col_gap))
+
+    if overflow > 0:
+        more = f"+ {overflow} more — /help"
+        out.append(line(f"{dim}{more}{undim}{reset}", len(more)))
+
+    out = out[:height]
+    while len(out) < height:
+        out.append(" " * width)
+    return out
+
+
 def _build_welcome_banner(
     model: str,
     session_id: str,
@@ -207,11 +373,17 @@ def _build_welcome_banner(
 
     info_w = max(len(p) for p in info_plain)
     gap = "   "
+    skills_gap = "   "
     rows_n = max(len(_DERAFSH_EMBLEM), len(info_plain))
     top_pad = (rows_n - len(info_plain)) // 2  # vertically center the text beside the emblem
-    content_inner = _EMBLEM_WIDTH + len(gap) + info_w
+    base_inner = _EMBLEM_WIDTH + len(gap) + info_w
     term_w = shutil.get_terminal_size((100, 24)).columns
-    inner = max(content_inner, term_w - 6)  # fill the terminal width (leave a small margin)
+    inner = max(base_inner, term_w - 6)  # fill the terminal width (leave a small margin)
+    # The previously-blank right pad becomes a dynamic skills/commands panel,
+    # sized to whatever terminal width is left over. Falls back to plain padding
+    # on narrow terminals (skills_w too small) or if the registry can't load.
+    skills_w = inner - base_inner - len(skills_gap)
+    skills_lines = _skills_panel_lines(skills_w, rows_n) if skills_w >= 32 else []
     blank_emblem = "⠀" * _EMBLEM_WIDTH
 
     lines.append(f"{indent}{muted}╭{'─' * (inner + 2)}╮{fg_reset}")
@@ -220,8 +392,13 @@ def _build_welcome_banner(
         j = k - top_pad
         info_c = info_color[j] if 0 <= j < len(info_color) else ""
         info_p = info_plain[j] if 0 <= j < len(info_plain) else ""
-        pad = " " * max(0, inner - (_EMBLEM_WIDTH + len(gap) + len(info_p)))
-        body = f"{gold}{emblem_row}{fg_reset}{gap}{info_c}{pad}"
+        if skills_lines:
+            info_pad = " " * max(0, info_w - len(info_p))
+            end_pad = " " * max(0, inner - (base_inner + len(skills_gap) + skills_w))
+            body = f"{gold}{emblem_row}{fg_reset}{gap}{info_c}{info_pad}{skills_gap}{skills_lines[k]}{end_pad}"
+        else:
+            pad = " " * max(0, inner - (_EMBLEM_WIDTH + len(gap) + len(info_p)))
+            body = f"{gold}{emblem_row}{fg_reset}{gap}{info_c}{pad}"
         lines.append(f"{indent}{muted}│{fg_reset} {body} {muted}│{fg_reset}")
     lines.append(f"{indent}{muted}╰{'─' * (inner + 2)}╯{fg_reset}")
 
