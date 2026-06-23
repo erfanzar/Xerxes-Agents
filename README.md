@@ -343,6 +343,42 @@ Xerxes ships adapters for 14 chat platforms:
 
 All channels use a unified `ChannelMessage` model with `IdentityResolver` for cross-platform identity management.
 
+Discord Gateway mode uses `discord.py`:
+
+```bash
+uv run xerxes discord --token "$DISCORD_BOT_TOKEN"
+```
+
+By default, `xerxes discord` starts a managed background service and returns to the shell. Use the same routing flags
+to check or stop that service:
+
+```bash
+uv run xerxes discord --channel-name macbook --status
+uv run xerxes discord --channel-name macbook --stop
+uv run xerxes discord --channel-name macbook --restart
+uv run xerxes discord --token "$DISCORD_BOT_TOKEN" --channel-name macbook --foreground  # debug in this terminal
+```
+
+Service pid, socket, and logs live under `~/.xerxes/services/<service-name>/`. The default service name comes from
+`--device-name`, `--channel-name`, `--address-name`, or channel id; override it with `--service-name`.
+
+Enable the bot's Message Content Intent in the Discord developer portal. In guild channels, Xerxes responds to DMs
+and bot mentions by default; use `--allowed-channel <id>` or `--always-reply` for broader channel behavior.
+Invite the bot with both `bot` and `applications.commands` scopes to expose native Discord slash commands:
+`/ask`, `/skills`, `/skill`, and `/status`. Disable command registration with `--no-discord-commands`.
+For multiple Xerxes daemons in one Discord server, route each device to a named channel or thread and label replies:
+
+```bash
+uv run xerxes discord --token "$DISCORD_BOT_TOKEN" --channel-name m2-max --device-name m2-max
+```
+
+If several daemons share the exact same text channel, give each one an address name and prefix messages with it:
+
+```bash
+uv run xerxes discord --token "$DISCORD_BOT_TOKEN" --address-name m2-max --device-name m2-max
+# In Discord: m2-max: status
+```
+
 ## Security & Sandboxing
 
 Xerxes implements defense-in-depth:

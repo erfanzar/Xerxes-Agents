@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from xerxes.channels import ChannelMessage, MessageDirection
@@ -60,6 +61,29 @@ def _start(channel):
 
 def _post(channel, headers, body):
     return asyncio.run(channel.handle_webhook(headers, body))
+
+
+class FakeDiscordInteractionResponse:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, bool]] = []
+        self._done = False
+
+    def is_done(self) -> bool:
+        return self._done
+
+    async def send_message(self, content: str, *, ephemeral: bool = False) -> None:
+        self._done = True
+        self.messages.append((content, ephemeral))
+
+
+class FakeDiscordInteraction:
+    def __init__(self, channel_name: str) -> None:
+        self.response = FakeDiscordInteractionResponse()
+        self.channel = SimpleNamespace(id="C1", name=channel_name, parent=None, parent_id=None)
+        self.channel_id = "C1"
+        self.guild = SimpleNamespace(id="G1", name="Guild")
+        self.guild_id = "G1"
+        self.user = SimpleNamespace(id="U1")
 
 
 class TestTelegram:
@@ -106,6 +130,167 @@ class TestDiscord:
         c = DiscordChannel("BOT", http_client=http)
         asyncio.run(c.send(ChannelMessage(text="hi", channel="discord", room_id="C1")))
         assert http.calls[0]["headers"]["Authorization"] == "Bot BOT"
+
+    def test_guild_message_requires_mention_when_configured(self):
+        c = DiscordChannel("BOT", bot_user_id="B1", require_mention=True)
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "content": "hi",
+                "author": {"id": "U1"},
+                "guild_id": "G1",
+                "mentions": [],
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx == []
+
+    def test_guild_mention_strips_bot_wake_word(self):
+        c = DiscordChannel("BOT", bot_user_id="B1", require_mention=True)
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "content": "<@B1> inspect this",
+                "author": {"id": "U1", "username": "erfan"},
+                "guild_id": "G1",
+                "mentions": [{"id": "B1"}],
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx[0].text == "inspect this"
+        assert rx[0].metadata["chat_type"] == "group"
+        assert rx[0].metadata["guild_id"] == "G1"
+
+    def test_dm_message_does_not_require_mention(self):
+        c = DiscordChannel("BOT", bot_user_id="B1", require_mention=True)
+        rx = _start(c)
+        body = json.dumps(
+            {"id": "1", "channel_id": "DM1", "content": "hi", "author": {"id": "U1"}, "mentions": []}
+        ).encode()
+        _post(c, {}, body)
+        assert rx[0].text == "hi"
+        assert rx[0].metadata["chat_type"] == "private"
+
+    def test_channel_name_filter_allows_matching_guild_channel_without_mention(self):
+        c = DiscordChannel("BOT", bot_user_id="B1", require_mention=True, allowed_channel_names="m2-max")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "channel": {"name": "m2-max"},
+                "content": "status",
+                "author": {"id": "U1"},
+                "guild_id": "G1",
+                "mentions": [],
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx[0].text == "status"
+        assert rx[0].metadata["channel_name"] == "m2-max"
+
+    def test_channel_name_filter_rejects_other_channel(self):
+        c = DiscordChannel("BOT", allowed_channel_names="m2-max")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "channel": {"name": "linux-box"},
+                "content": "status",
+                "author": {"id": "U1"},
+                "guild_id": "G1",
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx == []
+
+    def test_address_name_accepts_and_strips_prefix(self):
+        c = DiscordChannel("BOT", address_names="m2-max")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "content": "m2-max: status",
+                "author": {"id": "U1"},
+                "guild_id": "G1",
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx[0].text == "status"
+
+    def test_address_name_rejects_unaddressed_message(self):
+        c = DiscordChannel("BOT", address_names="m2-max")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "content": "status",
+                "author": {"id": "U1"},
+                "guild_id": "G1",
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx == []
+
+    def test_attachment_only_message_gets_prompt_text(self):
+        c = DiscordChannel("BOT")
+        rx = _start(c)
+        body = json.dumps(
+            {
+                "id": "1",
+                "channel_id": "C1",
+                "content": "",
+                "author": {"id": "U1"},
+                "attachments": [{"id": "A1", "filename": "log.txt", "url": "https://cdn.example/log.txt"}],
+            }
+        ).encode()
+        _post(c, {}, body)
+        assert rx[0].attachments[0]["filename"] == "log.txt"
+        assert "https://cdn.example/log.txt" in rx[0].text
+
+    def test_outbound_chunks_long_replies_and_suppresses_mentions(self):
+        http = CapturingHTTP()
+        c = DiscordChannel("BOT", http_client=http)
+        asyncio.run(c.send(ChannelMessage(text="x" * 2500, channel="discord", room_id="C1", reply_to="M1")))
+        assert len(http.calls) == 2
+        assert len(http.calls[0]["json"]["content"]) == 2000
+        assert http.calls[0]["json"]["allowed_mentions"] == {"parse": [], "replied_user": False}
+        assert http.calls[0]["json"]["message_reference"]["message_id"] == "M1"
+        assert "message_reference" not in http.calls[1]["json"]
+
+    def test_outbound_prefixes_instance_name(self):
+        http = CapturingHTTP()
+        c = DiscordChannel("BOT", instance_name="m2-max", http_client=http)
+        asyncio.run(c.send(ChannelMessage(text="hi", channel="discord", room_id="C1")))
+        assert http.calls[0]["json"]["content"] == "[m2-max]\nhi"
+
+    def test_app_command_respects_allowed_channel_name(self):
+        c = DiscordChannel("BOT", allowed_channel_names="macbook")
+        rx = _start(c)
+        interaction = FakeDiscordInteraction("macbook")
+
+        asyncio.run(c._handle_app_command(interaction, "/skills"))
+
+        assert interaction.response.messages == [("Queued.", True)]
+        assert rx[0].text == "/skills"
+        assert rx[0].metadata["discord_interaction"] is True
+
+    def test_app_command_rejects_disallowed_channel_name(self):
+        c = DiscordChannel("BOT", allowed_channel_names="macbook")
+        rx = _start(c)
+        interaction = FakeDiscordInteraction("other")
+
+        asyncio.run(c._handle_app_command(interaction, "/skills"))
+
+        assert rx == []
+        assert interaction.response.messages == [("This Xerxes instance is not configured for this channel.", True)]
 
 
 class TestSlack:
