@@ -19,8 +19,10 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from xerxes.channels import ChannelMessage, MessageDirection
 from xerxes.daemon.config import DaemonConfig, load_config
 from xerxes.daemon.fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from xerxes.daemon.runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
@@ -40,6 +42,120 @@ def test_config_env_refs_and_legacy_env(monkeypatch):
     telegram = cfg.resolved_channels()["telegram"]
     assert telegram["enabled"] is True
     assert telegram["settings"]["token"] == "telegram-secret"
+
+
+def test_config_discord_gateway_env(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "discord-secret")
+    monkeypatch.setenv("XERXES_DAEMON_ENABLE_DISCORD", "1")
+    monkeypatch.setenv("XERXES_DISCORD_CHANNEL_NAME", "m2-max")
+    monkeypatch.setenv("XERXES_DISCORD_INSTANCE_NAME", "mac-studio")
+    monkeypatch.setenv("XERXES_DISCORD_ADDRESS_NAME", "mac")
+
+    cfg = load_config(project_dir="/tmp/project")
+
+    discord = cfg.resolved_channels()["discord"]
+    assert discord["enabled"] is True
+    assert discord["type"] == "discord"
+    assert discord["settings"]["token"] == "discord-secret"
+    assert discord["settings"]["transport"] == "gateway"
+    assert discord["settings"]["require_mention"] is True
+    assert discord["settings"]["allowed_channel_names"] == "m2-max"
+    assert discord["settings"]["instance_name"] == "mac-studio"
+    assert discord["settings"]["address_names"] == "mac"
+
+
+class FakeChannelInstance:
+    def __init__(self) -> None:
+        self.sent: list[ChannelMessage] = []
+        self.typing_rooms: list[str | None] = []
+
+    async def send(self, message: ChannelMessage) -> None:
+        self.sent.append(message)
+
+    async def send_typing(self, room_id: str | None) -> None:
+        self.typing_rooms.append(room_id)
+
+
+def _discord_message(text: str) -> ChannelMessage:
+    return ChannelMessage(
+        text=text,
+        channel="discord",
+        channel_user_id="U1",
+        room_id="C1",
+        platform_message_id="M1",
+        direction=MessageDirection.INBOUND,
+        metadata={"chat_type": "group", "thread_id": "main"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_channel_slash_skills_replies_without_model_turn(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    channel = FakeChannelInstance()
+    server.channels.channels["discord"] = SimpleNamespace(instance=channel)
+    server.runtime.skills_list_text = lambda: "Skills:\n  /deep"  # type: ignore[method-assign]
+    server.runtime.discover_skills = lambda: ["deep"]  # type: ignore[method-assign]
+
+    await server._handle_channel_message(_discord_message("/skills"))
+
+    assert len(channel.sent) == 1
+    assert channel.sent[0].text == "Skills:\n  /deep"
+    assert channel.sent[0].reply_to == "M1"
+
+
+@pytest.mark.asyncio
+async def test_channel_slash_ask_runs_turn_and_refreshes_typing(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    channel = FakeChannelInstance()
+    server.channels.channels["discord"] = SimpleNamespace(instance=channel)
+    captured_prompts: list[str] = []
+
+    async def run_turn(session, text, emit, *, mode: str = "code", plan_mode: bool = False):
+        captured_prompts.append(text)
+        await asyncio.sleep(0.01)
+        await emit("text_part", {"text": "answer"})
+        return "answer"
+
+    server.turns.run_turn = run_turn  # type: ignore[method-assign]
+
+    await server._handle_channel_message(_discord_message("/ask which dir?"))
+
+    assert captured_prompts == ["[discord message]\nroom_id: C1\nfrom_user_id: U1\nthread_id: main\n\nwhich dir?"]
+    assert channel.typing_rooms == ["C1"]
+    assert len(channel.sent) == 1
+    assert channel.sent[0].text == "answer"
+
+
+def test_channel_skill_prompt_parses_name_and_prompt_argument(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    server = DaemonServer(cfg)
+    server.runtime.skills_dir = tmp_path / "skills"
+    skill_dir = server.runtime.skills_dir / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo skill\n---\n# Procedure\nDo the thing.\n",
+        encoding="utf-8",
+    )
+
+    result = server._channel_skill_prompt("skill", "demo inspect the repo")
+
+    assert result is not None
+    name, prompt, error = result
+    assert name == "demo"
+    assert error == ""
+    assert "## Skill: demo" in prompt
+    assert "User request: inspect the repo" in prompt
 
 
 def test_session_manager_creates_workspace_under_agents_root(tmp_path):

@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from xerxes.__main__ import _resolve_one_shot_prompt
+from argparse import Namespace
+
+from xerxes.__main__ import _discord_child_argv, _discord_service_name, _resolve_one_shot_prompt
 
 
 def test_resolve_one_shot_prompt_from_args() -> None:
@@ -41,3 +43,46 @@ def test_resolve_one_shot_prompt_opens_tui_for_empty_tty() -> None:
 
     assert one_shot is False
     assert prompt == ""
+
+
+def _discord_args(**overrides) -> Namespace:
+    base = {
+        "service_name": "",
+        "project_dir": "",
+        "host": "",
+        "port": 0,
+        "always_reply": False,
+        "no_message_content_intent": False,
+        "no_discord_commands": False,
+        "allowed_channel": [],
+        "allowed_channel_names": [],
+        "allowed_guild": [],
+        "instance_name": "",
+        "address_names": [],
+        "token": "",
+    }
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def test_discord_service_name_prefers_channel_name() -> None:
+    args = _discord_args(allowed_channel_names=["macbook"])
+
+    assert _discord_service_name(args) == "discord-macbook"
+
+
+def test_discord_service_name_prefers_explicit_name() -> None:
+    args = _discord_args(service_name="GPU Mac")
+
+    assert _discord_service_name(args) == "gpu-mac"
+
+
+def test_discord_child_argv_does_not_embed_token() -> None:
+    args = _discord_args(token="secret-token", allowed_channel_names=["macbook"], instance_name="macbook")
+
+    argv = _discord_child_argv(args, "discord-macbook")
+
+    assert "secret-token" not in argv
+    assert "--foreground" in argv
+    assert argv[argv.index("--channel-name") + 1] == "macbook"
+    assert argv[argv.index("--device-name") + 1] == "macbook"

@@ -219,8 +219,9 @@ def load_config(project_dir: str = "") -> DaemonConfig:
     Defaults seed the control/workspace blocks, then ``$XERXES_HOME/daemon/config.json``
     (if present) is merged on top via :func:`_merge_legacy_keys`. Finally
     ``XERXES_DAEMON_*`` and ``XERXES_*`` environment variables override
-    matching fields. ``XERXES_DAEMON_ENABLE_TELEGRAM`` injects a minimal
-    Telegram channel entry pulling the bot token from ``TELEGRAM_BOT_TOKEN``.
+    matching fields. ``XERXES_DAEMON_ENABLE_TELEGRAM`` and
+    ``XERXES_DAEMON_ENABLE_DISCORD`` inject minimal channel entries pulling
+    bot tokens from their conventional environment variables.
     """
 
     cfg = DaemonConfig(project_dir=project_dir or os.getcwd())
@@ -265,6 +266,28 @@ def load_config(project_dir: str = "") -> DaemonConfig:
         settings["enabled"] = True
         settings.setdefault("type", "telegram")
         settings.setdefault("settings", {}).setdefault("token_env", "TELEGRAM_BOT_TOKEN")
+
+    if os.environ.get("XERXES_DAEMON_ENABLE_DISCORD"):
+        settings = cfg.channels.setdefault("discord", {"type": "discord", "enabled": True, "settings": {}})
+        settings["enabled"] = True
+        settings.setdefault("type", "discord")
+        channel_settings = settings.setdefault("settings", {})
+        token_env = "DISCORD_BOT_TOKEN" if os.environ.get("DISCORD_BOT_TOKEN") else "DISCORD_TOKEN"
+        channel_settings.setdefault("token_env", token_env)
+        channel_settings.setdefault("transport", "gateway")
+        channel_settings.setdefault("require_mention", True)
+        if value := os.environ.get("XERXES_DISCORD_REGISTER_COMMANDS"):
+            channel_settings.setdefault("register_commands", value)
+        if value := os.environ.get("XERXES_DISCORD_CHANNEL_NAME"):
+            channel_settings.setdefault("allowed_channel_names", value)
+        if value := os.environ.get("XERXES_DISCORD_CHANNEL_ID"):
+            channel_settings.setdefault("allowed_channel_ids", value)
+        if value := os.environ.get("XERXES_DISCORD_GUILD_ID"):
+            channel_settings.setdefault("allowed_guild_ids", value)
+        if value := os.environ.get("XERXES_DISCORD_INSTANCE_NAME") or os.environ.get("XERXES_DISCORD_DEVICE_NAME"):
+            channel_settings.setdefault("instance_name", value)
+        if value := os.environ.get("XERXES_DISCORD_ADDRESS_NAME") or os.environ.get("XERXES_DISCORD_WAKE_NAME"):
+            channel_settings.setdefault("address_names", value)
 
     return cfg
 

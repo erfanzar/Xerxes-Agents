@@ -28,9 +28,18 @@ import argparse
 import asyncio
 import os
 import shlex
+import signal
+import subprocess
 import sys
+import time
+from pathlib import Path
+from typing import Any
 
+from .core.paths import xerxes_subdir
 from .runtime.interaction_modes import normalize_interaction_mode
+
+_DISCORD_SERVICE_STOP_TIMEOUT = 5.0
+_DISCORD_SERVICE_START_TIMEOUT = 3.0
 
 
 def _resolve_one_shot_prompt(
@@ -184,6 +193,177 @@ def _run_update_command(argv: list[str]) -> None:
         raise SystemExit(1)
 
 
+def _service_slug(value: str) -> str:
+    """Return a filesystem-safe service identifier component."""
+    clean = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    clean = "-".join(part for part in clean.split("-") if part)
+    return clean[:64] or "default"
+
+
+def _discord_service_name(args: argparse.Namespace) -> str:
+    """Derive the stable Discord service name from CLI routing options."""
+    explicit = str(getattr(args, "service_name", "") or "").strip()
+    if explicit:
+        return _service_slug(explicit)
+    candidates = (
+        list(getattr(args, "allowed_channel_names", []) or [])
+        + list(getattr(args, "address_names", []) or [])
+        + list(getattr(args, "allowed_channel", []) or [])
+    )
+    if getattr(args, "instance_name", ""):
+        candidates.insert(0, str(args.instance_name))
+    for candidate in candidates:
+        if str(candidate).strip():
+            return f"discord-{_service_slug(str(candidate))}"
+    return "discord-default"
+
+
+def _discord_service_paths(service_name: str) -> dict[str, Path]:
+    """Return pid/socket/log paths for one Discord service."""
+    base = xerxes_subdir("services", service_name)
+    return {
+        "base": base,
+        "pid_file": base / "service.pid",
+        "socket_path": base / "daemon.sock",
+        "log_dir": base / "logs",
+        "log_file": base / "service.log",
+    }
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    """Read a PID file, returning ``None`` when missing or malformed."""
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_running(pid: int | None) -> bool:
+    """Return true if ``pid`` appears to be alive."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _discord_child_argv(args: argparse.Namespace, service_name: str) -> list[str]:
+    """Build the foreground child argv without embedding the Discord token."""
+    child = [sys.executable, "-m", "xerxes", "discord", "--foreground", "--service-name", service_name]
+    if args.project_dir:
+        child.extend(["--project-dir", str(args.project_dir)])
+    if args.host:
+        child.extend(["--host", str(args.host)])
+    if args.port:
+        child.extend(["--port", str(args.port)])
+    if args.always_reply:
+        child.append("--always-reply")
+    if args.no_message_content_intent:
+        child.append("--no-message-content-intent")
+    if args.no_discord_commands:
+        child.append("--no-discord-commands")
+    for value in args.allowed_channel:
+        child.extend(["--allowed-channel", str(value)])
+    for value in args.allowed_channel_names:
+        child.extend(["--channel-name", str(value)])
+    for value in args.allowed_guild:
+        child.extend(["--allowed-guild", str(value)])
+    if args.instance_name:
+        child.extend(["--device-name", str(args.instance_name)])
+    for value in args.address_names:
+        child.extend(["--address-name", str(value)])
+    return child
+
+
+def _print_discord_service_status(service_name: str) -> bool:
+    """Print status for one Discord background service."""
+    paths = _discord_service_paths(service_name)
+    pid = _read_pid(paths["pid_file"])
+    running = _pid_running(pid)
+    state = "running" if running else "stopped"
+    suffix = f" (pid {pid})" if running else ""
+    print(f"Discord service `{service_name}`: {state}{suffix}")
+    print(f"PID: {paths['pid_file']}")
+    print(f"Log: {paths['log_file']}")
+    return running
+
+
+def _stop_discord_service(service_name: str) -> bool:
+    """Stop one Discord background service by pid file."""
+    paths = _discord_service_paths(service_name)
+    pid = _read_pid(paths["pid_file"])
+    if not _pid_running(pid):
+        paths["pid_file"].unlink(missing_ok=True)
+        print(f"Discord service `{service_name}` is not running.")
+        return False
+    assert pid is not None
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + _DISCORD_SERVICE_STOP_TIMEOUT
+    while time.monotonic() < deadline:
+        if not _pid_running(pid):
+            paths["pid_file"].unlink(missing_ok=True)
+            print(f"Stopped Discord service `{service_name}`.")
+            return True
+        time.sleep(0.1)
+    print(f"Discord service `{service_name}` did not stop after SIGTERM (pid {pid}).", file=sys.stderr)
+    return False
+
+
+def _start_discord_service(args: argparse.Namespace, service_name: str) -> None:
+    """Start one Discord gateway daemon in the background."""
+    paths = _discord_service_paths(service_name)
+    pid = _read_pid(paths["pid_file"])
+    if _pid_running(pid):
+        print(f"Discord service `{service_name}` is already running (pid {pid}).")
+        print(f"Log: {paths['log_file']}")
+        return
+
+    paths["base"].mkdir(parents=True, exist_ok=True)
+    paths["log_dir"].mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    if args.token:
+        env["DISCORD_BOT_TOKEN"] = str(args.token)
+    env["XERXES_DAEMON_ENABLE_DISCORD"] = "1"
+    argv = _discord_child_argv(args, service_name)
+    with paths["log_file"].open("ab") as log:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=os.getcwd(),
+            env=env,
+            start_new_session=True,
+        )
+
+    deadline = time.monotonic() + _DISCORD_SERVICE_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise SystemExit(f"Discord service `{service_name}` exited during startup. Log: {paths['log_file']}")
+        pid = _read_pid(paths["pid_file"])
+        if _pid_running(pid):
+            break
+        time.sleep(0.1)
+
+    print(f"Started Discord service `{service_name}` in background.")
+    print(f"PID: {paths['pid_file']}")
+    print(f"Log: {paths['log_file']}")
+
+
+def _configure_discord_daemon_paths(config: Any, service_name: str) -> None:
+    """Point a Discord daemon at its service-owned control files."""
+    paths = _discord_service_paths(service_name)
+    paths["base"].mkdir(parents=True, exist_ok=True)
+    paths["log_dir"].mkdir(parents=True, exist_ok=True)
+    config.socket_path = str(paths["socket_path"])
+    config.pid_file = str(paths["pid_file"])
+    config.log_dir = str(paths["log_dir"])
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse ``argv`` and dispatch to telegram, one-shot, or TUI mode.
 
@@ -217,6 +397,135 @@ def main(argv: list[str] | None = None) -> None:
             config.ws_host = telegram_args.host
         if telegram_args.port:
             config.ws_port = telegram_args.port
+        asyncio.run(DaemonServer(config).run())
+        return
+
+    if argv and argv[0] == "discord":
+        discord_parser = argparse.ArgumentParser(
+            prog="xerxes discord", description="Start the daemon with Discord Gateway enabled."
+        )
+        discord_parser.add_argument(
+            "--token", default=os.environ.get("DISCORD_BOT_TOKEN", os.environ.get("DISCORD_TOKEN", ""))
+        )
+        discord_parser.add_argument("--project-dir", default="")
+        discord_parser.add_argument("--host", default="")
+        discord_parser.add_argument("--port", type=int, default=0)
+        discord_parser.add_argument(
+            "--foreground",
+            action="store_true",
+            help="Run in the current terminal instead of starting the background service.",
+        )
+        discord_parser.add_argument(
+            "--detach",
+            action="store_true",
+            help="Start in the background (default for Discord).",
+        )
+        discord_parser.add_argument("--status", action="store_true", help="Show the background Discord service status.")
+        discord_parser.add_argument("--stop", action="store_true", help="Stop the background Discord service.")
+        discord_parser.add_argument("--restart", action="store_true", help="Restart the background Discord service.")
+        discord_parser.add_argument(
+            "--service-name",
+            default="",
+            help="Stable service id for pid/log/socket files. Defaults to the device/channel name.",
+        )
+        discord_parser.add_argument(
+            "--always-reply",
+            action="store_true",
+            help="Respond to every guild-channel message that passes allowlists instead of requiring a mention.",
+        )
+        discord_parser.add_argument(
+            "--allowed-channel",
+            action="append",
+            default=[],
+            help="Discord channel id to allow. Repeat for multiple channels.",
+        )
+        discord_parser.add_argument(
+            "--channel-name",
+            "--allowed-channel-name",
+            action="append",
+            default=[],
+            dest="allowed_channel_names",
+            help="Discord channel or thread name to allow. Repeat for multiple names.",
+        )
+        discord_parser.add_argument(
+            "--allowed-guild",
+            action="append",
+            default=[],
+            help="Discord guild id to allow. Repeat for multiple guilds.",
+        )
+        discord_parser.add_argument(
+            "--device-name",
+            "--instance-name",
+            default="",
+            dest="instance_name",
+            help="Label replies with this Xerxes instance/device name.",
+        )
+        discord_parser.add_argument(
+            "--address-name",
+            "--wake-name",
+            action="append",
+            default=[],
+            dest="address_names",
+            help="Only respond to messages that start with this name, like 'm2-max: status'.",
+        )
+        discord_parser.add_argument(
+            "--no-message-content-intent",
+            action="store_true",
+            help="Do not request Discord's privileged message content intent.",
+        )
+        discord_parser.add_argument(
+            "--no-discord-commands",
+            action="store_true",
+            help="Do not register Discord slash commands (/ask, /skills, /skill, /status).",
+        )
+        discord_args = discord_parser.parse_args(argv[1:])
+        service_name = _discord_service_name(discord_args)
+        if discord_args.status:
+            _print_discord_service_status(service_name)
+            return
+        if discord_args.stop:
+            _stop_discord_service(service_name)
+            return
+        if discord_args.restart:
+            _stop_discord_service(service_name)
+            _start_discord_service(discord_args, service_name)
+            return
+        if not discord_args.foreground:
+            _start_discord_service(discord_args, service_name)
+            return
+
+        if discord_args.token:
+            os.environ["DISCORD_BOT_TOKEN"] = discord_args.token
+        os.environ["XERXES_DAEMON_ENABLE_DISCORD"] = "1"
+
+        from .daemon.config import load_config
+        from .daemon.server import DaemonServer
+
+        config = load_config(project_dir=discord_args.project_dir)
+        _configure_discord_daemon_paths(config, service_name)
+        if discord_args.host:
+            config.ws_host = discord_args.host
+        if discord_args.port:
+            config.ws_port = discord_args.port
+        discord_config = config.channels.setdefault("discord", {"type": "discord", "enabled": True, "settings": {}})
+        discord_config["enabled"] = True
+        discord_config["type"] = "discord"
+        settings = discord_config.setdefault("settings", {})
+        settings["transport"] = "gateway"
+        settings["require_mention"] = not discord_args.always_reply
+        settings["always_reply_in_channels"] = discord_args.always_reply
+        settings["message_content_intent"] = not discord_args.no_message_content_intent
+        settings["register_commands"] = not discord_args.no_discord_commands
+        if discord_args.allowed_channel:
+            settings["allowed_channel_ids"] = discord_args.allowed_channel
+        if discord_args.allowed_channel_names:
+            settings["allowed_channel_names"] = discord_args.allowed_channel_names
+        if discord_args.allowed_guild:
+            settings["allowed_guild_ids"] = discord_args.allowed_guild
+        if discord_args.instance_name:
+            settings["instance_name"] = discord_args.instance_name
+        if discord_args.address_names:
+            settings["address_names"] = discord_args.address_names
         asyncio.run(DaemonServer(config).run())
         return
 

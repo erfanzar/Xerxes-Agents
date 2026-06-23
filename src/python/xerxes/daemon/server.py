@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import signal
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,7 @@ from typing import Any
 from ..bridge import profiles
 from ..channels.types import ChannelMessage, MessageDirection
 from ..context.window_usage import estimate_context_tokens
+from ..extensions.skills import activate_skill, inject_skill_config, skill_matches_platform
 from ..runtime.config_context import get_event_callback, set_event_callback
 from ..runtime.interaction_modes import normalize_interaction_mode
 from . import slash_commands as _slash_commands
@@ -57,6 +60,8 @@ MIGRATED_ERROR = (
 
 SlashCommandsMixin = _slash_commands.SlashCommandsMixin
 _BULK_SLASH_HANDLERS = _slash_commands._BULK_SLASH_HANDLERS
+logger = logging.getLogger(__name__)
+_CHANNEL_TYPING_INTERVAL = 4.0
 
 
 class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
@@ -629,8 +634,143 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
 
     async def _handle_channel_message(self, message: ChannelMessage) -> None:
         """Run a one-shot turn for an inbound channel message and reply on the same channel."""
-        if not message.text.strip():
+        text = message.text.strip()
+        if not text:
             return
+        channel = self.channels.channels.get(message.channel)
+        if text.startswith("/"):
+            await self._handle_channel_slash_message(message, channel)
+            return
+        await self._run_channel_turn(message, self._format_channel_prompt(message), channel)
+
+    async def _handle_channel_slash_message(self, message: ChannelMessage, channel: Any) -> None:
+        """Handle slash-like channel messages and send the result back through the channel."""
+        text = message.text.strip()
+        raw = text[1:].strip()
+        command, _, args = raw.partition(" ")
+        command = command.strip().lower()
+        args = args.strip()
+
+        if command == "ask":
+            if not args:
+                await self._send_channel_reply(channel, message, "Usage: `/ask <prompt>`")
+                return
+            await self._run_channel_turn(message, self._format_channel_prompt_with_text(message, args), channel)
+            return
+
+        if command in {"skills", "status", "help", "commands", "context", "doctor", "budget"}:
+            await self._run_channel_slash_notification(message, channel, text)
+            return
+
+        skill_prompt = self._channel_skill_prompt(command, args)
+        if skill_prompt is not None:
+            skill_name, prompt, error = skill_prompt
+            if error:
+                await self._send_channel_reply(channel, message, error)
+                return
+            await self._send_channel_reply(channel, message, f"Running skill `{skill_name}`...")
+            await self._run_channel_turn(message, prompt, channel)
+            return
+
+        await self._run_channel_slash_notification(message, channel, text)
+
+    async def _run_channel_slash_notification(self, message: ChannelMessage, channel: Any, text: str) -> None:
+        """Run one non-model slash command and post its notification output."""
+        session_key = self._channel_session_key(message)
+        output_parts: list[str] = []
+
+        async def emit(event_type: str, payload: dict[str, Any]) -> None:
+            if event_type == "notification":
+                body = str(payload.get("body") or payload.get("title") or "").strip()
+                if body:
+                    output_parts.append(body)
+
+        conn_sessions = getattr(self, "_connection_sessions", None)
+        if conn_sessions is not None:
+            conn_sessions[emit] = session_key
+        try:
+            self.sessions.open(session_key, self.workspaces.default_agent_id)
+            await self._handle_slash(text, emit)
+        finally:
+            if conn_sessions is not None:
+                conn_sessions.pop(emit, None)
+
+        await self._send_channel_reply(channel, message, "\n\n".join(output_parts).strip() or "Done.")
+
+    def _channel_skill_prompt(self, command: str, args: str) -> tuple[str, str, str] | None:
+        """Return a runnable skill prompt for Discord/channel slash commands."""
+        if command == "skill":
+            skill_expr = args.strip()
+            if not skill_expr:
+                return "", "", "Usage: `/skill <name>[:<sub>] [prompt]`"
+        else:
+            skill_name = command
+            subcommand = ""
+            if ":" in command:
+                skill_name, subcommand = command.split(":", 1)
+            self.runtime.discover_skills()
+            skill = self.runtime.skill_registry.get(skill_name)
+            if skill is None:
+                return None
+            if subcommand and args:
+                skill_expr = f"{skill_name}:{subcommand} {args}"
+            elif subcommand:
+                skill_expr = f"{skill_name}:{subcommand}"
+            elif args:
+                skill_expr = f"{skill_name}:{args}"
+            else:
+                skill_expr = skill_name
+
+        name = skill_expr.strip()
+        skill_args = ""
+        if command == "skill":
+            name, _, remainder = name.partition(" ")
+            name = name.strip()
+            if ":" in name:
+                name, skill_args = name.split(":", 1)
+                skill_args = f"{skill_args.strip()} {remainder.strip()}".strip()
+            else:
+                skill_args = remainder.strip()
+        elif ":" in name:
+            name, skill_args = name.split(":", 1)
+            name = name.strip()
+            skill_args = skill_args.strip()
+
+        self.runtime.discover_skills()
+        skill = self.runtime.skill_registry.get(name)
+        if skill is None:
+            matches = self.runtime.skill_registry.search(name)
+            if matches:
+                suggestions = ", ".join(s.name for s in matches[:5])
+                return "", "", f"Skill `{name}` not found. Did you mean: {suggestions}"
+            return "", "", f"Skill `{name}` not found. Use `/skills` to list available skills."
+        if not skill_matches_platform(skill):
+            return "", "", f"Skill `{name}` is not compatible with this platform ({sys.platform})."
+
+        activate_skill(name)
+        prompt_section = skill.to_prompt_section()
+        config_block = inject_skill_config(skill)
+        declared_subs = skill.metadata.subcommands or []
+        subcommand = ""
+        free_form = skill_args
+        if skill_args:
+            first, _, rest = skill_args.partition(" ")
+            if first in declared_subs:
+                subcommand = first
+                free_form = rest.strip()
+        if subcommand and free_form:
+            trigger = f"/{name}:{subcommand} {free_form}"
+        elif subcommand:
+            trigger = f"/{name}:{subcommand}"
+        elif skill_args:
+            trigger = skill_args
+        else:
+            trigger = f"Execute the '{name}' skill now."
+        prompt = f"[Skill '{name}' activated]{config_block}\n\n{prompt_section}\n\nUser request: {trigger}"
+        return name, prompt, ""
+
+    async def _run_channel_turn(self, message: ChannelMessage, prompt: str, channel: Any) -> None:
+        """Run one agent turn for a channel message and post the assistant text."""
         session_key = self._channel_session_key(message)
         session = self.sessions.open(session_key, self.workspaces.default_agent_id)
         output_parts: list[str] = []
@@ -638,20 +778,61 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         async def emit(event_type: str, payload: dict[str, Any]) -> None:
             if event_type == "text_part":
                 output_parts.append(str(payload.get("text", "")))
+            elif event_type == "notification" and payload.get("severity") == "error":
+                body = str(payload.get("body") or payload.get("title") or "").strip()
+                if body:
+                    output_parts.append(body)
 
-        await self.turns.run_turn(session, self._format_channel_prompt(message), emit, mode="code", plan_mode=False)
-        channel = self.channels.channels.get(message.channel)
-        if channel and channel.instance:
-            await channel.instance.send(
-                ChannelMessage(
-                    text="".join(output_parts).strip() or "(no response)",
-                    channel=message.channel,
-                    channel_user_id=message.channel_user_id,
-                    room_id=message.room_id,
-                    reply_to=message.platform_message_id,
-                    direction=MessageDirection.OUTBOUND,
-                )
+        typing_task = self._start_channel_typing(channel, message.room_id)
+        try:
+            await self.turns.run_turn(session, prompt, emit, mode="code", plan_mode=False)
+        finally:
+            await self._stop_channel_typing(typing_task)
+
+        await self._send_channel_reply(channel, message, "".join(output_parts).strip() or "(no response)")
+
+    def _start_channel_typing(self, channel: Any, room_id: str | None) -> asyncio.Task[Any] | None:
+        """Start refreshing a channel typing indicator while a turn runs."""
+        if not channel or channel.instance is None:
+            return None
+        typing_sender = getattr(channel.instance, "send_typing", None)
+        if not callable(typing_sender):
+            return None
+        return asyncio.create_task(self._channel_typing_loop(typing_sender, room_id))
+
+    async def _channel_typing_loop(self, typing_sender: Any, room_id: str | None) -> None:
+        """Refresh platform typing state until cancelled."""
+        while True:
+            try:
+                await typing_sender(room_id)
+            except Exception:
+                logger.warning("channel typing indicator failed", exc_info=True)
+                return
+            await asyncio.sleep(_CHANNEL_TYPING_INTERVAL)
+
+    @staticmethod
+    async def _stop_channel_typing(task: asyncio.Task[Any] | None) -> None:
+        """Cancel an active channel typing refresher."""
+        if task is None:
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    @staticmethod
+    async def _send_channel_reply(channel: Any, message: ChannelMessage, text: str) -> None:
+        """Send a reply through the originating channel when available."""
+        if not channel or channel.instance is None:
+            return
+        await channel.instance.send(
+            ChannelMessage(
+                text=text,
+                channel=message.channel,
+                channel_user_id=message.channel_user_id,
+                room_id=message.room_id,
+                reply_to=message.platform_message_id,
+                direction=MessageDirection.OUTBOUND,
             )
+        )
 
     async def _emit_status(self, emit: EmitFn) -> None:
         """Push a ``status_update`` reflecting the current session's token usage and mode."""
@@ -716,13 +897,18 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
     @staticmethod
     def _format_channel_prompt(message: ChannelMessage) -> str:
         """Render a channel message as a prompt with origin metadata."""
+        return DaemonServer._format_channel_prompt_with_text(message, message.text)
+
+    @staticmethod
+    def _format_channel_prompt_with_text(message: ChannelMessage, text: str) -> str:
+        """Render channel-origin metadata with an explicit prompt body."""
         meta = message.metadata or {}
         return (
             f"[{message.channel} message]\n"
             f"room_id: {message.room_id or ''}\n"
             f"from_user_id: {message.channel_user_id or ''}\n"
             f"thread_id: {meta.get('thread_id', '')}\n\n"
-            f"{message.text}"
+            f"{text}"
         )
 
     @staticmethod

@@ -46,6 +46,7 @@ dependencies = [
     "python-json-logger>=2.0.0",
     "validators>=0.30.0",
     "defusedxml>=0.7.0",
+    "discord.py>=2.5.0,<3.0.0",
 ]
 
 [project.urls]
