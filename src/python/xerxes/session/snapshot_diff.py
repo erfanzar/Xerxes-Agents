@@ -71,6 +71,8 @@ def _run_git(manager: SnapshotManager, args: list[str]) -> str:
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {args} failed (exit {proc.returncode}): {proc.stderr}")
     return proc.stdout
 
 

@@ -11,21 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Standalone file system tools for basic file operations and shell execution.
+"""Standalone file system tools for basic file operations.
 
-This module provides simple, standalone file and shell tools that don't require
+This module provides simple, standalone file tools that don't require
 external dependencies. These tools are always available for basic file operations.
 
 Example:
-    >>> from xerxes.tools.standalone import ReadFile, WriteFile, ExecuteShell
+    >>> from xerxes.tools.standalone import ReadFile, WriteFile
     >>> ReadFile.static_call(file_path="config.json", offset=0, limit=400)
-    >>> ExecuteShell.static_call(command="ls -la")
 """
 
 from __future__ import annotations
 
-import shlex
-import subprocess
+import difflib
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -33,6 +31,7 @@ from typing import Any
 from ..types import AgentBaseFn
 
 DEFAULT_READ_LINE_LIMIT = 400
+MAX_WRITE_DIFF_LINES = 60
 
 
 class ReadFile(AgentBaseFn):
@@ -197,9 +196,44 @@ class WriteFile(AgentBaseFn):
         p = Path(file_path).expanduser().resolve()
         if p.exists() and not overwrite:
             raise FileExistsError(f"File '{p}' already exists. Pass overwrite=True to replace it.")
+        old_content = ""
+        if p.exists():
+            old_content = p.read_text(encoding=encoding, errors="replace")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding=encoding)
-        return f"✅ Wrote {len(content)} characters to {p}"
+        summary = f"✅ Wrote {len(content)} characters to {p}"
+        diff = _capped_unified_diff(old_content, content, p.name)
+        return f"{summary}:\n\n{diff}" if diff else summary
+
+
+def _capped_unified_diff(original: str, modified: str, file_name: str) -> str:
+    if original == modified:
+        return ""
+
+    diff = list(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            modified.splitlines(keepends=True),
+            fromfile=f"a/{file_name}",
+            tofile=f"b/{file_name}",
+            n=3,
+        )
+    )
+    if not diff:
+        return ""
+
+    out: list[str] = []
+    for line in diff[:MAX_WRITE_DIFF_LINES]:
+        if line.startswith(("+++", "---", "@@")) or line.endswith("\n"):
+            out.append(line)
+        else:
+            out.append(line + "\n")
+            out.append("\\ No newline at end of file\n")
+
+    if len(diff) > MAX_WRITE_DIFF_LINES:
+        out.append(f"... ({len(diff) - MAX_WRITE_DIFF_LINES} more lines)\n")
+
+    return "".join(out).rstrip("\n")
 
 
 class ListDir(AgentBaseFn):
@@ -248,89 +282,6 @@ class ListDir(AgentBaseFn):
         return sorted(entries)
 
 
-class ExecuteShell(AgentBaseFn):
-    """Execute shell commands in a subprocess.
-
-    Runs shell commands with configurable timeout and working directory.
-    Commands are safely split with ``shlex.split`` and executed with
-    ``shell=False``.
-
-    Example:
-        >>> ExecuteShell.static_call(command="ls -la")
-        >>> ExecuteShell.static_call(command="git status", timeout=30)
-    """
-
-    DEFAULT_TIMEOUT_SECS: float = 30.0
-
-    @staticmethod
-    def static_call(
-        command: str,
-        timeout: float | None = None,
-        cwd: str | None = None,
-        **context_variables,
-    ) -> dict[str, str]:
-        """Execute a shell command.
-
-        Args:
-            command: Shell command string to execute.
-            timeout: Timeout in seconds. Uses XERXES_SHELL_TIMEOUT env or DEFAULT_TIMEOUT_SECS
-                if not specified. Set to 0 for no timeout. Defaults to None.
-            cwd: Working directory for command execution.
-            **context_variables: Additional context passed through to downstream calls.
-
-        Returns:
-            Dictionary with 'stdout', 'stderr', and 'returncode'.
-        """
-        import os as _os
-
-        effective: float | None
-        if timeout is None:
-            env_default = _os.environ.get("XERXES_SHELL_TIMEOUT")
-            try:
-                effective = float(env_default) if env_default else ExecuteShell.DEFAULT_TIMEOUT_SECS
-            except (TypeError, ValueError):
-                effective = ExecuteShell.DEFAULT_TIMEOUT_SECS
-        else:
-            try:
-                t = float(timeout)
-            except (TypeError, ValueError):
-                t = ExecuteShell.DEFAULT_TIMEOUT_SECS
-            effective = None if t <= 0 else t
-
-        args = shlex.split(command)
-        if not args:
-            return {
-                "error": "command is empty",
-                "stdout": "",
-                "stderr": "",
-                "returncode": "1",
-            }
-
-        try:
-            proc = subprocess.run(
-                args,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=effective,
-                cwd=cwd,
-            )
-            return {
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "returncode": str(proc.returncode),
-            }
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            cap = f"{effective:.0f}s" if effective is not None else "no-cap"
-            return {
-                "stdout": stdout,
-                "stderr": (stderr + f"\n[ExecuteShell] command timed out after {cap}").strip(),
-                "returncode": "124",
-            }
-
-
 class AppendFile(AgentBaseFn):
     """Append content to a file.
 
@@ -369,7 +320,6 @@ class AppendFile(AgentBaseFn):
 
 __all__ = (
     "AppendFile",
-    "ExecuteShell",
     "ListDir",
     "ReadFile",
     "WriteFile",

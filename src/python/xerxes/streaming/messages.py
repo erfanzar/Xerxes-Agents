@@ -254,6 +254,31 @@ def messages_from_anthropic(messages: list[dict[str, Any]]) -> list[NeutralMessa
     return result
 
 
+def _parse_tool_arguments(arguments: Any) -> dict[str, Any]:
+    """Parse OpenAI tool-call ``arguments`` which may be str, dict, or None.
+
+    Some providers return ``None`` when a tool call has no arguments, or a
+    pre-parsed dict instead of a JSON string. Calling ``json.loads`` on those
+    would crash. This helper normalises all cases to a dict.
+
+    Args:
+        arguments: The raw ``arguments`` value from the OpenAI tool call.
+
+    Returns:
+        A parsed argument dict. ``{}`` when arguments is ``None`` or empty.
+    """
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        s = arguments.strip()
+        if not s:
+            return {}
+        return json.loads(s)
+    return {}
+
+
 def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]:
     """Convert OpenAI chat-completions messages back to the neutral format.
 
@@ -290,7 +315,7 @@ def messages_from_openai(messages: list[dict[str, Any]]) -> list[NeutralMessage]
                     {
                         "id": tc["id"],
                         "name": tc["function"]["name"],
-                        "input": json.loads(tc["function"]["arguments"]),
+                        "input": _parse_tool_arguments(tc["function"].get("arguments")),
                     }
                     for tc in tcs
                 ]

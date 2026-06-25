@@ -97,7 +97,7 @@ class OAuthToken:
         except KeyError:
             raise KeyError("OAuth token response missing required 'access_token'") from None
         expires_in = payload.get("expires_in")
-        expires_at = time.time() + float(expires_in) if expires_in else None
+        expires_at = time.time() + float(expires_in) if expires_in is not None else None
         scope = payload.get("scope", "")
         scopes = tuple(scope.split()) if scope else ()
         return cls(

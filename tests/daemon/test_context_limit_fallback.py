@@ -56,8 +56,7 @@ def test_falls_back_to_registry_for_known_provider(tmp_path):
 
 def test_falls_back_to_anthropic_window(tmp_path):
     runner = _make_runner(tmp_path, {"model": "claude-sonnet-4-6"})
-    # Anthropic per-model registry returns 200k.
-    assert runner._resolve_context_limit() == 200_000
+    assert runner._resolve_context_limit() == 1_000_000
 
 
 def test_returns_zero_when_no_model(tmp_path):

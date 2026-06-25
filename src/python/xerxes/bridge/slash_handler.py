@@ -141,6 +141,16 @@ class SlashHandlerMixin:
                 return f"Unknown thinking level: {target}. Use off|low|medium|high."
             self.config["reasoning_effort"] = target
             self.config["thinking"] = target != "off"
+            profile = profiles.get_active_profile()
+            if profile:
+                profiles.update_sampling(
+                    profile["name"],
+                    {
+                        "thinking": self.config["thinking"],
+                        "reasoning_effort": target if target != "off" else None,
+                        "thinking_budget": 0 if target == "off" else self.config.get("thinking_budget", 0),
+                    },
+                )
             return f"Thinking effort set to: {target}"
 
         if cmd == "sampling":

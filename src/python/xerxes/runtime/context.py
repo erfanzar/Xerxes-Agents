@@ -611,13 +611,9 @@ class PromptContextBuilder:
             guidance_lines.append(
                 "- Directory-listing tools: Use them to discover repo structure or confirm what files exist before claiming paths from memory."
             )
-        if (
-            "exec_command" in tools_section_lower
-            or "executeshell" in tools_section_lower
-            or "execute_shell" in tools_section_lower
-        ):
+        if "exec_command" in tools_section_lower or "write_stdin" in tools_section_lower:
             guidance_lines.append(
-                "- Shell tools: Prefer `exec_command` for command execution because it creates a PTY session that can be polled with `write_stdin`, interrupted, fed input, and closed later. Use `ExecuteShell` only for short blocking one-shot commands."
+                "- Shell tools: Use `exec_command` for command execution because it creates a PTY session that can be polled with `write_stdin`, interrupted, fed input, and closed later. Use terminal sessions for both short and long commands."
             )
         if guidance_lines:
             lines.extend(["Tool selection guidance:", *guidance_lines])

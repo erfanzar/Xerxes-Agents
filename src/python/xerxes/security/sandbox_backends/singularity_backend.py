@@ -18,10 +18,11 @@ For HPC environments where Docker isn't permitted. Uses the
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 
 @dataclass
@@ -41,6 +42,10 @@ class SingularitySandboxBackend:
     """Shell out to ``singularity exec`` / ``apptainer exec`` for HPC sites."""
 
     name = "singularity"
+
+    # Only these parent environment variables are forwarded into the
+    # container. Everything else (including secrets) is dropped.
+    _SAFE_ENV_VARS: ClassVar[set[str]] = {"PATH", "HOME", "LANG", "LC_ALL", "TERM"}
 
     def __init__(self, config: SingularityBackendConfig | None = None) -> None:
         """Bind the backend to an optional explicit configuration."""
@@ -68,7 +73,10 @@ class SingularitySandboxBackend:
             argv.extend(["--pwd", cwd])
         argv.append(self._config.image)
         argv.extend(["bash", "-lc", command])
-        envvars = {**env} if env else None
+        if env is None:
+            envvars = {k: v for k, v in os.environ.items() if k in self._SAFE_ENV_VARS}
+        else:
+            envvars = {k: v for k, v in env.items() if k in self._SAFE_ENV_VARS}
         proc = subprocess.run(
             argv,
             capture_output=True,

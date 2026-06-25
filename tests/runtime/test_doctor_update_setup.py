@@ -114,6 +114,7 @@ class TestUpdate:
         assert "argv" in out
 
     def test_apply_update_editable_prefers_uv_pip(self, monkeypatch):
+        monkeypatch.setattr(update, "managed_venv_python", lambda: None)
         monkeypatch.setattr(update, "detect_install_mode", lambda: update.InstallMode.EDITABLE)
         monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
 

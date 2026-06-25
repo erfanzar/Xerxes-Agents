@@ -234,6 +234,7 @@ _SMOKE_CASES: list[tuple[str, str]] = [
     ("/resume", "saved sessions"),
     ("/undo", "Nothing to undo"),
     ("/retry", "Nothing to retry"),
+    ("/retry-connection", "No failed provider connection"),
     ("/branches", ""),
     ("/snapshots", ""),
 ]

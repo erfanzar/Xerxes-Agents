@@ -205,6 +205,19 @@ verify() {
     fi
 }
 
+install_node_runtime() {
+    if [ "${XERXES_SKIP_NODE_INSTALL:-0}" = "1" ]; then
+        warn "skipping managed Node.js runtime install because XERXES_SKIP_NODE_INSTALL=1"
+        return 0
+    fi
+    xerxes_bin="$XERXES_VENV/bin/xerxes"
+    [ -x "$xerxes_bin" ] || die "xerxes executable not found: $xerxes_bin"
+    info "installing managed Node.js runtime for the TypeScript TUI"
+    if ! "$xerxes_bin" install --node; then
+        die "managed Node.js install failed. Re-run after checking network access, or set XERXES_SKIP_NODE_INSTALL=1 and install Node manually."
+    fi
+}
+
 print_banner() {
     printf '%s\n' "${BOLD}"
     cat <<'BANNER'
@@ -225,6 +238,7 @@ main() {
     ensure_build_prereqs
     install_uv
     install_xerxes
+    install_node_runtime
     install_alias
     verify
     printf '\n'

@@ -30,7 +30,7 @@ def test_permission_request_payload_parses_in_tui_wire_model() -> None:
     output = io.StringIO()
     server._stdout = output
 
-    server._emit_wire_permission_request("tool_1", "ExecuteShell", "Run: git diff")
+    server._emit_wire_permission_request("tool_1", "exec_command", "Run: git diff")
 
     payload = _wire_payloads(output.getvalue())[0]
     payload["type"] = "ApprovalRequest"
@@ -39,7 +39,7 @@ def test_permission_request_payload_parses_in_tui_wire_model() -> None:
     assert isinstance(event, ApprovalRequest)
     assert event.id
     assert event.tool_call_id == "tool_1"
-    assert event.action == "ExecuteShell"
+    assert event.action == "exec_command"
 
 
 def test_question_request_payload_parses_in_tui_wire_model() -> None:

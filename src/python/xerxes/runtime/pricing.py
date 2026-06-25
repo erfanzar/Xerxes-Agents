@@ -63,8 +63,8 @@ def _add(*entries: ModelPricing) -> None:
 
 # Anthropic (cache_read = 10% of input; cache_write = 125%).
 _add(
-    ModelPricing("claude-opus-4-7", 15.0, 75.0, 1.5, 18.75, 200_000, 8_192),
-    ModelPricing("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75, 200_000, 8_192),
+    ModelPricing("claude-opus-4-7", 15.0, 75.0, 1.5, 18.75, 1_000_000, 8_192),
+    ModelPricing("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75, 1_000_000, 8_192),
     ModelPricing("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25, 200_000, 8_192),
     ModelPricing("claude-opus-4", 15.0, 75.0, 1.5, 18.75, 200_000, 8_192),
     ModelPricing("claude-sonnet-4", 3.0, 15.0, 0.3, 3.75, 200_000, 8_192),

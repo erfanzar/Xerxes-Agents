@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..streaming.events import AgentState
+from ..streaming.tool_markers import strip_assistant_tool_call_markers
 
 
 class SessionMixin:
@@ -84,6 +85,9 @@ class SessionMixin:
             if role == "assistant":
                 if outstanding:
                     _flush_outstanding()
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg = {**msg, "content": strip_assistant_tool_call_markers(content)}
                 repaired.append(msg)
                 for tc in msg.get("tool_calls") or []:
                     tid = tc.get("id") or ""
@@ -210,7 +214,7 @@ class SessionMixin:
             if role == "user":
                 body = f"✨ {text}"
             elif role == "assistant":
-                body = text
+                body = strip_assistant_tool_call_markers(text)
             else:
                 continue
 

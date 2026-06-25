@@ -113,7 +113,7 @@ def test_welcome_banner_includes_version_head_and_updates() -> None:
         model="kimi-for-coding",
         session_id="session-1",
         cwd="/tmp/xerxes",
-        version="0.2.5",
+        version="0.2.6",
         git_status=GitUpdateStatus(
             is_git=True,
             branch="main",
@@ -125,7 +125,7 @@ def test_welcome_banner_includes_version_head_and_updates() -> None:
     )
 
     assert "Version:" in banner
-    assert "v0.2.5" in banner
+    assert "v0.2.6" in banner
     assert "HEAD:" in banner
     assert "abc1234" in banner
     assert "4 ahead available (origin/main def5678)" in banner
@@ -216,6 +216,30 @@ def test_resume_replay_renders_assistant_markdown() -> None:
     assert "**Hello**" not in history
     assert "\x1b[1mHello" in history
     assert "item" in history
+
+
+def test_resume_replay_strips_internal_tool_call_markers() -> None:
+    tui = XerxesTUI()
+    prompt = PersistentPrompt()
+    tui._prompt = prompt
+
+    tui._on_notification(
+        Notification(
+            id="assistant",
+            category="history",
+            type="replay_assistant",
+            body=(
+                "Switching mode.\n"
+                'ASSISTANT_TOOL_CALLS: [{"id":"call_1","name":"SetInteractionModeTool",'
+                '"input":{"mode":"researcher"}}]'
+            ),
+        )
+    )
+
+    history = "\n".join(prompt._status._content_lines)
+    assert "Switching mode." in history
+    assert "ASSISTANT_TOOL_CALLS" not in history
+    assert "SetInteractionModeTool" not in history
 
 
 def test_resume_picker_resolves_enter_and_numbers() -> None:

@@ -243,6 +243,7 @@ class CortexTask:
     _original_expected_output: str | None = None
     _original_output_file: str | None = None
     _original_prompt_context: str | None = None
+    _original_agent_tools: list | None = None
 
     def interpolate_inputs(self, inputs: dict[str, Any]) -> None:
         """Apply ``{var}`` substitutions to description, expected output, etc.
@@ -496,12 +497,17 @@ class CortexTask:
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _apply_tool_restrictions(self):
-        """Filter the agent's tools to only those in ``self.tool_restrictions``."""
+        """Filter the agent's tools to only those in ``self.tool_restrictions``.
+
+        The original tool list is saved in ``self._original_agent_tools``
+        so it can be restored after execution by :meth:`execute`.
+        """
 
         if not self.tool_restrictions:
             return
 
         if self.agent:
+            self._original_agent_tools = list(self.agent.tools)
             allowed_tools = []
             for tool in self.agent.tools:
                 tool_name = tool.__class__.__name__
@@ -612,278 +618,289 @@ class CortexTask:
             self.description[:50] + "..." if len(self.description) > 50 else self.description, self.agent.role
         )
 
-        self._apply_tool_restrictions()
+        # Save original tools before any modifications so they can be
+        # restored after execution (covers both tool_restrictions filtering
+        # and task-tool appending below).
+        self._original_agent_tools = list(self.agent.tools)
 
-        self._execute_callback(self.pre_execution_callback, self)
+        try:
+            self._apply_tool_restrictions()
 
-        self._create_output_directory()
+            self._execute_callback(self.pre_execution_callback, self)
 
-        for tool in self.tools:
-            if tool not in self.agent.tools:
-                self.agent.tools.append(tool)
+            self._create_output_directory()
 
-        context = ""
-        if context_outputs:
-            context = "\n\n".join(context_outputs)
+            for tool in self.tools:
+                if tool not in self.agent.tools:
+                    self.agent.tools.append(tool)
 
-        retries = 0
-        last_error = None
-        start_time = time.time()
-        self._start_time = start_time
+            context = ""
+            if context_outputs:
+                context = "\n\n".join(context_outputs)
 
-        self._execution_stats = {
-            "used_tools": 0,
-            "tools_errors": 0,
-            "delegations": 0,
-            "retry_count": 0,
-        }
+            retries = 0
+            last_error = None
+            start_time = time.time()
+            self._start_time = start_time
 
-        timeout_triggered = False
-        timeout_timer: threading.Timer | None = None
+            self._execution_stats = {
+                "used_tools": 0,
+                "tools_errors": 0,
+                "delegations": 0,
+                "retry_count": 0,
+            }
 
-        if self.timeout:
-            log_warning(
-                f"Task timeout is set to {self.timeout}s, but this is a soft timeout. "
-                "Blocking agent.execute() calls may not be interrupted and could exceed the limit."
-            )
+            timeout_triggered = False
+            timeout_timer: threading.Timer | None = None
 
-            def _on_timeout():
-                nonlocal timeout_triggered
-                timeout_triggered = True
+            if self.timeout:
+                log_warning(
+                    f"Task timeout is set to {self.timeout}s, but this is a soft timeout. "
+                    "Blocking agent.execute() calls may not be interrupted and could exceed the limit."
+                )
 
-            timeout_timer = threading.Timer(self.timeout, _on_timeout)
-            timeout_timer.start()
+                def _on_timeout():
+                    nonlocal timeout_triggered
+                    timeout_triggered = True
 
-        while retries <= self.max_retries:
-            try:
-                if self.timeout and (time.time() - start_time) > self.timeout:
-                    if self.timeout_behavior == "fail":
-                        raise TimeoutError(f"Task timeout after {self.timeout}s")
-                    elif self.timeout_behavior == "continue":
-                        break
+                timeout_timer = threading.Timer(self.timeout, _on_timeout)
+                timeout_timer.start()
 
-                if self.conditional_execution and not self.conditional_execution(self):
-                    return self._create_empty_output("Conditional execution failed")
+            while retries <= self.max_retries:
+                try:
+                    if self.timeout and (time.time() - start_time) > self.timeout:
+                        if self.timeout_behavior == "fail":
+                            raise TimeoutError(f"Task timeout after {self.timeout}s")
+                        elif self.timeout_behavior == "continue":
+                            break
 
-                human_input_text = ""
-                if self.human_input:
-                    human_input_text = self._get_human_input()
+                    if self.conditional_execution and not self.conditional_execution(self):
+                        return self._create_empty_output("Conditional execution failed")
 
-                enhanced_context = self._build_enhanced_context(context, context_outputs, human_input_text)
+                    human_input_text = ""
+                    if self.human_input:
+                        human_input_text = self._get_human_input()
 
-                task_prompt = f"{self.description}\n\nExpected Output: {self.expected_output}"
-                if self.prompt_context:
-                    task_prompt += f"\n\nAdditional Context: {self.prompt_context}"
+                    enhanced_context = self._build_enhanced_context(context, context_outputs, human_input_text)
 
-                if hasattr(self.agent, "_generate_format_guidance") and (self.output_json or self.output_pydantic):
-                    output_model = self.output_json or self.output_pydantic
-                    format_guidance = self.agent._generate_format_guidance(output_model)
-                    if format_guidance:
-                        task_prompt += format_guidance
+                    task_prompt = f"{self.description}\n\nExpected Output: {self.expected_output}"
+                    if self.prompt_context:
+                        task_prompt += f"\n\nAdditional Context: {self.prompt_context}"
 
-                initial_delegations = getattr(self.agent, "_delegation_count", 0)
+                    if hasattr(self.agent, "_generate_format_guidance") and (self.output_json or self.output_pydantic):
+                        output_model = self.output_json or self.output_pydantic
+                        format_guidance = self.agent._generate_format_guidance(output_model)
+                        if format_guidance:
+                            task_prompt += format_guidance
 
-                if use_streaming:
-                    exec_result = self.agent.execute(
-                        task_description=task_prompt,
-                        context=enhanced_context,
-                        use_thread=True,
-                    )
-                    if isinstance(exec_result, str):
-                        from xerxes.types import StreamChunk
+                    initial_delegations = getattr(self.agent, "_delegation_count", 0)
 
-                        buffer = StreamerBuffer()
-                        thread = threading.Thread(target=lambda: None, daemon=True)
-                        buffer.put(
-                            StreamChunk(
-                                chunk=None,
-                                agent_id="cortex",
-                                content=exec_result,
-                                buffered_content=exec_result,
-                                function_calls_detected=False,
-                                reinvoked=False,
-                            )
+                    if use_streaming:
+                        exec_result = self.agent.execute(
+                            task_description=task_prompt,
+                            context=enhanced_context,
+                            use_thread=True,
                         )
+                        if isinstance(exec_result, str):
+                            from xerxes.types import StreamChunk
+
+                            buffer = StreamerBuffer()
+                            thread = threading.Thread(target=lambda: None, daemon=True)
+                            buffer.put(
+                                StreamChunk(
+                                    chunk=None,
+                                    agent_id="cortex",
+                                    content=exec_result,
+                                    buffered_content=exec_result,
+                                    function_calls_detected=False,
+                                    reinvoked=False,
+                                )
+                            )
+                        else:
+                            buffer, thread = exec_result
+
+                        if stream_callback:
+
+                            def process_stream(buffer: StreamerBuffer = buffer) -> None:
+                                """Drain ``buffer`` and dispatch each chunk to ``stream_callback``."""
+                                for chunk in buffer.stream():
+                                    stream_callback(chunk)
+
+                            callback_thread = threading.Thread(target=process_stream, daemon=True)
+                            callback_thread.start()
+
+                        setattr(buffer, "task", self)
+                        setattr(buffer, "agent", self.agent)
+
+                        if timeout_timer is not None:
+                            timeout_timer.cancel()
+
+                        return buffer, thread
+
+                    if self.agent.allow_delegation:
+                        delegated = self.agent.execute_with_delegation(
+                            task_description=task_prompt, context=enhanced_context
+                        )
+                        result = delegated
                     else:
-                        buffer, thread = exec_result
+                        executed = self.agent.execute(task_description=task_prompt, context=enhanced_context)
+                        result = (
+                            executed
+                            if isinstance(executed, str)
+                            else executed[0].get_result(1.0)
+                            if (executed[0].get_result is not None)
+                            else str(executed[0])
+                        )
 
-                    if stream_callback:
+                    if timeout_triggered:
+                        if self.timeout_behavior == "fail":
+                            raise TimeoutError(f"Task timeout after {self.timeout}s")
+                        elif self.timeout_behavior == "continue":
+                            if timeout_timer is not None:
+                                timeout_timer.cancel()
+                            break
 
-                        def process_stream(buffer: StreamerBuffer = buffer) -> None:
-                            """Drain ``buffer`` and dispatch each chunk to ``stream_callback``."""
-                            for chunk in buffer.stream():
-                                stream_callback(chunk)
+                    final_delegations = getattr(self.agent, "_delegation_count", 0)
+                    self._execution_stats["delegations"] = final_delegations - initial_delegations
 
-                        callback_thread = threading.Thread(target=process_stream, daemon=True)
-                        callback_thread.start()
+                    validation_passed = True
+                    pydantic_output = None
+                    validation_results: dict[str, Any] = {}
 
-                    setattr(buffer, "task", self)
-                    setattr(buffer, "agent", self.agent)
+                    if self.output_json or self.output_pydantic:
+                        validation_passed, pydantic_output, validation_results = self._validate_output(result)
+                        if not validation_passed:
+                            if retries < self.max_retries:
+                                retries += 1
+                                self._execution_stats["retry_count"] = retries
+
+                                error_details = []
+                                for key, value in validation_results.items():
+                                    if key.endswith("_error"):
+                                        error_details.append(f"{key}: {value}")
+
+                                error_msg = f"Output validation failed (attempt {retries}/{self.max_retries}): {'; '.join(error_details)}"
+                                log_retry(retries, self.max_retries, error_msg)
+
+                                continue
+                            else:
+                                raise TaskValidationError(f"Output validation failed: {validation_results}")
+
+                    self._output = result
+
+                    if self.output_file:
+                        with open(self.output_file, "w") as f:
+                            f.write(result)
+
+                    if self.human_feedback and os.getenv("ALLOW_HUMAN_FEEDBACK", "0") == "1":
+                        feedback = input("\n💭 Please provide feedback on this output (or press Enter to accept): ")
+                        if feedback:
+                            revised = self.agent.execute(
+                                task_description=(
+                                    f"Revise the following based on feedback:\n{result}\n\nFeedback: {feedback}"
+                                ),
+                                context=enhanced_context,
+                            )
+                            if isinstance(revised, str):
+                                result = revised
+                            self._output = result
+
+                    if self.save_to_memory and self.memory:
+                        self.memory.save_task_result(
+                            task_description=self.description,
+                            result=result,
+                            agent_role=self.agent.role,
+                            importance=self.importance,
+                            task_metadata={
+                                "expected_output": self.expected_output[:100] if self.expected_output else "",
+                                "tools_used": [tool.__class__.__name__ for tool in self.tools],
+                                "had_context": bool(context_outputs),
+                                "had_human_input": self.human_input,
+                                "validation_applied": bool(self.output_json or self.output_pydantic),
+                            },
+                        )
+
+                    execution_time = time.time() - start_time
+
+                    task_output = CortexTaskOutput(
+                        task=self,
+                        output=result,
+                        agent=self.agent,
+                        timestamp=start_time,
+                        raw_output=result,
+                        execution_time=execution_time,
+                        used_tools=self._execution_stats.get("used_tools", 0),
+                        tools_errors=self._execution_stats.get("tools_errors", 0),
+                        delegations=self._execution_stats.get("delegations", 0),
+                        retry_count=self._execution_stats.get("retry_count", 0),
+                        validation_results=validation_results,
+                        pydantic_output=pydantic_output,
+                        execution_metadata={
+                            "had_human_input": self.human_input,
+                            "had_dependencies": bool(self.dependencies),
+                            "security_applied": bool(self.tool_restrictions),
+                            "validation_applied": bool(self.output_json or self.output_pydantic),
+                        },
+                        performance_metrics={"avg_execution_time": execution_time, "total_retries": retries},
+                    )
+
+                    try:
+                        task_output.json_dict = json.loads(result)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                    self._execute_callback(self.callback, task_output, self)
+
+                    log_task_complete(
+                        self.description[:50] + "..." if len(self.description) > 50 else self.description, execution_time
+                    )
 
                     if timeout_timer is not None:
                         timeout_timer.cancel()
 
-                    return buffer, thread
+                    return task_output
 
-                if self.agent.allow_delegation:
-                    delegated = self.agent.execute_with_delegation(
-                        task_description=task_prompt, context=enhanced_context
-                    )
-                    result = delegated
-                else:
-                    executed = self.agent.execute(task_description=task_prompt, context=enhanced_context)
-                    result = (
-                        executed
-                        if isinstance(executed, str)
-                        else executed[0].get_result(1.0)
-                        if (executed[0].get_result is not None)
-                        else str(executed[0])
-                    )
+                except Exception as e:
+                    last_error = e
+                    self._execution_stats["tools_errors"] += 1
 
-                if timeout_triggered:
-                    if self.timeout_behavior == "fail":
-                        raise TimeoutError(f"Task timeout after {self.timeout}s")
-                    elif self.timeout_behavior == "continue":
-                        if timeout_timer is not None:
-                            timeout_timer.cancel()
+                    self._execute_callback(self.error_callback, e, self)
+
+                    if self._should_retry(e, retries):
+                        retries += 1
+                        self._execution_stats["retry_count"] = retries
+                        log_retry(retries, self.max_retries, str(e))
+                        if retries < self.max_retries:
+                            log_warning("Retrying in 5 seconds...")
+
+                        time.sleep(5)
+                    else:
+                        log_error(f"Task failed after all retries: {e!s}")
                         break
 
-                final_delegations = getattr(self.agent, "_delegation_count", 0)
-                self._execution_stats["delegations"] = final_delegations - initial_delegations
+            if timeout_timer is not None:
+                timeout_timer.cancel()
 
-                validation_passed = True
-                pydantic_output = None
-                validation_results: dict[str, Any] = {}
+            execution_time = time.time() - start_time
+            failure_output = CortexTaskOutput(
+                task=self,
+                output=f"Task failed after {retries} retries: {last_error}",
+                agent=self.agent,
+                timestamp=start_time,
+                execution_time=execution_time,
+                retry_count=retries,
+                execution_metadata={"failed": True, "last_error": str(last_error)},
+            )
 
-                if self.output_json or self.output_pydantic:
-                    validation_passed, pydantic_output, validation_results = self._validate_output(result)
-                    if not validation_passed:
-                        if retries < self.max_retries:
-                            retries += 1
-                            self._execution_stats["retry_count"] = retries
-
-                            error_details = []
-                            for key, value in validation_results.items():
-                                if key.endswith("_error"):
-                                    error_details.append(f"{key}: {value}")
-
-                            error_msg = f"Output validation failed (attempt {retries}/{self.max_retries}): {'; '.join(error_details)}"
-                            log_retry(retries, self.max_retries, error_msg)
-
-                            continue
-                        else:
-                            raise TaskValidationError(f"Output validation failed: {validation_results}")
-
-                self._output = result
-
-                if self.output_file:
-                    with open(self.output_file, "w") as f:
-                        f.write(result)
-
-                if self.human_feedback and os.getenv("ALLOW_HUMAN_FEEDBACK", "0") == "1":
-                    feedback = input("\n💭 Please provide feedback on this output (or press Enter to accept): ")
-                    if feedback:
-                        revised = self.agent.execute(
-                            task_description=(
-                                f"Revise the following based on feedback:\n{result}\n\nFeedback: {feedback}"
-                            ),
-                            context=enhanced_context,
-                        )
-                        if isinstance(revised, str):
-                            result = revised
-                        self._output = result
-
-                if self.save_to_memory and self.memory:
-                    self.memory.save_task_result(
-                        task_description=self.description,
-                        result=result,
-                        agent_role=self.agent.role,
-                        importance=self.importance,
-                        task_metadata={
-                            "expected_output": self.expected_output[:100] if self.expected_output else "",
-                            "tools_used": [tool.__class__.__name__ for tool in self.tools],
-                            "had_context": bool(context_outputs),
-                            "had_human_input": self.human_input,
-                            "validation_applied": bool(self.output_json or self.output_pydantic),
-                        },
-                    )
-
-                execution_time = time.time() - start_time
-
-                task_output = CortexTaskOutput(
-                    task=self,
-                    output=result,
-                    agent=self.agent,
-                    timestamp=start_time,
-                    raw_output=result,
-                    execution_time=execution_time,
-                    used_tools=self._execution_stats.get("used_tools", 0),
-                    tools_errors=self._execution_stats.get("tools_errors", 0),
-                    delegations=self._execution_stats.get("delegations", 0),
-                    retry_count=self._execution_stats.get("retry_count", 0),
-                    validation_results=validation_results,
-                    pydantic_output=pydantic_output,
-                    execution_metadata={
-                        "had_human_input": self.human_input,
-                        "had_dependencies": bool(self.dependencies),
-                        "security_applied": bool(self.tool_restrictions),
-                        "validation_applied": bool(self.output_json or self.output_pydantic),
-                    },
-                    performance_metrics={"avg_execution_time": execution_time, "total_retries": retries},
-                )
-
-                try:
-                    task_output.json_dict = json.loads(result)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-                self._execute_callback(self.callback, task_output, self)
-
-                log_task_complete(
-                    self.description[:50] + "..." if len(self.description) > 50 else self.description, execution_time
-                )
-
-                if timeout_timer is not None:
-                    timeout_timer.cancel()
-
-                return task_output
-
-            except Exception as e:
-                last_error = e
-                self._execution_stats["tools_errors"] += 1
-
-                self._execute_callback(self.error_callback, e, self)
-
-                if self._should_retry(e, retries):
-                    retries += 1
-                    self._execution_stats["retry_count"] = retries
-                    log_retry(retries, self.max_retries, str(e))
-                    if retries < self.max_retries:
-                        log_warning("Retrying in 5 seconds...")
-
-                    time.sleep(5)
-                else:
-                    log_error(f"Task failed after all retries: {e!s}")
-                    break
-
-        if timeout_timer is not None:
-            timeout_timer.cancel()
-
-        execution_time = time.time() - start_time
-        failure_output = CortexTaskOutput(
-            task=self,
-            output=f"Task failed after {retries} retries: {last_error}",
-            agent=self.agent,
-            timestamp=start_time,
-            execution_time=execution_time,
-            retry_count=retries,
-            execution_metadata={"failed": True, "last_error": str(last_error)},
-        )
-
-        if self.timeout_behavior == "return_partial":
-            return failure_output
-        else:
-            raise Exception(f"Task failed after {retries} retries: {last_error}")
+            if self.timeout_behavior == "return_partial":
+                return failure_output
+            else:
+                raise Exception(f"Task failed after {retries} retries: {last_error}")
+        finally:
+            # Restore the agent's original tool list after execution,
+            # undoing both tool_restrictions filtering and task-tool appends.
+            if self._original_agent_tools is not None and self.agent is not None:
+                self.agent.tools = self._original_agent_tools
 
     def get_execution_stats(self) -> dict:
         """Return a shallow copy of the running per-execution counters."""

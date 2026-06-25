@@ -190,6 +190,42 @@ def test_await_agents_wake_on_all_waits_for_everyone(mgr):
     assert statuses["slow"] == "completed"
 
 
+def test_await_agents_accepts_python_tuple_string_for_completed_names(mgr):
+    first = _spawn_stub(mgr, name="tuple-a", runtime_seconds=0.01)
+    second = _spawn_stub(mgr, name="tuple-b", runtime_seconds=0.01)
+    mgr.wait(first.id, timeout=2.0)
+    mgr.wait(second.id, timeout=2.0)
+
+    out = AwaitAgents.static_call(
+        agent_ids="('tuple-a', 'tuple-b')",
+        wake_on="all",
+        timeout_seconds=5.0,
+    )
+
+    payload = json.loads(out)
+    assert payload["wake_reason"] == "agents_done"
+    assert payload["elapsed_seconds"] < 1.0
+    assert {agent["name"] for agent in payload["agents"]} == {"tuple-a", "tuple-b"}
+
+
+def test_await_agents_accepts_comma_separated_names(mgr):
+    first = _spawn_stub(mgr, name="comma-a", runtime_seconds=0.01)
+    second = _spawn_stub(mgr, name="comma-b", runtime_seconds=0.01)
+    mgr.wait(first.id, timeout=2.0)
+    mgr.wait(second.id, timeout=2.0)
+
+    out = AwaitAgents.static_call(
+        agent_ids="comma-a, comma-b",
+        wake_on="all",
+        timeout_seconds=5.0,
+    )
+
+    payload = json.loads(out)
+    assert payload["wake_reason"] == "agents_done"
+    assert payload["elapsed_seconds"] < 1.0
+    assert {agent["name"] for agent in payload["agents"]} == {"comma-a", "comma-b"}
+
+
 def test_await_agents_wakes_on_user_input(mgr):
     """A pending steer in the session must shortcut the sleep."""
 

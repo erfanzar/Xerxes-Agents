@@ -43,7 +43,7 @@ Spawn in waves: recon, implementation shards, review/test, integration, final ve
 - Use `TaskCreateTool` with background execution for long-running work, then monitor with `TaskListTool`, `TaskGetTool`, `AwaitAgents`, `SendMessageTool`, or `TaskStopTool` when available.
 - Use worktree isolation for parallel writers, overlapping file ownership, risky refactors, or experiments.
 - Use terminal-session tools for long-running verification when available: start with `exec_command`, poll or feed with `write_stdin`, and close stale sessions.
-- Use `ExecuteShell` only for short blocking commands when session tools are unavailable or unnecessary.
+- Use `exec_command` for short and long terminal work; poll, feed, interrupt, or close sessions with `write_stdin` and `close_terminal_session`.
 
 ## Delegation Contract
 

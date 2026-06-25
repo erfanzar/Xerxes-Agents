@@ -31,7 +31,30 @@ import logging
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
+from xerxes.runtime.arg_validation import validate_and_format_error
+
 logger = logging.getLogger(__name__)
+
+_TERMINAL_OPERATOR_TOOLS = {
+    "exec_command",
+    "write_stdin",
+    "list_terminal_sessions",
+    "close_terminal_session",
+}
+
+
+def _register_terminal_operator_tools(registry: Any) -> Any:
+    """Attach PTY terminal tools to a registry used outside the daemon."""
+    from xerxes.operators import OperatorRuntimeConfig, OperatorState
+
+    operator_state = OperatorState(
+        OperatorRuntimeConfig(
+            enabled=True,
+            power_tools_enabled=True,
+            allowed_tool_names=set(_TERMINAL_OPERATOR_TOOLS),
+        )
+    )
+    return register_operator_tools(registry, operator_state, set(_TERMINAL_OPERATOR_TOOLS))
 
 
 def _runtime_context(
@@ -317,6 +340,7 @@ def _normalise_explicit_tool_schema(
     *,
     fallback_name: str,
     fallback_description: str,
+    fallback_input_schema: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the runtime's Anthropic-style schema from supported tool shapes."""
 
@@ -334,6 +358,7 @@ def _normalise_explicit_tool_schema(
     normalised_input.setdefault("type", "object")
     normalised_input.setdefault("properties", {})
     normalised_input.setdefault("required", [])
+    _merge_signature_input_schema(normalised_input, fallback_input_schema)
 
     return {
         "name": schema.get("name") or fallback_name,
@@ -355,6 +380,91 @@ def _explicit_schema_from_tool(tool_obj: Any, handler: Any) -> dict[str, Any] | 
             if isinstance(schema, dict):
                 return schema
     return None
+
+
+def _input_schema_from_tool_schema(schema: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Extract a runtime input schema from supported tool schema shapes."""
+
+    if not isinstance(schema, dict):
+        return None
+    if isinstance(schema.get("input_schema"), dict):
+        return schema["input_schema"]
+    if isinstance(schema.get("parameters"), dict):
+        return schema["parameters"]
+    function_schema = schema.get("function")
+    if isinstance(function_schema, dict):
+        return _input_schema_from_tool_schema(function_schema)
+    return None
+
+
+def _signature_input_schema(handler: Any) -> dict[str, Any]:
+    """Build an input schema from a callable signature."""
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    if handler is None:
+        return schema
+
+    try:
+        sig = inspect.signature(handler)
+    except (ValueError, TypeError):
+        return schema
+    try:
+        resolved_hints = get_type_hints(handler)
+    except Exception:
+        resolved_hints = {}
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for param_name, param in sig.parameters.items():
+        if param_name in ("self", "cls", "context_variables") or param_name.startswith("_"):
+            continue
+        if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
+            continue
+
+        annotation = resolved_hints.get(param_name, param.annotation)
+        prop = _json_schema_for_annotation(annotation)
+        if param.default is not inspect.Parameter.empty:
+            prop["default"] = _json_schema_default(param.default)
+        else:
+            required.append(param_name)
+        properties[param_name] = prop
+
+    schema["properties"] = properties
+    schema["required"] = required
+    return schema
+
+
+def _merge_signature_input_schema(target: dict[str, Any], signature_schema: dict[str, Any] | None) -> None:
+    """Fill missing explicit schema fields from a signature-derived schema."""
+
+    if not signature_schema:
+        return
+
+    target_properties = target.setdefault("properties", {})
+    if not isinstance(target_properties, dict):
+        target_properties = {}
+        target["properties"] = target_properties
+
+    for name, prop in signature_schema.get("properties", {}).items():
+        if name not in target_properties:
+            target_properties[name] = prop
+            continue
+        existing = target_properties[name]
+        if isinstance(existing, dict):
+            for key, value in prop.items():
+                existing.setdefault(key, value)
+
+    target_required = target.setdefault("required", [])
+    if not isinstance(target_required, list):
+        target_required = []
+        target["required"] = target_required
+    for name in signature_schema.get("required", []):
+        if name not in target_required:
+            target_required.append(name)
 
 
 def _json_schema_default(value: Any) -> Any:
@@ -422,56 +532,20 @@ def _build_tool_schema(
     """
 
     explicit_schema = _explicit_schema_from_tool(tool_obj, handler)
+    signature_schema = _signature_input_schema(handler)
     if explicit_schema is not None:
         return _normalise_explicit_tool_schema(
             explicit_schema,
             fallback_name=name,
             fallback_description=description,
+            fallback_input_schema=signature_schema,
         )
 
     schema: dict[str, Any] = {
         "name": name,
         "description": description or f"Execute {name}",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
+        "input_schema": signature_schema,
     }
-
-    if handler is None:
-        return schema
-
-    try:
-        sig = inspect.signature(handler)
-    except (ValueError, TypeError):
-        return schema
-    try:
-        resolved_hints = get_type_hints(handler)
-    except Exception:
-        resolved_hints = {}
-
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-
-    for param_name, param in sig.parameters.items():
-        if param_name in ("self", "cls", "context_variables") or param_name.startswith("_"):
-            continue
-        if param.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL):
-            continue
-
-        annotation = resolved_hints.get(param_name, param.annotation)
-        prop = _json_schema_for_annotation(annotation)
-
-        if param.default is not inspect.Parameter.empty:
-            prop["default"] = _json_schema_default(param.default)
-        else:
-            required.append(param_name)
-
-        properties[param_name] = prop
-
-    schema["input_schema"]["properties"] = properties
-    schema["input_schema"]["required"] = required
 
     return schema
 
@@ -495,6 +569,13 @@ def build_tool_executor(
             entry = registry.get_tool(tool_name)
             if entry is not None and entry.handler is not None:
                 try:
+                    error = validate_and_format_error(
+                        tool_name,
+                        tool_input,
+                        _input_schema_from_tool_schema(entry.schema),
+                    )
+                    if error:
+                        return f"Error: {error}"
                     result = _call_tool_handler(
                         entry.handler,
                         tool_input,
@@ -565,7 +646,7 @@ def create_query_engine(
 
     from xerxes.runtime.query_engine import QueryEngine
 
-    registry = populate_registry()
+    registry = _register_terminal_operator_tools(populate_registry())
     tool_executor = build_tool_executor(
         xerxes_instance=xerxes_instance,
         agent=agent,
@@ -610,7 +691,7 @@ def bootstrap_xerxes(
         extra_context=extra_context,
     )
 
-    populate_registry(result.registry)
+    _register_terminal_operator_tools(populate_registry(result.registry))
 
     return result
 

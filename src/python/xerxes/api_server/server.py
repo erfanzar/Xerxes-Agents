@@ -117,6 +117,14 @@ class XerxesAPIServer:
                         return Response("Bad Request", status_code=400)
                     if length > _max_body_bytes:
                         return Response("Request body too large", status_code=413)
+                elif request.method in ("POST", "PUT", "PATCH"):
+                    # No content-length header (e.g. chunked transfer encoding).
+                    # Read the body and check its actual size.
+                    body = await request.body()
+                    if len(body) > _max_body_bytes:
+                        return Response("Request body too large", status_code=413)
+                    # Re-inject the body so downstream handlers can read it.
+                    request._body = body
                 return await call_next(request)
 
         self.app.add_middleware(ContentLengthLimitMiddleware)
@@ -129,6 +137,7 @@ class XerxesAPIServer:
                 super().__init__(app)
                 self.requests_per_minute = requests_per_minute
                 self._store: dict[str, list[float]] = {}
+                self._request_counter = 0
 
             async def dispatch(self, request: Request, call_next):
                 xff = request.headers.get("x-forwarded-for")
@@ -143,6 +152,19 @@ class XerxesAPIServer:
                 if len(self._store[client]) >= self.requests_per_minute:
                     return Response("Rate limit exceeded", status_code=429)
                 self._store[client].append(now)
+
+                # Periodic cleanup of stale entries every 100 requests
+                self._request_counter += 1
+                if self._request_counter >= 100:
+                    self._request_counter = 0
+                    stale_keys = [
+                        key
+                        for key, timestamps in self._store.items()
+                        if not timestamps or all(now - t >= window for t in timestamps)
+                    ]
+                    for key in stale_keys:
+                        del self._store[key]
+
                 return await call_next(request)
 
         self.app.add_middleware(RateLimitMiddleware, requests_per_minute=_rpm)
@@ -195,7 +217,8 @@ class XerxesAPIServer:
 
         self.xerxes.register_agent(agent)
         agent_key = agent.id or agent.name or agent.model
-        assert agent_key is not None
+        if agent_key is None:
+            raise ValueError("Agent must have id, name, or model")
         self.agents[agent_key] = agent
 
         if not self._routers_initialized:

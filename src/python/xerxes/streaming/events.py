@@ -95,6 +95,25 @@ class ThinkingChunk:
 
 
 @dataclass
+class ProviderRetry:
+    """Provider retry notice that must not enter assistant-visible text.
+
+    Attributes:
+        error: Provider or transport error text.
+        attempt: Retry attempt number, starting at one.
+        max_attempts: Total retry attempts configured for this request.
+        delay: Seconds until the next attempt; zero when ``final`` is true.
+        final: True when all retry attempts were exhausted.
+    """
+
+    error: str
+    attempt: int
+    max_attempts: int
+    delay: int = 0
+    final: bool = False
+
+
+@dataclass
 class ToolStart:
     """Signals that a tool call is about to execute.
 
@@ -193,11 +212,14 @@ class SkillSuggestion:
     unique_tools: list[str] = field(default_factory=list)
 
 
-StreamEvent = TextChunk | ThinkingChunk | ToolStart | ToolEnd | PermissionRequest | TurnDone | SkillSuggestion
+StreamEvent = (
+    TextChunk | ThinkingChunk | ProviderRetry | ToolStart | ToolEnd | PermissionRequest | TurnDone | SkillSuggestion
+)
 
 __all__ = [
     "AgentState",
     "PermissionRequest",
+    "ProviderRetry",
     "SkillSuggestion",
     "StreamEvent",
     "TextChunk",

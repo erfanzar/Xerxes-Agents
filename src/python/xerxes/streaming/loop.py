@@ -34,6 +34,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Generator
@@ -44,6 +46,7 @@ from ..context.compaction_provisioner import (
     CompactionProvisioner,
     compaction_summary_agent_from_config,
 )
+from ..context.headroom import DEFAULT_HEADROOM_PREVIEW_CHARS, compress_tool_result
 from ..context.window_usage import estimate_request_overhead_tokens
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
@@ -53,6 +56,7 @@ from ..runtime.workflow_memory import capture_user_workflow_memory
 from .events import (
     AgentState,
     PermissionRequest,
+    ProviderRetry,
     SkillSuggestion,
     StreamEvent,
     TextChunk,
@@ -72,6 +76,7 @@ from .prompt_caching import (
     wrap_system_with_cache,
     wrap_tools_with_cache,
 )
+from .tool_markers import extract_assistant_tool_call_markers
 
 
 class _ThinkingParser:
@@ -451,6 +456,53 @@ def _provision_context_window(
 LLM_STREAM_RETRY_DELAYS = (5, 5, 5, 5, 5, 5)
 
 _DEFAULT_TOOL_RESULT_SPILL_CHARS = 30_000
+_DEFAULT_TOOL_RESULT_HEADROOM_CHARS = DEFAULT_HEADROOM_PREVIEW_CHARS
+_CLAUDE_CODE_LEGACY_SHELL_TOOL_NAME = "".join(("Execute", "Shell"))
+_CLAUDE_CODE_NATIVE_TOOL_NAMES = (
+    "Bash",
+    "BashOutput",
+    "Edit",
+    _CLAUDE_CODE_LEGACY_SHELL_TOOL_NAME,
+    "ExitPlanMode",
+    "Glob",
+    "Grep",
+    "KillBash",
+    "LS",
+    "MultiEdit",
+    "NotebookEdit",
+    "NotebookRead",
+    "Read",
+    "SlashCommand",
+    "Task",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "Write",
+)
+_CLAUDE_CODE_CLI_DISALLOWED_TOOL_NAMES = (
+    "Bash",
+    "BashOutput",
+    "Edit",
+    _CLAUDE_CODE_LEGACY_SHELL_TOOL_NAME,
+    "ExitPlanMode",
+    "Glob",
+    "Grep",
+    "KillBash",
+    "LS",
+    "MultiEdit",
+    "NotebookEdit",
+    "NotebookRead",
+    "Read",
+    "Task",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "Write",
+)
+_CLAUDE_CODE_NATIVE_TOOL_KEYS = frozenset(
+    re.sub(r"[^a-z0-9]+", "", name.lower()) for name in _CLAUDE_CODE_NATIVE_TOOL_NAMES
+)
+_CLAUDE_CODE_NATIVE_TOOL_DENY_ARG = ",".join(_CLAUDE_CODE_CLI_DISALLOWED_TOOL_NAMES)
 
 
 def _session_token_budget(config: dict[str, Any]) -> int | None:
@@ -532,8 +584,8 @@ def _spill_tool_result_to_project_memory(
     """Save an oversized tool result and return a compact pointer for context.
 
     The full result is preserved in project agent memory. The message returned
-    to the provider contains a memory path and, when available, an agent-written
-    summary instead of a lossy head/tail clamp.
+    to the provider contains a memory path plus a deterministic Headroom-style
+    preview, and may also include an agent-written summary.
     """
     limit = int(config.get("tool_result_spill_chars") or _DEFAULT_TOOL_RESULT_SPILL_CHARS)
     if not isinstance(result, str) or len(result) <= limit:
@@ -577,11 +629,15 @@ def _spill_tool_result_to_project_memory(
         except Exception as exc:
             summary_error = str(exc)
 
+    headroom_limit = int(config.get("tool_result_headroom_chars") or _DEFAULT_TOOL_RESULT_HEADROOM_CHARS)
+    headroom = compress_tool_result(tool_name, result, max_chars=headroom_limit)
+
     lines = [
         "[Large tool result stored outside model context]",
         f"- Tool: `{tool_name}`",
         f"- Tool call id: `{tool_call_id}`",
         f"- Original size: {len(result):,} characters",
+        f"- Headroom: {headroom.metadata_line()}",
     ]
     if saved:
         lines.append(f"- Full result: project agent memory `{memory_path}`")
@@ -593,9 +649,8 @@ def _spill_tool_result_to_project_memory(
     if summary:
         lines.extend(["", "## Agent-written compact summary", summary])
     elif summary_error:
-        lines.append(f"- Summary unavailable: {summary_error}")
-    else:
-        lines.append("- Summary unavailable: no compaction agent configured.")
+        lines.append(f"- Agent summary unavailable: {summary_error}")
+    lines.extend(["", "## Built-in headroom preview", headroom.compressed])
     return "\n".join(lines)
 
 
@@ -773,6 +828,7 @@ def run(
 
     config = dict(config)
     state.metadata["model"] = config.get("model", "")
+    state.metadata.pop("last_connection_failure", None)
     _capture_runtime_workflow_memory(user_message, config=config, depth=depth)
 
     perm_mode = PermissionMode(config.get("permission_mode", "accept-all"))
@@ -957,8 +1013,11 @@ def run(
                         e,
                         delay,
                     )
-                    yield TextChunk(
-                        f"\n[Error: the response was interrupted: {e}. Retrying in {delay}s... ({_retry_attempt + 1}/{_MAX_RETRIES})]"
+                    yield ProviderRetry(
+                        error=str(e),
+                        attempt=_retry_attempt + 1,
+                        max_attempts=_MAX_RETRIES,
+                        delay=delay,
                     )
                     time.sleep(delay)
                     _retry_attempt += 1
@@ -972,6 +1031,39 @@ def run(
                 if isinstance(sub, ThinkingChunk):
                     thinking_text += sub.text
                     yield sub
+            if not _is_context_limit_error(_last_error):
+                if not text and not thinking_text and state.messages and state.messages[-1].get("role") == "user":
+                    content = state.messages[-1].get("content")
+                    if content == user_message:
+                        state.messages.pop()
+                state.metadata["last_connection_failure"] = {
+                    "user_message": user_message,
+                    "error": str(_last_error),
+                    "model": model,
+                    "turn_count": state.turn_count,
+                }
+                yield ProviderRetry(
+                    error=str(_last_error),
+                    attempt=_MAX_RETRIES,
+                    max_attempts=_MAX_RETRIES,
+                    final=True,
+                )
+                if text or thinking_text:
+                    msg_partial: dict[str, Any] = {"role": "assistant", "content": text, "tool_calls": []}
+                    if thinking_text:
+                        msg_partial["thinking"] = thinking_text
+                        if thinking_signature:
+                            msg_partial["thinking_signature"] = thinking_signature
+                    state.messages.append(msg_partial)
+                    if thinking_text:
+                        state.thinking_content.append(thinking_text)
+                yield TurnDone(
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    tool_calls_count=0,
+                    model=model,
+                )
+                return
             err_note = f"[Error: the response was interrupted: {_last_error}]"
             combined = (f"{text}\n\n{err_note}" if text else err_note).strip()
             msg_err: dict[str, Any] = {"role": "assistant", "content": combined, "tool_calls": []}
@@ -1340,10 +1432,304 @@ def _stream_llm(
     else:
         model_name = provider_model(model, provider_name)
 
-    if provider_type == "anthropic":
+    if provider_type == "claude-code":
+        yield from _stream_claude_code_cli(model_name, system, messages, tool_schemas, config)
+    elif provider_type == "anthropic":
         yield from _stream_anthropic(model_name, system, messages, tool_schemas, config, provider_name)
     else:
         yield from _stream_openai_compat(model_name, system, messages, tool_schemas, config, provider_name)
+
+
+def _claude_code_command(model: str, config: dict[str, Any]) -> list[str]:
+    """Build the local Claude Code CLI command for provider-mode calls."""
+    command = str(config.get("claude_code_command") or os.environ.get("CLAUDE_CODE_CLI") or "claude")
+    model = model.strip()
+    argv = [
+        command,
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--disable-slash-commands",
+        "--tools",
+        "",
+        "--disallowedTools",
+        _CLAUDE_CODE_NATIVE_TOOL_DENY_ARG,
+    ]
+    if model and model not in {"default", "auto"}:
+        argv.extend(["--model", model])
+    effort = str(config.get("reasoning_effort") or "").strip().lower()
+    if bool(config.get("thinking")) and effort and effort != "off":
+        argv.extend(["--effort", effort])
+    return argv
+
+
+def _claude_code_env(config: dict[str, Any]) -> dict[str, str]:
+    """Return environment for Claude Code subscription-mode subprocesses."""
+    env = os.environ.copy()
+    use_api_env = bool(config.get("claude_code_use_api_env")) or os.environ.get("XERXES_CLAUDE_CODE_USE_API_ENV") == "1"
+    if not use_api_env:
+        for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN"):
+            env.pop(key, None)
+    return env
+
+
+def _claude_code_auth_hint(text: str, model: str = "") -> str:
+    """Append a focused hint for Claude Code auth failures."""
+    lower = text.lower()
+    if "invalid authentication credentials" not in lower and "failed to authenticate" not in lower:
+        return text
+    clean_model = model.strip()
+    keys = [key for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "ANTHROPIC_AUTH_TOKEN") if os.environ.get(key)]
+    if keys:
+        joined = ", ".join(keys)
+        return (
+            f"{text}\n\n"
+            "Claude Code auth hint: your shell has "
+            f"{joined} set. Claude reports those as API-key auth instead of the claude.ai subscription. "
+            "Unset them and restart the daemon with `uv run xerxes --refresh`, then launch Xerxes again. "
+            "If the raw `claude -p` command still 401s after that, refresh Claude Code login with `claude auth login`."
+        )
+    if clean_model and clean_model not in {"default", "auto"}:
+        return (
+            f"{text}\n\n"
+            f"Claude Code auth hint: raw Claude Code rejected the explicit model override `{clean_model}` with 401. "
+            "This happened outside Xerxes too. Use `/model claude-code/default` to let Claude Code choose from "
+            "its local config, or set a model id that your Claude Code login can run directly."
+        )
+    return (
+        f"{text}\n\n"
+        "Claude Code auth hint: raw Claude Code returned a 401 even without Anthropic API env vars. "
+        "Refresh the local Claude Code login with `claude auth login`, then restart Xerxes with `uv run xerxes --refresh`."
+    )
+
+
+def _stringify_claude_code_content(content: Any) -> str:
+    """Return a readable text form for a message content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if text:
+                    parts.append(str(text))
+                else:
+                    parts.append(json.dumps(item, ensure_ascii=False, default=str))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return json.dumps(content, ensure_ascii=False, default=str)
+
+
+def _claude_code_prompt(
+    system: str,
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+) -> str:
+    """Render Xerxes messages into the plain prompt Claude Code print mode accepts."""
+    parts: list[str] = []
+    if system:
+        parts.append(f"# System\n{system.strip()}")
+    if tool_schemas:
+        tools = [
+            {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "input_schema": tool.get("input_schema", {}),
+            }
+            for tool in tool_schemas
+        ]
+        parts.append(
+            "# Xerxes Tool Calling\n"
+            "You are running as a Xerxes model provider, not as the Claude Code agent runtime. "
+            "Native Claude Code tools are disabled and ignored. "
+            f"Never call Bash, {_CLAUDE_CODE_LEGACY_SHELL_TOOL_NAME}, Read, Write, Edit, Grep, Glob, Task, "
+            "TodoWrite, or other Claude Code-native tools. "
+            "For shell work use Xerxes `exec_command`; poll, interrupt, or send input with `write_stdin`. "
+            "When you need a Xerxes tool, output exactly one or more calls in this format and no markdown fence:\n"
+            '<function=ToolName>{"arg":"value"}</function>\n'
+            "After Xerxes executes the tool, the tool result will appear in the next message.\n"
+            f"Available Xerxes tools:\n{json.dumps(tools, ensure_ascii=False, default=str)}"
+        )
+
+    rendered: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = _stringify_claude_code_content(message.get("content"))
+        rendered.append(f"{role.upper()}:\n{content}".rstrip())
+        if message.get("tool_calls"):
+            rendered.append(
+                "ASSISTANT_TOOL_CALLS:\n" + json.dumps(message.get("tool_calls"), ensure_ascii=False, default=str)
+            )
+        if message.get("tool_call_id"):
+            rendered.append(f"TOOL_CALL_ID: {message.get('tool_call_id')}")
+    if rendered:
+        parts.append("# Conversation\n" + "\n\n".join(rendered))
+    return "\n\n".join(parts).strip()
+
+
+def _claude_code_text_from_event(event: dict[str, Any]) -> str:
+    """Extract assistant text from a Claude Code stream-json event."""
+    event_type = str(event.get("type", "")).lower()
+    if "thinking" in event_type or "tool" in event_type:
+        return ""
+
+    if isinstance(event.get("delta"), dict):
+        delta = event["delta"]
+        text = delta.get("text") or delta.get("content")
+        if isinstance(text, str):
+            return text
+    if isinstance(event.get("content"), str):
+        return event["content"]
+
+    message = event.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text" and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+            return "".join(parts)
+
+    result = event.get("result")
+    if isinstance(result, str):
+        return result
+    return ""
+
+
+def _strip_function_blocks(text: str) -> str:
+    """Remove inline function-call blocks from assistant-visible text."""
+    return re.sub(r"<function=[^>]+>.*?</function>", "", text, flags=re.S).strip()
+
+
+def _parse_function_blocks(text: str) -> list[dict[str, Any]]:
+    """Parse ``<function=name>{json}</function>`` blocks into Xerxes tool calls."""
+    from xerxes.streaming.parsers.common import LlamaParser
+
+    calls = []
+    for index, call in enumerate(LlamaParser().parse(text)):
+        calls.append(
+            {
+                "id": call.raw_id or f"call_cc_{index}",
+                "name": call.name,
+                "input": call.arguments,
+            }
+        )
+    return calls
+
+
+def _is_claude_code_native_tool_name(name: str) -> bool:
+    """Return true for Claude Code-native tools that provider mode must ignore."""
+    key = re.sub(r"[^a-z0-9]+", "", name.lower())
+    return key in _CLAUDE_CODE_NATIVE_TOOL_KEYS
+
+
+def _filter_claude_code_provider_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop Claude Code-native tool calls before they reach Xerxes execution."""
+    filtered: list[dict[str, Any]] = []
+    removed: list[str] = []
+    for tool_call in tool_calls:
+        name = str(tool_call.get("name") or "")
+        if _is_claude_code_native_tool_name(name):
+            removed.append(name)
+            continue
+        filtered.append(tool_call)
+    if removed:
+        logger.warning("Ignored Claude Code-native provider tool calls: %s", ", ".join(removed))
+    return filtered
+
+
+def _stream_claude_code_cli(
+    model: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> Generator[TextChunk | ThinkingChunk | dict[str, Any], None, None]:
+    """Stream one provider-mode response through the local Claude Code CLI."""
+    argv = _claude_code_command(model, config)
+    executable = argv[0]
+    resolved = executable if os.path.sep in executable else shutil.which(executable)
+    if not resolved:
+        yield TextChunk(
+            "[Error: Claude Code CLI is not installed. Install it with `xerxes install --cloud-code`, "
+            "then run `claude auth login`. If Claude Code is installed in a custom location, set "
+            "CLAUDE_CODE_CLI to the executable path.]"
+        )
+        yield {"tool_calls": [], "in_tokens": 0, "out_tokens": 0}
+        return
+    argv[0] = resolved
+
+    prompt = _claude_code_prompt(system, messages, tool_schemas)
+    cwd = str(config.get("project_dir") or os.getcwd())
+    text_parts: list[str] = []
+    result_text = ""
+
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_claude_code_env(config),
+    )
+    assert proc.stdin is not None
+    proc.stdin.write(prompt)
+    proc.stdin.close()
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            result_text += line + "\n"
+            continue
+        chunk_text = _claude_code_text_from_event(event)
+        if not chunk_text:
+            continue
+        if event.get("type") == "result":
+            result_text = chunk_text
+            continue
+        text_parts.append(chunk_text)
+
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    return_code = proc.wait()
+    raw_text = "".join(text_parts) or result_text
+    if return_code != 0 and not raw_text.strip():
+        error = _claude_code_auth_hint(stderr.strip() or f"Claude Code exited with status {return_code}", model)
+        yield TextChunk(f"[Error: Claude Code provider failed: {error}]")
+        yield {"tool_calls": [], "in_tokens": 0, "out_tokens": 0}
+        return
+
+    clean_text, marker_tool_calls = extract_assistant_tool_call_markers(raw_text, id_prefix="call_cc")
+    tool_calls = _filter_claude_code_provider_tool_calls([*_parse_function_blocks(clean_text), *marker_tool_calls])
+    visible_text = _claude_code_auth_hint(_strip_function_blocks(clean_text), model)
+    if visible_text:
+        yield TextChunk(visible_text)
+
+    from xerxes.core.utils import estimate_messages_tokens, estimate_tokens
+
+    yield {
+        "tool_calls": tool_calls,
+        "in_tokens": estimate_messages_tokens(messages) + estimate_tokens(system),
+        "out_tokens": estimate_tokens(raw_text),
+    }
 
 
 def _stream_anthropic(
