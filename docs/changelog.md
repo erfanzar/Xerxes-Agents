@@ -6,7 +6,12 @@ Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, 
 
 ---
 
-## 0.2.5 — 2026-06-22 (current)
+## 0.2.6 — 2026-06-23 (current)
+
+- Added the bundled `bug-bounty-hunter` multi-iteration swarm repair skill.
+- Bumped the package/runtime version to 0.2.6.
+
+## 0.2.5 — 2026-06-22
 
 - Added the bundled `eternal-army` swarm-orchestration skill.
 - Fixed skill discovery refresh for source checkouts and resilient frontmatter parsing.

@@ -56,6 +56,27 @@ def test_pty_session_manager_round_trip():
     assert closed["closed"] is True
 
 
+def test_pty_session_manager_runs_nonempty_command_through_shell(tmp_path: Path):
+    manager = PTYSessionManager()
+    cmd = (
+        "mkdir -p tmp-files && "
+        "{ echo '=== DEEPSCAN INITIATED ==='; echo \"Project: $(pwd)\"; } "
+        "> tmp-files/AGENT_NOTES.md && cat tmp-files/AGENT_NOTES.md"
+    )
+
+    started = manager.create_session(cmd, workdir=str(tmp_path), login=False, yield_time_ms=1000)
+
+    assert started["exit_code"] == 0
+    assert "=== DEEPSCAN INITIATED ===" in started["stdout"]
+    assert f"Project: {tmp_path}" in started["stdout"]
+    assert (
+        (tmp_path / "tmp-files" / "AGENT_NOTES.md").read_text(encoding="utf-8").startswith("=== DEEPSCAN INITIATED ===")
+    )
+    assert not (tmp_path / "{").exists()
+    assert not (tmp_path / "&&").exists()
+    assert not (tmp_path / "Project: $(pwd);").exists()
+
+
 def test_pty_session_manager_returns_before_long_command_finishes():
     manager = PTYSessionManager()
     script = "import time; print('start', flush=True); time.sleep(0.8); print('done', flush=True)"

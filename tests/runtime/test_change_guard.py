@@ -27,8 +27,8 @@ def test_deleted_tests_are_error_even_with_verification() -> None:
         ],
         [
             {
-                "name": "ExecuteShell",
-                "inputs": {"command": "uv run pytest tests/tools/test_read_file_null_defaults.py -q"},
+                "name": "exec_command",
+                "inputs": {"cmd": "uv run pytest tests/tools/test_read_file_null_defaults.py -q"},
             }
         ],
     )
@@ -51,7 +51,7 @@ def test_runtime_change_without_verification_notifies() -> None:
 def test_runtime_change_with_verification_suppresses_warning() -> None:
     report = analyze_status_lines(
         [" M src/python/xerxes/daemon/runtime.py"],
-        [{"name": "ExecuteShell", "inputs": {"cmd": "uv run ruff check src/python/xerxes/daemon/runtime.py"}}],
+        [{"name": "exec_command", "inputs": {"cmd": "uv run ruff check src/python/xerxes/daemon/runtime.py"}}],
     )
 
     assert not report.should_notify

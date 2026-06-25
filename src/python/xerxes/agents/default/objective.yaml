@@ -15,7 +15,6 @@ agent:
   when_to_use: |
     Use this agent when the user gives a measurable outcome and expects the agent to keep trying until tests, benchmarks, or explicit acceptance criteria pass.
   tools:
-    - ExecuteShell
     - exec_command
     - write_stdin
     - list_terminal_sessions
@@ -42,7 +41,6 @@ agent:
     - agent_memory_search
     - agent_memory_journal
   allowed_tools:
-    - ExecuteShell
     - exec_command
     - write_stdin
     - list_terminal_sessions

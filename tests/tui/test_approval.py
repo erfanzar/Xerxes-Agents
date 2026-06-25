@@ -34,7 +34,7 @@ def _tui_with_approval() -> tuple[XerxesTUI, _PromptStub, ApprovalRequestPanel]:
     panel = ApprovalRequestPanel(
         request_id="req_1",
         tool_call_id="tool_1",
-        action="ExecuteShell",
+        action="exec_command",
         description="Run: cd /tmp",
     )
     tui._prompt = prompt  # type: ignore[assignment]

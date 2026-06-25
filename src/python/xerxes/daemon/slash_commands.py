@@ -547,7 +547,38 @@ class SlashCommandsMixin:
             msgs.pop()
         if msgs:
             msgs.pop()  # remove the user message too — _submit_turn re-appends it
+        metadata = getattr(session.state, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata.pop("last_connection_failure", None)
         await self._emit_slash(emit, "Retrying the last prompt…")
+        await self._submit_turn({"text": last_user_text, "_internal_slash": True}, emit)
+
+    async def _slash_retry_connection(self, args: str, emit: EmitFn) -> None:
+        """Retry the most recent provider request that exhausted connection retries."""
+        session = self._session_for_emit(emit)
+        if session is None:
+            await self._emit_slash(emit, "No failed provider connection to retry.")
+            return
+
+        metadata = getattr(session.state, "metadata", None)
+        failure = metadata.get("last_connection_failure") if isinstance(metadata, dict) else None
+        if not isinstance(failure, dict):
+            await self._emit_slash(emit, "No failed provider connection to retry.")
+            return
+
+        last_user_text = str(failure.get("user_message") or "").strip()
+        if not last_user_text:
+            await self._emit_slash(emit, "Last provider failure did not record a retryable prompt.")
+            return
+
+        msgs = session.state.messages
+        while msgs and msgs[-1].get("role") != "user":
+            msgs.pop()
+        if msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+        metadata.pop("last_connection_failure", None)
+        self.sessions.save(session)
+        await self._emit_slash(emit, "Retrying the last failed provider connection…")
         await self._submit_turn({"text": last_user_text, "_internal_slash": True}, emit)
 
     async def _slash_undo(self, args: str, emit: EmitFn) -> None:
@@ -1025,16 +1056,18 @@ class SlashCommandsMixin:
         ``/thinking`` shows the current effort and how it maps to the active
         provider; ``/thinking <off|low|medium|high>`` sets it.
         """
-        from ..llms.registry import detect_provider
+        from ..llms.registry import resolve_provider
 
         target = args.strip().lower()
         if not target:
             state = self.runtime.reasoning_state()
-            provider = detect_provider(self.runtime.model or "") or "?"
+            provider = resolve_provider(self.runtime.model or "", self.runtime.runtime_config) or "?"
             if state["effort"] == "off":
                 mapping = "reasoning disabled"
             elif provider in {"anthropic", "claude"}:
                 mapping = f"{provider} → budget_tokens={state['budget_tokens']}"
+            elif provider == "claude-code":
+                mapping = f"{provider} → --effort {state['effort']}"
             else:
                 mapping = f"{provider} → reasoning_effort={state['effort']}"
             await self._emit_slash(
@@ -1050,9 +1083,10 @@ class SlashCommandsMixin:
             await self._emit_slash(emit, str(exc))
             return
         await self._emit_slash(emit, f"Thinking effort set to: {state['effort']}.")
-        # Refresh the status bar so the new effort shows immediately. Guarded so
-        # the minimally-wired test fixture (no session manager) doesn't trip.
         if getattr(self, "sessions", None) is not None:
+            sync_session = getattr(self, "_sync_runtime_to_connection_session", None)
+            if callable(sync_session):
+                sync_session(emit)
             await self._emit_status(emit)
 
     async def _slash_skin(self, args: str, emit: EmitFn) -> None:
@@ -1425,6 +1459,7 @@ _BULK_SLASH_HANDLERS: dict[str, Any] = {
     "restart": SlashCommandsMixin._slash_restart,
     "undo": SlashCommandsMixin._slash_undo,
     "retry": SlashCommandsMixin._slash_retry,
+    "retry-connection": SlashCommandsMixin._slash_retry_connection,
     "branch": SlashCommandsMixin._slash_branch,
     "branches": SlashCommandsMixin._slash_branches,
     "snapshot": SlashCommandsMixin._slash_snapshot,

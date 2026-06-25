@@ -39,7 +39,7 @@ class EntryKind(Enum):
 
     Attributes:
         COMMAND: A user-facing slash command (``/help``, ``/model``).
-        TOOL: An LLM-callable tool (``Read``, ``ExecuteShell``).
+        TOOL: An LLM-callable tool (``ReadFile``, ``exec_command``).
     """
 
     COMMAND = "command"

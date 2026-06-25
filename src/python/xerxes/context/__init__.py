@@ -19,6 +19,8 @@ context:
 * :mod:`tool_result_pruner` — cheap pre-pruning of oversize tool outputs.
 * :mod:`tool_result_storage` — overflow huge tool outputs to disk and
   replace them with reference placeholders.
+* :mod:`headroom` — deterministic content routing for bounded tool-output
+  previews while originals live in project memory.
 * :mod:`compaction_strategies` — pluggable rolling strategies
   (truncate, sliding window, priority, LLM summarization).
 * :mod:`compressor` — the orchestrator that decides when to compact
@@ -51,6 +53,7 @@ from .compressor import (
     Summarizer,
     naive_summarizer,
 )
+from .headroom import DEFAULT_HEADROOM_PREVIEW_CHARS, HeadroomResult, compress_tool_result
 from .repo_map import RepoMapConfig, RepoMapper, RepoMapResult, Symbol, build_repo_map
 from .token_counter import SmartTokenCounter
 from .tool_result_pruner import (
@@ -65,6 +68,7 @@ from .window_usage import estimate_context_tokens, estimate_request_overhead_tok
 
 __all__ = [
     "COMPACTION_REFERENCE_PREFIX",
+    "DEFAULT_HEADROOM_PREVIEW_CHARS",
     "DEFAULT_HEAD_LINES",
     "DEFAULT_INLINE_LIMIT_CHARS",
     "DEFAULT_MAX_CHARS",
@@ -75,6 +79,7 @@ __all__ = [
     "CompactionProvisioner",
     "CompressionResult",
     "ContextCompressor",
+    "HeadroomResult",
     "PriorityBasedStrategy",
     "ProviderCompactionAgent",
     "RepoMapConfig",
@@ -89,6 +94,7 @@ __all__ = [
     "TruncateStrategy",
     "build_repo_map",
     "compaction_summary_agent_from_config",
+    "compress_tool_result",
     "estimate_context_tokens",
     "estimate_request_overhead_tokens",
     "get_compaction_strategy",

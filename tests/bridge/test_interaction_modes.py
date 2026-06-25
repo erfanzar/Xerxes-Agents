@@ -100,7 +100,6 @@ def test_code_mode_uses_coder_agent_spec(monkeypatch) -> None:
         captured["system_prompt"]
     )
     assert set(captured["tools"]) == {
-        "ExecuteShell",
         "ReadFile",
         "WriteFile",
         "FileEditTool",
@@ -135,7 +134,7 @@ def test_objective_mode_uses_objective_agent_spec_and_loop_guidance(monkeypatch)
     system_prompt = str(captured["system_prompt"])
     assert "You are an objective runner for hard engineering goals." in system_prompt
     assert "Do not final-answer with a narrative status while the acceptance criteria are unmet." in system_prompt
-    assert {"ExecuteShell", "WriteFile", "FileEditTool", "SpawnAgents", "TodoWriteTool"} <= set(captured["tools"])
+    assert {"WriteFile", "FileEditTool", "SpawnAgents", "TodoWriteTool"} <= set(captured["tools"])
     assert srv.config["plan_mode"] is False
 
 

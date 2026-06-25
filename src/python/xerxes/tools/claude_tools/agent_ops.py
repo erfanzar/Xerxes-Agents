@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import time
@@ -165,6 +166,47 @@ def _parse_agents_payload(raw: str) -> list[dict[str, Any]] | str:
         if isinstance(parsed, dict):
             return [parsed]
     return raw
+
+
+def _parse_agent_ids_payload(raw: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    """Best-effort parse of ``AwaitAgents.agent_ids`` from model-shaped input."""
+
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if not isinstance(raw, str):
+        value = str(raw).strip()
+        return [value] if value else []
+
+    stripped = raw.strip()
+    if not stripped:
+        return []
+
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        parsed = None
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    if isinstance(parsed, str) and parsed.strip():
+        return [parsed.strip()]
+
+    try:
+        literal = ast.literal_eval(stripped)
+    except (SyntaxError, ValueError):
+        literal = None
+    if isinstance(literal, (list, tuple)):
+        return [str(item).strip() for item in literal if str(item).strip()]
+    if isinstance(literal, str) and literal.strip():
+        return [literal.strip()]
+
+    ids = []
+    for item in stripped.split(","):
+        cleaned = item.strip().strip("()[]{}").strip().strip("\"'")
+        if cleaned:
+            ids.append(cleaned)
+    return ids
 
 
 def _subagent_wait_timeout(value: float | int | str | None = None) -> float | None:
@@ -686,16 +728,7 @@ class AwaitAgents(AgentBaseFn):
         from ...runtime.session_context import get_active_session
 
         mgr = _get_agent_manager()
-        ids_input = agent_ids
-        if isinstance(ids_input, str):
-            raw_ids = ids_input
-            try:
-                parsed = _json.loads(raw_ids)
-                ids_input = parsed if isinstance(parsed, list) else [raw_ids]
-            except Exception:
-                ids_input = [s.strip() for s in raw_ids.split(",") if s.strip()]
-        if not isinstance(ids_input, list):
-            ids_input = [str(ids_input)]
+        ids_input = _parse_agent_ids_payload(agent_ids)
 
         watched: list[str] = []
         if ids_input:

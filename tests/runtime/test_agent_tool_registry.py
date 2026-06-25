@@ -17,7 +17,7 @@ from __future__ import annotations
 from xerxes.agents.definitions import get_agent_definition
 from xerxes.bridge.server import BridgeServer
 from xerxes.operators import OperatorRuntimeConfig, OperatorState
-from xerxes.runtime.bridge import build_tool_executor, populate_registry, register_operator_tools
+from xerxes.runtime.bridge import create_query_engine, populate_registry, register_operator_tools
 from xerxes.streaming.permissions import SAFE_TOOLS
 
 TERMINAL_OPERATOR_TOOLS = {
@@ -70,23 +70,21 @@ def test_registry_prefers_explicit_read_file_schema() -> None:
 
 
 def test_registry_reflects_bool_and_numeric_types() -> None:
-    registry = populate_registry()
+    registry = _registry_with_terminal_tools()
     schemas = {schema["name"]: schema for schema in registry.tool_schemas()}
     edit_props = schemas["FileEditTool"]["input_schema"]["properties"]
-    shell_props = schemas["ExecuteShell"]["input_schema"]["properties"]
+    exec_props = schemas["exec_command"]["input_schema"]["properties"]
 
     assert edit_props["replace_all"]["type"] == "boolean"
-    assert shell_props["timeout"]["type"] == "number"
+    assert exec_props["yield_time_ms"]["type"] == "integer"
 
 
-def test_tool_executor_accepts_execute_shell_command_argument() -> None:
+def test_registry_no_longer_exposes_blocking_execute_shell() -> None:
     registry = populate_registry()
-    executor = build_tool_executor(registry=registry)
+    tool_names = {schema.get("name", "") for schema in registry.tool_schemas()}
 
-    result = executor("ExecuteShell", {"command": "printf hello"})
-
-    assert "missing required parameter" not in result
-    assert "hello" in result
+    removed_shell_tool = "Execute" + "Shell"
+    assert removed_shell_tool not in tool_names
 
 
 def test_root_agent_tool_schemas_follow_default_agent_yaml() -> None:
@@ -109,3 +107,11 @@ def test_code_agents_can_use_terminal_sessions() -> None:
     assert coder_agent is not None
     assert TERMINAL_OPERATOR_TOOLS <= set(default_agent.tools)
     assert TERMINAL_OPERATOR_TOOLS <= set(coder_agent.allowed_tools or [])
+
+
+def test_create_query_engine_registers_terminal_operator_tools() -> None:
+    engine = create_query_engine(model="test-model")
+    schemas = engine._default_tool_schemas
+    tool_names = {schema["name"] for schema in schemas}
+
+    assert TERMINAL_OPERATOR_TOOLS <= tool_names

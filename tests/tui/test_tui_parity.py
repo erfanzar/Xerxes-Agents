@@ -55,6 +55,7 @@ from xerxes.tui.panel_state import (
     ApprovalPanelState,
     PanelSelection,
 )
+from xerxes.tui.prompt import _mouse_support_enabled
 from xerxes.tui.reasoning_filter import ReasoningFilter
 from xerxes.tui.skin_engine import Skin, SkinEngine
 from xerxes.tui.status_bar import StatusSnapshot, format_status
@@ -234,6 +235,18 @@ class TestTips:
 
     def test_tips_are_strings(self):
         assert all(isinstance(t, str) and t for t in TIPS)
+
+
+class TestPromptMouseSupport:
+    def test_mouse_support_is_enabled_unless_disabled(self, monkeypatch):
+        monkeypatch.delenv("XERXES_MOUSE", raising=False)
+        assert _mouse_support_enabled() is True
+
+        for value in ("", "1", "true", "yes", "on", " TRUE ", "maybe"):
+            assert _mouse_support_enabled(value) is True
+
+        for value in ("0", "false", "no", "off"):
+            assert _mouse_support_enabled(value) is False
 
 
 class TestSkinBranding:
@@ -629,7 +642,7 @@ class TestBackgroundSessions:
 class TestBanner:
     def test_full_banner_includes_logo(self):
         data = BannerData(
-            version="0.2.5",
+            version="0.2.6",
             model="claude-opus-4-7",
             session_id="abcd1234ef",
             workspace="/proj",

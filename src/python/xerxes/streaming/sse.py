@@ -98,7 +98,14 @@ class SSEParser:
 
     def _dispatch(self) -> None:
         """Finalise the in-progress record into an :class:`SSEEvent`."""
-        if not self._current_data and not self._current_event != "message":
+        # When there is no data and the event is the default "message",
+        # there is nothing to emit. We still reset the per-record buffers
+        # so stale event/id/retry values don't leak into the next record.
+        if not self._current_data and self._current_event == "message":
+            self._current_event = "message"
+            self._current_data = []
+            self._current_id = ""
+            self._current_retry = None
             return
         ev = SSEEvent(
             event=self._current_event,

@@ -29,7 +29,6 @@ agent:
     - AgentTool
     - SpawnAgents
     - AskUserQuestionTool
-    - ExecuteShell
     - WriteFile
     - FileEditTool
     - TodoWriteTool

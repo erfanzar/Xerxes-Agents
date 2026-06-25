@@ -22,14 +22,14 @@ name: fibonacci-generator
 description: Generate Fibonacci sequences efficiently
 version: 1.0.0
 tags: [math, python, algorithm]
-required_tools: [ExecuteShell, WriteFile]
+required_tools: [exec_command, write_stdin, WriteFile]
 ---
 
 # When to use
 Apply this skill when the user asks for Fibonacci numbers, sequences, or related mathematical patterns.
 
 # How to use
-1. Use ExecuteShell to calculate the sequence
+1. Use exec_command to calculate the sequence
 2. Use WriteFile to save results if requested
 
 # Example
@@ -151,7 +151,7 @@ class skill_write:
                     "required_tools": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tools this skill requires (e.g., ['ExecuteShell', 'WriteFile']).",
+                        "description": "Tools this skill requires (e.g., ['exec_command', 'write_stdin', 'WriteFile']).",
                         "default": [],
                     },
                     "version": {

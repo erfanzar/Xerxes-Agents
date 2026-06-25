@@ -13,7 +13,7 @@
 # limitations under the License.
 """LLM provider registry tests."""
 
-from xerxes.llms.registry import PROVIDERS, get_context_limit, provider_model, resolve_provider
+from xerxes.llms.registry import PROVIDERS, detect_provider, get_context_limit, provider_model, resolve_provider
 
 
 def test_resolve_provider_promotes_kimi_for_coding_model() -> None:
@@ -32,6 +32,16 @@ def test_resolve_provider_promotes_openrouter_endpoint() -> None:
         )
         == "openrouter"
     )
+
+
+def test_claude_code_provider_route() -> None:
+    assert detect_provider("claude-code/sonnet") == "claude-code"
+    assert resolve_provider("sonnet", {"provider": "claude-code"}) == "claude-code"
+    assert resolve_provider("sonnet", {"base_url": "claude-code://local"}) == "claude-code"
+
+
+def test_provider_model_strips_claude_code_route_prefix() -> None:
+    assert provider_model("claude-code/opus", "claude-code") == "opus"
 
 
 def test_openrouter_provider_config() -> None:
@@ -53,3 +63,16 @@ def test_resolve_provider_keeps_generic_kimi_endpoint() -> None:
 
 def test_context_limit_uses_effective_provider_for_kimi_code_prefix() -> None:
     assert get_context_limit("kimi/kimi-for-coding") == 256_000
+
+
+def test_context_limit_uses_claude_code_model_override_for_opus() -> None:
+    assert get_context_limit("claude-code/opus") == 1_000_000
+
+
+def test_context_limit_uses_claude_code_provider_default_for_unknown_alias() -> None:
+    assert get_context_limit("claude-code/custom") == 200_000
+
+
+def test_context_limit_uses_anthropic_one_million_overrides() -> None:
+    assert get_context_limit("claude-opus-4-6") == 1_000_000
+    assert get_context_limit("anthropic/claude-sonnet-4-6") == 1_000_000

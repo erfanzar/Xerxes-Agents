@@ -85,12 +85,14 @@ class _Recorder:
 
 
 @pytest.fixture
-def daemon_with_runtime(tmp_path):
+def daemon_with_runtime(tmp_path, monkeypatch):
     """Build a ``DaemonServer`` whose ``runtime`` is hand-seeded.
 
     We deliberately skip ``runtime.reload()`` (which requires a real
     provider profile) and seed ``runtime_config`` directly."""
     from xerxes.daemon.server import DaemonServer
+
+    monkeypatch.setattr("xerxes.daemon.runtime.profiles.get_active_profile", lambda: None)
 
     # Use defaults; the test path never touches sockets or the real bootstrap.
     server = DaemonServer.__new__(DaemonServer)
@@ -157,6 +159,25 @@ class TestSlashFlags:
         # ...and rejects unknown levels.
         out4 = _drive(daemon_with_runtime, "/thinking bogus")
         assert "Unknown reasoning level" in out4[0]
+
+    def test_thinking_syncs_session_before_status(self, tmp_path, monkeypatch):
+        from xerxes.daemon.server import DaemonServer
+
+        monkeypatch.setattr("xerxes.daemon.runtime.profiles.get_active_profile", lambda: None)
+        server = DaemonServer(DaemonConfig(project_dir=str(tmp_path)))
+        server.runtime.runtime_config = {"model": "claude-code/opus", "permission_mode": "accept-all"}
+        try:
+            rec = _Recorder()
+            asyncio.new_event_loop().run_until_complete(server._handle_slash("/thinking high", rec))
+
+            session = server.sessions.open("tui:default", server.workspaces.default_agent_id)
+            status = [payload for event_type, payload in rec.events if event_type == "status_update"]
+
+            assert session.runtime_config["thinking"] is True
+            assert session.runtime_config["reasoning_effort"] == "high"
+            assert status[-1]["reasoning_effort"] == "high"
+        finally:
+            server.turns.close()
 
     def test_verbose(self, daemon_with_runtime):
         out = _drive(daemon_with_runtime, "/verbose")

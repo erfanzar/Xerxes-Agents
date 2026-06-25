@@ -34,6 +34,7 @@ from typing import Any
 
 from ..runtime.interaction_modes import normalize_interaction_mode
 from ..runtime.update import GitUpdateStatus, git_update_status, installed_version
+from ..streaming.tool_markers import strip_assistant_tool_call_markers
 from .blocks import (
     ApprovalRequestPanel,
     QuestionRequestPanel,
@@ -1198,6 +1199,9 @@ class XerxesTUI:
         """Append a resumed transcript message using the same rendering as live turns."""
         if self._prompt is None or not body:
             return
+        body = strip_assistant_tool_call_markers(body)
+        if not body:
+            return
         if replay_type == "replay_assistant":
             self._prompt.append_line(markdown_to_ansi(body))
             return
@@ -1775,7 +1779,9 @@ class XerxesTUI:
             "WriteFile",
             "AppendFile",
             "FileEditTool",
-            "ExecuteShell",
+            "exec_command",
+            "write_stdin",
+            "close_terminal_session",
         }
         if tool_name in research_tools:
             return "researcher"

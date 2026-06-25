@@ -36,6 +36,10 @@ from ..sandbox import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
+# Only these parent environment variables are forwarded into the sandbox
+# child. Everything else (including secrets) is dropped.
+_SAFE_ENV_VARS: set[str] = {"PATH", "HOME", "LANG", "LC_ALL", "TERM"}
+
 
 def _json_object_hook(obj: dict) -> tp.Any:
     """Restore special types serialized by the child script."""
@@ -113,7 +117,7 @@ class SubprocessSandboxBackend:
         )
         encoded_payload = base64.b64encode(payload.encode("utf-8")).decode()
 
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items() if k in _SAFE_ENV_VARS}
         mem_bytes = self._config.sandbox_memory_limit_mb * 1024 * 1024
         env["_XERXES_MEM_LIMIT_BYTES"] = str(mem_bytes)
 

@@ -164,7 +164,7 @@ class ObservabilityConfig(BaseModel):
     trace_endpoint: str | None = None
     metrics_endpoint: str | None = None
     service_name: str = "xerxes"
-    service_version: str = "0.2.5"
+    service_version: str = "0.2.6"
     enable_request_logging: bool = True
     enable_response_logging: bool = False
     enable_function_logging: bool = True

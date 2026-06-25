@@ -380,11 +380,15 @@ class DynamicCortex(Cortex):
 
             return buffer, worker_thread
         else:
-            result = self.kickoff(use_streaming=False)
-            assert not isinstance(result, tuple)
+            try:
+                result = self.kickoff(use_streaming=False)
+            finally:
+                # Non-streaming kickoff runs synchronously, so it is safe
+                # to restore now — even on exception.
+                if process:
+                    self.process = original_process
 
-            if process:
-                self.process = original_process
+            assert not isinstance(result, tuple)
 
             if isinstance(prompts, dict):
                 outputs = {}

@@ -179,14 +179,28 @@ class MCPClient:
             return False
         except Exception as e:
             self.logger.error(f"Failed to connect via stdio: {e}")
-            if self.process:
-                self.logger.error(f"Process poll: {self.process.poll()}")
+            if self.process and self.process.poll() is None:
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                except Exception:
+                    pass
+            # Close any open pipes to avoid resource leaks.
+            for pipe in (self.process.stdin, self.process.stdout, self.process.stderr) if self.process else ():
+                try:
+                    if pipe:
+                        pipe.close()
+                except Exception:
+                    pass
             return False
 
     @staticmethod
     def _validate_mcp_url(url: str) -> str | None:
         """Validate an MCP server URL. Returns error message or None if valid."""
         import ipaddress
+        import socket
         from urllib.parse import urlparse
 
         try:
@@ -200,12 +214,53 @@ class MCPClient:
             return "URL must have a host"
         if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
             return "Private/localhost addresses are not allowed"
+
+        def _is_internal_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+            return (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_link_local
+                or addr.is_multicast
+                or addr.is_reserved
+            )
+
         try:
             addr = ipaddress.ip_address(hostname)
-            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved:
+            # IPv6-mapped IPv4 check: if this is a mapped address, validate the
+            # underlying IPv4.
+            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+                if _is_internal_address(addr.ipv4_mapped):
+                    return "Private IP addresses are not allowed"
+            if _is_internal_address(addr):
                 return "Private IP addresses are not allowed"
         except ValueError:
-            pass
+            # Hostname (not an IP literal) — resolve via DNS and check each
+            # resolved address. Fail open if DNS resolution itself fails.
+            try:
+                infos = socket.getaddrinfo(hostname, None)
+                for family, _socktype, _proto, _canon, sockaddr in infos:
+                    try:
+                        if family == socket.AF_INET:
+                            resolved_addr = ipaddress.ip_address(sockaddr[0])
+                        elif family == socket.AF_INET6:
+                            resolved_addr = ipaddress.ip_address(sockaddr[0])
+                            # Check IPv6-mapped IPv4 in resolved addresses too.
+                            if (
+                                isinstance(resolved_addr, ipaddress.IPv6Address)
+                                and resolved_addr.ipv4_mapped is not None
+                            ):
+                                if _is_internal_address(resolved_addr.ipv4_mapped):
+                                    return "Hostname resolves to a private IP address"
+                        else:
+                            continue
+                        if _is_internal_address(resolved_addr):
+                            return "Hostname resolves to a private IP address"
+                    except (ValueError, IndexError):
+                        continue
+            except (socket.gaierror, socket.herror):
+                # DNS resolution failed — fail open so legitimate hostnames
+                # are not blocked due to transient DNS issues.
+                pass
         return None
 
     async def _connect_sse(self) -> bool:

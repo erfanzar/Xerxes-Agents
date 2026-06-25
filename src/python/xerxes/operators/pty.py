@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 import pty
 import select
-import shlex
 import signal
 import subprocess
 import time
@@ -97,20 +96,20 @@ class PTYSessionManager:
         resolved_workdir = os.path.abspath(workdir or os.getcwd())
         master_fd, slave_fd = pty.openpty()
 
+        shell = os.environ.get("SHELL", "/bin/sh")
+        shell_name = os.path.basename(shell)
         if not cmd or not cmd.strip():
             # Empty command: start an interactive shell session.
-            shell = os.environ.get("SHELL", "/bin/sh")
             args = [shell]
-            if login and os.path.basename(shell).endswith("zsh"):
+            if login and shell_name.endswith("zsh"):
                 args.append("-l")
-            elif login and os.path.basename(shell).endswith("bash"):
+            elif login and shell_name.endswith("bash"):
                 args.append("-l")
         else:
-            # Split command into argv and run directly without an implicit shell wrapper.
-            try:
-                args = shlex.split(cmd)
-            except ValueError as exc:
-                raise ValueError(f"Invalid command syntax: {exc}") from exc
+            args = [shell]
+            if login and (shell_name.endswith("zsh") or shell_name.endswith("bash")):
+                args.append("-l")
+            args.extend(["-c", cmd])
 
         process = subprocess.Popen(
             args,

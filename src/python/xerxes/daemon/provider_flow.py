@@ -46,6 +46,7 @@ class ProviderFlowMixin:
         "openai",
         "openrouter",
         "anthropic",
+        "claude-code",
         "ollama",
         "gemini",
         "deepseek",
@@ -64,6 +65,14 @@ class ProviderFlowMixin:
     _emit_init_done: Callable[[EmitFn], Awaitable[None]]
     _emit_slash: Callable[[EmitFn, str], Awaitable[None]]
     _sync_runtime_to_connection_session: Callable[[EmitFn], None]
+
+    @staticmethod
+    def _canonical_provider_type(provider_type: str) -> str:
+        """Normalize provider aliases used by the interactive picker."""
+        clean = provider_type.strip().lower()
+        if clean == "claude_code":
+            return "claude-code"
+        return clean or "auto"
 
     async def _emit_provider_edit_panel(self, emit: EmitFn) -> None:
         """Ask which profile + field to edit + the new value (batched)."""
@@ -112,6 +121,7 @@ class ProviderFlowMixin:
 
         default_url = ""
         default_model = ""
+        provider_type = self._canonical_provider_type(provider_type)
         if provider_type and provider_type not in {"auto", "custom"}:
             prov_cfg = PROVIDERS.get(provider_type)
             if prov_cfg is not None:
@@ -250,10 +260,20 @@ class ProviderFlowMixin:
             # Stage 1 → 2: collect name + provider type, then pop the
             # credentials panel with provider-aware defaults.
             name = (answers.get("name") or "").strip()
-            provider_type = (answers.get("provider_type") or "").strip() or "auto"
+            provider_type = self._canonical_provider_type(answers.get("provider_type") or "auto")
             if not name:
                 self._provider_flow = None
                 await self._emit_slash(emit, "Add cancelled — profile name is required.")
+                return
+            if provider_type == "claude-code":
+                await self._emit_provider_model_panel(
+                    emit,
+                    name=name,
+                    provider_type=provider_type,
+                    base_url="claude-code://local",
+                    api_key="",
+                    default_model="",
+                )
                 return
             await self._emit_provider_credentials_panel(emit, name, provider_type)
             return
@@ -450,7 +470,19 @@ class ProviderFlowMixin:
         ``init_done`` refresh the old single-shot Add path used to do.
         """
         self._provider_flow = None
+        provider_type = self._canonical_provider_type(provider_type)
         saved_type = "" if provider_type == "auto" else provider_type
+        if provider_type == "claude-code":
+            base_url = base_url or "claude-code://local"
+            api_key = ""
+            if model and not model.startswith("claude-code/"):
+                if "/" in model:
+                    await self._emit_slash(
+                        emit,
+                        "Add cancelled — Claude Code model ids must be bare aliases or `claude-code/<model>`.",
+                    )
+                    return
+                model = f"claude-code/{model}"
         if not model:
             await self._emit_slash(
                 emit,
@@ -539,7 +571,9 @@ class ProviderFlowMixin:
             models = await asyncio.to_thread(profiles.fetch_models, base_url, api_key)
         except Exception as exc:
             fetch_error = str(exc)
-        # Order: registry default first (if it's in the list), then alphabetical.
+        # Order: default first (if it's in the list), otherwise keep provider order.
+        if not default_model and models:
+            default_model = models[0]
         if default_model and default_model in models:
             models = [default_model] + [m for m in models if m != default_model]
 
@@ -648,7 +682,7 @@ class ProviderFlowMixin:
         question_text = "Model id"
         if default_model:
             question_text += f" (press Enter for `{default_model}`)"
-        question_text += " — e.g. `gpt-4o`, `kimi-for-coding`:"
+        question_text += " — e.g. `gpt-4o`, `kimi-for-coding`, `claude-code/sonnet`:"
         await emit(
             "question_request",
             {
