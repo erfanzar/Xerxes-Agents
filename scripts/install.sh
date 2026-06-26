@@ -55,6 +55,20 @@ download() {
     fi
 }
 
+local_checkout_root() {
+    script_path="${1:-$0}"
+    case "$script_path" in
+        */*) script_dir="$(dirname "$script_path")" ;;
+        *) return 1 ;;
+    esac
+
+    script_dir="$(CDPATH= cd "$script_dir" 2>/dev/null && pwd -P)" || return 1
+    repo_root="$(CDPATH= cd "$script_dir/.." 2>/dev/null && pwd -P)" || return 1
+    [ -f "$repo_root/pyproject.toml" ] || return 1
+    [ -d "$repo_root/src/python/xerxes" ] || return 1
+    printf '%s\n' "$repo_root"
+}
+
 detect_platform() {
     uname_s="$(uname -s 2>/dev/null || echo unknown)"
     uname_m="$(uname -m 2>/dev/null || echo unknown)"
@@ -119,12 +133,18 @@ install_xerxes() {
         [ -f "$old_bin" ] && rm -f "$old_bin" && ok "removed stale binary: $old_bin"
     done
 
-    # Default to git install since the package is not yet on PyPI.
-    spec="xerxes-agent @ git+${REPO_URL}.git"
-    if [ -n "${XERXES_REF:-}" ]; then
+    # Default to the local checkout when this script is run from the repository;
+    # curl-piped installs fall back to GitHub because there is no checkout path.
+    if [ -n "${XERXES_PACKAGE_SPEC:-}" ]; then
+        spec="$XERXES_PACKAGE_SPEC"
+    elif [ -n "${XERXES_REF:-}" ]; then
         spec="xerxes-agent @ git+${REPO_URL}.git@${XERXES_REF}"
     elif [ -n "${XERXES_VERSION:-}" ]; then
         spec="xerxes-agent==${XERXES_VERSION}"
+    elif repo_root="$(local_checkout_root "$0" 2>/dev/null)"; then
+        spec="xerxes-agent @ file://${repo_root}"
+    else
+        spec="xerxes-agent @ git+${REPO_URL}.git"
     fi
 
     if [ -n "${XERXES_INSTALL_EXTRAS:-}" ]; then
@@ -248,4 +268,6 @@ main() {
     printf '   issues: %s/issues\n' "$REPO_URL"
 }
 
-main "$@"
+if [ "${XERXES_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi
