@@ -1,3 +1,7 @@
 dist/
+!dist/
+dist/*
+!dist/entry.js
 node_modules/
+packages/*/dist/
 src/*.js
