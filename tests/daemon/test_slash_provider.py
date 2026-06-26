@@ -240,6 +240,7 @@ class TestSlashProviderInteractivePanel:
         assert "anthropic" in ptype_q["options"]
         assert "openrouter" in ptype_q["options"]
         assert "ollama" in ptype_q["options"]
+        assert "claude-code" in ptype_q["options"]
         assert "kimi-code" in ptype_q["options"]
 
         # Stub fetch_models so stage 3 (model picker) doesn't hit the network.
@@ -346,6 +347,60 @@ class TestSlashProviderInteractivePanel:
         assert "kimi-code" in ptype["options"]
         # Order: general "kimi" before "kimi-code".
         assert ptype["options"].index("kimi") < ptype["options"].index("kimi-code")
+
+    def test_claude_code_add_flow_skips_credentials(self, daemon, monkeypatch, profiles_data):
+        saved: list[dict] = []
+        monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: profiles_data)
+        monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
+        monkeypatch.setattr(
+            "xerxes.bridge.profiles.fetch_models",
+            lambda base_url, api_key: ["claude-code/sonnet", "claude-code/opus"],
+        )
+
+        def _save(name, base_url, api_key, model, provider="", *_a, **_kw):
+            saved.append(
+                {
+                    "name": name,
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": model,
+                    "provider": provider,
+                }
+            )
+            return saved[-1]
+
+        monkeypatch.setattr("xerxes.bridge.profiles.save_profile", _save)
+        monkeypatch.setattr(daemon.runtime, "reload", lambda *_a, **_kw: None)
+
+        rec = _Recorder()
+        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        rid = next(p for (t, p) in rec.events if t == "question_request")["id"]
+        self._async_question_response(daemon, rid, {"action": "+ Add new profile…"}, rec)
+        meta = [p for (t, p) in rec.events if t == "question_request"][-1]
+
+        self._async_question_response(
+            daemon,
+            meta["id"],
+            {"name": "claude", "provider_type": "claude-code"},
+            rec,
+        )
+
+        model_panel = [p for (t, p) in rec.events if t == "question_request"][-1]
+        assert [q["id"] for q in model_panel["questions"]] == ["model"]
+        model_q = model_panel["questions"][0]
+        assert "claude-code/sonnet" in model_q["options"]
+        assert "claude-code/opus" in model_q["options"]
+
+        self._async_question_response(daemon, model_panel["id"], {"model": "claude-code/opus"}, rec)
+        assert saved == [
+            {
+                "name": "claude",
+                "base_url": "claude-code://local",
+                "api_key": "",
+                "model": "claude-code/opus",
+                "provider": "claude-code",
+            }
+        ]
 
     def test_openrouter_defaults_auto_fill(self, daemon, monkeypatch, profiles_data):
         """Pick provider_type=openrouter and the credentials panel must

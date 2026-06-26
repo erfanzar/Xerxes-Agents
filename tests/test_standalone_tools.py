@@ -16,7 +16,6 @@
 import pytest
 from xerxes.tools.standalone import (
     AppendFile,
-    ExecuteShell,
     ListDir,
     ReadFile,
     WriteFile,
@@ -89,8 +88,12 @@ class TestWriteFile:
     def test_write_overwrite(self, tmp_path):
         f = tmp_path / "existing.txt"
         f.write_text("old")
-        WriteFile.static_call(str(f), "new", overwrite=True)
+        result = WriteFile.static_call(str(f), "new", overwrite=True)
         assert f.read_text() == "new"
+        assert "--- a/existing.txt" in result
+        assert "+++ b/existing.txt" in result
+        assert "-old" in result
+        assert "+new" in result
 
 
 class TestListDir:
@@ -118,16 +121,6 @@ class TestListDir:
         result = ListDir.static_call(str(tmp_path))
         assert "subdir" not in result
         assert "file.txt" in result
-
-
-class TestExecuteShell:
-    def test_simple_command(self):
-        result = ExecuteShell.static_call("echo hello")
-        assert "hello" in result["stdout"]
-
-    def test_with_cwd(self, tmp_path):
-        result = ExecuteShell.static_call("pwd", cwd=str(tmp_path))
-        assert str(tmp_path) in result["stdout"] or tmp_path.name in result["stdout"]
 
 
 class TestAppendFile:

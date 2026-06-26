@@ -55,6 +55,7 @@ from ..runtime.project_workspace import load_project_agent_workspace
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
+    ProviderRetry,
     SkillSuggestion,
     TextChunk,
     ThinkingChunk,
@@ -177,10 +178,17 @@ class RuntimeManager:
                 runtime["base_url"] = profile.get("base_url", "")
             if not runtime.get("api_key"):
                 runtime["api_key"] = profile.get("api_key", "")
+            if profile.get("provider"):
+                runtime["provider"] = profile.get("provider", "")
+            else:
+                runtime.pop("provider", None)
+            if profile.get("provider") == "claude-code":
+                runtime.pop("api_key", None)
             for _k, _v in profile.get("sampling", {}).items():
                 runtime.setdefault(_k, _v)
 
         runtime.setdefault("permission_mode", "accept-all")
+        self._normalize_reasoning_config(runtime)
         cwd = Path(str(clean_overrides.get("project_dir") or self.config.project_dir or os.getcwd())).expanduser()
         try:
             cwd = cwd.resolve()
@@ -297,8 +305,56 @@ class RuntimeManager:
             self.runtime_config["thinking"] = True
             self.runtime_config["reasoning_effort"] = clean
             self.runtime_config["thinking_budget"] = self.REASONING_LEVELS[clean]
+        profile = profiles.get_active_profile()
+        if profile:
+            profiles.update_sampling(
+                profile["name"],
+                {
+                    "thinking": self.runtime_config.get("thinking", False),
+                    "reasoning_effort": self.runtime_config.get("reasoning_effort"),
+                    "thinking_budget": self.runtime_config.get("thinking_budget", 0),
+                },
+            )
         set_global_config(self.runtime_config)
         return self.reasoning_state()
+
+    def _normalize_reasoning_config(self, runtime: dict[str, Any]) -> None:
+        """Normalize thinking/reasoning knobs before a runtime config becomes active."""
+        provider = str(runtime.get("provider", "")).strip().lower()
+        model = str(runtime.get("model", "")).strip()
+        raw_effort = runtime.get("reasoning_effort")
+        if isinstance(raw_effort, str) and raw_effort.strip():
+            effort = raw_effort.strip().lower()
+            effort = {"none": "off", "no": "off", "false": "off", "0": "off", "disable": "off", "med": "medium"}.get(
+                effort, effort
+            )
+            if effort == "off" or runtime.get("thinking") is False:
+                runtime["thinking"] = False
+                runtime["thinking_budget"] = 0
+                runtime.pop("reasoning_effort", None)
+                return
+            if effort in self.REASONING_LEVELS:
+                runtime["thinking"] = True
+                runtime["reasoning_effort"] = effort
+                runtime["thinking_budget"] = self.REASONING_LEVELS[effort]
+                return
+
+        if "thinking" in runtime:
+            if bool(runtime.get("thinking")):
+                effort = str(runtime.get("reasoning_effort") or "medium").strip().lower()
+                if effort not in self.REASONING_LEVELS or effort == "off":
+                    effort = "medium"
+                runtime["reasoning_effort"] = effort
+                runtime["thinking_budget"] = int(runtime.get("thinking_budget") or self.REASONING_LEVELS[effort])
+            else:
+                runtime["thinking_budget"] = 0
+                runtime.pop("reasoning_effort", None)
+            return
+
+        if provider == "claude-code" or model.startswith("claude-code/"):
+            runtime["thinking"] = True
+            runtime["reasoning_effort"] = "medium"
+            runtime["thinking_budget"] = self.REASONING_LEVELS["medium"]
 
     def discover_skills(self) -> list[str]:
         """Re-scan bundled, user, and cwd skill directories; return sorted ids.
@@ -1416,6 +1472,30 @@ class TurnRunner:
             if isinstance(event, TextChunk):
                 output_parts.append(event.text)
                 push("text_part", {"text": event.text})
+            elif isinstance(event, ProviderRetry):
+                retry_body = (
+                    f"{event.error}\nUse /retry-connection to retry the last prompt."
+                    if event.final
+                    else f"{event.error}\nRetrying provider connection in {event.delay}s "
+                    f"({event.attempt}/{event.max_attempts})."
+                )
+                push(
+                    "notification",
+                    {
+                        "id": f"{session.id}:provider-connection",
+                        "category": "provider_connection",
+                        "type": "failed" if event.final else "retrying",
+                        "severity": "error" if event.final else "warning",
+                        "title": "Provider connection",
+                        "body": retry_body,
+                        "payload": {
+                            "attempt": event.attempt,
+                            "max_attempts": event.max_attempts,
+                            "delay": event.delay,
+                            "final": event.final,
+                        },
+                    },
+                )
             elif isinstance(event, ThinkingChunk):
                 push("think_part", {"think": event.text})
             elif isinstance(event, ToolStart):
@@ -1805,6 +1885,11 @@ class TurnRunner:
         """Build the ``status_update`` payload for ``session``."""
         status_mode = str(getattr(session, "interaction_mode", mode) or mode)
         status_plan_mode = bool(getattr(session, "plan_mode", plan_mode))
+        runtime_config = getattr(session, "runtime_config", None) or self.runtime.runtime_config
+        model = str(runtime_config.get("model", "")) or self.runtime.model
+        reasoning_effort = "off"
+        if bool(runtime_config.get("thinking", False)):
+            reasoning_effort = str(runtime_config.get("reasoning_effort") or "medium")
         system_prompt = render_session_system_prompt(
             self.runtime,
             session,
@@ -1814,13 +1899,14 @@ class TurnRunner:
         return {
             "context_tokens": estimate_context_tokens(
                 session.state.messages,
-                model=str(getattr(session, "runtime_config", {}).get("model", "")) or self.runtime.model,
+                model=model,
                 system_prompt=system_prompt,
                 tool_schemas=self.runtime.tool_schemas,
             ),
-            "max_context": self._resolve_context_limit(getattr(session, "runtime_config", None)),
+            "max_context": self._resolve_context_limit(runtime_config),
             "mcp_status": {},
             "plan_mode": status_plan_mode,
+            "reasoning_effort": reasoning_effort,
             "mode": status_mode,
         }
 

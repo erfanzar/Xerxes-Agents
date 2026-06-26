@@ -19,7 +19,7 @@ Dispatches between three modes:
   enabled (token via flag or ``TELEGRAM_BOT_TOKEN`` env var).
 * One-shot — a prompt provided as positional args or piped on stdin;
   streams assistant text to stdout and exits.
-* Interactive — no prompt and stdin is a tty; launches ``XerxesTUI``.
+* Interactive — no prompt and stdin is a tty; launches the TypeScript TUI.
 """
 
 from __future__ import annotations
@@ -27,11 +27,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import platform
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +44,116 @@ from .runtime.interaction_modes import normalize_interaction_mode
 
 _DISCORD_SERVICE_STOP_TIMEOUT = 5.0
 _DISCORD_SERVICE_START_TIMEOUT = 3.0
+_NEW_TUI_ENTRY_ENV = "XERXES_TUI_ENTRY"
+_NEW_TUI_PROJECT_DIR_ENV = "XERXES_PROJECT_DIR"
+_NEW_TUI_RESUME_ENV = "XERXES_TUI_RESUME"
+_NEW_TUI_PYTHON_ENV = "XERXES_PYTHON"
+_NEW_TUI_SOURCE_ENTRY = Path("src") / "ui-tui" / "dist" / "entry.js"
+_NEW_TUI_PACKAGE_ENTRY = Path("_tui_dist") / "entry.js"
+_NODE_ENV = "XERXES_NODE"
+_NPM_ENV = "XERXES_NPM"
+_NODE_VERSION_ENV = "XERXES_NODE_VERSION"
+_NODE_DIST_BASE_URL_ENV = "XERXES_NODE_DIST_BASE_URL"
+_MANAGED_NODE_VERSION = "22.17.1"
+
+
+def _new_tui_entry_candidates() -> list[Path]:
+    """Return candidate paths for the TypeScript TUI bundle."""
+    candidates: list[Path] = []
+    override = os.environ.get(_NEW_TUI_ENTRY_ENV, "").strip()
+    if override:
+        candidates.append(Path(override).expanduser())
+
+    package_root = Path(__file__).resolve().parent
+    candidates.append(package_root / _NEW_TUI_PACKAGE_ENTRY)
+
+    source_root = package_root.parents[2]
+    candidates.append(source_root / _NEW_TUI_SOURCE_ENTRY)
+    return candidates
+
+
+def _find_new_tui_entry() -> Path | None:
+    """Find the built TypeScript TUI entrypoint, if available."""
+    for candidate in _new_tui_entry_candidates():
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _resolve_new_tui_project_dir(cwd: Path) -> Path:
+    """Resolve the project root the Node TUI should use."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        root = proc.stdout.strip()
+        if root:
+            return Path(root).resolve()
+    return cwd.resolve()
+
+
+def _managed_node_bin(name: str) -> Path:
+    executable = f"{name}.exe" if os.name == "nt" else name
+    return xerxes_subdir("node", "current", "bin", executable)
+
+
+def _resolve_node_executable() -> str:
+    override = os.environ.get(_NODE_ENV, "").strip()
+    if override:
+        return override
+    managed = _managed_node_bin("node")
+    if managed.is_file() and os.access(managed, os.X_OK):
+        return str(managed)
+    return shutil.which("node") or ""
+
+
+def _resolve_npm_executable() -> str:
+    override = os.environ.get(_NPM_ENV, "").strip()
+    if override:
+        return override
+    managed = _managed_node_bin("npm")
+    if managed.is_file() and os.access(managed, os.X_OK):
+        return str(managed)
+    return shutil.which("npm") or ""
+
+
+def _run_new_tui(*, resume_session_id: str = "") -> None:
+    """Launch the Node/Ink TUI that talks to the Xerxes daemon."""
+    entry = _find_new_tui_entry()
+    if entry is None:
+        searched = ", ".join(str(path) for path in _new_tui_entry_candidates())
+        raise RuntimeError(
+            "New Xerxes TUI bundle was not found. "
+            "Build it with `cd src/ui-tui && npm run build`, or run `xerxes --legacy-tui`. "
+            f"Searched: {searched}"
+        )
+
+    node = _resolve_node_executable()
+    if not node:
+        raise RuntimeError(
+            "Node.js was not found. Run `xerxes install --node` to install the managed Xerxes Node runtime, "
+            "install Node.js yourself and set XERXES_NODE, or run `xerxes --legacy-tui`."
+        )
+
+    env = os.environ.copy()
+    env.setdefault(_NEW_TUI_PYTHON_ENV, sys.executable)
+    env["NODE_ENV"] = os.environ.get("XERXES_TUI_NODE_ENV", "production")
+    env["DEV"] = "true" if os.environ.get("XERXES_TUI_DEVTOOLS") == "1" else "false"
+    project_dir = _resolve_new_tui_project_dir(Path.cwd())
+    env.setdefault(_NEW_TUI_PROJECT_DIR_ENV, str(project_dir))
+    env.setdefault("XERXES_CWD", str(project_dir))
+    if resume_session_id:
+        env[_NEW_TUI_RESUME_ENV] = resume_session_id
+
+    proc = subprocess.run([node, str(entry)], cwd=project_dir, env=env)
+    if proc.returncode:
+        raise SystemExit(proc.returncode)
 
 
 def _resolve_one_shot_prompt(
@@ -77,7 +191,7 @@ async def _run_one_shot(prompt: str, *, resume_session_id: str = "", mode: str =
     client = BridgeClient()
     wrote_text = False
     try:
-        client.spawn()
+        await client.spawn()
         await client.initialize(
             permission_mode="accept-all",
             resume_session_id=resume_session_id,
@@ -191,6 +305,164 @@ def _run_update_command(argv: list[str]) -> None:
         if error:
             print(str(error), file=sys.stderr)
         raise SystemExit(1)
+
+
+def _claude_code_cli_path() -> str:
+    """Return the configured Claude Code executable path if it is installed."""
+    command = os.environ.get("CLAUDE_CODE_CLI", "claude")
+    if os.path.sep in command:
+        return command if Path(command).exists() else ""
+    return shutil.which(command) or ""
+
+
+def _node_version() -> str:
+    version = os.environ.get(_NODE_VERSION_ENV, _MANAGED_NODE_VERSION).strip().removeprefix("v")
+    if not version:
+        raise RuntimeError(f"{_NODE_VERSION_ENV} cannot be empty")
+    return version
+
+
+def _node_dist_target(version: str) -> tuple[str, str, str]:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    os_map = {"darwin": "darwin", "linux": "linux"}
+    arch_map = {
+        "amd64": "x64",
+        "x86_64": "x64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+    node_os = os_map.get(system)
+    node_arch = arch_map.get(machine)
+    if node_os is None or node_arch is None:
+        raise RuntimeError(f"managed Node.js install is not supported on {platform.system()} {platform.machine()}")
+    dist_name = f"node-v{version}-{node_os}-{node_arch}"
+    archive_name = f"{dist_name}.tar.gz"
+    base_url = os.environ.get(_NODE_DIST_BASE_URL_ENV, "https://nodejs.org/dist").rstrip("/")
+    return dist_name, archive_name, f"{base_url}/v{version}/{archive_name}"
+
+
+def _safe_extract_tar(archive: Path, dest: Path, *, expected_root: str) -> None:
+    dest_resolved = dest.resolve()
+    with tarfile.open(archive, "r:gz") as tar:
+        for member in tar.getmembers():
+            name = member.name
+            if name != expected_root and not name.startswith(f"{expected_root}/"):
+                raise RuntimeError(f"unexpected Node.js archive member: {name}")
+            target = (dest / name).resolve()
+            if os.path.commonpath([str(dest_resolved), str(target)]) != str(dest_resolved):
+                raise RuntimeError(f"unsafe Node.js archive member: {name}")
+        tar.extractall(dest)
+
+
+def _download_file(url: str, dest: Path) -> None:
+    with urllib.request.urlopen(url, timeout=60) as response, dest.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def _replace_current_node_link(target: Path) -> None:
+    current = xerxes_subdir("node", "current")
+    if current.is_symlink() or current.is_file():
+        current.unlink()
+    elif current.exists():
+        shutil.rmtree(current)
+    current.symlink_to(target, target_is_directory=True)
+
+
+def _install_managed_node(*, dry_run: bool = False, force: bool = False) -> Path:
+    version = _node_version()
+    dist_name, archive_name, url = _node_dist_target(version)
+    node_root = xerxes_subdir("node")
+    target = node_root / dist_name
+    node_path = target / "bin" / ("node.exe" if os.name == "nt" else "node")
+    if node_path.is_file() and os.access(node_path, os.X_OK) and not force:
+        _replace_current_node_link(target)
+        print(f"Managed Node.js already installed: {node_path}")
+        return node_path
+
+    if dry_run:
+        print(f"Would download: {url}")
+        print(f"Would install to: {target}")
+        print(f"Would set current runtime: {xerxes_subdir('node', 'current')}")
+        return node_path
+
+    node_root.mkdir(parents=True, exist_ok=True)
+    downloads = node_root / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    archive = downloads / archive_name
+    if force and target.exists():
+        shutil.rmtree(target)
+
+    if not target.exists():
+        print(f"Downloading Node.js v{version} from {url}")
+        _download_file(url, archive)
+        print(f"Installing Node.js to {node_root}")
+        _safe_extract_tar(archive, node_root, expected_root=dist_name)
+
+    if not node_path.is_file():
+        raise RuntimeError(f"Node.js archive did not contain expected executable: {node_path}")
+    node_path.chmod(node_path.stat().st_mode | 0o111)
+    _replace_current_node_link(target)
+    print(f"Managed Node.js installed: {node_path}")
+    return node_path
+
+
+def _run_install_command(argv: list[str]) -> None:
+    """Install optional companion CLIs used by Xerxes."""
+    install_parser = argparse.ArgumentParser(
+        prog="xerxes install",
+        description="Install optional Xerxes companion tools.",
+    )
+    install_parser.add_argument(
+        "--node",
+        action="store_true",
+        help="Install the managed Node.js runtime used by the packaged TypeScript TUI.",
+    )
+    install_parser.add_argument(
+        "--cloud-code",
+        "--claude-code",
+        action="store_true",
+        dest="claude_code",
+        help="Install Anthropic Claude Code for the built-in claude-code provider profile.",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall even if the Claude Code executable is already available.",
+    )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the install command without executing it.",
+    )
+    args = install_parser.parse_args(argv)
+    if not args.node and not args.claude_code:
+        install_parser.error("choose an install target, for example `xerxes install --node`")
+
+    if args.node:
+        _install_managed_node(dry_run=args.dry_run, force=args.force)
+
+    if args.claude_code:
+        installed = _claude_code_cli_path()
+        if installed and not args.force:
+            print(f"Claude Code is already installed: {installed}")
+            print("Login or refresh credentials with: claude auth login")
+            return
+
+        npm = _resolve_npm_executable()
+        if not npm:
+            raise SystemExit("npm was not found. Run `xerxes install --node` first, then `xerxes install --cloud-code`.")
+
+        command = [npm, "install", "-g", "@anthropic-ai/claude-code"]
+        if args.dry_run:
+            print(f"Would run: {shlex.join(command)}")
+            return
+
+        proc = subprocess.run(command, text=True)
+        if proc.returncode != 0:
+            raise SystemExit(proc.returncode)
+        print("Claude Code installed.")
+        print("Login with: claude auth login")
 
 
 def _service_slug(value: str) -> str:
@@ -367,11 +639,14 @@ def _configure_discord_daemon_paths(config: Any, service_name: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Parse ``argv`` and dispatch to telegram, one-shot, or TUI mode.
 
-    Imports the TUI lazily so that ``xerxes telegram`` and one-shot
+    Imports the legacy TUI lazily so that ``xerxes telegram`` and one-shot
     paths avoid the heavy ``prompt_toolkit`` startup. Honours
     ``KeyboardInterrupt`` quietly.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "install":
+        _run_install_command(argv[1:])
+        return
     if argv and argv[0] == "update":
         _run_update_command(argv[1:])
         return
@@ -529,8 +804,6 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(DaemonServer(config).run())
         return
 
-    from .tui import XerxesTUI
-
     parser = argparse.ArgumentParser(
         prog="xerxes",
         description="Xerxes — interactive AI agent in your terminal.",
@@ -557,6 +830,11 @@ def main(argv: list[str] | None = None) -> None:
         "--refresh",
         action="store_true",
         help="Kill the running daemon so the next launch starts fresh.",
+    )
+    parser.add_argument(
+        "--legacy-tui",
+        action="store_true",
+        help="Use the old prompt_toolkit TUI instead of the TypeScript TUI.",
     )
     parser.add_argument(
         "prompt",
@@ -588,14 +866,23 @@ def main(argv: list[str] | None = None) -> None:
             pass
         return
 
-    async def _run() -> None:
-        """Open the interactive TUI and await its lifecycle."""
+    if not args.legacy_tui:
+        try:
+            _run_new_tui(resume_session_id=args.resume)
+        except KeyboardInterrupt:
+            pass
+        return
+
+    from .tui import XerxesTUI
+
+    async def _run_legacy() -> None:
+        """Open the legacy interactive TUI and await its lifecycle."""
         tui = XerxesTUI(resume_session_id=args.resume)
         async with tui:
             await tui.wait_until_done()
 
     try:
-        asyncio.run(_run())
+        asyncio.run(_run_legacy())
     except KeyboardInterrupt:
         pass
 

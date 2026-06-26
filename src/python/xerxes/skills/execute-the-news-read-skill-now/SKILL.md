@@ -2,8 +2,8 @@
 name: execute-the-news-read-skill-now
 description: "Execute the 'news-read' skill now."
 version: 0.1.0
-tags: [TodoWriteTool, SpawnAgents, delegate_task, SendMessageTool, DuckDuckGoSearch, ExecuteShell, WebScraper, GoogleSearch, RSSReader]
-required_tools: [TodoWriteTool, SpawnAgents, delegate_task, SendMessageTool, DuckDuckGoSearch, ExecuteShell, WebScraper, GoogleSearch, RSSReader]
+tags: [TodoWriteTool, SpawnAgents, delegate_task, SendMessageTool, DuckDuckGoSearch, exec_command, WebScraper, GoogleSearch, RSSReader]
+required_tools: [TodoWriteTool, SpawnAgents, delegate_task, SendMessageTool, DuckDuckGoSearch, exec_command, WebScraper, GoogleSearch, RSSReader]
 author: Xerxes-skill-authoring
 ---
 # When to use
@@ -27,10 +27,10 @@ Apply this skill for tasks similar to: *Execute the 'news-read' skill now.*
 13. **DuckDuckGoSearch** — query=top science news today May ..., n_results=5, safesearch=moderate, timelimit=d
 14. **DuckDuckGoSearch** — query=top business finance news t..., n_results=5, safesearch=moderate, timelimit=d
 15. **DuckDuckGoSearch** — query=top health medical news tod..., n_results=5, safesearch=moderate, timelimit=d
-16. **ExecuteShell** — command=curl -sSL --compressed -A '..., timeout=30
-17. **ExecuteShell** — command=curl -sSL --compressed -A '..., timeout=30
-18. **ExecuteShell** — command=curl -sSL --compressed -A '..., timeout=30
-19. **ExecuteShell** — command=curl -sSL --compressed -A '..., timeout=30
+16. **exec_command** — cmd=curl -sSL --compressed -A '..., yield_time_ms=30000
+17. **exec_command** — cmd=curl -sSL --compressed -A '..., yield_time_ms=30000
+18. **exec_command** — cmd=curl -sSL --compressed -A '..., yield_time_ms=30000
+19. **exec_command** — cmd=curl -sSL --compressed -A '..., yield_time_ms=30000
 20. **WebScraper** — url=https://www.bbc.com/news, selector=h3, clean_text=true, timeout=30
 21. **WebScraper** — url=https://www.theguardian.com, selector=h3, clean_text=true, timeout=30
 22. **GoogleSearch** — query=top technology news today, n_results=5, time_range=d
@@ -43,6 +43,6 @@ Apply this skill for tasks similar to: *Execute the 'news-read' skill now.*
 
 # Verification
 
-After running the procedure, the agent should have invoked these tools in order: `TodoWriteTool>SpawnAgents>TodoWriteTool>delegate_task>delegate_task>delegate_task>delegate_task>SendMessageTool>SendMessageTool>SendMessageTool>SendMessageTool>DuckDuckGoSearch>DuckDuckGoSearch>DuckDuckGoSearch>DuckDuckGoSearch>ExecuteShell>ExecuteShell>ExecuteShell>ExecuteShell>WebScraper>WebScraper>GoogleSearch>GoogleSearch>GoogleSearch>GoogleSearch>RSSReader>RSSReader>TodoWriteTool`.
+After running the procedure, the agent should have invoked these tools in order: `TodoWriteTool>SpawnAgents>TodoWriteTool>delegate_task>delegate_task>delegate_task>delegate_task>SendMessageTool>SendMessageTool>SendMessageTool>SendMessageTool>DuckDuckGoSearch>DuckDuckGoSearch>DuckDuckGoSearch>DuckDuckGoSearch>exec_command>exec_command>exec_command>exec_command>WebScraper>WebScraper>GoogleSearch>GoogleSearch>GoogleSearch>GoogleSearch>RSSReader>RSSReader>TodoWriteTool`.
 Total successful calls expected: **28**.
 Reference final response (truncated): *# 📰 Global News Briefing — April 19, 2026  ---  ## 🏛️ POLITICS  **1. Trump Pushes Sweeping Tax & Spending Cuts Bill Through Congress** President Donald Trump ma*

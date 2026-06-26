@@ -148,6 +148,8 @@ class ApprovalStore:
         temp = self._persist_path.with_suffix(".tmp")
         temp.write_text(json.dumps([r.to_dict() for r in always], indent=2), encoding="utf-8")
         os.replace(temp, self._persist_path)
+        # Restrict permissions on the persisted approvals file to owner-only.
+        os.chmod(self._persist_path, 0o600)
 
 
 __all__ = ["ApprovalRecord", "ApprovalScope", "ApprovalStore"]

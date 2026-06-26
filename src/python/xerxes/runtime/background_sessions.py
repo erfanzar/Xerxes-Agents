@@ -83,7 +83,7 @@ RunFn = Callable[[BackgroundSession], str]
 class BackgroundSessionManager:
     """Spawn and track threads running background agent sessions."""
 
-    def __init__(self, runner: RunFn, *, max_concurrent: int = 4) -> None:
+    def __init__(self, runner: RunFn, *, max_concurrent: int = 4, max_completed: int = 100) -> None:
         """Create a manager bound to ``runner`` with a concurrency cap.
 
         Args:
@@ -93,9 +93,13 @@ class BackgroundSessionManager:
             max_concurrent: Maximum number of sessions running simultaneously
                 (clamped to ``>= 1``). Additional submissions stay ``PENDING``
                 until a slot frees up.
+            max_completed: Maximum number of finished sessions to retain in
+                ``self._sessions``. Older completed sessions are pruned after
+                new ones finish, keeping the most recent up to this count.
         """
         self._runner = runner
         self._max = max(1, int(max_concurrent))
+        self._max_completed = max(0, int(max_completed))
         self._sessions: dict[str, BackgroundSession] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
@@ -145,14 +149,29 @@ class BackgroundSessionManager:
         """Execute ``runner(sess)`` on the worker thread and record the outcome."""
         try:
             result = self._runner(sess)
-            sess.result = result
-            sess.status = BackgroundStatus.SUCCEEDED
+            with self._lock:
+                sess.result = result
+                sess.status = BackgroundStatus.SUCCEEDED
         except Exception as exc:
-            sess.error = f"{type(exc).__name__}: {exc}"
-            sess.status = BackgroundStatus.FAILED
+            with self._lock:
+                sess.error = f"{type(exc).__name__}: {exc}"
+                sess.status = BackgroundStatus.FAILED
         finally:
-            sess.finished_at = time.time()
+            with self._lock:
+                sess.finished_at = time.time()
             self._drain_pending()
+            with self._lock:
+                self._threads.pop(sess.id, None)
+                # Prune older completed sessions to bound memory.
+                terminal = (BackgroundStatus.SUCCEEDED, BackgroundStatus.FAILED, BackgroundStatus.CANCELLED)
+                completed = [
+                    (sid, s) for sid, s in self._sessions.items() if s.status in terminal
+                ]
+                if len(completed) > self._max_completed:
+                    # Sort by finished_at descending; keep most recent.
+                    completed.sort(key=lambda item: item[1].finished_at, reverse=True)
+                    for sid, _s in completed[self._max_completed:]:
+                        self._sessions.pop(sid, None)
 
     def _drain_pending(self) -> None:
         """Promote one ``PENDING`` session to ``RUNNING`` if capacity allows."""

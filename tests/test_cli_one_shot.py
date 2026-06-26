@@ -13,7 +13,10 @@
 # limitations under the License.
 
 from argparse import Namespace
+from types import SimpleNamespace
 
+import pytest
+from xerxes import __main__
 from xerxes.__main__ import _discord_child_argv, _discord_service_name, _resolve_one_shot_prompt
 
 
@@ -43,6 +46,111 @@ def test_resolve_one_shot_prompt_opens_tui_for_empty_tty() -> None:
 
     assert one_shot is False
     assert prompt == ""
+
+
+def test_main_interactive_uses_new_tui_by_default(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    monkeypatch.setattr(__main__.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        __main__, "_run_new_tui", lambda *, resume_session_id: seen.setdefault("resume", resume_session_id)
+    )
+
+    __main__.main(["-r", "abc123"])
+
+    assert seen == {"resume": "abc123"}
+
+
+def test_run_new_tui_invokes_node_and_preserves_python_env(monkeypatch, tmp_path) -> None:
+    entry = tmp_path / "entry.js"
+    entry.write_text("console.log('tui')\n", encoding="utf-8")
+    monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.setenv("XERXES_PYTHON", "/custom/python")
+    monkeypatch.setattr(__main__.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+    seen: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        env = kwargs.get("env")
+        if env is None:
+            return SimpleNamespace(returncode=1, stdout="")
+        seen["argv"] = argv
+        seen["env"] = env
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(__main__.subprocess, "run", run)
+
+    __main__._run_new_tui(resume_session_id="abc123")
+
+    assert seen["argv"] == ["/usr/bin/node", str(entry)]
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["XERXES_PYTHON"] == "/custom/python"
+    assert env["XERXES_TUI_RESUME"] == "abc123"
+
+
+def test_run_new_tui_prefers_managed_node(monkeypatch, tmp_path) -> None:
+    entry = tmp_path / "entry.js"
+    entry.write_text("console.log('tui')\n", encoding="utf-8")
+    managed = tmp_path / "home" / "node" / "current" / "bin" / "node"
+    managed.parent.mkdir(parents=True)
+    managed.write_text("#!/bin/sh\n", encoding="utf-8")
+    managed.chmod(0o755)
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.delenv("XERXES_NODE", raising=False)
+    monkeypatch.setattr(__main__.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+    seen: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        if argv and argv[0] == "git":
+            return SimpleNamespace(returncode=1, stdout="")
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(__main__.subprocess, "run", run)
+
+    __main__._run_new_tui()
+
+    assert seen["argv"] == [str(managed), str(entry)]
+
+
+def test_run_new_tui_uses_current_python_when_unset(monkeypatch, tmp_path) -> None:
+    entry = tmp_path / "entry.js"
+    entry.write_text("console.log('tui')\n", encoding="utf-8")
+    monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.setenv("DEV", "true")
+    monkeypatch.delenv("XERXES_PYTHON", raising=False)
+    monkeypatch.setattr(__main__.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+    seen: dict[str, object] = {}
+
+    def run(argv, **kwargs):
+        env = kwargs.get("env")
+        if env is None:
+            return SimpleNamespace(returncode=1, stdout="")
+        seen["env"] = env
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(__main__.subprocess, "run", run)
+
+    __main__._run_new_tui()
+
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["XERXES_PYTHON"] == __main__.sys.executable
+    assert env["NODE_ENV"] == "production"
+    assert env["DEV"] == "false"
+    assert "XERXES_TUI_RESUME" not in env
+
+
+def test_run_new_tui_errors_when_node_is_missing(monkeypatch, tmp_path) -> None:
+    entry = tmp_path / "entry.js"
+    entry.write_text("console.log('tui')\n", encoding="utf-8")
+    monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.delenv("XERXES_NODE", raising=False)
+    monkeypatch.setattr(__main__.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match=r"xerxes install --node"):
+        __main__._run_new_tui()
 
 
 def _discord_args(**overrides) -> Namespace:

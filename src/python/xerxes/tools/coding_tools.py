@@ -444,7 +444,7 @@ def git_diff(
             cmd.append("--staged")
 
         if file_path:
-            cmd.append(file_path)
+            cmd.extend(["--", file_path])
 
         result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=30)
 
@@ -568,7 +568,7 @@ def git_add(files: list[str], repo_path: str = ".", context_variables: dict | No
         if not files:
             return "Error: No files specified"
 
-        cmd = ["git", "add", *files]
+        cmd = ["git", "add", "--", *files]
 
         result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True, timeout=10)
 

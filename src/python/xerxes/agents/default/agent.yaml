@@ -10,7 +10,6 @@ agent:
     - FileEditTool
     - GlobTool
     - GrepTool
-    - ExecuteShell
     - exec_command
     - write_stdin
     - list_terminal_sessions

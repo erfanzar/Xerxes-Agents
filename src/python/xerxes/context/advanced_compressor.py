@@ -72,8 +72,8 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
 
-    if tool_name in ("terminal", "ExecuteShell", "shell"):
-        cmd = args.get("command", "")
+    if tool_name in ("terminal", "exec_command", "shell"):
+        cmd = args.get("cmd", args.get("command", ""))
         if len(cmd) > 80:
             cmd = cmd[:77] + "..."
         exit_match = re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
@@ -111,7 +111,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
             goal = goal[:57] + "..."
         return f"[{tool_name}] '{goal}' ({content_len:,} chars result)"
 
-    if tool_name in ("execute_code", "ExecuteShell"):
+    if tool_name in ("execute_code", "exec_command"):
         code_preview = (args.get("code") or "")[:60].replace("\n", " ")
         if len(args.get("code", "")) > 60:
             code_preview += "..."

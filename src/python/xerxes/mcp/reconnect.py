@@ -84,7 +84,7 @@ def reconnect_with_backoff(
     *,
     policy: ReconnectPolicy | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    on_error: Callable[[int, BaseException], None] | None = None,
+    on_error: Callable[[int, Exception], None] | None = None,
 ) -> T:
     """Retry ``connect`` with exponential backoff until success or ``max_attempts``.
 
@@ -95,11 +95,11 @@ def reconnect_with_backoff(
     """
 
     p = policy or ReconnectPolicy()
-    last_exc: BaseException | None = None
+    last_exc: Exception | None = None
     for attempt in range(1, p.max_attempts + 1):
         try:
             return connect()
-        except BaseException as exc:
+        except Exception as exc:
             last_exc = exc
             if on_error is not None:
                 on_error(attempt, exc)

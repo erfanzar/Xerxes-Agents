@@ -87,7 +87,7 @@ class SessionFTSIndex:
         """Probe whether the SQLite build supports FTS5."""
 
         try:
-            with self._connect() as conn:
+            with self._lock, self._connect() as conn:
                 cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_fts5_test'")
                 cur.fetchall()
 
@@ -102,7 +102,7 @@ class SessionFTSIndex:
     def _ensure_schema(self) -> None:
         """Create the ``session_fts`` virtual table if absent."""
 
-        with self._connect() as conn:
+        with self._lock, self._connect() as conn:
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
@@ -121,7 +121,7 @@ class SessionFTSIndex:
         if not self._fts_available:
             return
 
-        with self._connect() as conn:
+        with self._lock, self._connect() as conn:
             conn.execute(
                 "DELETE FROM session_fts WHERE session_id = ?",
                 (session.session_id,),
@@ -142,7 +142,7 @@ class SessionFTSIndex:
 
         if not self._fts_available:
             return
-        with self._connect() as conn:
+        with self._lock, self._connect() as conn:
             conn.execute(
                 "DELETE FROM session_fts WHERE session_id = ?",
                 (session_id,),
@@ -184,10 +184,29 @@ class SessionFTSIndex:
         sql += " ORDER BY rank LIMIT ?"
         params.append(k)
 
-        with self._connect() as conn:
+        with self._lock, self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            cur = conn.execute(sql, params)
-            rows = cur.fetchall()
+            try:
+                cur = conn.execute(sql, params)
+                rows = cur.fetchall()
+            except sqlite3.OperationalError:
+                # FTS5 syntax error from raw user input — fall back to LIKE
+                like_q = f"%{query}%"
+                like_sql = (
+                    "SELECT session_id, turn_id, agent_id, content, 0 AS rank "
+                    "FROM session_fts WHERE content LIKE ?"
+                )
+                like_params: list[Any] = [like_q]
+                if agent_id is not None:
+                    like_sql += " AND agent_id = ?"
+                    like_params.append(agent_id)
+                if session_id is not None:
+                    like_sql += " AND session_id = ?"
+                    like_params.append(session_id)
+                like_sql += " LIMIT ?"
+                like_params.append(k)
+                cur = conn.execute(like_sql, like_params)
+                rows = cur.fetchall()
 
         return [
             {

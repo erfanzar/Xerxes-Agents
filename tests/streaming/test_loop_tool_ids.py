@@ -19,7 +19,7 @@ import time
 
 from xerxes.runtime.agent_memory import AgentMemory
 from xerxes.streaming import loop
-from xerxes.streaming.events import TextChunk, ToolEnd, ToolStart, TurnDone
+from xerxes.streaming.events import ProviderRetry, TextChunk, ToolEnd, ToolStart, TurnDone
 from xerxes.tools.agent_memory_tool import active_memory, set_active_memory
 
 
@@ -34,8 +34,8 @@ def test_run_assigns_tool_id_when_provider_omits_one() -> None:
                 "tool_calls": [
                     {
                         "id": "",
-                        "name": "ExecuteShell",
-                        "input": {"command": "cd /tmp && pwd"},
+                        "name": "exec_command",
+                        "input": {"cmd": "cd /tmp && pwd"},
                     }
                 ],
                 "in_tokens": 1,
@@ -228,8 +228,8 @@ def test_run_spills_large_tool_result_to_project_memory(tmp_path) -> None:
                 "tool_calls": [
                     {
                         "id": "call_large",
-                        "name": "ExecuteShell",
-                        "input": {"command": "make noisy"},
+                        "name": "exec_command",
+                        "input": {"cmd": "make noisy"},
                     }
                 ],
                 "in_tokens": 1,
@@ -276,6 +276,82 @@ def test_run_spills_large_tool_result_to_project_memory(tmp_path) -> None:
     assert large_result not in seen_provider_messages[1][-1]["content"]
 
 
+def test_run_spills_large_tool_result_with_builtin_headroom_when_no_summary_agent(tmp_path) -> None:
+    original = loop._stream_llm
+    previous_memory = active_memory()
+    memory = AgentMemory(project_root=tmp_path)
+    large_result = "\n".join(
+        [f"INFO build line {index}" for index in range(140)]
+        + [
+            "ERROR tests/test_runtime.py::test_context failed",
+            "Traceback (most recent call last):",
+            "  File 'tests/test_runtime.py', line 42, in test_context",
+            "FAILED tests/test_runtime.py::test_context - AssertionError",
+            "1 failed, 300 passed in 10.00s",
+        ]
+    )
+    calls = {"n": 0}
+    seen_provider_messages: list[list[dict]] = []
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        seen_provider_messages.append(list(kwargs["messages"]))
+        if calls["n"] == 1:
+            yield {
+                "tool_calls": [
+                    {
+                        "id": "call_large",
+                        "name": "exec_command",
+                        "input": {"cmd": "pytest -q"},
+                    }
+                ],
+                "in_tokens": 1,
+                "out_tokens": 1,
+            }
+        else:
+            yield TextChunk("done")
+            yield {"tool_calls": [], "in_tokens": 1, "out_tokens": 1}
+
+    loop._stream_llm = fake_stream
+    set_active_memory(memory)
+    try:
+        events = list(
+            loop.run(
+                user_message="run tests",
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "tool_result_spill_chars": 100,
+                    "tool_result_headroom_chars": 1200,
+                    "compaction_summary_agent": False,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: large_result,
+                tool_schemas=[],
+            )
+        )
+    finally:
+        set_active_memory(previous_memory)
+        loop._stream_llm = original
+
+    ends = [event for event in events if isinstance(event, ToolEnd)]
+    tool_messages = [msg for msg in state.messages if msg.get("role") == "tool"]
+    files = [entry for entry in memory.list_files("project") if entry.relative.startswith("tool-results/")]
+
+    assert len(files) == 1
+    assert memory.read("project", files[0].relative) == large_result
+    assert "[Large tool result stored outside model context]" in ends[0].result
+    assert "Headroom: log preview" in ends[0].result
+    assert "## Built-in headroom preview" in ends[0].result
+    assert "ERROR tests/test_runtime.py::test_context failed" in ends[0].result
+    assert "Summary unavailable" not in ends[0].result
+    assert large_result not in ends[0].result
+    assert tool_messages[0]["content"] == ends[0].result
+    assert large_result not in seen_provider_messages[1][-1]["content"]
+
+
 def test_large_tool_result_when_memory_init_fails_returns_pointer_error_not_raw_payload(tmp_path, monkeypatch) -> None:
     original = loop._stream_llm
     previous_memory = active_memory()
@@ -292,8 +368,8 @@ def test_large_tool_result_when_memory_init_fails_returns_pointer_error_not_raw_
                 "tool_calls": [
                     {
                         "id": "call_large",
-                        "name": "ExecuteShell",
-                        "input": {"command": "make noisy"},
+                        "name": "exec_command",
+                        "input": {"cmd": "make noisy"},
                     }
                 ],
                 "in_tokens": 1,
@@ -548,11 +624,52 @@ def test_llm_stream_retry_uses_six_fixed_delay_stages(monkeypatch) -> None:
         loop._stream_llm = original
 
     text = "".join(event.text for event in events if isinstance(event, TextChunk))
+    retries = [event for event in events if isinstance(event, ProviderRetry)]
 
     assert calls["n"] == 7
     assert sleeps == [5, 5, 5, 5, 5, 5]
-    assert "Retrying in 5s... (6/6)" in text
+    assert [event.attempt for event in retries] == [1, 2, 3, 4, 5, 6]
+    assert all(event.delay == 5 for event in retries)
+    assert all(not event.final for event in retries)
+    assert "Retrying in" not in text
     assert "done" in text
+    assert any(isinstance(event, TurnDone) for event in events)
+
+
+def test_llm_stream_connection_failure_stays_out_of_assistant_context(monkeypatch) -> None:
+    original = loop._stream_llm
+    sleeps: list[int] = []
+    state = loop.AgentState()
+
+    def fake_stream(*args, **kwargs):
+        raise ConnectionError("Request timed out.")
+        yield
+
+    loop._stream_llm = fake_stream
+    monkeypatch.setattr(loop.time, "sleep", sleeps.append)
+    try:
+        events = list(
+            loop.run(
+                user_message="test",
+                state=state,
+                config={"model": "openai/test", "permission_mode": "accept-all"},
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+    retries = [event for event in events if isinstance(event, ProviderRetry)]
+
+    assert sleeps == [5, 5, 5, 5, 5, 5]
+    assert "Request timed out" not in text
+    assert len(retries) == 7
+    assert retries[-1].final is True
+    assert state.messages == []
+    assert state.metadata["last_connection_failure"]["user_message"] == "test"
     assert any(isinstance(event, TurnDone) for event in events)
 
 
@@ -664,8 +781,8 @@ def test_tool_end_duration_reflects_executor_time() -> None:
                 "tool_calls": [
                     {
                         "id": "call_sleep",
-                        "name": "ExecuteShell",
-                        "input": {"command": "sleep 0.05"},
+                        "name": "exec_command",
+                        "input": {"cmd": "sleep 0.05"},
                     }
                 ],
                 "in_tokens": 1,

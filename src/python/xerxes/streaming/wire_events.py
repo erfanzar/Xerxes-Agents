@@ -218,9 +218,13 @@ class InitDone(WireEvent):
         session_id: Session identifier (also used for replay).
         cwd: Working directory.
         git_branch: Active git branch in ``cwd``, or empty string.
+        head_hash: Short git HEAD hash in ``cwd``, or empty string.
         context_limit: Maximum context window for the active model.
         agent_name: Name of the loaded agent definition.
         skills: List of loaded skill identifiers.
+        skill_descriptions: Descriptions keyed by invokable skill id.
+        mode: Active interaction mode.
+        version: Installed Xerxes package version.
     """
 
     event_type: str = "init_done"
@@ -228,9 +232,13 @@ class InitDone(WireEvent):
     session_id: str = ""
     cwd: str = ""
     git_branch: str = ""
+    head_hash: str = ""
     context_limit: int = 0
     agent_name: str = ""
     skills: list[str] = field(default_factory=list)
+    skill_descriptions: dict[str, str] = field(default_factory=dict)
+    mode: str = ""
+    version: str = ""
 
 
 @dataclass(frozen=True)

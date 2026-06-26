@@ -34,6 +34,8 @@ import signal
 import subprocess
 import sys
 import uuid
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,14 @@ SlashCommandsMixin = _slash_commands.SlashCommandsMixin
 _BULK_SLASH_HANDLERS = _slash_commands._BULK_SLASH_HANDLERS
 logger = logging.getLogger(__name__)
 _CHANNEL_TYPING_INTERVAL = 4.0
+
+
+def _installed_version() -> str:
+    """Return the installed package version for client banners."""
+    try:
+        return package_version("xerxes-agent")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
@@ -292,6 +302,10 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         if method == "slash":
             await self._handle_slash(str(params.get("command", "")), emit)
             return {"ok": True}
+        if method == "commands.catalog":
+            return self._commands_catalog()
+        if method == "complete":
+            return self._complete(params)
         if method == "set_plan_mode":
             enabled = bool(params.get("enabled", params.get("plan_mode", False)))
             self._set_connection_mode(emit, params.get("mode", self._connection_mode(emit)[0]), plan_mode=enabled)
@@ -373,6 +387,182 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             return {"ok": True}
         return {"ok": False, "error": f"Unknown method: {method}"}
 
+    def _complete(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return completions for a partial input line.
+
+        Two modes, chosen by the text: a leading ``/`` with no space yet
+        completes slash-command names from the command registry; otherwise the
+        last whitespace token is treated as a filesystem path (``@`` mention
+        prefixes are honoured) and matching directory entries are returned. The
+        TUI applies ``completions[i].value`` over the active token.
+        """
+        text = str(params.get("text", ""))
+        stripped = text.strip()
+        if stripped.startswith("/") and " " not in stripped:
+            return {"ok": True, "kind": "slash", "completions": self._complete_slash(stripped)}
+        return {"ok": True, "kind": "path", "completions": self._complete_path(text)}
+
+    def _commands_catalog(self) -> dict[str, Any]:
+        """Return the full slash-command and skill catalog for rich TUI surfaces."""
+        from ..bridge.commands import CATEGORIES, list_commands
+
+        canon: dict[str, str] = {}
+        categories: list[dict[str, Any]] = []
+        pairs: list[list[str]] = []
+        category_pairs: dict[str, list[list[str]]] = {category: [] for category in CATEGORIES}
+
+        for command in list_commands():
+            label = f"/{command.name}"
+            desc = command.description
+            if command.args_hint:
+                desc = f"{desc} {command.args_hint}"
+            pair = [label, desc]
+            pairs.append(pair)
+            category_pairs.setdefault(command.category, []).append(pair)
+            canon[label] = label
+            for alias in command.aliases:
+                canon[f"/{alias}"] = label
+
+        for category in CATEGORIES:
+            rows = category_pairs.get(category) or []
+            if rows:
+                categories.append({"name": category, "pairs": rows})
+
+        skills = self._cached_skills()
+        descriptions = self._skill_description_map()
+
+        sub: dict[str, list[str]] = {}
+        skill_pairs: list[list[str]] = []
+        for skill in skills:
+            label = f"/{skill}"
+            root, sep, subcommand = skill.partition(":")
+            if sep:
+                sub.setdefault(root, []).append(subcommand)
+            desc = descriptions.get(skill) or descriptions.get(root) or "skill"
+            pair = [label, desc]
+            skill_pairs.append(pair)
+            pairs.append(pair)
+            canon[label] = label
+        if skill_pairs:
+            categories.append({"name": "project skills", "pairs": skill_pairs})
+
+        return {
+            "canon": canon,
+            "categories": categories,
+            "pairs": pairs,
+            "skill_count": len(skills),
+            "sub": sub,
+        }
+
+    def _complete_slash(self, text: str) -> list[dict[str, str]]:
+        """Slash-command name completions matching ``text`` (with leading ``/``)."""
+        from ..bridge.commands import list_commands
+
+        prefix = text[1:].lower()
+        command_matches: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for cmd in list_commands():
+            for name in (cmd.name, *cmd.aliases):
+                if name in seen or not name.lower().startswith(prefix):
+                    continue
+                seen.add(name)
+                command_matches.append({"value": f"/{name}", "label": name, "meta": cmd.description})
+                break
+            if len(command_matches) >= 50:
+                break
+
+        skills = self._cached_skills()
+        descriptions = self._skill_description_map()
+        skill_matches: list[dict[str, str]] = []
+        for skill in skills:
+            if skill in seen or not skill.lower().startswith(prefix):
+                continue
+            seen.add(skill)
+            skill_matches.append({"value": f"/{skill}", "label": skill, "meta": descriptions.get(skill) or "skill"})
+            if len(skill_matches) >= 50:
+                break
+        if prefix:
+            return [*command_matches, *skill_matches][:50]
+
+        command_budget = min(len(command_matches), 24 if skill_matches else 50)
+        out = command_matches[:command_budget]
+        out.extend(skill_matches[: 50 - len(out)])
+        return out
+
+    def _skill_description_map(self) -> dict[str, str]:
+        """Return current skill descriptions keyed by invokable skill id."""
+        registry = getattr(self.runtime, "skill_registry", None)
+        if registry is None:
+            return {}
+
+        descriptions: dict[str, str] = {}
+        for skill in registry.get_all():
+            description = str(getattr(skill.metadata, "description", "") or "")
+            descriptions[skill.name] = description
+            for subcommand in skill.metadata.subcommands:
+                descriptions[f"{skill.name}:{subcommand}"] = description
+        return descriptions
+
+    def _cached_skills(self) -> list[str]:
+        """Return invokable skill ids from the current in-memory registry."""
+        runtime = getattr(self, "runtime", None)
+        if runtime is None:
+            return []
+        getter = getattr(runtime, "skill_names_with_subs", None)
+        if callable(getter):
+            try:
+                return sorted(str(name) for name in getter())
+            except Exception:
+                pass
+
+        registry = getattr(runtime, "skill_registry", None)
+        if registry is None:
+            return []
+        try:
+            skills = registry.get_all()
+        except Exception:
+            return []
+
+        out: list[str] = []
+        for skill in skills:
+            name = str(getattr(skill, "name", "") or "")
+            if not name:
+                continue
+            out.append(name)
+            metadata = getattr(skill, "metadata", None)
+            for subcommand in getattr(metadata, "subcommands", []) or []:
+                out.append(f"{name}:{subcommand}")
+        return sorted(out)
+
+    @staticmethod
+    def _complete_path(text: str) -> list[dict[str, str]]:
+        """Filesystem completions for the last path-like token in ``text``."""
+        tokens = text.split()
+        token = tokens[-1] if tokens else ""
+        at = token.startswith("@")
+        raw = token[1:] if at else token
+        if not raw or (raw[0] not in "/.~" and "/" not in raw):
+            return []
+        prefix_dir, base = raw.rsplit("/", 1) if "/" in raw else ("", raw)
+        listdir_target = os.path.expanduser(prefix_dir) if prefix_dir else "."
+        try:
+            entries = sorted(os.listdir(listdir_target or "."))
+        except OSError:
+            return []
+        out: list[dict[str, str]] = []
+        for name in entries:
+            if name.startswith(".") and not base.startswith("."):
+                continue
+            if base and not name.lower().startswith(base.lower()):
+                continue
+            is_dir = os.path.isdir(os.path.join(listdir_target or ".", name))
+            display = name + ("/" if is_dir else "")
+            value = ("@" if at else "") + (f"{prefix_dir}/" if prefix_dir else "") + display
+            out.append({"value": value, "label": display, "meta": "dir" if is_dir else "file"})
+            if len(out) >= 50:
+                break
+        return out
+
     def _handle_runtime_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Handle process-global tool/subagent events emitted from worker threads."""
         if event_type == "interaction_mode_changed":
@@ -429,18 +619,20 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             session.runtime_config.get("mode", session.interaction_mode),
             bool(session.runtime_config.get("plan_mode", session.plan_mode)),
         )
-        await emit(
-            "init_done",
-            {
-                "model": str(session.runtime_config.get("model", "")) or self.runtime.model,
-                "session_id": session.id,
-                "cwd": str(project_dir),
-                "git_branch": self._git_branch(project_dir),
-                "context_limit": self._resolve_context_limit(session.runtime_config),
-                "agent_name": session.agent_id,
-                "skills": self.runtime.discover_skills(),
-            },
-        )
+        init_payload = {
+            "model": str(session.runtime_config.get("model", "")) or self.runtime.model,
+            "session_id": session.id,
+            "cwd": str(project_dir),
+            "git_branch": self._git_branch(project_dir),
+            "head_hash": self._git_head_hash(project_dir),
+            "context_limit": self._resolve_context_limit(session.runtime_config),
+            "agent_name": session.agent_id,
+            "skills": self._cached_skills(),
+            "skill_descriptions": self._skill_description_map(),
+            "mode": session.interaction_mode,
+            "version": _installed_version(),
+        }
+        await emit("init_done", init_payload)
         await self._emit_status(emit)
         # Replay prior turns so the user actually SEES their resumed history.
         # The session manager loads messages into state on open(), but without
@@ -449,6 +641,7 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
             await self._replay_session_history(session, emit)
         return {
             **self.runtime.status(),
+            **init_payload,
             "ok": True,
             "session": session.status(),
             "daemon_protocol": DAEMON_PROTOCOL_VERSION,
@@ -928,6 +1121,23 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         except Exception:
             return ""
 
+    @staticmethod
+    def _git_head_hash(cwd: Path | None = None) -> str:
+        """Return the short git HEAD hash, or empty string if unavailable."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                cwd=cwd or Path.cwd(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+            return result.stdout.strip()
+        except Exception:
+            return ""
+
     def _write_pid(self) -> None:
         """Write the current PID to ``config.pid_file``."""
         pid_path = Path(self.config.pid_file).expanduser()
@@ -1118,15 +1328,15 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
         session = sessions.get(session_key) if sessions is not None and session_key else None
         workspaces = getattr(self, "workspaces", None)
         default_agent = getattr(workspaces, "default_agent_id", "default") if workspaces else "default"
-        try:
-            skills = self.runtime.discover_skills()
-        except Exception:
-            skills = []
+        skills = self._cached_skills()
+        skill_descriptions = self._skill_description_map()
         project_dir = self._resolve_project_dir(getattr(self.config, "project_dir", "") or Path.cwd())
         try:
             git_branch = self._git_branch(project_dir)
+            head_hash = self._git_head_hash(project_dir)
         except Exception:
             git_branch = ""
+            head_hash = ""
         await emit(
             "init_done",
             {
@@ -1138,11 +1348,15 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 "session_id": session.id if session else "",
                 "cwd": str(project_dir),
                 "git_branch": git_branch,
+                "head_hash": head_hash,
                 "context_limit": self._resolve_context_limit(
                     getattr(session, "runtime_config", {}) if session is not None else None
                 ),
                 "agent_name": (session.agent_id if session else default_agent),
                 "skills": skills,
+                "skill_descriptions": skill_descriptions,
+                "mode": session.interaction_mode if session else getattr(self, "_current_mode", "code"),
+                "version": _installed_version(),
             },
         )
         # Also push a status_update so the footer's ``context: x/y`` line

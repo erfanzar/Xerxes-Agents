@@ -159,6 +159,7 @@ class CompletionService:
             True,
         )
         if isinstance(stream_result, ResponseResult):
+            yield "data: [DONE]\n\n"
             return
         # Strip inline ``<think>...</think>`` reasoning from streamed deltas so SSE
         # clients see only the visible answer. Reasoning models (MiniMax M-series,

@@ -14,7 +14,7 @@ Xerxes uses **hatchling** with a custom Rust build hook to produce a single whee
 
 ```bash
 uv build --wheel
-# → dist/xerxes_agent-0.2.5-py3-none-any.whl
+# → dist/xerxes_agent-0.2.6-py3-none-any.whl
 ```
 
 Under the hood, [hatch_build.py](../hatch_build.py) bundles the TypeScript CLI before hatch packs the wheel.
@@ -23,7 +23,7 @@ Under the hood, [hatch_build.py](../hatch_build.py) bundles the TypeScript CLI b
 
 ```bash
 # From local wheel
-pip install dist/xerxes_agent-0.2.5-py3-none-any.whl
+pip install dist/xerxes_agent-0.2.6-py3-none-any.whl
 
 # Editable dev install
 uv pip install -e .

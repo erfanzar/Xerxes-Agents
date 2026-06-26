@@ -25,6 +25,10 @@ implement it.
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import subprocess
 from typing import Any
 
 import httpx
@@ -33,6 +37,7 @@ from ..core.paths import xerxes_home
 
 PROFILES_DIR = xerxes_home()
 PROFILES_FILE = PROFILES_DIR / "profiles.json"
+CLAUDE_CODE_PROFILE_NAME = "cc"
 
 
 def _load_store() -> dict[str, Any]:
@@ -45,6 +50,50 @@ def _load_store() -> dict[str, Any]:
     return {"active": None, "profiles": {}}
 
 
+def _builtin_profiles() -> dict[str, dict[str, Any]]:
+    """Return profiles that ship with Xerxes and cannot disappear."""
+    return {
+        CLAUDE_CODE_PROFILE_NAME: {
+            "name": CLAUDE_CODE_PROFILE_NAME,
+            "base_url": "claude-code://local",
+            "api_key": "",
+            "model": _CLAUDE_CODE_DEFAULT_MODEL,
+            "provider": "claude-code",
+            "sampling": {},
+        }
+    }
+
+
+def _merged_profiles(store: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return built-in profiles plus user profiles, letting user profiles override."""
+    merged = _builtin_profiles()
+    for name, profile in store.get("profiles", {}).items():
+        if isinstance(profile, dict):
+            merged[str(name)] = profile
+    return merged
+
+
+def _active_profile_name(store: dict[str, Any], profiles: dict[str, dict[str, Any]]) -> str:
+    """Resolve the active profile, falling back to the built-in Claude Code profile."""
+    active = str(store.get("active") or "")
+    if active in profiles:
+        return active
+    return CLAUDE_CODE_PROFILE_NAME
+
+
+def _ensure_writable_profile(store: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """Return a mutable stored profile, copying a built-in profile when needed."""
+    profiles = store.setdefault("profiles", {})
+    if name in profiles:
+        return profiles[name]
+    builtin = _builtin_profiles().get(name)
+    if builtin is None:
+        return None
+    profiles[name] = dict(builtin)
+    profiles[name]["sampling"] = dict(builtin.get("sampling", {}))
+    return profiles[name]
+
+
 def _save_store(store: dict[str, Any]) -> None:
     """Write the profiles store to disk, creating parent directories as needed."""
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -54,9 +103,10 @@ def _save_store(store: dict[str, Any]) -> None:
 def list_profiles() -> list[dict[str, Any]]:
     """Return every stored profile with an extra ``"active"`` boolean per record."""
     store = _load_store()
-    active = store.get("active")
+    profiles = _merged_profiles(store)
+    active = _active_profile_name(store, profiles)
     result = []
-    for name, profile in store.get("profiles", {}).items():
+    for name, profile in profiles.items():
         result.append(
             {
                 **profile,
@@ -69,10 +119,8 @@ def list_profiles() -> list[dict[str, Any]]:
 def get_active_profile() -> dict[str, Any] | None:
     """Return the profile marked active, or ``None`` if no active profile exists."""
     store = _load_store()
-    active = store.get("active")
-    if active and active in store.get("profiles", {}):
-        return store["profiles"][active]
-    return None
+    profiles = _merged_profiles(store)
+    return profiles.get(_active_profile_name(store, profiles))
 
 
 SAMPLING_PARAMS = {
@@ -84,6 +132,9 @@ SAMPLING_PARAMS = {
     "presence_penalty",
     "repetition_penalty",
     "min_p",
+    "thinking",
+    "reasoning_effort",
+    "thinking_budget",
 }
 
 
@@ -112,6 +163,8 @@ def save_profile(
     """
     store = _load_store()
     existing = store.get("profiles", {}).get(name, {})
+    provider = provider.strip().lower()
+    provider = {"claude_code": "claude-code"}.get(provider, provider)
     profile = {
         "name": name,
         "base_url": base_url.rstrip("/"),
@@ -134,29 +187,32 @@ def update_sampling(name: str, sampling: dict[str, Any]) -> dict[str, Any] | Non
     Returns the updated profile, or ``None`` if no such profile exists.
     """
     store = _load_store()
-    if name not in store.get("profiles", {}):
+    profile = _ensure_writable_profile(store, name)
+    if profile is None:
         return None
-    existing = store["profiles"][name].get("sampling", {})
+    existing = profile.get("sampling", {})
     for k, v in sampling.items():
         if k in SAMPLING_PARAMS:
             if v is None:
                 existing.pop(k, None)
             else:
                 existing[k] = v
-    store["profiles"][name]["sampling"] = existing
+    profile["sampling"] = existing
     _save_store(store)
-    return store["profiles"][name]
+    return profile
 
 
 def update_active_model(model: str) -> dict[str, Any] | None:
     """Persist ``model`` as the active profile's default; return it, or ``None``."""
     store = _load_store()
-    active = store.get("active")
-    if not active or active not in store.get("profiles", {}):
+    profiles = _merged_profiles(store)
+    active = _active_profile_name(store, profiles)
+    profile = _ensure_writable_profile(store, active)
+    if profile is None:
         return None
-    store["profiles"][active]["model"] = model
+    profile["model"] = model
     _save_store(store)
-    return store["profiles"][active]
+    return profile
 
 
 def delete_profile(name: str) -> bool:
@@ -174,7 +230,7 @@ def delete_profile(name: str) -> bool:
 def set_active(name: str) -> bool:
     """Mark ``name`` as the active profile; return ``False`` if it doesn't exist."""
     store = _load_store()
-    if name in store.get("profiles", {}):
+    if name in _merged_profiles(store):
         store["active"] = name
         _save_store(store)
         return True
@@ -194,6 +250,84 @@ _MINIMAX_MODELS = [
     "abab5-chat",
 ]
 _PROVIDERS_WITHOUT_MODELS = {"minimax", "minimaxi"}
+_CLAUDE_CODE_MODELS_ENV = "CLAUDE_CODE_MODELS"
+_CLAUDE_CODE_CLI_ENV = "CLAUDE_CODE_CLI"
+_CLAUDE_CODE_DEFAULT_MODEL = "claude-code/default"
+
+
+def _split_declared_models(raw: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[\s,]+", raw) if part.strip()]
+
+
+def _claude_code_model_option(model: str) -> str | None:
+    clean = model.strip().strip("'\"")
+    if not clean:
+        return None
+    if clean in {"default", "auto", _CLAUDE_CODE_DEFAULT_MODEL}:
+        return _CLAUDE_CODE_DEFAULT_MODEL
+    if clean.startswith("claude-code/"):
+        return clean
+    if "/" in clean:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.:-]+", clean) is None:
+        return None
+    return f"claude-code/{clean}"
+
+
+def _with_claude_code_default(models: list[str]) -> list[str]:
+    return [_CLAUDE_CODE_DEFAULT_MODEL] + [model for model in models if model != _CLAUDE_CODE_DEFAULT_MODEL]
+
+
+def _dedupe_claude_code_models(models: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for model in models:
+        option = _claude_code_model_option(model)
+        if option and option not in seen:
+            seen.add(option)
+            result.append(option)
+    return result
+
+
+def _claude_code_models_from_help(help_text: str) -> list[str]:
+    section: list[str] = []
+    capture = False
+    for line in help_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--model "):
+            capture = True
+        elif capture and stripped.startswith("--"):
+            break
+        if capture:
+            section.append(stripped)
+    text = " ".join(section)
+    if not text:
+        return []
+    quoted = re.findall(r"(?<![A-Za-z0-9])['\"]([A-Za-z0-9_.:-]+)['\"]", text)
+    return _dedupe_claude_code_models(quoted)
+
+
+def fetch_claude_code_models() -> list[str]:
+    """Discover Claude Code model aliases from local configuration/CLI help."""
+    env_models = os.environ.get(_CLAUDE_CODE_MODELS_ENV, "")
+    if env_models:
+        return _with_claude_code_default(_dedupe_claude_code_models(_split_declared_models(env_models)))
+
+    command = os.environ.get(_CLAUDE_CODE_CLI_ENV, "claude")
+    executable = command if os.path.sep in command else shutil.which(command)
+    if not executable:
+        return []
+    try:
+        proc = subprocess.run(
+            [executable, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return _with_claude_code_default(_claude_code_models_from_help(f"{proc.stdout}\n{proc.stderr}"))
 
 
 def fetch_models(base_url: str, api_key: str) -> list[str]:
@@ -206,6 +340,9 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
         httpx.HTTPStatusError: For non-404 HTTP errors.
         httpx.RequestError: On network-level failures.
     """
+    if _guess_provider(base_url) == "claude-code":
+        return fetch_claude_code_models()
+
     url = f"{base_url.rstrip('/')}/models"
     headers = {}
     if api_key:
@@ -237,6 +374,8 @@ def _guess_provider(base_url: str) -> str:
     generic Kimi chat provider.
     """
     url = base_url.lower()
+    if url.startswith("claude-code://"):
+        return "claude-code"
     if "openrouter.ai" in url:
         return "openrouter"
     if "openai" in url:

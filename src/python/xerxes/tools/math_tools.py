@@ -89,7 +89,14 @@ def _safe_eval(expression: str) -> float:
         if isinstance(node, ast.BinOp):
             if type(node.op) not in _ALLOWED_BINOPS:
                 raise ValueError(f"Operator {type(node.op).__name__} is not allowed")
-            return _ALLOWED_BINOPS[type(node.op)](_eval(node.left), _eval(node.right))
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, ast.Pow) and isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                base = abs(left)
+                exp = abs(right)
+                if exp * math.log10(max(base, 1)) > 10000:
+                    raise ValueError("Exponent too large")
+            return _ALLOWED_BINOPS[type(node.op)](left, right)
         if isinstance(node, ast.UnaryOp):
             if type(node.op) not in _ALLOWED_UNARYOPS:
                 raise ValueError(f"Unary operator {type(node.op).__name__} is not allowed")
@@ -299,11 +306,15 @@ class StatisticalAnalyzer(AgentBaseFn):
             if len(data) > 2:
                 std_dev = statistics.stdev(data)
                 n = len(data)
-                skewness = sum((x - mean) ** 3 for x in data) / (n * std_dev**3)
-                result["skewness"] = skewness
+                if std_dev == 0:
+                    result["skewness"] = 0.0
+                    result["kurtosis"] = 0.0
+                else:
+                    skewness = sum((x - mean) ** 3 for x in data) / (n * std_dev**3)
+                    result["skewness"] = skewness
 
-                kurtosis = sum((x - mean) ** 4 for x in data) / (n * std_dev**4) - 3
-                result["kurtosis"] = kurtosis
+                    kurtosis = sum((x - mean) ** 4 for x in data) / (n * std_dev**4) - 3
+                    result["kurtosis"] = kurtosis
 
             num_bins = min(10, len(set(data)))
             if num_bins > 1:

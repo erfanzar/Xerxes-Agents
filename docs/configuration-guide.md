@@ -33,7 +33,7 @@ config = XerxesConfig(
         "output_sanitization": True,
         "rate_limit_per_minute": 60,
         "allowed_functions": [],       # empty list = allow all
-        "blocked_functions": ["system_tools.ExecuteShell"],
+        "blocked_functions": ["exec_command"],
     },
     llm={
         "provider": "openai",
@@ -153,7 +153,7 @@ features = RuntimeFeaturesConfig(
     sandbox={
         "mode": "WARN",
         "backend_type": "subprocess",
-        "sandboxed_tools": {"ExecuteShell", "ExecutePythonCode"},
+        "sandboxed_tools": {"exec_command"},
         "sandbox_timeout": 30.0,
         "sandbox_memory_limit_mb": 512,
     },
@@ -276,7 +276,7 @@ from xerxes.security.sandbox import SandboxConfig, SandboxMode, SandboxBackendCo
 
 sandbox = SandboxConfig(
     mode=SandboxMode.STRICT,
-    sandboxed_tools={"ExecuteShell", "ExecutePythonCode", "WebScraper"},
+    sandboxed_tools={"exec_command", "WebScraper"},
     elevated_tools={"ReadFile"},          # exempt, runs on host regardless
     sandbox_timeout=30.0,
     sandbox_memory_limit_mb=512,

@@ -128,14 +128,27 @@ class ExecutionPlan:
                 return step
         return None
 
-    def get_next_steps(self, completed_steps: set[int]) -> list[PlanStep]:
-        """Return all not-yet-run steps whose dependencies are all satisfied."""
+    def get_next_steps(
+        self, completed_steps: set[int], failed_steps: set[int] | None = None
+    ) -> list[PlanStep]:
+        """Return all not-yet-run steps whose dependencies are all satisfied.
 
+        Steps that are already completed or failed are excluded. Steps
+        whose dependencies include any failed step are also excluded
+        (they will never become runnable).
+        """
+
+        if failed_steps is None:
+            failed_steps = set()
         next_steps = []
         for step in self.steps:
-            if step.step_id not in completed_steps:
-                if all(dep_id in completed_steps for dep_id in step.dependencies):
-                    next_steps.append(step)
+            if step.step_id in completed_steps or step.step_id in failed_steps:
+                continue
+            # Skip steps whose dependencies include any failed step
+            if any(dep_id in failed_steps for dep_id in step.dependencies):
+                continue
+            if all(dep_id in completed_steps for dep_id in step.dependencies):
+                next_steps.append(step)
         return next_steps
 
 
@@ -264,8 +277,10 @@ class CortexPlanner:
 
         Each iteration calls :meth:`ExecutionPlan.get_next_steps`; if none
         are eligible the loop exits to avoid spinning on a circular
-        dependency. Errors per step are logged and the step is marked
-        completed so the rest of the plan can still proceed.
+        dependency. Errors per step are logged and the step is added to
+        ``failed_steps`` (not ``completed_steps``) so that downstream
+        steps depending on it are skipped rather than crashing with a
+        ``KeyError``.
 
         Returns:
             Mapping from ``step_id`` to the step's output string.
@@ -291,10 +306,11 @@ class CortexPlanner:
             task_context += "\n"
 
         completed_steps: set[int] = set()
+        failed_steps: set[int] = set()
         step_results: dict[int, str] = {}
 
-        while len(completed_steps) < len(plan.steps):
-            next_steps = plan.get_next_steps(completed_steps)
+        while len(completed_steps) + len(failed_steps) < len(plan.steps):
+            next_steps = plan.get_next_steps(completed_steps, failed_steps)
 
             if not next_steps:
                 if self.logger:
@@ -316,7 +332,20 @@ class CortexPlanner:
                         if self.logger:
                             self.logger.error(f"❌ Step {step.step_id} failed: {e}")
 
-                    completed_steps.add(step.step_id)
+                    failed_steps.add(step.step_id)
+
+                    if self.verbose and self.logger:
+                        # Log downstream steps that will be skipped
+                        for future_step in plan.steps:
+                            if (
+                                future_step.step_id not in completed_steps
+                                and future_step.step_id not in failed_steps
+                                and step.step_id in future_step.dependencies
+                            ):
+                                self.logger.warning(
+                                    f"⏭️ Skipping step {future_step.step_id}: "
+                                    f"dependency step {step.step_id} failed"
+                                )
 
         if self.verbose:
             if self.logger:

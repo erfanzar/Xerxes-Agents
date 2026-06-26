@@ -25,7 +25,7 @@ def test_wire_tool_result_reuses_generated_tool_call_id() -> None:
     output = io.StringIO()
     server._stdout = output
 
-    server._emit_wire_tool_start("", "ExecuteShell", {"command": "cd /tmp && pwd"})
+    server._emit_wire_tool_start("", "exec_command", {"cmd": "cd /tmp && pwd"})
     server._emit_wire_tool_result("", "ok", duration_ms=123.0)
 
     lines = [json.loads(line) for line in output.getvalue().splitlines()]
