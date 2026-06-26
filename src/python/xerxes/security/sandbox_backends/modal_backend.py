@@ -21,6 +21,7 @@ this module is cheap even on installs that don't have the extra."""
 from __future__ import annotations
 
 import importlib.util
+import shlex
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,7 +78,8 @@ class ModalSandboxBackend:
         app = modal.App.lookup("xerxes-sandbox", create_if_missing=True)  # type: ignore[attr-defined]
         full_env = {**self._config.env, **(env or {})}
         # Prepend cd so the working dir matches the caller's expectation.
-        run_cmd = ["bash", "-lc", (f"cd {cwd} && " if cwd else "") + command]
+        # shlex.quote prevents command injection via a malicious cwd path.
+        run_cmd = ["bash", "-lc", (f"cd {shlex.quote(cwd)} && " if cwd else "") + command]
         with modal.Sandbox.create(  # type: ignore[attr-defined]
             *run_cmd,
             image=image,

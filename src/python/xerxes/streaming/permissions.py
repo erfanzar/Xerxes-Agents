@@ -103,26 +103,63 @@ _DANGEROUS_BASH_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\brm\s+(-[a-zA-Z]*f|-[a-zA-Z]*r|--force|--recursive)\b"),
     re.compile(r"\bgit\s+(push\s+--force|reset\s+--hard|clean\s+-[a-zA-Z]*f)\b"),
     re.compile(r"\b(mkfs|dd\s+if=|format|fdisk|parted)\b"),
-    re.compile(r">\s*/dev/"),
+    re.compile(r">\s*\S"),
     re.compile(r"\bsudo\b"),
     re.compile(r"\bcurl\b.*\|\s*(bash|sh|zsh)\b"),
+    re.compile(r"\bos\.system\b"),
+    re.compile(r"\bsubprocess\b"),
+    re.compile(r"\beval\s*\("),
+    re.compile(r"\bexec\s*\("),
 ]
+
+# Shell operators that chain multiple commands together.
+_SHELL_OPERATORS: list[re.Pattern[str]] = [
+    re.compile(r"&&"),
+    re.compile(r"\|\|"),
+    re.compile(r";"),
+    re.compile(r"\|"),
+]
+
+
+def _split_shell_commands(command: str) -> list[str]:
+    """Split a command string on shell chaining operators.
+
+    Splits on ``&&``, ``||``, ``;``, and ``|`` to extract individual
+    sub-commands so each can be evaluated independently.
+    """
+    # Replace operators with a sentinel, then split on it.
+    result = [command]
+    for op_pattern in _SHELL_OPERATORS:
+        new_result: list[str] = []
+        for part in result:
+            new_result.extend(op_pattern.split(part))
+        result = new_result
+    return [p.strip() for p in result if p.strip()]
 
 
 def is_safe_bash(command: str) -> bool:
     """Return whether a shell command is on the conservative auto-approve list.
 
-    The check rejects dangerous patterns first (``rm -rf``, ``sudo``,
-    ``curl ... | sh``, partition tools, ``git push --force``) and then accepts
-    only commands whose first token matches a read-only allowlist (``ls``,
-    ``git status``, search tools, version probes, etc.). A ``cd ... &&``
-    prefix is unwrapped and the trailing command re-evaluated recursively.
+    The command is first split on shell chaining operators (``&&``, ``||``,
+    ``;``, ``|``) so that every sub-command is checked independently. This
+    prevents bypasses like ``echo hello && rm -rf /`` where the leading
+    ``echo`` would match a safe pattern and auto-approve the whole chain.
+
+    Each sub-command is rejected if it matches any dangerous pattern
+    (``rm -rf``, ``sudo``, ``curl ... | sh``, partition tools,
+    ``git push --force``, ``os.system``, ``subprocess``, ``eval(``,
+    ``exec(``, output redirects with ``>``). Then the sub-command is
+    accepted only if its first token matches a read-only allowlist
+    (``ls``, ``git status``, search tools, version probes, etc.). A
+    ``cd ... &&`` prefix is unwrapped and the trailing command
+    re-evaluated recursively.
 
     Args:
         command: Raw shell command string from the tool call.
 
     Returns:
-        ``True`` only if every check passes; ``False`` is the safe default.
+        ``True`` only if every sub-command passes all checks; ``False``
+        is the safe default.
     """
 
     command = command.strip()
@@ -131,15 +168,25 @@ def is_safe_bash(command: str) -> bool:
     if cd_prefix:
         return is_safe_bash(cd_prefix.group(1))
 
-    for pattern in _DANGEROUS_BASH_PATTERNS:
-        if pattern.search(command):
+    # Split on shell chaining operators and check each sub-command.
+    sub_commands = _split_shell_commands(command)
+    for sub in sub_commands:
+        for pattern in _DANGEROUS_BASH_PATTERNS:
+            if pattern.search(sub):
+                return False
+
+    # If no sub-command matched a dangerous pattern, verify that every
+    # sub-command matches a safe pattern.
+    for sub in sub_commands:
+        matched_safe = False
+        for pattern in _SAFE_BASH_PATTERNS:
+            if pattern.search(sub):
+                matched_safe = True
+                break
+        if not matched_safe:
             return False
 
-    for pattern in _SAFE_BASH_PATTERNS:
-        if pattern.search(command):
-            return True
-
-    return False
+    return True
 
 
 def check_permission(
@@ -195,22 +242,28 @@ def check_permission(
     if mode == PermissionMode.PLAN:
         if name in SAFE_TOOLS:
             return True
-        if name in ("Bash", "ExecuteShell"):
+        if name == "Bash":
             cmd = tool_call.get("input", {}).get("command", "")
+            return is_safe_bash(cmd)
+        if name == "exec_command":
+            cmd = tool_call.get("input", {}).get("cmd", "")
             return is_safe_bash(cmd)
         return False
 
     if name in SAFE_TOOLS:
         return True
 
-    if name in ("Bash", "ExecuteShell"):
+    if name == "Bash":
         cmd = tool_call.get("input", {}).get("command", "")
+        return is_safe_bash(cmd)
+    if name == "exec_command":
+        cmd = tool_call.get("input", {}).get("cmd", "")
         return is_safe_bash(cmd)
 
     if name in ("Agent", "SendMessage"):
         return True
 
-    if name in ("MemorySave", "MemoryDelete"):
+    if name == "MemorySave":
         return True
 
     if name in ("Write", "WriteFile", "Edit", "FileEditTool", "AppendFile"):
@@ -229,8 +282,10 @@ def format_permission_description(tool_call: dict[str, Any]) -> str:
     name = tool_call.get("name", "")
     inp = tool_call.get("input", {})
 
-    if name in ("Bash", "ExecuteShell"):
+    if name == "Bash":
         return f"Run: {inp.get('command', '')}"
+    if name == "exec_command":
+        return f"Run: {inp.get('cmd', '')}"
     if name in ("Write", "WriteFile"):
         return f"Write to: {inp.get('file_path', '')}"
     if name in ("Edit",):

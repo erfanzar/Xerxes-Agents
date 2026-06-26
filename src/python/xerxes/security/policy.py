@@ -58,14 +58,24 @@ class ToolPolicy:
     deny: set[str] = field(default_factory=set)
     optional_tools: set[str] = field(default_factory=set)
 
+    def __post_init__(self) -> None:
+        """Normalize all tool-name sets to lowercase for case-insensitive comparison."""
+        self.allow = {name.lower() for name in self.allow}
+        self.deny = {name.lower() for name in self.deny}
+        self.optional_tools = {name.lower() for name in self.optional_tools}
+
     def evaluate(self, tool_name: str) -> PolicyAction:
-        """Return ``ALLOW`` or ``DENY`` for ``tool_name`` under this policy."""
+        """Return ``ALLOW`` or ``DENY`` for ``tool_name`` under this policy.
+
+        Tool names are compared case-insensitively; both the stored sets
+        and the incoming ``tool_name`` are lowercased before comparison."""
+        tool_name_lower = tool_name.lower()
 
         if self.allow:
-            return PolicyAction.ALLOW if tool_name in self.allow else PolicyAction.DENY
-        if tool_name in self.deny:
+            return PolicyAction.ALLOW if tool_name_lower in self.allow else PolicyAction.DENY
+        if tool_name_lower in self.deny:
             return PolicyAction.DENY
-        if tool_name in self.optional_tools:
+        if tool_name_lower in self.optional_tools:
             return PolicyAction.DENY
         return PolicyAction.ALLOW
 

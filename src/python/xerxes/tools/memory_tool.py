@@ -161,7 +161,7 @@ def search_memory(
         memories = memory_store.retrieve_memories(
             memory_types=memory_type_enums,
             agent_id=agent_id,
-            tags=None,
+            tags=tags,
             limit=limit * 5 if (query or tags) else limit,
         )
 

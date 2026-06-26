@@ -105,6 +105,13 @@ PROVIDERS: dict[str, ProviderConfig] = {
             "x-ai/grok-code-fast-1",
         ],
     ),
+    "claude-code": ProviderConfig(
+        name="claude-code",
+        type="claude-code",
+        api_key_env=None,
+        base_url="claude-code://local",
+        context_limit=200_000,
+    ),
     "gemini": ProviderConfig(
         name="gemini",
         type="openai",
@@ -308,10 +315,18 @@ COSTS: dict[str, tuple[float, float]] = {
     "glm-4.6": (0.5, 0.5),
     "glm-4.5": (0.3, 1.1),
     "glm-4.5-air": (0.07, 0.07),
+    "sonnet": (0.0, 0.0),
+    "opus": (0.0, 0.0),
+    "haiku": (0.0, 0.0),
+}
+
+_PROVIDER_ALIASES: dict[str, str] = {
+    "claude_code": "claude-code",
 }
 
 _PREFIX_MAP: list[tuple[str, str]] = sorted(
     [
+        ("claude-code/", "claude-code"),
         ("claude-", "anthropic"),
         ("gpt-", "openai"),
         ("o1", "openai"),
@@ -352,7 +367,8 @@ def detect_provider(model: str) -> str:
     """
 
     if "/" in model:
-        return model.split("/", 1)[0].lower()
+        explicit = model.split("/", 1)[0].lower()
+        return _PROVIDER_ALIASES.get(explicit, explicit)
     lower = model.lower()
     for prefix, provider_name in _PREFIX_MAP:
         if lower.startswith(prefix):
@@ -372,8 +388,14 @@ def resolve_provider(model: str, extra_config: dict | None = None) -> str:
     """
     provider_name = detect_provider(model)
     cfg = extra_config or {}
+    configured_provider = str(cfg.get("provider") or cfg.get("provider_type") or "").lower()
+    configured_provider = _PROVIDER_ALIASES.get(configured_provider, configured_provider)
+    if configured_provider == "claude-code":
+        return "claude-code"
     base_url = str(cfg.get("base_url") or cfg.get("custom_base_url") or "").lower()
     model_name = bare_model(model).lower()
+    if base_url.startswith("claude-code://") or model.lower().startswith("claude-code/"):
+        return "claude-code"
     if "openrouter.ai" in base_url or model.lower().startswith("openrouter/"):
         return "openrouter"
     if "kimi.com/coding" in base_url or model_name.startswith("kimi-for-"):
@@ -401,6 +423,8 @@ def provider_model(model: str, provider_name: str) -> str:
             routed = model.split("/", 1)[1]
             return routed if "/" in routed else model
         return model
+    if provider_name == "claude-code":
+        return bare_model(model)
     return bare_model(model)
 
 
@@ -480,6 +504,19 @@ def list_all_models() -> dict[str, list[str]]:
 
 
 _MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    # Claude 1M-context models and Claude Code aliases. Keep these above the
+    # generic Anthropic / Claude Code provider fallback of 200k.
+    "opus": 1_000_000,
+    "fable": 1_000_000,
+    "mythos": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-mythos-5": 1_000_000,
+    "claude-mythos-preview": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-opus-4-5": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
     "MiniMax-M2.7-highspeed": 1_024_000,
     "MiniMax-M2.7-flashspeed": 1_024_000,
     "MiniMax-Text-01": 256_000,

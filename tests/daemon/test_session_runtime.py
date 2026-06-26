@@ -27,7 +27,7 @@ from xerxes.daemon.config import DaemonConfig, load_config
 from xerxes.daemon.fingerprint import DAEMON_PROTOCOL_VERSION, daemon_build_id
 from xerxes.daemon.runtime import RuntimeManager, SessionManager, TurnRunner, WorkspaceManager
 from xerxes.daemon.server import MIGRATED_ERROR, DaemonServer
-from xerxes.streaming.events import TextChunk, TurnDone
+from xerxes.streaming.events import ProviderRetry, TextChunk, TurnDone
 
 
 def test_config_env_refs_and_legacy_env(monkeypatch):
@@ -247,6 +247,72 @@ def test_status_payload_uses_session_scoped_interaction_mode(tmp_path):
         runner.close()
 
 
+def test_status_payload_uses_session_scoped_reasoning_effort(tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4)
+    session = sessions.open("tui:default")
+    session.runtime_config = {"model": "claude-code/opus", "thinking": True, "reasoning_effort": "high"}
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "model": "",
+            "runtime_config": {},
+            "system_prompt": "",
+            "tool_schemas": [],
+            "active_skill_prompt": lambda self: "",
+        },
+    )()
+    runner = TurnRunner(runtime=runtime, sessions=sessions)
+    try:
+        payload = runner._status_payload(session, mode="code", plan_mode=False)
+
+        assert payload["reasoning_effort"] == "high"
+
+        session.runtime_config = {"model": "claude-code/opus", "thinking": False, "reasoning_effort": "high"}
+        payload = runner._status_payload(session, mode="code", plan_mode=False)
+
+        assert payload["reasoning_effort"] == "off"
+    finally:
+        runner.close()
+
+
+def test_claude_code_runtime_defaults_to_medium_reasoning(tmp_path):
+    runtime = RuntimeManager(DaemonConfig(project_dir=str(tmp_path)))
+    config = {"provider": "claude-code", "model": "claude-code/opus"}
+
+    runtime._normalize_reasoning_config(config)
+
+    assert config["thinking"] is True
+    assert config["reasoning_effort"] == "medium"
+    assert config["thinking_budget"] == runtime.REASONING_LEVELS["medium"]
+
+
+def test_reasoning_effort_override_enables_thinking(tmp_path):
+    runtime = RuntimeManager(DaemonConfig(project_dir=str(tmp_path)))
+    config = {"provider": "zhipu", "model": "glm-5.2", "reasoning_effort": "high"}
+
+    runtime._normalize_reasoning_config(config)
+
+    assert config["thinking"] is True
+    assert config["reasoning_effort"] == "high"
+    assert config["thinking_budget"] == runtime.REASONING_LEVELS["high"]
+
+
+def test_explicit_thinking_false_wins_over_stale_effort(tmp_path):
+    runtime = RuntimeManager(DaemonConfig(project_dir=str(tmp_path)))
+    config = {"provider": "claude-code", "model": "claude-code/opus", "thinking": False, "reasoning_effort": "high"}
+
+    runtime._normalize_reasoning_config(config)
+
+    assert config["thinking"] is False
+    assert config["thinking_budget"] == 0
+    assert "reasoning_effort" not in config
+
+
 def test_session_mode_does_not_sync_from_process_global_config(tmp_path):
     cfg = DaemonConfig(
         workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
@@ -304,6 +370,47 @@ def test_turn_runner_flushes_pending_steers_before_marking_turn_idle(monkeypatch
         event_type == "notification" and "Steer saved for next turn" in payload.get("body", "")
         for event_type, payload in events
     )
+
+
+def test_turn_runner_emits_provider_retry_as_notification_not_text(monkeypatch, tmp_path):
+    cfg = DaemonConfig(
+        workspace={"root": str(tmp_path / "agents"), "default_agent_id": "xerxes"},
+        project_dir=str(tmp_path),
+    )
+    sessions = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=tmp_path / "sessions")
+    session = sessions.open("tui:default")
+    runtime = RuntimeManager(cfg)
+    runtime.runtime_config = {"model": "openai/test", "permission_mode": "accept-all", "project_dir": str(tmp_path)}
+    runtime.system_prompt = ""
+    runtime.tool_executor = lambda name, inp: ""
+    runtime.tool_schemas = []
+    runtime.agent_memory = type("Memory", (), {"to_prompt_section": lambda self: ""})()
+    runner = TurnRunner(runtime=runtime, sessions=sessions)
+    events: list[tuple[str, dict]] = []
+
+    def fake_run_agent_loop(*args, **kwargs):
+        yield ProviderRetry(error="Request timed out.", attempt=2, max_attempts=6, delay=5)
+        yield TurnDone(input_tokens=0, output_tokens=0, tool_calls_count=0, model="openai/test")
+
+    async def emit(event_type: str, payload: dict) -> None:
+        events.append((event_type, payload))
+
+    monkeypatch.setattr("xerxes.daemon.runtime.run_agent_loop", fake_run_agent_loop)
+    try:
+        output = asyncio.run(runner.run_turn(session, "hello", emit))
+    finally:
+        runner.close()
+
+    assert output == ""
+    assert not any(event_type == "text_part" for event_type, _payload in events)
+    retry_notifications = [
+        payload
+        for event_type, payload in events
+        if event_type == "notification" and payload.get("category") == "provider_connection"
+    ]
+    assert len(retry_notifications) == 1
+    assert retry_notifications[0]["type"] == "retrying"
+    assert "Retrying provider connection in 5s" in retry_notifications[0]["body"]
 
 
 def test_daemon_runtime_event_updates_current_mode(tmp_path):
@@ -393,13 +500,25 @@ def test_runtime_reload_registers_terminal_operator_tools(tmp_path, monkeypatch)
 
     runtime.reload({"model": "gpt-4o"})
 
-    tool_names = {schema["name"] for schema in runtime.tool_schemas}
+    schemas_by_name = {schema["name"]: schema for schema in runtime.tool_schemas}
+    tool_names = set(schemas_by_name)
     assert {
         "exec_command",
         "write_stdin",
         "list_terminal_sessions",
         "close_terminal_session",
     } <= tool_names
+
+    exec_schema = schemas_by_name["exec_command"]["input_schema"]
+    assert exec_schema["properties"]["cmd"]["type"] == "string"
+    assert exec_schema["properties"]["yield_time_ms"]["type"] == "integer"
+    assert exec_schema["properties"]["login"]["type"] == "boolean"
+    assert "cmd" in exec_schema["required"]
+    assert "session_id" in schemas_by_name["write_stdin"]["input_schema"]["required"]
+
+    missing_result = runtime.tool_executor("exec_command", {})
+    assert missing_result == "Error: exec_command: missing required parameter(s): cmd"
+    assert "OperatorState" not in missing_result
 
     result = runtime.tool_executor("exec_command", {"cmd": "printf hello", "yield_time_ms": 200})
 

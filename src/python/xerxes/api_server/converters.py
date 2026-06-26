@@ -26,6 +26,25 @@ class MessageConverter:
     """Namespace for OpenAI <-> Xerxes message translation helpers."""
 
     @staticmethod
+    def _extract_text(content: str | list | None) -> str:
+        """Extract a plain-text string from OpenAI message content.
+
+        - ``str``  → used directly
+        - ``list`` → join ``text`` fields of items where ``type == 'text'``
+        - ``None`` → empty string
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"
+            )
+        # Fallback for unexpected types
+        return str(content) if content else ""
+
+    @staticmethod
     def convert_openai_to_xerxes(messages: list[ChatMessage]) -> MessagesHistory:
         """Map OpenAI chat messages to a Xerxes :class:`MessagesHistory`.
 
@@ -36,7 +55,7 @@ class MessageConverter:
         xerxes_messages: list[SystemMessage | UserMessage | AssistantMessage | ToolMessage] = []
 
         for msg in messages:
-            content = str(msg.content) if msg.content else ""
+            content = MessageConverter._extract_text(msg.content)
 
             if msg.role == "system":
                 xerxes_messages.append(SystemMessage(content=content))
@@ -44,6 +63,10 @@ class MessageConverter:
                 xerxes_messages.append(UserMessage(content=content))
             elif msg.role == "assistant":
                 xerxes_messages.append(AssistantMessage(content=content))
+            elif msg.role == "tool":
+                xerxes_messages.append(ToolMessage(content=content))
+            elif msg.role == "function":
+                xerxes_messages.append(ToolMessage(content=content))
             else:
                 raise ValueError(f"Unknown message role: {msg.role}")
 

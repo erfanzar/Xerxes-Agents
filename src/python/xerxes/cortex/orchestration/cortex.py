@@ -70,6 +70,57 @@ def _resolve_execute_output(value: Any) -> str:
     return str(head)
 
 
+def _extract_first_json(text: str) -> dict | None:
+    """Extract the first parseable JSON object from ``text``.
+
+    Tries (in order):
+
+    1. ``json.loads(text)`` — the entire response is JSON.
+    2. A balanced-brace scan — finds the first ``{...}`` block whose
+       braces balance and parses it.
+    3. A non-greedy regex fallback ``\\{[\\s\\S]*?\\}`` — catches simple
+       single-line objects that the brace scanner might miss.
+    """
+    # 1. Entire response is JSON
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 2. Balanced-brace scan
+    brace_level = 0
+    start_idx = -1
+    for i, char in enumerate(text):
+        if char == "{":
+            if brace_level == 0:
+                start_idx = i
+            brace_level += 1
+        elif char == "}":
+            brace_level -= 1
+            if brace_level == 0 and start_idx != -1:
+                candidate = text[start_idx : i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+                start_idx = -1
+
+    # 3. Non-greedy regex fallback
+    for match in re.finditer(r"\{[\s\S]*?\}", text):
+        try:
+            parsed = json.loads(match.group())
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 class MemoryConfig(TypedDict, total=False):
     """Optional kwargs bundle for configuring a :class:`Cortex` memory stack.
 
@@ -886,10 +937,8 @@ class Cortex:
             plan_response = raw_plan_response
 
         try:
-            json_match = re.search(r"\{[\s\S]*\}", plan_response)
-            if json_match:
-                plan = json.loads(json_match.group())
-            else:
+            plan = _extract_first_json(plan_response)
+            if plan is None:
                 raise ValueError("Manager failed to produce a valid JSON execution plan")
         except Exception as e:
             self.logger.error(f"❌ Failed to parse manager plan: {e}")
@@ -969,11 +1018,10 @@ class Cortex:
                 review = raw_review
 
             try:
-                review_json_match = re.search(r"\{[\s\S]*\}", review)
-                if not review_json_match:
+                review_data = _extract_first_json(review)
+                if review_data is None:
                     raise ValueError("Manager review did not contain valid JSON")
 
-                review_data = json.loads(review_json_match.group())
                 if "approved" not in review_data:
                     raise ValueError("Manager review missing 'approved' field")
 
@@ -1206,10 +1254,8 @@ class Cortex:
         )
 
         try:
-            json_match = re.search(r"\{[\s\S]*\}", plan_response)
-            if json_match:
-                plan = json.loads(json_match.group())
-            else:
+            plan = _extract_first_json(plan_response)
+            if plan is None:
                 raise ValueError("Manager failed to produce a valid JSON execution plan")
         except Exception as e:
             self.logger.error(f"❌ Failed to parse manager plan: {e}")

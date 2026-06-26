@@ -107,13 +107,14 @@ class SessionIndex:
             """
             CREATE TABLE IF NOT EXISTS turns (
                 session_id TEXT,
-                turn_id TEXT PRIMARY KEY,
+                turn_id TEXT,
                 agent_id TEXT,
                 prompt TEXT,
                 response TEXT,
                 started_at TEXT,
                 metadata TEXT,
-                embedding TEXT
+                embedding TEXT,
+                PRIMARY KEY (session_id, turn_id)
             )
             """
         )
@@ -122,7 +123,9 @@ class SessionIndex:
             cur.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
-                    prompt, response, turn_id UNINDEXED, tokenize = 'porter unicode61'
+                    prompt, response,
+                    session_id UNINDEXED, turn_id UNINDEXED,
+                    tokenize = 'porter unicode61'
                 )
                 """
             )
@@ -185,10 +188,13 @@ class SessionIndex:
             ),
         )
         if self._has_fts:
-            cur.execute("DELETE FROM turns_fts WHERE turn_id = ?", (turn.turn_id,))
             cur.execute(
-                "INSERT INTO turns_fts (prompt, response, turn_id) VALUES (?, ?, ?)",
-                (prompt, response, turn.turn_id),
+                "DELETE FROM turns_fts WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn.turn_id),
+            )
+            cur.execute(
+                "INSERT INTO turns_fts (prompt, response, session_id, turn_id) VALUES (?, ?, ?, ?)",
+                (prompt, response, session_id, turn.turn_id),
             )
         self._conn.commit()
 
@@ -202,8 +208,7 @@ class SessionIndex:
             return 0
         cur.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
         if self._has_fts:
-            placeholders = ",".join("?" * len(ids))
-            cur.execute(f"DELETE FROM turns_fts WHERE turn_id IN ({placeholders})", ids)
+            cur.execute("DELETE FROM turns_fts WHERE session_id = ?", (session_id,))
         self._conn.commit()
         return len(ids)
 
@@ -302,7 +307,8 @@ class SessionIndex:
             sql = (
                 "SELECT t.session_id, t.turn_id, t.agent_id, t.prompt, t.response, "
                 "t.started_at, t.metadata, t.embedding, bm25(turns_fts) AS rank "
-                "FROM turns_fts JOIN turns t ON t.turn_id = turns_fts.turn_id "
+                "FROM turns_fts JOIN turns t "
+                "ON t.session_id = turns_fts.session_id AND t.turn_id = turns_fts.turn_id "
                 f"WHERE turns_fts MATCH ?{extra} "
                 "ORDER BY rank LIMIT ?"
             )

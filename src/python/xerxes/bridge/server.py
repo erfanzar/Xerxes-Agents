@@ -70,6 +70,7 @@ from ..runtime.interaction_modes import (
 from ..streaming.events import (
     AgentState,
     PermissionRequest,
+    ProviderRetry,
     TextChunk,
     ThinkingChunk,
     ToolEnd,
@@ -447,6 +448,8 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 model = profile.get("model", "")
                 base_url = profile.get("base_url", "")
                 api_key = profile.get("api_key", "")
+                if profile.get("provider"):
+                    self.config["provider"] = profile.get("provider", "")
                 for k, v in profile.get("sampling", {}).items():
                     self.config[k] = v
 
@@ -736,6 +739,34 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
                 if self._wire_mode:
                     self._emit_wire_text(event.text)
                 self._emit_text(event.text)
+
+            elif isinstance(event, ProviderRetry):
+                body = (
+                    f"{event.error}\nUse /retry-connection to retry the last prompt."
+                    if event.final
+                    else f"{event.error}\nRetrying provider connection in {event.delay}s "
+                    f"({event.attempt}/{event.max_attempts})."
+                )
+                if self._wire_mode:
+                    self._emit_wire_notification(
+                        notification_id="provider-connection",
+                        category="provider_connection",
+                        type_="failed" if event.final else "retrying",
+                        severity="error" if event.final else "warning",
+                        title="Provider connection",
+                        body=body,
+                    )
+                else:
+                    self._emit(
+                        "provider_retry",
+                        {
+                            "error": event.error,
+                            "attempt": event.attempt,
+                            "max_attempts": event.max_attempts,
+                            "delay": event.delay,
+                            "final": event.final,
+                        },
+                    )
 
             elif isinstance(event, ThinkingChunk):
                 if self._wire_mode:
@@ -1247,8 +1278,14 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
 
         self.config["model"] = model
         self.config["base_url"] = base_url
+        if provider:
+            self.config["provider"] = provider
+        else:
+            self.config.pop("provider", None)
         if api_key:
             self.config["api_key"] = api_key
+        else:
+            self.config.pop("api_key", None)
         set_global_config(self.config)
         self._emit("model_changed", {"model": model, "provider": detect_provider(model)})
         if self._wire_mode and self._initialized:
@@ -1276,8 +1313,14 @@ class BridgeServer(WireEventMixin, SlashHandlerMixin, SessionMixin):
         if profile:
             self.config["model"] = profile["model"]
             self.config["base_url"] = profile.get("base_url", "")
+            if profile.get("provider"):
+                self.config["provider"] = profile["provider"]
+            else:
+                self.config.pop("provider", None)
             if profile.get("api_key"):
                 self.config["api_key"] = profile["api_key"]
+            else:
+                self.config.pop("api_key", None)
             for k, v in profile.get("sampling", {}).items():
                 self.config[k] = v
             set_global_config(self.config)

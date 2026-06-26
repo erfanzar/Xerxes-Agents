@@ -275,6 +275,8 @@ class QueryEngine:
             "model": self.config.model,
             "permission_mode": self.config.permission_mode,
             "max_tokens": self.config.max_tokens,
+            "thinking": self.config.thinking,
+            "thinking_budget": self.config.thinking_budget,
             "max_budget_tokens": self.config.max_budget_tokens,
         }
 
@@ -379,9 +381,11 @@ class QueryEngine:
         engine._total_in_tokens = data.get("total_in_tokens", 0)
         engine._total_out_tokens = data.get("total_out_tokens", 0)
         for msg in data.get("messages", []):
-            role = msg.pop("role", "user")
-            content = msg.pop("content", "")
-            engine.transcript.append(role, content, **msg)
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            engine.transcript.append(
+                role, content, **{k: v for k, v in msg.items() if k not in ("role", "content")}
+            )
         return engine
 
 

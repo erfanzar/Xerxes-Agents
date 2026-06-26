@@ -77,6 +77,7 @@ COMMAND_REGISTRY: tuple[CommandDef, ...] = (
     CommandDef("history", "Show or search conversation history", "session"),
     CommandDef("save", "Save the session by name", "session", args_hint="<name>"),
     CommandDef("retry", "Re-run the last turn", "session"),
+    CommandDef("retry-connection", "Retry the last failed provider connection", "session"),
     CommandDef("undo", "Undo the last turn", "session"),
     CommandDef("title", "Generate or set the session title", "session", args_hint="[title]"),
     CommandDef("branch", "Fork this session", "session", args_hint="[label]"),

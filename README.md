@@ -17,7 +17,7 @@ A coding agent that runs in your terminal. Pure-Python runtime with a `prompt_to
 › xerxes
 
 ╭────────────────────────────────────────────────────────╮
-│ Xerxes (v0.2.5)                                       │
+│ Xerxes (v0.3.0)                                       │
 ├────────────────────────────────────────────────────────┤
 │ model:  claude-opus-4-7                               │
 │ dir:    ~/Projects/myapp                               │
@@ -29,12 +29,14 @@ A coding agent that runs in your terminal. Pure-Python runtime with a `prompt_to
 This is a Python web application using FastAPI...
 
 ✓ ReadFile README.md ✓
-✓ ExecuteShell find src -name "*.py" | head -20 ✓
+✓ exec_command find src -name "*.py" | head -20 ✓
 ```
 
 ## Install
 
-Requires Python 3.11+. The installer uses [uv](https://docs.astral.sh/uv/) — no Node.js, no npm.
+Requires Python 3.11+. The installer uses [uv](https://docs.astral.sh/uv/), installs Xerxes into
+`~/.xerxes-venv`, and downloads a managed Node.js runtime under `~/.xerxes/node` for the packaged
+TypeScript TUI.
 
 ```bash
 # One-line install (installs uv if missing, creates ~/.xerxes-venv, then adds a shell alias)
@@ -51,6 +53,13 @@ uv pip install -e ".[dev]"          # or: pip install -e ".[dev]"
 ```bash
 # Verify
 xerxes --help
+```
+
+If you installed from PyPI/editable mode without the shell installer and Node.js is not already on
+your machine, run:
+
+```bash
+xerxes install --node
 ```
 
 ## Setup
@@ -207,7 +216,7 @@ Xerxes works with any OpenAI-compatible API. Built-in provider detection for:
 | Category | Tools |
 |----------|-------|
 | **File system** | ReadFile, WriteFile, AppendFile, FileEditTool, GlobTool, GrepTool, ListDir, TempFileManager |
-| **Execution** | ExecuteShell, PythonExecution, ProcessManager |
+| **Execution** | exec_command, write_stdin, list_terminal_sessions, close_terminal_session, ProcessManager |
 | **Web** | DuckDuckGoSearch, GoogleSearch, WebScraper, APIClient, RSSReader, URLAnalyzer |
 | **Browser** | Playwright-driven page navigation, DOM inspection, screenshotting |
 | **Data** | JSONProcessor, CSVProcessor, TextProcessor, DateTimeProcessor |

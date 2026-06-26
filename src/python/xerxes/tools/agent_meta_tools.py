@@ -362,6 +362,17 @@ class skill_view(AgentBaseFn):
         return result
 
 
+def _validate_skill_name(name: str) -> None:
+    """Reject empty or path-traversing skill names.
+
+    Raises:
+        ValueError: ``name`` is empty, contains ``/`` or ``\\``, contains
+            ``..``, or starts with ``.``.
+    """
+    if not name or "/" in name or "\\" in name or ".." in name or name.startswith("."):
+        raise ValueError(f"invalid skill name: {name!r}")
+
+
 class skill_manage(AgentBaseFn):
     """Create, update, or delete a skill on disk and refresh the registry."""
 
@@ -399,6 +410,8 @@ class skill_manage(AgentBaseFn):
             Dict reporting ``ok`` plus ``name``, ``path``/``deleted``,
             ``action``, or an ``error`` describing why the operation failed.
         """
+
+        _validate_skill_name(name)
 
         from pathlib import Path
 

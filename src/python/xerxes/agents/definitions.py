@@ -206,7 +206,6 @@ _HARDCODED_BUILTIN_AGENTS: dict[str, AgentDefinition] = {
             "- If blocked, report the concrete blocker and evidence.\n"
         ),
         allowed_tools=[
-            "ExecuteShell",
             "exec_command",
             "write_stdin",
             "list_terminal_sessions",

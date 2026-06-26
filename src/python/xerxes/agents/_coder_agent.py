@@ -17,7 +17,7 @@ This module instantiates a pre-configured Agent for software engineering tasks
 such as writing, debugging, refactoring, and documenting code.
 """
 
-from ..tools import ExecuteShell, FileSystemTools, ReadFile, WriteFile
+from ..tools import FileSystemTools, ReadFile, WriteFile
 from ..types import Agent
 
 code_agent = Agent(
@@ -51,7 +51,7 @@ When generating code:
 
 You have access to various code analysis and generation tools.
 Use them strategically to provide the best assistance.""",
-    functions=[ReadFile, WriteFile, ExecuteShell, FileSystemTools],
+    functions=[ReadFile, WriteFile, FileSystemTools],
     temperature=0.6,
     max_tokens=4096,
 )

@@ -57,6 +57,12 @@ _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _FG_RESET = "\x1b[39m"
 
 
+def _mouse_support_enabled(raw: str | None = None) -> bool:
+    """Return False only when prompt_toolkit mouse capture is explicitly disabled."""
+    value = os.environ.get("XERXES_MOUSE", "") if raw is None else raw
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 class _ScrollableFormattedTextControl(FormattedTextControl):
     """A FormattedTextControl that only renders a visible slice of content.
 
@@ -938,7 +944,7 @@ class FooterRenderer:
         self._reasoning_effort = "off"
         self._context_used = 0
         self._context_max = 0
-        self._tip = "shift-tab: mode  ctrl-j: newline"
+        self._tip = "pgup/pgdn: scroll  shift-tab: mode  ctrl-j: newline"
 
     def line_count(self) -> int:
         """Return the visible footer line count (ANSI stripped, min 1)."""
@@ -1162,6 +1168,8 @@ class PersistentPrompt:
             buffer=self._input_buffer,
             focusable=True,
         )
+        self._buffer_mouse_handler = self._buffer_control.mouse_handler
+        self._buffer_control.mouse_handler = self._on_buffer_mouse  # type: ignore[method-assign]
 
         # Input grows with its content (newlines via ctrl-j and wrapped long
         # lines), from 1 row up to _INPUT_MAX_ROWS; beyond that it scrolls.
@@ -1178,6 +1186,7 @@ class PersistentPrompt:
             focusable=False,
             show_cursor=False,
         )
+        self._footer_control.mouse_handler = self._on_status_mouse  # type: ignore[method-assign]
 
         self._footer_window = Window(
             content=self._footer_control,
@@ -1231,6 +1240,11 @@ class PersistentPrompt:
             self._scroll_y = max(0, new)
         self._invalidate()
 
+    def _scroll_page(self, direction: int) -> None:
+        """Scroll by one visible status-page in ``direction``."""
+        step = max(1, self._status_visible_rows - 1)
+        self._scroll_by(step * direction)
+
     def _on_status_mouse(self, mouse_event: MouseEvent) -> Any:
         """Translate wheel-up / wheel-down events into status-area scrolling."""
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
@@ -1240,6 +1254,13 @@ class PersistentPrompt:
             self._scroll_by(1)
             return None
         return NotImplemented
+
+    def _on_buffer_mouse(self, mouse_event: MouseEvent) -> Any:
+        """Route wheel events over the input pane to transcript scrolling."""
+        handled = self._on_status_mouse(mouse_event)
+        if handled is None:
+            return None
+        return self._buffer_mouse_handler(mouse_event)
 
     def _input_prefix(self, line_number: int, wrap_count: int) -> AnyFormattedText:
         """Render the branded prompt glyph; accent when idle, dim while running."""
@@ -1324,15 +1345,31 @@ class PersistentPrompt:
             self._input_queue.put_nowait("/interrupt")
             self._exit_armed = False
 
+        @kb.add(Keys.ControlPageUp, eager=True)
+        @kb.add(Keys.ShiftPageUp, eager=True)
         @kb.add(Keys.PageUp, eager=True)
         def _pgup(event: KeyPressEvent) -> None:
-            """PageUp: scroll the status area up by ten lines."""
-            self._scroll_by(-10)
+            """PageUp: scroll the status area up by one visible page."""
+            self._scroll_page(-1)
 
+        @kb.add(Keys.ControlPageDown, eager=True)
+        @kb.add(Keys.ShiftPageDown, eager=True)
         @kb.add(Keys.PageDown, eager=True)
         def _pgdown(event: KeyPressEvent) -> None:
-            """PageDown: scroll the status area down by ten lines."""
-            self._scroll_by(10)
+            """PageDown: scroll the status area down by one visible page."""
+            self._scroll_page(1)
+
+        @kb.add(Keys.ScrollUp, eager=True)
+        @kb.add(Keys.ControlUp, eager=True)
+        def _scroll_up(event: KeyPressEvent) -> None:
+            """Ctrl+Up / wheel-up: scroll the status area up one line."""
+            self._scroll_by(-1)
+
+        @kb.add(Keys.ScrollDown, eager=True)
+        @kb.add(Keys.ControlDown, eager=True)
+        def _scroll_down(event: KeyPressEvent) -> None:
+            """Ctrl+Down / wheel-down: scroll the status area down one line."""
+            self._scroll_by(1)
 
         @kb.add(Keys.ControlEnd, eager=True)
         def _to_bottom(event: KeyPressEvent) -> None:
@@ -1786,8 +1823,8 @@ class PersistentPrompt:
     async def run(self) -> Application[None]:
         """Run the prompt_toolkit application until it exits; returns it for inspection.
 
-        Set ``XERXES_MOUSE=0`` to disable mouse support if wheel events
-        should stay with the host terminal instead of scrolling the TUI.
+        Set ``XERXES_MOUSE=0`` to disable mouse support if native terminal
+        selection is more important than wheel scrolling.
 
         ``refresh_interval`` is bumped to 500ms — prompt_toolkit only
         needs the periodic refresh to advance time-based UI (the spinner
@@ -1800,7 +1837,7 @@ class PersistentPrompt:
             key_bindings=self._kb,
             style=self._completion_style(),
             erase_when_done=True,
-            mouse_support=os.environ.get("XERXES_MOUSE", "1").lower() not in {"0", "false", "no", "off"},
+            mouse_support=_mouse_support_enabled(),
             full_screen=True,
             refresh_interval=0.5,
         )

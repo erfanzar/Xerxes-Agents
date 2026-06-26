@@ -1,9 +1,9 @@
 # XERXES.md — Xerxes-Agents Project Context
 
-> **Version:** 0.2.5  
-> **Project root:** `/Users/erfan/Documents/Projects/Xerxes-Agents`  
-> **Author:** Erfan Zare Chavoshi (@erfanzar)  
-> **License:** Apache-2.0  
+> **Version:** 0.2.6
+> **Project root:** `/Users/erfan/Documents/Projects/Xerxes-Agents`
+> **Author:** Erfan Zare Chavoshi (@erfanzar)
+> **License:** Apache-2.0
 > **Python:** 3.11+ (3.11 / 3.12 / 3.13)
 
 ## What This Project Is
@@ -182,7 +182,7 @@ The test suite has **88 failures** that are NOT caused by your changes. They clu
 - **2 shell=True locations** in `tools/system_tools.py` and `tools/standalone.py` — **command injection risk.** A prior fix attempt (June 20, 2026) did not persist; the code still uses `shell=True` in some paths. When modifying these files, always use `shlex.split(command)` + `shell=False`.
 - **API key storage in `bridge/server.py`** stores raw API keys without redaction. `handle_provider_list` spreads them verbatim to clients.
 - **FastAPI server** has no CORS middleware, no rate limiting, and auth is disabled by default (`enable_authentication: False`).
-- **Dockerfile** source path mismatch: copies `xerxes_agent/` but the actual layout is `src/python/xerxes/`. Version label says `0.0.18` but project is `0.2.5`.
+- **Dockerfile** source path mismatch: copies `xerxes_agent/` but the actual layout is `src/python/xerxes/`. Version label says `0.0.18` but project is `0.2.6`.
 - **Docker Compose** has hardcoded secrets (`xerxes_pass`, `admin`). PostgreSQL and Redis services are declared but **unused** by the runtime code.
 
 ### Documentation Drift

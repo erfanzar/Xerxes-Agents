@@ -26,6 +26,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,6 +60,7 @@ class SnapshotManager:
         self.workspace = Path(workspace_dir).resolve()
         self._shadow_root = shadow_root or xerxes_subdir_safe("snapshots")
         self._records_path = self._shadow_path() / "_records.txt"
+        self._lock = threading.Lock()
 
     def _hash_workspace(self) -> str:
         return hashlib.sha1(str(self.workspace).encode()).hexdigest()[:12]
@@ -160,25 +162,31 @@ class SnapshotManager:
 
     def prune(self, *, keep: int = 100) -> int:
         """Drop record entries beyond the most recent ``keep``."""
-        records = self.list()
-        if len(records) <= keep:
-            return 0
-        to_keep = records[-keep:]
-        path = self._records_path
-        path.write_text(
-            "\n".join("\t".join((r.id, r.label, r.commit_sha, r.created_at, r.workspace_dir)) for r in to_keep),
-            encoding="utf-8",
-        )
-        return len(records) - keep
+        with self._lock:
+            records = self.list()
+            if len(records) <= keep:
+                return 0
+            to_keep = records[-keep:]
+            path = self._records_path
+            content = "\n".join(
+                "\t".join((r.id, r.label, r.commit_sha, r.created_at, r.workspace_dir)) for r in to_keep
+            )
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(str(tmp_path), str(path))
+            return len(records) - keep
 
     def _append_record(self, record: SnapshotRecord) -> None:
-        path = self._records_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        new_line = "\t".join((record.id, record.label, record.commit_sha, record.created_at, record.workspace_dir))
-        path.write_text(
-            existing + ("\n" if existing and not existing.endswith("\n") else "") + new_line + "\n", encoding="utf-8"
-        )
+        with self._lock:
+            path = self._records_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            label = record.label.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+            new_line = "\t".join((record.id, label, record.commit_sha, record.created_at, record.workspace_dir))
+            content = existing + ("\n" if existing and not existing.endswith("\n") else "") + new_line + "\n"
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(str(tmp_path), str(path))
 
     def reset(self) -> None:
         """Remove the shadow repo (irreversible). Used by tests."""

@@ -31,9 +31,9 @@ def test_cd_with_shell_metacharacters_still_requires_approval() -> None:
     assert not is_safe_bash("cd /tmp && npm install")
 
 
-def test_execute_shell_cd_auto_permission() -> None:
+def test_exec_command_cd_auto_permission() -> None:
     assert check_permission(
-        {"name": "ExecuteShell", "input": {"command": "cd /tmp && git diff"}},
+        {"name": "exec_command", "input": {"cmd": "cd /tmp && git diff"}},
         PermissionMode.AUTO,
     )
 

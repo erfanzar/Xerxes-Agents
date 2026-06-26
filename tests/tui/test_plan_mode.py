@@ -15,6 +15,9 @@
 from __future__ import annotations
 
 import pytest
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from xerxes.streaming.wire_events import InitDone, StatusUpdate
 from xerxes.tui.app import XerxesTUI, _build_welcome_banner
 from xerxes.tui.prompt import FooterRenderer, PersistentPrompt, StatusRenderer
@@ -379,18 +382,51 @@ def test_prompt_scroll_uses_rendered_lines_and_visible_height() -> None:
     for idx in range(30):
         prompt.append_line(f"line {idx}")
 
-    prompt._scroll_by(-10)
+    prompt._scroll_page(-1)
 
-    assert prompt._scroll_y == 15
+    assert prompt._scroll_y == 20
 
     markup = prompt._status._markup(prompt._scroll_y, visible_rows=prompt._status_visible_rows)
-    assert "line 15" in markup
-    assert "line 19" in markup
-    assert "line 20" not in markup
+    assert "line 20" in markup
+    assert "line 24" in markup
+    assert "line 25" not in markup
 
-    prompt._scroll_by(10)
+    prompt._scroll_page(1)
 
     assert prompt._scroll_y is None
+
+
+def test_prompt_scroll_key_aliases_are_registered() -> None:
+    prompt = PersistentPrompt()
+    keys = {binding.keys for binding in prompt._kb.bindings}
+
+    assert (Keys.PageUp,) in keys
+    assert (Keys.ShiftPageUp,) in keys
+    assert (Keys.ControlPageUp,) in keys
+    assert (Keys.PageDown,) in keys
+    assert (Keys.ShiftPageDown,) in keys
+    assert (Keys.ControlPageDown,) in keys
+    assert (Keys.ControlUp,) in keys
+    assert (Keys.ControlDown,) in keys
+    assert (Keys.ScrollUp,) in keys
+    assert (Keys.ScrollDown,) in keys
+
+
+def test_mouse_wheel_over_input_routes_to_transcript_scroll() -> None:
+    prompt = PersistentPrompt()
+    prompt._set_status_visible_rows(6)
+    for idx in range(30):
+        prompt.append_line(f"line {idx}")
+
+    event = MouseEvent(
+        position=Point(x=0, y=0),
+        event_type=MouseEventType.SCROLL_UP,
+        button=MouseButton.NONE,
+        modifiers=frozenset(),
+    )
+
+    assert prompt._buffer_control.mouse_handler(event) is None
+    assert prompt._scroll_y == 24
 
 
 @pytest.mark.asyncio
