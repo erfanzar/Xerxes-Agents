@@ -246,19 +246,20 @@ export const coreCommands: SlashCommand[] = [
   },
 
   {
-    help: 'toggle compact transcript',
-    name: 'compact',
+    aliases: ['transcript-compact'],
+    help: 'toggle compact transcript display',
+    name: 'ui-compact',
     run: (arg, ctx) => {
       const next = flagFromArg(arg, ctx.ui.compact)
 
       if (next === null) {
-        return ctx.transcript.sys('usage: /compact [on|off|toggle]')
+        return ctx.transcript.sys('usage: /ui-compact [on|off|toggle]')
       }
 
       patchUiState({ compact: next })
       ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'compact', value: next ? 'on' : 'off' }).catch(() => {})
 
-      queueMicrotask(() => ctx.transcript.sys(`compact ${next ? 'on' : 'off'}`))
+      queueMicrotask(() => ctx.transcript.sys(`transcript compact display ${next ? 'on' : 'off'}`))
     }
   },
 
