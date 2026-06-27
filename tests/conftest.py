@@ -39,9 +39,11 @@ def _restore_default_event_loop():
     test so ``asyncio.get_event_loop()`` callers never race with
     ``asyncio.run()``.
     """
-    yield
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    except Exception:
-        pass
+        yield
+    finally:
+        asyncio.set_event_loop(None)
+        if not loop.is_closed():
+            loop.close()

@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import typing as tp
+from pathlib import Path
 
 from ..sandbox import SandboxConfig
 
@@ -77,6 +78,9 @@ if mem_limit:
 
 payload = base64.b64decode(sys.stdin.read())
 data = json.loads(payload)
+for path in reversed(data.get("import_paths", [])):
+    if path and path not in sys.path:
+        sys.path.insert(0, path)
 mod = importlib.import_module(data["func_module"])
 func = functools.reduce(getattr, data["func_name"].split('.'), mod)
 args = data["args"]
@@ -97,6 +101,19 @@ class SubprocessSandboxBackend:
 
         self._config = sandbox_config
 
+    def _import_paths(self) -> list[str]:
+        paths: list[str] = []
+        for raw_path in [os.getcwd(), self._config.working_directory, *sys.path]:
+            if not raw_path:
+                continue
+            try:
+                path = str(Path(raw_path).resolve())
+            except OSError:
+                continue
+            if path not in paths and Path(path).exists():
+                paths.append(path)
+        return paths
+
     def execute(self, tool_name: str, func: tp.Callable, arguments: dict) -> tp.Any:
         """Serialize ``func``/``arguments`` into a child, return the result.
 
@@ -113,6 +130,7 @@ class SubprocessSandboxBackend:
                 "func_module": func_module,
                 "func_name": func_name,
                 "args": arguments,
+                "import_paths": self._import_paths(),
             }
         )
         encoded_payload = base64.b64encode(payload.encode("utf-8")).decode()

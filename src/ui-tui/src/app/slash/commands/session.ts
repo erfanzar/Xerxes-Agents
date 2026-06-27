@@ -108,6 +108,18 @@ export const sessionCommands: SlashCommand[] = [
                 ...state,
                 info: state.info ? { ...state.info, model: r.value! } : { model: r.value!, skills: {}, tools: {} }
               }))
+              ctx.transcript.setHistoryItems(items =>
+                items.map(item =>
+                  item.kind === 'intro'
+                    ? {
+                        ...item,
+                        info: item.info
+                          ? { ...item.info, model: r.value! }
+                          : { model: r.value!, skills: {}, tools: {} }
+                      }
+                    : item
+                )
+              )
             })
           )
 
@@ -410,6 +422,7 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
+    aliases: ['thinking'],
     help: 'inspect or set reasoning effort (updates live agent)',
     name: 'reasoning',
     run: (arg, ctx) => {
@@ -428,10 +441,13 @@ export const sessionCommands: SlashCommand[] = [
           if (!r.value) {
             return
           }
-          if (r.info?.reasoning_effort) {
+
+          const nextReasoningEffort = r.info?.reasoning_effort || (!['hide', 'show'].includes(r.value) ? r.value : '')
+
+          if (nextReasoningEffort) {
             patchUiState(state => ({
               ...state,
-              info: state.info ? { ...state.info, reasoning_effort: r.info?.reasoning_effort } : state.info
+              info: state.info ? { ...state.info, reasoning_effort: nextReasoningEffort } : state.info
             }))
           }
 

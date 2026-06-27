@@ -26,11 +26,12 @@ wire event, blocks on a queue, and is unblocked by the matching
 
 from __future__ import annotations
 
-import asyncio
 import threading
 import time
 
 from xerxes.daemon.runtime import TurnRunner
+
+from tests.async_helpers import run_coro
 
 
 def _make_runner() -> TurnRunner:
@@ -53,7 +54,7 @@ def _make_runner() -> TurnRunner:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def test_ask_user_question_emits_wire_event_and_blocks():

@@ -160,10 +160,11 @@ def parse_skill_md(content: str, source_path: Path) -> Skill:
             if ":" in line:
                 key, _, value = line.partition(":")
                 key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if value.startswith("[") and value.endswith("]"):
-                    value = [v.strip().strip('"').strip("'") for v in value[1:-1].split(",")]
-                parsed[key] = value
+                raw_value = value.strip().strip('"').strip("'")
+                parsed_value: tp.Any = raw_value
+                if raw_value.startswith("[") and raw_value.endswith("]"):
+                    parsed_value = [v.strip().strip('"').strip("'") for v in raw_value[1:-1].split(",")]
+                parsed[key] = parsed_value
         return parsed
 
     if fm_match:

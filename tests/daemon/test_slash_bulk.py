@@ -25,7 +25,6 @@ Catches the regression of "command listed in ``/help`` but daemon prints
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Any
 
@@ -34,6 +33,8 @@ from xerxes.bridge.commands import COMMAND_REGISTRY
 from xerxes.daemon import server as daemon_server
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager
+
+from tests.async_helpers import run_coro
 
 
 class _Recorder:
@@ -177,7 +178,7 @@ def daemon(tmp_path, monkeypatch):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def _drive(server, command: str) -> _Recorder:

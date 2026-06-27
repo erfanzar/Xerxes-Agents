@@ -15,11 +15,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from xerxes.extensions.skills import SkillRegistry
+
+from tests.async_helpers import run_coro
 
 
 def _write_skill(dir_: Path, *, frontmatter: dict, refs: list[str] | None = None) -> Path:
@@ -115,6 +116,28 @@ class TestRealAutoresearchSkill:
         must_have = {"debug", "fix", "plan", "predict", "security", "ship"}
         assert must_have.issubset(subs), f"missing core subs in {subs}"
 
+    def test_bundled_skills_do_not_include_auto_recorded_skill_runs(self):
+        bundled = Path(__file__).resolve().parents[2] / "src" / "python" / "xerxes" / "skills"
+        if not bundled.is_dir():
+            pytest.skip("bundled skills not present in this checkout")
+
+        reg = SkillRegistry()
+        discovered = reg.discover(bundled)
+
+        assert not [name for name in discovered if name.startswith("execute-the-")]
+        bad_markers = (
+            "/Users/erfan/",
+            "Apply this skill for tasks similar to:",
+            "After running the procedure, the agent should have invoked these tools in order:",
+        )
+        contaminated = []
+        for skill_path in bundled.glob("*/SKILL.md"):
+            body = skill_path.read_text(encoding="utf-8")
+            if any(marker in body for marker in bad_markers):
+                contaminated.append(skill_path.parent.name)
+
+        assert contaminated == []
+
 
 class TestDaemonDispatchSubcommands:
     """Drive the daemon's _handle_slash directly to verify routing."""
@@ -146,7 +169,7 @@ class TestDaemonDispatchSubcommands:
         async def emit(event_type, payload):
             events.append((event_type, payload))
 
-        asyncio.new_event_loop().run_until_complete(server._handle_slash(command, emit))
+        run_coro(server._handle_slash(command, emit))
         return [
             payload.get("body", "")
             for (etype, payload) in events

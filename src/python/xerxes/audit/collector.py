@@ -64,7 +64,6 @@ class InMemoryCollector:
             if len(self._events) > self.MAX_IN_MEMORY_EVENTS:
                 self._events = self._events[len(self._events) - self.MAX_IN_MEMORY_EVENTS :]
 
-
     def flush(self) -> None:
         """No buffered state; provided for protocol compatibility."""
 
@@ -102,7 +101,7 @@ class JSONLSinkCollector:
         self._owns_stream = False
 
         if isinstance(sink, str | Path):
-            self._stream: IO[str] = open(sink, "a", encoding="utf-8")
+            self._stream: IO[str] | None = open(sink, "a", encoding="utf-8")
             self._owns_stream = True
         else:
             self._stream = sink
@@ -111,11 +110,15 @@ class JSONLSinkCollector:
         """Serialise ``event`` to one JSON line and write it under lock."""
         line = json.dumps(event.to_dict(), default=str) + "\n"
         with self._lock:
+            if self._stream is None:
+                raise ValueError("Cannot emit to a closed audit collector")
             self._stream.write(line)
 
     def flush(self) -> None:
         """Flush buffered writes to the underlying stream."""
         with self._lock:
+            if self._stream is None:
+                return
             self._stream.flush()
 
     def close(self) -> None:

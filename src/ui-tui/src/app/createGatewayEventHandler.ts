@@ -990,13 +990,19 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
               summary: ev.payload.summary || ev.payload.text || c.summary
             }
           },
-          { createIfMissing: false }
+          { createIfMissing: true }
         )
 
         return
 
       case 'message.delta':
         turnController.recordMessageDelta(ev.payload ?? {})
+
+        return
+      case 'transcript.append':
+        if (ev.payload?.text?.trim()) {
+          appendMessage({ role: ev.payload.role, text: ev.payload.text })
+        }
 
         return
       case 'message.complete': {

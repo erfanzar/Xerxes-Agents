@@ -22,4 +22,15 @@ describe('turnController', () => {
     expect(result.finalMessages).toEqual([{ role: 'assistant', text: 'Done.' }])
     expect(getTurnState().todos).toEqual(todos)
   })
+
+  it('clears pinned todos when the next assistant turn starts', () => {
+    const todos = [{ content: 'verify the fix', id: '1', status: 'completed' as const }]
+
+    turnController.recordTodos(todos)
+    expect(getTurnState().todos).toEqual(todos)
+
+    turnController.startMessage()
+
+    expect(getTurnState().todos).toEqual([])
+  })
 })

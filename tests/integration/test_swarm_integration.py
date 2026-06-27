@@ -149,7 +149,7 @@ class MockLLM(BaseLLM):
     def parse_tool_calls(self, raw_data: Any) -> list[dict]:
         return []
 
-    async def _initialize_client(self):
+    def _initialize_client(self):
         pass
 
 
@@ -434,10 +434,14 @@ async def test_definitions():
 
     defs = load_agent_definitions()
     assert "coder" in defs
-    assert "reviewer" in defs
+    assert "researcher" in defs
+    assert "planner" in defs
+    assert "objective" in defs
 
-    reviewer = defs["reviewer"]
-    assert reviewer.tools == ["Read", "ReadFile", "Glob", "Grep", "ListDir"]
+    researcher = defs["researcher"]
+    assert {"ReadFile", "GlobTool", "GrepTool", "ListDir"} <= set(researcher.allowed_tools or [])
+    assert {"exec_command", "write_stdin"} <= set(defs["coder"].allowed_tools or [])
+    assert "apply_patch" in (defs["objective"].allowed_tools or [])
     log("DEFINITIONS", "Built-in definitions OK")
 
 

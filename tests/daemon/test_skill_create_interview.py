@@ -21,12 +21,13 @@ every intercepted step so the TUI spinner doesn't hang.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import pytest
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager
+
+from tests.async_helpers import run_coro
 
 
 class _Recorder:
@@ -122,7 +123,7 @@ def daemon(tmp_path):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def _drive_slash(server, command: str) -> _Recorder:

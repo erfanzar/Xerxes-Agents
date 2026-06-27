@@ -106,7 +106,6 @@ Locate `_MODEL_CONTEXT_LIMITS`. If any model has a non-default context window, a
 After editing, run the following to confirm the provider is discoverable:
 
 ```bash
-cd /Users/erfan/Documents/Projects/Xerxes-Agents
 uv run python -c "
 from xerxes.llms.registry import detect_provider, list_all_models
 print(detect_provider('myprovider-model-1'))

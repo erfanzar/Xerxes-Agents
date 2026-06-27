@@ -193,8 +193,7 @@ class SessionFTSIndex:
                 # FTS5 syntax error from raw user input — fall back to LIKE
                 like_q = f"%{query}%"
                 like_sql = (
-                    "SELECT session_id, turn_id, agent_id, content, 0 AS rank "
-                    "FROM session_fts WHERE content LIKE ?"
+                    "SELECT session_id, turn_id, agent_id, content, 0 AS rank FROM session_fts WHERE content LIKE ?"
                 )
                 like_params: list[Any] = [like_q]
                 if agent_id is not None:

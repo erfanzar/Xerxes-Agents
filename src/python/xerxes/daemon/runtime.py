@@ -523,8 +523,10 @@ class WorkspaceManager:
     def __init__(self, config: DaemonConfig) -> None:
         """Resolve the workspace root and default agent id from ``config``."""
         self.config = config
-        self.root = Path(config.workspace.get("root", "") or "").expanduser()
-        if not str(self.root):
+        raw_root = str(config.workspace.get("root", "") or "").strip()
+        if raw_root:
+            self.root = Path(raw_root).expanduser()
+        else:
             from ..core.paths import xerxes_subdir
 
             self.root = xerxes_subdir("agents")

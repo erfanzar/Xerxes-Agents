@@ -85,6 +85,7 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
   const [compIdx, setCompIdx] = useState(0)
   const [compReplace, setCompReplace] = useState(0)
   const ref = useRef('')
+  const catalogRef = useRef<SlashCatalog | null>(null)
 
   useEffect(() => {
     const clear = () => {
@@ -100,17 +101,28 @@ export function useCompletion(input: string, blocked: boolean, gw: GatewayClient
       return
     }
 
-    if (input === ref.current) {
+    const catalogChanged = catalog !== catalogRef.current
+
+    if (input === ref.current && !catalogChanged) {
       return
     }
 
     ref.current = input
+    catalogRef.current = catalog
 
     const request = completionRequestForInput(input)
     if (!request) {
       clear()
 
       return
+    }
+
+    const initialLocal = request.method === 'complete.slash' ? slashCompletionsFromCatalog(input, catalog) : []
+
+    if (initialLocal.length) {
+      setCompletions(initialLocal)
+      setCompIdx(0)
+      setCompReplace(request.replaceFrom)
     }
 
     const t = setTimeout(() => {

@@ -16,8 +16,7 @@
 
 Targets ``.py``, ``.sh``, ``.yml``, ``.yaml``, ``Dockerfile``. Two fixes:
 
-1.  Replace ``Copyright 2026 Xerxes-Agents Author`` with
-    ``Copyright 2026 Xerxes-Agents Author`` (drops the "The" article).
+1.  Normalize legacy Xerxes copyright lines to the canonical author line.
 2.  When a file has the opening license lines but is missing the trailing
     "Unless required by applicable law…" block, splice the block in
     immediately after the ``LICENSE-2.0`` line.
@@ -27,13 +26,18 @@ Idempotent — running it a second time is a no-op.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-WRONG_COPYRIGHT = "Copyright 2026 Xerxes-Agents Author"
-RIGHT_COPYRIGHT = "Copyright 2026 Xerxes-Agents Author"
+CANONICAL_COPYRIGHT_LINE = "# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi)."
+COPYRIGHT_RE = re.compile(
+    r"^# Copyright 2026 (?:The )?Xerxes-Agents Author"
+    r"(?: @erfanzar \(Erfan Zare Chavoshi\))?\.?$",
+    re.MULTILINE,
+)
 
 LICENSE_URL_LINE = "#     https://www.apache.org/licenses/LICENSE-2.0"
 
@@ -70,9 +74,10 @@ def fix_text(text: str) -> tuple[str, list[str]]:
     fixes: list[str] = []
     new_text = text
 
-    if WRONG_COPYRIGHT in new_text:
-        new_text = new_text.replace(WRONG_COPYRIGHT, RIGHT_COPYRIGHT)
-        fixes.append("the-article")
+    normalized_text = COPYRIGHT_RE.sub(CANONICAL_COPYRIGHT_LINE, new_text)
+    if normalized_text != new_text:
+        new_text = normalized_text
+        fixes.append("copyright")
 
     if LICENSE_URL_LINE in new_text and TRAILER_MARKER not in new_text:
         # Splice the trailer in directly after the LICENSE_URL_LINE. We do this

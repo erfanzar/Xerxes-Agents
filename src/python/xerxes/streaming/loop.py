@@ -314,6 +314,21 @@ def _short_context_error_detail(value: Any, *, max_chars: int = 240) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
+def _metadata_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
+
+
 def _format_context_limit_stop(
     *,
     provision: dict[str, Any],
@@ -1130,9 +1145,9 @@ def _run_impl(
                         **observed_context,
                         "reason": str(context_retry.get("reason") or "compaction_unavailable"),
                         "error": _short_context_error_detail(context_retry.get("error")),
-                        "tokens_before": int(context_retry.get("tokens_before") or 0),
-                        "tokens_after": int(context_retry.get("tokens_after") or 0),
-                        "max_context_tokens": int(context_retry.get("max_context_tokens") or 0),
+                        "tokens_before": _metadata_int(context_retry.get("tokens_before")),
+                        "tokens_after": _metadata_int(context_retry.get("tokens_after")),
+                        "max_context_tokens": _metadata_int(context_retry.get("max_context_tokens")),
                     }
                     yield TextChunk(_format_context_limit_stop(provision=context_retry, observed=observed_context))
                     yield TurnDone(
@@ -1213,9 +1228,9 @@ def _run_impl(
                 **observed_context,
                 "reason": str(context_retry.get("reason") or "compaction_unavailable"),
                 "error": _short_context_error_detail(context_retry.get("error")),
-                "tokens_before": int(context_retry.get("tokens_before") or 0),
-                "tokens_after": int(context_retry.get("tokens_after") or 0),
-                "max_context_tokens": int(context_retry.get("max_context_tokens") or 0),
+                "tokens_before": _metadata_int(context_retry.get("tokens_before")),
+                "tokens_after": _metadata_int(context_retry.get("tokens_after")),
+                "max_context_tokens": _metadata_int(context_retry.get("max_context_tokens")),
             }
             yield TextChunk(_format_context_limit_stop(provision=context_retry, observed=observed_context))
             yield TurnDone(

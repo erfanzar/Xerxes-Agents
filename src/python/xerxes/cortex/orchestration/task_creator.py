@@ -46,7 +46,7 @@ def _safe_xml_fromstring(xml_content: str) -> Any:
     """Parse XML while disabling entity expansion to prevent XML bomb attacks."""
     if "<!DOCTYPE" in xml_content or "<!ENTITY" in xml_content:
         raise ValueError("XML contains DTD/ENTITY declarations; rejected for security")
-    parser = ET.XMLParser(resolve_entities=False)
+    parser = ET.XMLParser()
     return ET.fromstring(xml_content, parser=parser)
 
 

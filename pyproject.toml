@@ -156,6 +156,8 @@ ignore = ["F722", "B008", "UP015", "A005", "E501", "B010"]
 # and free — ``addopts = ["-m", "not eval"]`` means you have to opt in
 # with ``-m eval`` (or ``-m ""`` to run everything).
 addopts = ["-m", "not eval"]
+asyncio_mode = "auto"
+python_files = ["test_*.py"]
 markers = [
     "eval: scored end-to-end playground eval against the real agent (spawns an isolated daemon + bills tokens; auto-skipped without API credentials)",
 ]

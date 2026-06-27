@@ -383,9 +383,7 @@ class QueryEngine:
         for msg in data.get("messages", []):
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            engine.transcript.append(
-                role, content, **{k: v for k, v in msg.items() if k not in ("role", "content")}
-            )
+            engine.transcript.append(role, content, **{k: v for k, v in msg.items() if k not in ("role", "content")})
         return engine
 
 

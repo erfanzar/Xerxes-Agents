@@ -3,7 +3,7 @@ name: fix-license-headers
 description: Normalize Apache-2.0 copyright headers across Python, shell, YAML, and Dockerfile files in the repository. Uses scripts/fix_license_headers.py.
 version: 1.0.0
 tags: [license, headers, hygiene, xerxes]
-required_tools: [ExecuteShell, ReadFile]
+required_tools: [exec_command, ReadFile]
 ---
 
 # When to use
@@ -21,8 +21,7 @@ Use this skill when:
 The repository includes a script that handles this automatically:
 
 ```bash
-cd /Users/erfan/Documents/Projects/Xerxes-Agents
-python scripts/fix_license_headers.py
+uv run python scripts/fix_license_headers.py
 ```
 
 This script:

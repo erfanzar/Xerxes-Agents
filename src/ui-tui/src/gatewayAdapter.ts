@@ -128,7 +128,7 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       return [{ type: 'message.delta', payload: { text: str(payload.text) } }]
 
     case 'think_part':
-      return [{ type: 'reasoning.delta', payload: { text: str(payload.think), verbose: true } }]
+      return [{ type: 'thinking.delta', payload: { text: str(payload.think) } }]
 
     case 'turn_end':
       return [{ type: 'message.complete', payload: {} }]
@@ -256,11 +256,10 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
 
   if (category === 'history') {
     if (kind === 'replay_assistant') {
-      return [
-        { type: 'message.start', payload: undefined },
-        { type: 'message.delta', payload: { text: body } },
-        { type: 'message.complete', payload: {} }
-      ]
+      return [{ type: 'transcript.append', payload: { role: 'assistant', text: body } }]
+    }
+    if (kind === 'replay_user') {
+      return [{ type: 'transcript.append', payload: { role: 'user', text: body } }]
     }
     return [
       {

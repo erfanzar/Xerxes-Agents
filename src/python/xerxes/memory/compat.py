@@ -172,6 +172,11 @@ class MemoryStore(ContextualMemory):
         Returns:
             The newly created ``MemoryEntry``."""
 
+        metadata = dict(kwargs.pop("metadata", {}) or {})
+        for key in ("confidence",):
+            if key in kwargs:
+                metadata[key] = kwargs.pop(key)
+
         entry = MemoryEntry(
             content=content,
             timestamp=kwargs.pop("timestamp", datetime.now()),
@@ -180,6 +185,7 @@ class MemoryStore(ContextualMemory):
             context=context or {},
             importance_score=importance_score,
             tags=list(tags or []),
+            metadata=metadata,
             **kwargs,
         )
         self.memories[memory_type].append(entry)

@@ -66,6 +66,10 @@ describe('gatewayAdapter', () => {
       { payload: { text: 'hello' }, type: 'message.delta' }
     ])
 
+    expect(adaptDaemonEvent('think_part', { think: 'hidden chain' })).toEqual([
+      { payload: { text: 'hidden chain' }, type: 'thinking.delta' }
+    ])
+
     expect(adaptDaemonEvent('tool_call', { arguments: '{"q":"x"}', id: 'call_1', name: 'ReadFile' })).toEqual([
       {
         payload: {
@@ -99,6 +103,24 @@ describe('gatewayAdapter', () => {
         type: 'tool.complete'
       }
     ])
+  })
+
+  it('maps replay notifications to transcript append events instead of live streaming', () => {
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'old answer',
+        category: 'history',
+        type: 'replay_assistant'
+      })
+    ).toEqual([{ payload: { role: 'assistant', text: 'old answer' }, type: 'transcript.append' }])
+
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'old prompt',
+        category: 'history',
+        type: 'replay_user'
+      })
+    ).toEqual([{ payload: { role: 'user', text: 'old prompt' }, type: 'transcript.append' }])
   })
 
   it('keeps clarify responses addressable by daemon request id and question id', () => {
