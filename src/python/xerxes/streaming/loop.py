@@ -50,6 +50,7 @@ from ..context.headroom import DEFAULT_HEADROOM_PREVIEW_CHARS, compress_tool_res
 from ..context.window_usage import estimate_request_overhead_tokens
 from ..llms.registry import get_context_limit
 from ..runtime.change_guard import analyze_workspace_changes, format_change_guard_notification
+from ..runtime.config_context import set_active_config
 from ..runtime.iteration_budget import iteration_budget_from_config
 from ..runtime.objective_guard import inspect_objective_response, objective_guard_retry_limit
 from ..runtime.workflow_memory import capture_user_workflow_memory
@@ -851,6 +852,38 @@ def run(
     steer_drain: Callable[[], list[str]] | None = None,
     agent_event_drain: Callable[[], list[str]] | None = None,
 ) -> Generator[StreamEvent, None, None]:
+    """Run one streaming turn and clear thread-local turn state afterward."""
+    try:
+        yield from _run_impl(
+            user_message=user_message,
+            state=state,
+            config=config,
+            system_prompt=system_prompt,
+            tool_executor=tool_executor,
+            tool_schemas=tool_schemas,
+            depth=depth,
+            cancel_check=cancel_check,
+            runtime_features_state=runtime_features_state,
+            steer_drain=steer_drain,
+            agent_event_drain=agent_event_drain,
+        )
+    finally:
+        set_active_config(None)
+
+
+def _run_impl(
+    user_message: str,
+    state: AgentState,
+    config: dict[str, Any],
+    system_prompt: str,
+    tool_executor: Callable[[str, dict[str, Any]], str] | None = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
+    depth: int = 0,
+    cancel_check: Callable[[], bool] | None = None,
+    runtime_features_state: Any = None,
+    steer_drain: Callable[[], list[str]] | None = None,
+    agent_event_drain: Callable[[], list[str]] | None = None,
+) -> Generator[StreamEvent, None, None]:
     """Drive a full turn: stream LLM output, run tools, and yield stream events.
 
     Appends the user message to ``state.messages``, then streams a response,
@@ -897,6 +930,7 @@ def run(
     from xerxes.llms.registry import get_provider_config, resolve_provider
 
     config = dict(config)
+    set_active_config(config)
     state.metadata["model"] = config.get("model", "")
     state.metadata.pop("last_connection_failure", None)
     _capture_runtime_workflow_memory(user_message, config=config, depth=depth)

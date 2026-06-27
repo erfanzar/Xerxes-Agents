@@ -31,6 +31,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
+_local = threading.local()
 _config: dict[str, Any] = {}
 _event_callback: Callable[[str, dict[str, Any]], None] | None = None
 
@@ -63,6 +64,21 @@ def get_config() -> dict[str, Any]:
 
     with _lock:
         return dict(_config)
+
+
+def set_active_config(config: dict[str, Any] | None) -> None:
+    """Bind the live turn config to the current worker thread."""
+    if config is None:
+        if hasattr(_local, "config"):
+            delattr(_local, "config")
+        return
+    _local.config = config
+
+
+def get_active_config() -> dict[str, Any] | None:
+    """Return the live turn config bound to this thread, if any."""
+    value = getattr(_local, "config", None)
+    return value if isinstance(value, dict) else None
 
 
 def get_inheritable() -> dict[str, Any]:

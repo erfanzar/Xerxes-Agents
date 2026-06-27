@@ -190,7 +190,7 @@ class SetInteractionModeTool(AgentBaseFn):
         Returns:
             Confirmation message with the normalized target mode.
         """
-        from ...runtime.config_context import emit_event, get_config, set_config
+        from ...runtime.config_context import emit_event, get_active_config, get_config, set_config
         from ...runtime.interaction_modes import MODE_ALIASES
         from ...runtime.session_context import get_active_session
 
@@ -206,6 +206,10 @@ class SetInteractionModeTool(AgentBaseFn):
             "source": "model",
         }
         if session is not None:
+            active_config = get_active_config()
+            if active_config is not None:
+                active_config["mode"] = normalized
+                active_config["plan_mode"] = normalized == "plan"
             session.interaction_mode = normalized
             session.plan_mode = normalized == "plan"
             runtime_config = dict(getattr(session, "runtime_config", {}) or get_config())
