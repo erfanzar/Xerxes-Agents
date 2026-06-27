@@ -22,6 +22,9 @@ assistant_memory
 build/
 develop-eggs/
 dist/
+!src/ui-tui/dist/
+!src/ui-tui/dist/*
+!src/ui-tui/dist/entry.js
 downloads/
 eggs/
 .eggs/
