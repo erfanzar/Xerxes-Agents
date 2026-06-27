@@ -256,12 +256,82 @@ _CONTEXT_LIMIT_ERROR_MARKERS = (
     "context window",
     "too many tokens",
 )
+_CONTEXT_REQUESTED_RE = re.compile(r"\brequested\D+(\d{4,})", re.IGNORECASE)
+_CONTEXT_LIMIT_RE = re.compile(r"\b(?:model token limit|token limit|context limit|limit)\D+(\d{4,})", re.IGNORECASE)
 
 
 def _is_context_limit_error(exc: Exception) -> bool:
     """Return true for provider errors that cannot succeed by retrying unchanged."""
     text = str(exc).lower()
     return any(marker in text for marker in _CONTEXT_LIMIT_ERROR_MARKERS)
+
+
+def _context_limit_numbers(exc: Exception) -> tuple[int | None, int | None]:
+    """Extract provider-reported ``requested`` and ``limit`` token counts."""
+    text = str(exc)
+    requested_match = _CONTEXT_REQUESTED_RE.search(text)
+    limit_match = _CONTEXT_LIMIT_RE.search(text)
+    requested = int(requested_match.group(1)) if requested_match else None
+    limit = int(limit_match.group(1)) if limit_match else None
+    return requested, limit
+
+
+def _calibrate_request_overhead_from_context_error(
+    state: AgentState,
+    *,
+    config: dict[str, Any],
+    model: str,
+    error: Exception,
+) -> dict[str, int]:
+    """Raise request-overhead accounting when the provider reports a larger window."""
+    requested, provider_limit = _context_limit_numbers(error)
+    if requested is None:
+        return {}
+
+    provisioner = _compaction_provisioner(config=config, model=model)
+    message_tokens = provisioner.count_tokens(state.messages)
+    observed_overhead = max(0, requested - message_tokens)
+    current_overhead = _request_overhead_tokens(config)
+    if observed_overhead > current_overhead:
+        config[_REQUEST_OVERHEAD_TOKENS_CONFIG_KEY] = observed_overhead
+
+    payload = {
+        "provider_requested_tokens": requested,
+        "estimated_message_tokens": message_tokens,
+        "request_overhead_tokens": _request_overhead_tokens(config),
+    }
+    if provider_limit is not None:
+        payload["provider_limit_tokens"] = provider_limit
+    return payload
+
+
+def _short_context_error_detail(value: Any, *, max_chars: int = 240) -> str:
+    """Return a compact, single-line context failure detail."""
+    text = str(value or "").strip().replace("\n", " ")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _format_context_limit_stop(
+    *,
+    provision: dict[str, Any],
+    observed: dict[str, int],
+    reason: str | None = None,
+) -> str:
+    """Render a provider context-limit stop without echoing the raw provider error."""
+    failure_reason = reason or str(provision.get("reason") or "compaction_unavailable")
+    detail = _short_context_error_detail(provision.get("error"))
+    suffix = f" ({detail})" if detail else ""
+    requested = observed.get("provider_requested_tokens")
+    provider_limit = observed.get("provider_limit_tokens") or provision.get("max_context_tokens")
+    requested_text = ""
+    if requested is not None and provider_limit is not None:
+        requested_text = f" Provider reported {requested:,}/{int(provider_limit):,} tokens."
+    return (
+        "\n[Stopped: provider rejected the request as too large."
+        f"{requested_text} Forced compaction could not reduce the request window: {failure_reason}{suffix}.]"
+    )
 
 
 def _context_safety_tokens(config: dict[str, Any], *, max_context_tokens: int | None = None) -> int:
@@ -993,7 +1063,26 @@ def run(
                 _last_error = e
                 if _is_context_limit_error(e):
                     logger.error("LLM request exceeded the model context window: %s", e)
-                    if not _context_compaction_retry_attempted and not text and not thinking_text and not tool_calls:
+                    observed_context = _calibrate_request_overhead_from_context_error(
+                        state,
+                        config=config,
+                        model=model,
+                        error=e,
+                    )
+                    if text or thinking_text or tool_calls:
+                        context_retry = {
+                            "compacted": False,
+                            "blocked": True,
+                            "reason": "partial_response_started",
+                            "error": "provider rejected the request after streaming partial output",
+                        }
+                    elif _context_compaction_retry_attempted:
+                        context_retry = {
+                            "compacted": False,
+                            "blocked": True,
+                            "reason": "retry_already_attempted",
+                        }
+                    else:
                         context_retry = _provision_context_window(state, config=config, model=model, force=True)
                         _context_compaction_retry_attempted = True
                         if context_retry["compacted"] and not context_retry["blocked"]:
@@ -1003,7 +1092,22 @@ def run(
                                 "Retrying once.]\n"
                             )
                             continue
-                    break
+                    state.metadata["last_compaction_failure"] = {
+                        **observed_context,
+                        "reason": str(context_retry.get("reason") or "compaction_unavailable"),
+                        "error": _short_context_error_detail(context_retry.get("error")),
+                        "tokens_before": int(context_retry.get("tokens_before") or 0),
+                        "tokens_after": int(context_retry.get("tokens_after") or 0),
+                        "max_context_tokens": int(context_retry.get("max_context_tokens") or 0),
+                    }
+                    yield TextChunk(_format_context_limit_stop(provision=context_retry, observed=observed_context))
+                    yield TurnDone(
+                        input_tokens=in_tokens,
+                        output_tokens=out_tokens,
+                        tool_calls_count=0,
+                        model=model,
+                    )
+                    return
                 if _retry_attempt < _MAX_RETRIES:
                     delay = LLM_STREAM_RETRY_DELAYS[_retry_attempt]
                     logger.warning(
@@ -1064,17 +1168,22 @@ def run(
                     model=model,
                 )
                 return
-            err_note = f"[Error: the response was interrupted: {_last_error}]"
-            combined = (f"{text}\n\n{err_note}" if text else err_note).strip()
-            msg_err: dict[str, Any] = {"role": "assistant", "content": combined, "tool_calls": []}
-            if thinking_text:
-                msg_err["thinking"] = thinking_text
-                if thinking_signature:
-                    msg_err["thinking_signature"] = thinking_signature
-            state.messages.append(msg_err)
-            if thinking_text:
-                state.thinking_content.append(thinking_text)
-            yield TextChunk(f"\n{err_note}")
+            observed_context = _calibrate_request_overhead_from_context_error(
+                state,
+                config=config,
+                model=model,
+                error=_last_error,
+            )
+            context_retry = _provision_context_window(state, config=config, model=model, force=True)
+            state.metadata["last_compaction_failure"] = {
+                **observed_context,
+                "reason": str(context_retry.get("reason") or "compaction_unavailable"),
+                "error": _short_context_error_detail(context_retry.get("error")),
+                "tokens_before": int(context_retry.get("tokens_before") or 0),
+                "tokens_after": int(context_retry.get("tokens_after") or 0),
+                "max_context_tokens": int(context_retry.get("max_context_tokens") or 0),
+            }
+            yield TextChunk(_format_context_limit_stop(provision=context_retry, observed=observed_context))
             yield TurnDone(
                 input_tokens=in_tokens,
                 output_tokens=out_tokens,

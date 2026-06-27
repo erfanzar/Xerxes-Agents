@@ -1,4 +1,12 @@
-import { type ScrollBoxHandle, useApp, useHasSelection, useSelection, useStdout, useTerminalTitle } from '@xerxes/ink'
+import {
+  type ScrollBoxHandle,
+  useApp,
+  useHasSelection,
+  useSelection,
+  useStdout,
+  useTerminalFocus,
+  useTerminalTitle
+} from '@xerxes/ink'
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -34,6 +42,7 @@ import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
+import { liveTailScrollKey, shouldAutoScrollLiveTail } from './liveTailScroll.js'
 import { $overlayState, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { turnController } from './turnController.js'
@@ -138,6 +147,7 @@ export async function startPromptLiveSession({
 export function useMainApp(gw: GatewayClient) {
   const { exit } = useApp()
   const { stdout } = useStdout()
+  const terminalFocused = useTerminalFocus()
   const [cols, setCols] = useState(stdout?.columns ?? 80)
 
   useEffect(() => {
@@ -192,6 +202,7 @@ export function useMainApp(gw: GatewayClient) {
       state.todos.length
     )
   )
+  const liveTailKey = useTurnSelector(liveTailScrollKey)
 
   const slashFlightRef = useRef(0)
   const slashRef = useRef<(cmd: string) => boolean>(() => false)
@@ -607,6 +618,30 @@ export function useMainApp(gw: GatewayClient) {
       stdout.off('resize', onResize)
     }
   }, [rpc, stdout, ui.sid])
+
+  const syncLiveTailScroll = useCallback(() => {
+    const scroll = scrollRef.current
+
+    if (!shouldAutoScrollLiveTail(turnLiveTailActive, scroll)) {
+      return
+    }
+
+    queueMicrotask(() => {
+      if (shouldAutoScrollLiveTail(turnLiveTailActive, scrollRef.current)) {
+        scrollRef.current?.scrollToBottom()
+      }
+    })
+  }, [turnLiveTailActive])
+
+  useEffect(() => {
+    syncLiveTailScroll()
+  }, [liveTailKey, syncLiveTailScroll])
+
+  useEffect(() => {
+    if (terminalFocused) {
+      syncLiveTailScroll()
+    }
+  }, [terminalFocused, syncLiveTailScroll])
 
   const answerClarify = useCallback(
     (answer: string) => {

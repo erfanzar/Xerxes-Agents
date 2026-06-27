@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { classifyInput, shouldQueue } from '../app/slash.js'
 import { decideSubmit, dequeue, enqueue, replaceLast } from '../app/queue.js'
 import { executePlan, planSubmit, respondApproval, respondQuestion, type ClientLike } from '../app/controller.js'
+import { findSlashCommand } from '../app/slash/registry.js'
 import { appendHistory, HistoryCursor, loadHistory } from '../lib/history.js'
 import { initialState, reduce, type WireEvt } from '../app/gatewayState.js'
 
@@ -28,6 +29,11 @@ describe('classifyInput', () => {
   it('falls unknown slashes through to remote', () => {
     expect(classifyInput('/skills')).toEqual({ kind: 'remote', command: '/skills' })
     expect(classifyInput('/model gpt')).toEqual({ kind: 'remote', command: '/model gpt' })
+    expect(classifyInput('/compact')).toEqual({ kind: 'remote', command: '/compact' })
+  })
+  it('/compact is not a client-local display toggle', () => {
+    expect(findSlashCommand('compact')).toBeUndefined()
+    expect(findSlashCommand('ui-compact')?.help).toBe('toggle compact transcript display')
   })
   it('empty → noop, only messages queue', () => {
     expect(classifyInput('   ').kind).toBe('noop')
