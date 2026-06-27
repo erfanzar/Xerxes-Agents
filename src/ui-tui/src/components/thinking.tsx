@@ -618,6 +618,9 @@ function SubagentAccordion({
 
 // ── Thinking ─────────────────────────────────────────────────────────
 
+export const thinkingRenderText = (reasoning: string, mode: ThinkingMode): string =>
+  thinkingPreview(reasoning, mode, THINKING_COT_MAX)
+
 export const Thinking = memo(function Thinking({
   active = false,
   branch = 'last',
@@ -635,11 +638,7 @@ export const Thinking = memo(function Thinking({
   streaming?: boolean
   t: Theme
 }) {
-  const preview = useMemo(() => {
-    const raw = thinkingPreview(reasoning, mode, THINKING_COT_MAX)
-
-    return mode === 'full' ? boundedLiveRenderText(raw) : raw
-  }, [mode, reasoning])
+  const preview = useMemo(() => thinkingRenderText(reasoning, mode), [mode, reasoning])
 
   const lines = useMemo(() => preview.split('\n').map(line => line.replace(/\t/g, '  ')), [preview])
 

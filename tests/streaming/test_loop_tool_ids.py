@@ -677,10 +677,11 @@ def test_llm_stream_context_limit_error_does_not_retry(monkeypatch) -> None:
     original = loop._stream_llm
     calls = {"n": 0}
     sleeps: list[int] = []
+    state = loop.AgentState()
 
     def fake_stream(*args, **kwargs):
         calls["n"] += 1
-        raise ConnectionError("Invalid request: Your request exceeded model token limit")
+        raise ConnectionError("Invalid request: Your request exceeded model token limit: 262144 (requested: 262470)")
         yield
 
     loop._stream_llm = fake_stream
@@ -689,8 +690,12 @@ def test_llm_stream_context_limit_error_does_not_retry(monkeypatch) -> None:
         events = list(
             loop.run(
                 user_message="test",
-                state=loop.AgentState(),
-                config={"model": "openai/test", "permission_mode": "accept-all"},
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "compaction_summary_agent": False,
+                },
                 system_prompt="",
                 tool_executor=lambda name, inp: "ok",
                 tool_schemas=[],
@@ -704,7 +709,12 @@ def test_llm_stream_context_limit_error_does_not_retry(monkeypatch) -> None:
     assert calls["n"] == 1
     assert sleeps == []
     assert "Retrying in" not in text
-    assert "exceeded model token limit" in text
+    assert "provider rejected the request as too large" in text
+    assert "262,470/262,144" in text
+    assert "Invalid request" not in text
+    assert not any(msg.get("role") == "assistant" for msg in state.messages)
+    assert state.metadata["last_compaction_failure"]["provider_requested_tokens"] == 262470
+    assert state.metadata["last_compaction_failure"]["provider_limit_tokens"] == 262144
     assert any(isinstance(event, TurnDone) for event in events)
 
 
@@ -767,6 +777,64 @@ def test_llm_stream_context_limit_error_forces_compaction_and_retries_once(monke
     assert "Context compacted after the provider rejected the request" in text
     assert "Retrying once" in text
     assert "done" in text
+    assert any(isinstance(event, TurnDone) for event in events)
+
+
+def test_second_context_limit_error_after_forced_compaction_stops_cleanly(monkeypatch) -> None:
+    original = loop._stream_llm
+    calls = {"n": 0}
+    sleeps: list[int] = []
+
+    def summary_agent(messages, _previous_summary):
+        return "compact summary"
+
+    def fake_stream(*args, **kwargs):
+        calls["n"] += 1
+        raise ConnectionError("Invalid request: Your request exceeded model token limit")
+        yield
+
+    state = loop.AgentState(
+        messages=[
+            {"role": "user", "content": "old user " * 500},
+            {"role": "assistant", "content": "old assistant " * 500},
+        ]
+    )
+
+    loop._stream_llm = fake_stream
+    monkeypatch.setattr(loop.time, "sleep", sleeps.append)
+    try:
+        events = list(
+            loop.run(
+                user_message="continue",
+                state=state,
+                config={
+                    "model": "openai/test",
+                    "permission_mode": "accept-all",
+                    "max_context_tokens": 100_000,
+                    "compaction_threshold_tokens": 200_000,
+                    "compaction_target_tokens": 80,
+                    "context_safety_tokens": 0,
+                    "compaction_summary_agent": summary_agent,
+                },
+                system_prompt="",
+                tool_executor=lambda name, inp: "ok",
+                tool_schemas=[],
+            )
+        )
+    finally:
+        loop._stream_llm = original
+
+    text = "".join(event.text for event in events if isinstance(event, TextChunk))
+
+    assert calls["n"] == 2
+    assert sleeps == []
+    assert "Context compacted after the provider rejected the request" in text
+    assert "retry_already_attempted" in text
+    assert "Invalid request" not in text
+    assert not any(
+        msg.get("role") == "assistant" and "exceeded model token limit" in str(msg.get("content", ""))
+        for msg in state.messages
+    )
     assert any(isinstance(event, TurnDone) for event in events)
 
 
