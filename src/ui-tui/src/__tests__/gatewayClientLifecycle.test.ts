@@ -30,6 +30,52 @@ const initGitProject = () => {
 }
 
 describe('GatewayClient session lifecycle', () => {
+  it('routes active and saved session lists to distinct daemon RPCs', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:sessions' })
+    const calls: string[] = []
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async (method, params) => {
+      calls.push(method)
+      if (method === 'session.active_list') {
+        expect(params).toEqual({ current_session_id: 'live1' })
+        return {
+          ok: true,
+          sessions: [{ active_turn_id: 'turn1', id: 'live1', key: 'test:sessions', messages: 3, title: 'live work' }]
+        }
+      }
+      if (method === 'session.list') {
+        expect(params).toEqual({ limit: 200 })
+        return {
+          ok: true,
+          sessions: [
+            {
+              key: 'old1',
+              messages: 2,
+              session_id: 'old1',
+              title: 'saved work',
+              updated_at: '2026-06-27T10:00:00+00:00'
+            }
+          ]
+        }
+      }
+      throw new Error(`unexpected ${method}`)
+    }
+
+    const active = await client.request('session.active_list', { current_session_id: 'live1' })
+    const saved = await client.request('session.list', { limit: 200 })
+
+    expect(calls).toEqual(['session.active_list', 'session.list'])
+    expect(active).toMatchObject({
+      sessions: [{ id: 'live1', message_count: 3, status: 'working', title: 'live work' }]
+    })
+    expect(saved).toMatchObject({
+      sessions: [{ id: 'old1', message_count: 2, source: 'saved', title: 'saved work' }]
+    })
+  })
+
   it('returns normalized reasoning info after config.set reasoning', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:reasoning' })
     const privateClient = client as unknown as {

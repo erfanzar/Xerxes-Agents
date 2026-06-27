@@ -251,6 +251,27 @@ class TestInitializeReplaysWhenResuming:
 
 
 class TestSlashResume:
+    def test_rpc_session_lists_split_live_and_saved_sessions(self, tmp_path):
+        server = _make_server(tmp_path)
+        live = server.sessions.open("tui:default")
+        live.state.messages = [{"role": "user", "content": "live draft"}]
+
+        saved = server.sessions.open("abcd1234")
+        saved.state.messages = [{"role": "user", "content": "saved question"}]
+        saved.state.turn_count = 1
+        server.sessions.save(saved)
+        server.sessions._sessions.pop("abcd1234")
+
+        recorder = _Recorder()
+
+        active = _run(server._handle_rpc("session.active_list", {}, recorder))
+        history = _run(server._handle_rpc("session.list", {"limit": 200}, recorder))
+
+        assert [item["id"] for item in active["sessions"]] == [live.id]
+        assert [item["session_id"] for item in history["sessions"]] == ["abcd1234"]
+        assert history["sessions"][0]["title"] == "saved question"
+        assert history["sessions"][0]["messages"] == 1
+
     def test_resume_without_args_lists_saved_sessions(self, tmp_path):
         server = _make_server(tmp_path)
         sess = server.sessions.open("abcd1234")
