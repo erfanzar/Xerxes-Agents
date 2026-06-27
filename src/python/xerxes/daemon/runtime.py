@@ -1334,6 +1334,7 @@ class TurnRunner:
         can fetch it without plumbing.
         """
         from ..agents.subagent_manager import SubAgentManager
+        from ..runtime.config_context import set_active_config
         from ..runtime.session_context import set_active_session
         from ..tools.claude_tools import _get_agent_manager
 
@@ -1386,6 +1387,7 @@ class TurnRunner:
         finally:
             # Always unbind the session — tools called after the turn (in
             # tests, for example) should not pick up a stale handle.
+            set_active_config(None)
             set_active_session(None)
 
     @staticmethod
