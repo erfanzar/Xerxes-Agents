@@ -264,8 +264,14 @@ class DaemonServer(SlashCommandsMixin, ProviderFlowMixin, SkillCreateMixin):
                 str(params.get("agent_id") or self.workspaces.default_agent_id),
             )
             return {"ok": True, "session": session.status()}
-        if method == "session.list":
+        if method == "session.active_list":
             return {"ok": True, "sessions": self.sessions.list()}
+        if method == "session.list":
+            sessions = self.sessions.list_saved()
+            limit = int(params.get("limit") or 0)
+            if limit > 0:
+                sessions = sessions[:limit]
+            return {"ok": True, "sessions": sessions}
         if method == "session.status":
             status_session = self.sessions.get(str(params.get("session_key") or self._connection_session_key(emit)))
             return {"ok": bool(status_session), "session": status_session.status() if status_session else None}

@@ -325,8 +325,10 @@ export class GatewayClient extends EventEmitter {
         return this.sessionResume(params) as Promise<T>
 
       case 'session.active_list':
+        return this.sessionActiveList(params) as Promise<T>
+
       case 'session.list':
-        return this.sessionList(params, method === 'session.active_list') as Promise<T>
+        return this.sessionHistoryList(params) as Promise<T>
 
       case 'session.close':
         return { closed: true, ok: true } as T
@@ -606,8 +608,8 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  private async sessionList(_params: Record<string, unknown>, _active: boolean): Promise<RpcObject> {
-    const raw = (await this.rawRequest('session.list', {})) as RpcObject
+  private async sessionActiveList(params: Record<string, unknown>): Promise<RpcObject> {
+    const raw = (await this.rawRequest('session.active_list', params)) as RpcObject
     const rows = Array.isArray(raw.sessions) ? raw.sessions : []
     const sessions = rows.map((row: RpcObject) => {
       const id = String(row.id ?? row.session_id ?? row.key ?? '')
@@ -624,6 +626,28 @@ export class GatewayClient extends EventEmitter {
         started_at: Date.now() / 1000,
         status: row.active_turn_id ? 'working' : 'idle',
         title: String(row.title ?? row.key ?? id)
+      }
+    })
+    return { sessions }
+  }
+
+  private async sessionHistoryList(params: Record<string, unknown>): Promise<RpcObject> {
+    const raw = (await this.rawRequest('session.list', params)) as RpcObject
+    const rows = Array.isArray(raw.sessions) ? raw.sessions : []
+    const sessions = rows.map((row: RpcObject) => {
+      const id = String(row.session_id ?? row.id ?? row.key ?? '')
+      if (id && row.key) {
+        this.sessionKeys.set(id, String(row.key))
+      }
+      const updatedAt = Date.parse(String(row.updated_at ?? '')) / 1000
+      const title = String(row.title ?? row.key ?? id)
+      return {
+        id,
+        message_count: Number(row.message_count ?? row.messages ?? 0),
+        preview: title,
+        source: 'saved',
+        started_at: Number.isFinite(updatedAt) ? updatedAt : Date.now() / 1000,
+        title
       }
     })
     return { sessions }
