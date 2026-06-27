@@ -560,6 +560,7 @@ export type GatewayEvent =
   | { payload: SessionInfo; session_id?: string; type: 'session.info' }
   | { payload?: { text?: string }; session_id?: string; type: 'thinking.delta' }
   | { payload?: undefined; session_id?: string; type: 'message.start' }
+  | { payload: GatewayTranscriptMessage; session_id?: string; type: 'transcript.append' }
   | {
       payload?: { kind?: string; mode?: string; reasoning_effort?: string; text?: string; usage?: Usage }
       session_id?: string

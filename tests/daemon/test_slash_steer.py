@@ -30,6 +30,8 @@ from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import DaemonSession, RuntimeManager
 from xerxes.daemon.server import DaemonServer
 
+from tests.async_helpers import run_coro
+
 
 class _FakeState:
     def __init__(self) -> None:
@@ -78,7 +80,7 @@ def daemon(tmp_path):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def test_steer_with_active_turn_queues_to_session(daemon):

@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +23,8 @@ from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager
 from xerxes.daemon.server import DaemonServer
 from xerxes.streaming.events import AgentState
+
+from tests.async_helpers import run_coro
 
 
 class _Recorder:
@@ -55,7 +56,7 @@ class _Sessions:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def test_slash_compact_rewrites_session_messages_and_saves(tmp_path, monkeypatch):

@@ -451,6 +451,7 @@ class OAuthClient:
                 delay = 2**attempt
                 logger.warning("OAuth POST attempt %d failed, retrying in %ds", attempt + 1, delay)
                 time.sleep(delay)
+        raise RuntimeError("OAuth POST failed without a response")
 
     def _token_from_payload(self, payload: dict[str, tp.Any]) -> OAuthToken:
         """Build an ``OAuthToken`` from a raw token-endpoint response.

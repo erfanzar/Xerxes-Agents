@@ -35,7 +35,7 @@ name: my-skill
 description: One-line description of what this skill does.
 version: 1.0.0
 tags: [python, security, xerxes]
-required_tools: [ReadFile, ExecuteShell]
+required_tools: [ReadFile, exec_command]
 ---
 
 # When to use
@@ -83,7 +83,7 @@ version: 1.0.0                   # Required. SemVer.
 tags: [python, lint, security]    # Optional. Array of strings.
 required_tools:                   # Optional. List of tool names.
   - ReadFile
-  - ExecuteShell
+  - exec_command
   - GrepTool
 author: Your Name                # Optional.
 dependencies:                    # Optional. Python packages needed.
@@ -101,7 +101,7 @@ subcommands:                     # Optional. Auto-detected sub-skills.
 - `name` must be kebab-case and unique across all discovered skills.
 - `description` should be a single sentence, <120 characters.
 - `version` must follow SemVer (`MAJOR.MINOR.PATCH`).
-- `required_tools` lists the tool class names (e.g., `ReadFile`, `ExecuteShell`) that this skill will use. The framework uses this for permission filtering.
+- `required_tools` lists the tool names (e.g., `ReadFile`, `exec_command`) that this skill will use. The framework uses this for permission filtering.
 - `subcommands` are auto-detected if you create `references/<subcommand>-workflow.md` files alongside `SKILL.md`.
 
 ## 4. Write the markdown body

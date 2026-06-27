@@ -359,7 +359,7 @@ class SubAgentManager:
         self._by_name: dict[str, str] = {}
         self.max_concurrent = max_concurrent
         self.max_depth = max_depth
-        self._pool = ThreadPoolExecutor(max_workers=max_concurrent)
+        self._pool: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=max_concurrent)
         self._agent_runner: Any = None
         self._tool_executor: Any = None
         self._tool_schemas: list[dict[str, Any]] | None = None
@@ -867,6 +867,8 @@ class SubAgentManager:
                 if worktree_path and not _has_worktree_changes(worktree_path):
                     _remove_worktree(worktree_path, worktree_branch, worktree_root)
 
+        if self._pool is None:
+            raise RuntimeError("Cannot spawn subagent after the manager has shut down")
         task._future = self._pool.submit(_run)
         return task
 

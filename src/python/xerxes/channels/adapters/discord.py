@@ -345,7 +345,8 @@ class DiscordChannel(WebhookChannel):
 
     def _message_from_mapping(self, msg: dict[str, tp.Any]) -> ChannelMessage | None:
         """Build a neutral message from a Discord JSON message object."""
-        author = msg.get("author") if isinstance(msg.get("author"), dict) else {}
+        raw_author = msg.get("author")
+        author: dict[str, tp.Any] = raw_author if isinstance(raw_author, dict) else {}
         author_id = str(author.get("id", ""))
         channel_id = str(msg.get("channel_id", ""))
         channel_names = _channel_names_from_mapping(msg)
@@ -362,10 +363,10 @@ class DiscordChannel(WebhookChannel):
             mentioned=mentioned,
         ):
             return None
-        text = self._strip_bot_mention(content).strip()
-        text = _strip_address(text, self.address_names)
-        if text is None:
+        stripped_text = _strip_address(self._strip_bot_mention(content).strip(), self.address_names)
+        if stripped_text is None:
             return None
+        text = stripped_text
         if not text and attachments:
             text = _attachment_text(attachments)
         if not text:
@@ -408,10 +409,13 @@ class DiscordChannel(WebhookChannel):
         ):
             return None
         attachments = _attachments_from_discord_py(getattr(message, "attachments", []))
-        text = self._strip_bot_mention(str(getattr(message, "content", "") or "")).strip()
-        text = _strip_address(text, self.address_names)
-        if text is None:
+        stripped_text = _strip_address(
+            self._strip_bot_mention(str(getattr(message, "content", "") or "")).strip(),
+            self.address_names,
+        )
+        if stripped_text is None:
             return None
+        text = stripped_text
         if not text and attachments:
             text = _attachment_text(attachments)
         if not text:

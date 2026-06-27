@@ -28,7 +28,7 @@ import pathlib
 import re
 import tempfile
 import typing as tp
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from PIL import Image
@@ -974,7 +974,7 @@ class OperatorState:
             sign = 1 if utc_offset.startswith("+") else -1
             hours_str, minutes_str = utc_offset[1:].split(":", 1)
             delta = timedelta(hours=sign * int(hours_str), minutes=sign * int(minutes_str))
-            current = datetime.utcnow() + delta
+            current = datetime.now(UTC) + delta
             return {
                 "utc_offset": utc_offset,
                 "iso": current.isoformat(timespec="seconds"),

@@ -919,7 +919,7 @@ class TurnController {
       this.clearNotice(yieldingNoticeKey)
     }
     patchUiState({ busy: true })
-    patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
+    patchTurnState({ activity: [], outcome: '', subagents: [], todos: [], toolTokens: 0, tools: [], turnTrail: [] })
   }
 
   upsertSubagent(

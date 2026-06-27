@@ -131,8 +131,12 @@ def _resolve_tool_result(result: Any) -> Any:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(result)
+        return asyncio.run(_await_tool_result(result))
     raise RuntimeError("Cannot execute async tool handler while an event loop is already running")
+
+
+async def _await_tool_result(result: Any) -> Any:
+    return await result
 
 
 def _coerce_argument_types(

@@ -58,9 +58,7 @@ def _validate_browser_url(url: str) -> None:
     """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"}:
-        raise ValueError(
-            f"URL scheme '{parsed.scheme}' is not allowed. Only http:// and https:// are permitted."
-        )
+        raise ValueError(f"URL scheme '{parsed.scheme}' is not allowed. Only http:// and https:// are permitted.")
 
 
 class BrowserManager:
@@ -192,14 +190,12 @@ class BrowserManager:
             try:
                 screenshot_path.relative_to(allowed_dir)
             except ValueError:
-                raise ValueError(
-                    f"Screenshot path must be within the allowed directory: {allowed_dir}"
-                ) from None
-            screenshot_path = str(screenshot_path)
+                raise ValueError(f"Screenshot path must be within the allowed directory: {allowed_dir}") from None
         else:
             screenshot_path = self._default_screenshot_path(ref_id)
-        await page.screenshot(path=screenshot_path, full_page=full_page)
-        return {"ref_id": ref_id, "path": screenshot_path, "full_page": full_page}
+        screenshot_path_str = str(screenshot_path)
+        await page.screenshot(path=screenshot_path_str, full_page=full_page)
+        return {"ref_id": ref_id, "path": screenshot_path_str, "full_page": full_page}
 
     def list_pages(self) -> list[dict[str, str]]:
         """Return a wire-safe summary of every tracked page."""
@@ -251,7 +247,7 @@ class BrowserManager:
         links = await page.locator("a[href]").evaluate_all("(els) => els.map((el) => el.href).filter(Boolean)")
         return {index: href for index, href in enumerate(links)}
 
-    def _default_screenshot_path(self, ref_id: str) -> str:
+    def _default_screenshot_path(self, ref_id: str) -> Path:
         """Return an auto-generated screenshot filename for ``ref_id``."""
 
         if self._screenshot_dir:
@@ -259,4 +255,4 @@ class BrowserManager:
             directory.mkdir(parents=True, exist_ok=True)
         else:
             directory = Path(tempfile.mkdtemp(prefix="xerxes-browser-"))
-        return str(directory / f"{ref_id}.png")
+        return directory / f"{ref_id}.png"

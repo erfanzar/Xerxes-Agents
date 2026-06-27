@@ -97,14 +97,23 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
               return
             }
 
+            const slashText = slashExecText(raw as SlashExecResponse)
+            if (slashText) {
+              const long = slashText.length > 180 || slashText.split('\n').filter(Boolean).length > 2
+
+              long ? page(slashText, parsed.name[0]!.toUpperCase() + parsed.name.slice(1)) : sys(slashText)
+              return
+            }
+
             const d = asCommandDispatch(raw)
 
             if (!d) {
-              return sys('error: invalid response: command.dispatch')
+              return
             }
 
             if (d.type === 'exec' || d.type === 'plugin') {
-              return sys(d.output || '(no output)')
+              const output = d.output?.trim()
+              return output ? sys(output) : undefined
             }
 
             if (d.type === 'alias') {

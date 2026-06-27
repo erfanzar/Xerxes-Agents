@@ -67,7 +67,7 @@ def _safe_xml_fromstring(xml_content: str) -> Any:
     """Parse XML while disabling entity expansion to prevent XML bomb attacks."""
     if "<!DOCTYPE" in xml_content or "<!ENTITY" in xml_content:
         raise ValueError("XML contains DTD/ENTITY declarations; rejected for security")
-    parser = ET.XMLParser(resolve_entities=False)
+    parser = ET.XMLParser()
     return ET.fromstring(xml_content, parser=parser)
 
 
@@ -128,9 +128,7 @@ class ExecutionPlan:
                 return step
         return None
 
-    def get_next_steps(
-        self, completed_steps: set[int], failed_steps: set[int] | None = None
-    ) -> list[PlanStep]:
+    def get_next_steps(self, completed_steps: set[int], failed_steps: set[int] | None = None) -> list[PlanStep]:
         """Return all not-yet-run steps whose dependencies are all satisfied.
 
         Steps that are already completed or failed are excluded. Steps
@@ -343,8 +341,7 @@ class CortexPlanner:
                                 and step.step_id in future_step.dependencies
                             ):
                                 self.logger.warning(
-                                    f"⏭️ Skipping step {future_step.step_id}: "
-                                    f"dependency step {step.step_id} failed"
+                                    f"⏭️ Skipping step {future_step.step_id}: dependency step {step.step_id} failed"
                                 )
 
         if self.verbose:

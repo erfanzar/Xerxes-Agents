@@ -168,9 +168,7 @@ class SnapshotManager:
                 return 0
             to_keep = records[-keep:]
             path = self._records_path
-            content = "\n".join(
-                "\t".join((r.id, r.label, r.commit_sha, r.created_at, r.workspace_dir)) for r in to_keep
-            )
+            content = "\n".join("\t".join((r.id, r.label, r.commit_sha, r.created_at, r.workspace_dir)) for r in to_keep)
             tmp_path = path.with_suffix(".tmp")
             tmp_path.write_text(content, encoding="utf-8")
             os.replace(str(tmp_path), str(path))

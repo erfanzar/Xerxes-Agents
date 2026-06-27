@@ -18,10 +18,11 @@ from __future__ import annotations
 from xerxes import __main__ as cli
 
 
-def test_install_node_dry_run_prints_official_archive(monkeypatch, capsys) -> None:
+def test_install_node_dry_run_prints_official_archive(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(cli.platform, "machine", lambda: "arm64")
     monkeypatch.setenv("XERXES_NODE_VERSION", "22.17.1")
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
 
     cli._run_install_command(["--node", "--dry-run"])
 

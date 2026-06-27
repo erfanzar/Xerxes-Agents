@@ -164,13 +164,11 @@ class BackgroundSessionManager:
                 self._threads.pop(sess.id, None)
                 # Prune older completed sessions to bound memory.
                 terminal = (BackgroundStatus.SUCCEEDED, BackgroundStatus.FAILED, BackgroundStatus.CANCELLED)
-                completed = [
-                    (sid, s) for sid, s in self._sessions.items() if s.status in terminal
-                ]
+                completed = [(sid, s) for sid, s in self._sessions.items() if s.status in terminal]
                 if len(completed) > self._max_completed:
                     # Sort by finished_at descending; keep most recent.
                     completed.sort(key=lambda item: item[1].finished_at, reverse=True)
-                    for sid, _s in completed[self._max_completed:]:
+                    for sid, _s in completed[self._max_completed :]:
                         self._sessions.pop(sid, None)
 
     def _drain_pending(self) -> None:

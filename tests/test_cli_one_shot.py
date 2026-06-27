@@ -66,6 +66,7 @@ def test_run_new_tui_invokes_node_and_preserves_python_env(monkeypatch, tmp_path
     entry.write_text("console.log('tui')\n", encoding="utf-8")
     monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
     monkeypatch.setenv("XERXES_PYTHON", "/custom/python")
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(__main__.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
     seen: dict[str, object] = {}
 
@@ -118,6 +119,7 @@ def test_run_new_tui_uses_current_python_when_unset(monkeypatch, tmp_path) -> No
     entry = tmp_path / "entry.js"
     entry.write_text("console.log('tui')\n", encoding="utf-8")
     monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("DEV", "true")
     monkeypatch.delenv("XERXES_PYTHON", raising=False)
     monkeypatch.setattr(__main__.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None)
@@ -146,6 +148,7 @@ def test_run_new_tui_errors_when_node_is_missing(monkeypatch, tmp_path) -> None:
     entry = tmp_path / "entry.js"
     entry.write_text("console.log('tui')\n", encoding="utf-8")
     monkeypatch.setenv("XERXES_TUI_ENTRY", str(entry))
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("XERXES_NODE", raising=False)
     monkeypatch.setattr(__main__.shutil, "which", lambda _name: None)
 

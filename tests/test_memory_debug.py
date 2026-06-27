@@ -18,7 +18,6 @@ Debug and test memory system to identify and fix issues.
 
 import traceback
 from datetime import datetime, timedelta
-from pathlib import Path
 
 # Test original and enhanced memory systems
 from xerxes.memory import MemoryEntry, MemoryStore, MemoryType
@@ -50,12 +49,11 @@ def test_original_memory():
         print(f"  ✓ Consolidated memories: {len(summary)} chars")
 
         print("✅ Original MemoryStore working!")
-        return True
 
     except Exception as e:
         print(f"❌ Original MemoryStore failed: {e}")
         traceback.print_exc()
-        return False
+        raise AssertionError("Original MemoryStore failed") from e
 
 
 def test_enhanced_memory():
@@ -71,7 +69,8 @@ def test_enhanced_memory():
     except Exception as e:
         issues.append(f"Initialization failed: {e}")
         traceback.print_exc()
-        return issues
+        assert not issues
+        return
 
     # Test adding memories
     try:
@@ -84,7 +83,8 @@ def test_enhanced_memory():
                 tags=["enhanced", f"test_{i}"],
                 confidence=0.9,
             )
-            print(f"  ✓ Added enhanced memory {i}: {entry.id}")
+            assert entry.metadata["confidence"] == 0.9
+            print(f"  ✓ Added enhanced memory {i}: {entry.memory_id}")
 
     except Exception as e:
         issues.append(f"Adding memories failed: {e}")
@@ -110,17 +110,10 @@ def test_enhanced_memory():
 
     # Test persistence
     try:
-        temp_path = Path("/tmp/test_memory.pkl")
-        store.persistence_path = temp_path
-        store.save()
-        print(f"  ✓ Saved to {temp_path}")
-
-        # Load back
-        MemoryStore(enable_persistence=True, persistence_path=temp_path)
-        print(f"  ✓ Loaded from {temp_path}")
-
-        # Clean up
-        temp_path.unlink(missing_ok=True)
+        item = store.save("Contextual memory smoke", metadata={"kind": "debug"}, importance=0.9)
+        assert item.content == "Contextual memory smoke"
+        assert item.metadata["kind"] == "debug"
+        print("  ✓ Contextual save API works")
 
     except Exception as e:
         issues.append(f"Persistence failed: {e}")
@@ -133,7 +126,7 @@ def test_enhanced_memory():
         for issue in issues:
             print(f"  - {issue}")
 
-    return issues
+    assert not issues
 
 
 def test_memory_indexing():
@@ -182,7 +175,7 @@ def test_memory_indexing():
     else:
         print(f"❌ Memory indexing has {len(issues)} issues")
 
-    return issues
+    assert not issues
 
 
 def test_memory_decay():
@@ -273,7 +266,9 @@ def test_edge_cases():
         # Third retrieval (should miss cache)
         store.retrieve_memories(agent_id="test", limit=2)
 
-        print(f"  ✓ Cache working (hits: {store.cache_hits}, misses: {store.cache_misses})")
+        stats = store.get_statistics()
+        assert "cache_hit_rate" in stats
+        print(f"  ✓ Retrieval statistics available (cache hit rate: {stats['cache_hit_rate']})")
 
     except Exception as e:
         issues.append(f"Cache test failed: {e}")
@@ -285,7 +280,7 @@ def test_edge_cases():
         for issue in issues:
             print(f"  - {issue}")
 
-    return issues
+    assert not issues
 
 
 def main():
@@ -294,35 +289,17 @@ def main():
     print("🔍 MEMORY SYSTEM DEBUG & TEST")
     print("=" * 60)
 
-    all_issues = []
-
-    # Test both implementations
     test_original_memory()
-
-    enhanced_issues = test_enhanced_memory()
-    all_issues.extend(enhanced_issues)
-
-    indexing_issues = test_memory_indexing()
-    all_issues.extend(indexing_issues)
-
+    test_enhanced_memory()
+    test_memory_indexing()
     test_memory_decay()
+    test_edge_cases()
 
-    edge_issues = test_edge_cases()
-    all_issues.extend(edge_issues)
-
-    # Summary
     print("\n" + "=" * 60)
     print("📊 TEST SUMMARY")
     print("=" * 60)
-
-    if not all_issues:
-        print("✅ All tests passed! Memory system is working correctly.")
-    else:
-        print(f"❌ Found {len(all_issues)} issues to fix:")
-        for i, issue in enumerate(all_issues, 1):
-            print(f"{i}. {issue}")
-
-    return len(all_issues) == 0
+    print("✅ All tests passed! Memory system is working correctly.")
+    return True
 
 
 if __name__ == "__main__":

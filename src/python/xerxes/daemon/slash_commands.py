@@ -576,7 +576,8 @@ class SlashCommandsMixin:
             msgs.pop()
         if msgs and msgs[-1].get("role") == "user":
             msgs.pop()
-        metadata.pop("last_connection_failure", None)
+        if isinstance(metadata, dict):
+            metadata.pop("last_connection_failure", None)
         self.sessions.save(session)
         await self._emit_slash(emit, "Retrying the last failed provider connection…")
         await self._submit_turn({"text": last_user_text, "_internal_slash": True}, emit)

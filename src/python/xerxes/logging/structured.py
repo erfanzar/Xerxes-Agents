@@ -297,6 +297,14 @@ class XerxesLogger:
 
         return event_dict
 
+    @staticmethod
+    def _structlog_fields(fields: dict[str, Any]) -> dict[str, Any]:
+        if "event" not in fields:
+            return fields
+        normalized = fields.copy()
+        normalized["event_name"] = normalized.pop("event")
+        return normalized
+
     def log_function_call(
         self,
         agent_id: str,
@@ -342,12 +350,12 @@ class XerxesLogger:
             log_data["error"] = str(error)
             ERROR_COUNTER.labels(error_type=type(error).__name__, component="function_executor").inc()
             if self._use_structlog:
-                self.logger.error("Function call failed", **log_data)
+                self.logger.error("Function call failed", **self._structlog_fields(log_data))
             else:
                 self.logger.error(f"Function call failed: {log_data}")
         else:
             if self._use_structlog:
-                self.logger.info("Function call completed", **log_data)
+                self.logger.info("Function call completed", **self._structlog_fields(log_data))
             else:
                 self.logger.info(f"Function call completed: {log_data['function_name']} in {duration:.2f}s")
 
@@ -367,7 +375,7 @@ class XerxesLogger:
         if self._use_structlog:
             self.logger.info(
                 "Agent switch",
-                event="agent_switch",
+                event_name="agent_switch",
                 from_agent=from_agent,
                 to_agent=to_agent,
                 reason=reason,
@@ -414,12 +422,12 @@ class XerxesLogger:
             log_data["error"] = str(error)
             ERROR_COUNTER.labels(error_type=type(error).__name__, component="llm_client").inc()
             if self._use_structlog:
-                self.logger.error("LLM request failed", **log_data)
+                self.logger.error("LLM request failed", **self._structlog_fields(log_data))
             else:
                 self.logger.error(f"LLM request failed: {log_data}")
         else:
             if self._use_structlog:
-                self.logger.info("LLM request completed", **log_data)
+                self.logger.info("LLM request completed", **self._structlog_fields(log_data))
             else:
                 self.logger.info(
                     f"LLM request completed: {provider} {model}, tokens: {prompt_tokens}+{completion_tokens}"
@@ -464,12 +472,12 @@ class XerxesLogger:
             log_data["error"] = str(error)
             ERROR_COUNTER.labels(error_type=type(error).__name__, component="memory_store").inc()
             if self._use_structlog:
-                self.logger.error("Memory operation failed", **log_data)
+                self.logger.error("Memory operation failed", **self._structlog_fields(log_data))
             else:
                 self.logger.error(f"Memory operation failed: {log_data}")
         else:
             if self._use_structlog:
-                self.logger.debug("Memory operation completed", **log_data)
+                self.logger.debug("Memory operation completed", **self._structlog_fields(log_data))
             else:
                 self.logger.debug(f"Memory operation {operation} completed for {agent_id}")
 

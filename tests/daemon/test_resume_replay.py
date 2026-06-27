@@ -20,11 +20,11 @@ turn so the TUI scrollback isn't blank after ``xerxes -r <id>``."""
 
 from __future__ import annotations
 
-import asyncio
-
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager, WorkspaceManager
 from xerxes.daemon.server import DaemonServer
+
+from tests.async_helpers import run_coro
 
 
 class _Recorder:
@@ -62,7 +62,7 @@ def _make_server(tmp_path) -> DaemonServer:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 class TestRenderMessageText:

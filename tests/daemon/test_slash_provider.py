@@ -19,11 +19,11 @@ came back as ``Unknown command`` even though it was listed in /help.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager
+
+from tests.async_helpers import run_coro
 
 
 class _Recorder:
@@ -60,7 +60,7 @@ def daemon(tmp_path):
 
 def _drive(server, command: str) -> list[str]:
     rec = _Recorder()
-    asyncio.new_event_loop().run_until_complete(server._handle_slash(command, rec))
+    run_coro(server._handle_slash(command, rec))
     return rec.slash_outputs()
 
 
@@ -69,7 +69,7 @@ class TestSlashProvider:
         monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: [])
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: None)
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
 
         assert rec.slash_outputs() == []
         qrs = [p for (t, p) in rec.events if t == "question_request"]
@@ -89,7 +89,7 @@ class TestSlashProvider:
         monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: profiles_data)
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         qrs = [p for (t, p) in rec.events if t == "question_request"]
         assert qrs, "no question_request emitted"
         options = qrs[0]["questions"][0]["options"]
@@ -161,7 +161,7 @@ class TestSlashProviderInteractivePanel:
             {"request_id": request_id, "answers": answers},
             rec,
         )
-        asyncio.new_event_loop().run_until_complete(coro)
+        run_coro(coro)
 
     def test_bare_provider_emits_question_request(self, daemon, monkeypatch, profiles_data):
         monkeypatch.setattr("xerxes.bridge.profiles.list_profiles", lambda: profiles_data)
@@ -170,7 +170,7 @@ class TestSlashProviderInteractivePanel:
         rec = _drive(daemon, "/provider")  # noqa: F841 — drive returns slash bodies, we want events
         # Drive again capturing the full Recorder for inspection.
         full = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", full))
+        run_coro(daemon._handle_slash("/provider", full))
         qrs = self._events_of_type(full, "question_request")
         assert qrs, "no question_request emitted"
         options = qrs[0]["questions"][0]["options"]
@@ -193,7 +193,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr(daemon.runtime, "reload", lambda *_a, **_kw: None)
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         qrs = self._events_of_type(rec, "question_request")
         rid = qrs[0]["id"]
         # Pick the openai row (label format: "openai  (gpt-4o @ https://api.openai.com/v1)").
@@ -224,7 +224,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr(daemon.runtime, "reload", lambda *_a, **_kw: None)
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid1 = self._events_of_type(rec, "question_request")[0]["id"]
         self._async_question_response(daemon, rid1, {"action": "+ Add new profile…"}, rec)
         # A second question_request should have been emitted with the four
@@ -311,7 +311,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr(daemon.runtime, "reload", lambda *_a, **_kw: None)
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid1 = self._events_of_type(rec, "question_request")[0]["id"]
         self._async_question_response(daemon, rid1, {"action": "✗ Remove existing profile…"}, rec)
         followup = self._events_of_type(rec, "question_request")[-1]
@@ -320,7 +320,7 @@ class TestSlashProviderInteractivePanel:
         assert deleted == []
         # Re-enter the flow and confirm.
         rec2 = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec2))
+        run_coro(daemon._handle_slash("/provider", rec2))
         rid_main = self._events_of_type(rec2, "question_request")[0]["id"]
         self._async_question_response(daemon, rid_main, {"action": "✗ Remove existing profile…"}, rec2)
         followup2 = self._events_of_type(rec2, "question_request")[-1]
@@ -337,7 +337,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid1 = next(p for (t, p) in rec.events if t == "question_request")["id"]
         self._async_question_response(daemon, rid1, {"action": "+ Add new profile…"}, rec)
         # The stage-1 meta panel (name + provider_type) is the latest emit.
@@ -373,7 +373,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr(daemon.runtime, "reload", lambda *_a, **_kw: None)
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid = next(p for (t, p) in rec.events if t == "question_request")["id"]
         self._async_question_response(daemon, rid, {"action": "+ Add new profile…"}, rec)
         meta = [p for (t, p) in rec.events if t == "question_request"][-1]
@@ -410,7 +410,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid = next(p for (t, p) in rec.events if t == "question_request")["id"]
         self._async_question_response(daemon, rid, {"action": "+ Add new profile…"}, rec)
         meta = [p for (t, p) in rec.events if t == "question_request"][-1]
@@ -459,7 +459,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr("xerxes.bridge.profiles.fetch_models", _boom)
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid = next(p for (t, p) in rec.events if t == "question_request")["id"]
         self._async_question_response(daemon, rid, {"action": "+ Add new profile…"}, rec)
         meta = [p for (t, p) in rec.events if t == "question_request"][-1]
@@ -504,7 +504,7 @@ class TestSlashProviderInteractivePanel:
         monkeypatch.setattr("xerxes.bridge.profiles.get_active_profile", lambda: profiles_data[0])
 
         rec = _Recorder()
-        asyncio.new_event_loop().run_until_complete(daemon._handle_slash("/provider", rec))
+        run_coro(daemon._handle_slash("/provider", rec))
         rid = self._events_of_type(rec, "question_request")[0]["id"]
         self._async_question_response(daemon, rid, {"action": "Cancel"}, rec)
         bodies = rec.slash_bodies()

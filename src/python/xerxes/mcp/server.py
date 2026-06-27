@@ -76,17 +76,27 @@ def _redact(obj: Any) -> Any:
     Replaces values of common credential field names with ``"[redacted]"``;
     recurses into nested dicts and lists.
     """
-    _CREDENTIAL_FIELDS = frozenset({
-        "api_key", "apikey", "token", "password",
-        "secret", "api_secret", "access_token", "refresh_token",
-        "client_secret", "private_key", "secret_key",
-        "auth_token", "bearer_token", "credentials", "api_key_id",
-    })
-    if isinstance(obj, dict):
-        return {
-            k: ("[redacted]" if k.lower() in _CREDENTIAL_FIELDS else _redact(v))
-            for k, v in obj.items()
+    _CREDENTIAL_FIELDS = frozenset(
+        {
+            "api_key",
+            "apikey",
+            "token",
+            "password",
+            "secret",
+            "api_secret",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "private_key",
+            "secret_key",
+            "auth_token",
+            "bearer_token",
+            "credentials",
+            "api_key_id",
         }
+    )
+    if isinstance(obj, dict):
+        return {k: ("[redacted]" if k.lower() in _CREDENTIAL_FIELDS else _redact(v)) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact(x) for x in obj]
     return obj

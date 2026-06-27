@@ -112,7 +112,7 @@ agent:
 agent:
   extend: ./agent.yaml
   exclude_tools:
-    - ExecuteShell
+    - exec_command
     - WriteFile
     - FileEditTool
 ```
@@ -175,7 +175,7 @@ class TestReviewerAgent:
         spec = load_agent_spec("src/python/xerxes/agents/default/reviewer.yaml")
         assert spec.name == "reviewer"
         assert "ReadFile" in spec.allowed_tools
-        assert "ExecuteShell" not in spec.allowed_tools
+        assert "exec_command" not in spec.allowed_tools
 
     def test_inherits_from_base(self):
         spec = load_agent_spec("src/python/xerxes/agents/default/reviewer.yaml")
@@ -195,6 +195,6 @@ Some parts of the framework may require explicit registration of new agent specs
 - **YAML syntax errors:** Indentation must be consistent (2 spaces per level). Mixed tabs/spaces will cause cryptic `yaml.scanner.ScannerError`.
 - **Missing `extend`:** If you don't extend `./agent.yaml`, you must define ALL required fields (system_prompt_path, model, max_depth, etc.) yourself. It's easier to extend.
 - **Tool name typos:** `allowed_tools` and `exclude_tools` use the exact Python class name. `readfile` or `read_file` will silently be ignored because the tool doesn't exist.
-- **Overly broad tool lists:** Giving an agent `ExecuteShell` or `WriteFile` is high-risk. Use `exclude_tools` to remove dangerous tools from inherited lists.
+- **Overly broad tool lists:** Giving an agent `exec_command` or `WriteFile` is high-risk. Use `exclude_tools` to remove dangerous tools from inherited lists.
 - **Circular subagent references:** Don't create A → B → A delegation loops. The framework's `LoopDetector` will catch them at runtime, but it's better to design hierarchies as trees.
 - **System prompt bloat:** `ROLE_ADDITIONAL` should be 2-5 sentences. Long system prompts consume context window and degrade performance.

@@ -19,11 +19,11 @@ daemon must handle the common slash commands or users see
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager
+
+from tests.async_helpers import run_coro
 
 
 class TestRuntimeManagerPermissions:
@@ -103,12 +103,12 @@ def daemon_with_runtime(tmp_path, monkeypatch):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return run_coro(coro)
 
 
 def _drive(server, command: str) -> list[str]:
     rec = _Recorder()
-    asyncio.new_event_loop().run_until_complete(server._handle_slash(command, rec))
+    run_coro(server._handle_slash(command, rec))
     return rec.slash_outputs()
 
 
@@ -168,7 +168,7 @@ class TestSlashFlags:
         server.runtime.runtime_config = {"model": "claude-code/opus", "permission_mode": "accept-all"}
         try:
             rec = _Recorder()
-            asyncio.new_event_loop().run_until_complete(server._handle_slash("/thinking high", rec))
+            run_coro(server._handle_slash("/thinking high", rec))
 
             session = server.sessions.open("tui:default", server.workspaces.default_agent_id)
             status = [payload for event_type, payload in rec.events if event_type == "status_update"]

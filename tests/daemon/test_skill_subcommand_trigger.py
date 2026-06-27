@@ -20,13 +20,14 @@ reconstructs the canonical form before handing off to the model."""
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
 from xerxes.daemon.config import DaemonConfig
 from xerxes.daemon.runtime import RuntimeManager, SessionManager, WorkspaceManager
 from xerxes.daemon.server import DaemonServer
+
+from tests.async_helpers import run_coro
 
 
 def _write_skill(skills_dir: Path, name: str, *, subcommands: list[str] | None = None) -> Path:
@@ -82,7 +83,7 @@ def _drive(server, command: str, *, captured: dict | None = None) -> dict:
     async def emit(et, payload):
         pass
 
-    asyncio.new_event_loop().run_until_complete(server._handle_slash(command, emit))
+    run_coro(server._handle_slash(command, emit))
     return captured
 
 
@@ -95,7 +96,7 @@ def test_slash_skills_emits_listing_and_refreshes_completions(tmp_path):
     async def emit(et, payload):
         events.append((et, payload))
 
-    asyncio.new_event_loop().run_until_complete(server._handle_slash("/skills", emit))
+    run_coro(server._handle_slash("/skills", emit))
 
     slash_bodies = [payload.get("body", "") for et, payload in events if et == "notification"]
     init_skills = [payload.get("skills", []) for et, payload in events if et == "init_done"]

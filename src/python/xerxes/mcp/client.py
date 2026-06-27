@@ -216,13 +216,7 @@ class MCPClient:
             return "Private/localhost addresses are not allowed"
 
         def _is_internal_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-            return (
-                addr.is_private
-                or addr.is_loopback
-                or addr.is_link_local
-                or addr.is_multicast
-                or addr.is_reserved
-            )
+            return addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_reserved
 
         try:
             addr = ipaddress.ip_address(hostname)

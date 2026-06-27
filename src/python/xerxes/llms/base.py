@@ -311,14 +311,13 @@ class BaseLLM(ABC):
         """Close the underlying HTTP client on context exit."""
         await self.close()
 
-    @abstractmethod
     async def close(self) -> None:
         """Close the HTTP client and release resources.
 
         Should be called when the LLM client is no longer needed, either
         explicitly or via the async context manager protocol.
         """
-        pass
+        return None
 
     def format_messages(self, messages: list[dict[str, str]], system_prompt: str | None = None) -> list[dict[str, str]]:
         """Prepend a system prompt to a message list.

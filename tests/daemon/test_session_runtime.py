@@ -172,6 +172,17 @@ def test_session_manager_creates_workspace_under_agents_root(tmp_path):
     assert (session.workspace.path / "memory").is_dir()
 
 
+def test_empty_workspace_root_uses_xerxes_home_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("XERXES_HOME", str(tmp_path / "home"))
+    cfg = DaemonConfig(workspace={"root": "", "default_agent_id": "xerxes"})
+    manager = SessionManager(WorkspaceManager(cfg), keep_messages=4, store_dir=tmp_path / "sessions")
+
+    session = manager.open("telegram:private:1")
+
+    assert session.workspace.path == tmp_path / "home" / "agents" / "xerxes"
+    assert (session.workspace.path / "AGENTS.md").exists()
+
+
 def test_session_save_records_project_cwd_not_agent_workspace(tmp_path):
     project = tmp_path / "project"
     cfg = DaemonConfig(
