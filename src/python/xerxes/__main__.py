@@ -307,6 +307,113 @@ def _run_update_command(argv: list[str]) -> None:
         raise SystemExit(1)
 
 
+def _print_export_session_list(sessions: list[dict[str, Any]]) -> None:
+    """Print saved sessions in a compact human-readable table."""
+    if not sessions:
+        print("No saved Xerxes sessions found.")
+        return
+    for item in sessions:
+        title = str(item.get("title") or "").replace("\n", " ").strip()
+        if len(title) > 80:
+            title = title[:77] + "..."
+        project = str(item.get("project_dir") or "")
+        print(
+            f"{item.get('id')}  {item.get('messages')} message(s), {item.get('turn_count')} turn(s), "
+            f"updated {item.get('updated_at')}"
+        )
+        if title:
+            print(f"  title: {title}")
+        if project:
+            print(f"  project: {project}")
+
+
+def _run_export_command(argv: list[str]) -> None:
+    """Run ``xerxes export`` for persisted daemon sessions."""
+    from .runtime.session_export import (
+        DEFAULT_EXPORT_FORMAT,
+        EXPORT_FORMATS,
+        SessionExportError,
+        build_session_export,
+        format_session_export,
+        list_saved_sessions,
+        saved_session_summary,
+        select_saved_session,
+    )
+
+    export_parser = argparse.ArgumentParser(
+        prog="xerxes export",
+        description="Export a saved Xerxes session trace with full persisted messages.",
+    )
+    export_parser.add_argument(
+        "session",
+        nargs="?",
+        default="",
+        help="Session id, id prefix, key, or title. Defaults to the latest saved session in the project.",
+    )
+    export_parser.add_argument(
+        "--session",
+        dest="session_flag",
+        default="",
+        help="Session id, id prefix, key, or title. Equivalent to the positional session argument.",
+    )
+    export_parser.add_argument(
+        "--project",
+        default="",
+        help="Project directory to filter sessions by. Defaults to the current project directory.",
+    )
+    export_parser.add_argument(
+        "--all-projects",
+        action="store_true",
+        help="Do not filter saved sessions by project directory.",
+    )
+    export_parser.add_argument(
+        "--store-dir",
+        default="",
+        help="Override the daemon session store directory (defaults to ~/.xerxes/sessions).",
+    )
+    export_parser.add_argument(
+        "--format",
+        choices=EXPORT_FORMATS,
+        default=DEFAULT_EXPORT_FORMAT,
+        help="Output format.",
+    )
+    export_parser.add_argument("-o", "--output", default="", help="Write the export to this file instead of stdout.")
+    export_parser.add_argument("--list", action="store_true", help="List matching saved sessions instead of exporting.")
+    export_parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Do not include the compacted-message archive sidecar, if one exists.",
+    )
+    args = export_parser.parse_args(argv)
+
+    query = str(args.session_flag or args.session or "").strip()
+    project_dir = None if args.all_projects else (args.project or _resolve_new_tui_project_dir(Path.cwd()))
+    store_dir = args.store_dir or None
+    try:
+        if args.list:
+            sessions = [
+                saved_session_summary(saved)
+                for saved in list_saved_sessions(store_dir=store_dir, project_dir=project_dir)
+            ]
+            _print_export_session_list(sessions)
+            return
+
+        saved = select_saved_session(query, store_dir=store_dir, project_dir=project_dir)
+        export = build_session_export(saved, include_archive=not args.no_archive)
+        rendered = format_session_export(export, args.format)
+    except SessionExportError as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    if args.output:
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+        print(f"Exported session {export['session']['id']} to {output}")
+        return
+    sys.stdout.write(rendered)
+
+
 def _claude_code_cli_path() -> str:
     """Return the configured Claude Code executable path if it is installed."""
     command = os.environ.get("CLAUDE_CODE_CLI", "claude")
@@ -649,6 +756,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if argv and argv[0] == "update":
         _run_update_command(argv[1:])
+        return
+    if argv and argv[0] == "export":
+        _run_export_command(argv[1:])
         return
 
     if argv and argv[0] == "telegram":
