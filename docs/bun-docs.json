@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "title": "Xerxes",
+  "sourceDirectory": ".",
+  "outputDirectory": "_bun",
+  "staticDirectory": "_static",
+  "typescriptApi": {
+    "sourceDirectory": "../src/typescript/src",
+    "packageName": "@xerxes/runtime",
+    "outputDirectory": "typescript-api"
+  }
+}

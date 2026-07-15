@@ -12,260 +12,93 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# Install the locked Bun workspace and production launchers.
 set -eu
 
-REPO_URL="https://github.com/erfanzar/Xerxes-Agents"
-RAW_URL="https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main"
-XERXES_VENV="${XERXES_VENV:-$HOME/.xerxes-venv}"
-XERXES_SOURCE_FILE="$XERXES_VENV/.xerxes-source"
+REPO_URL="https://github.com/erfanzar/Xerxes-Agents.git"
+INSTALL_DIRECTORY="${XERXES_INSTALL_DIRECTORY:-$HOME/.xerxes-bun}"
+BIN_DIRECTORY="${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}"
 
-RED=""
-GREEN=""
-YELLOW=""
-BLUE=""
-BOLD=""
-RESET=""
-if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
-    RED="$(tput setaf 1)"
-    GREEN="$(tput setaf 2)"
-    YELLOW="$(tput setaf 3)"
-    BLUE="$(tput setaf 4)"
-    BOLD="$(tput bold)"
-    RESET="$(tput sgr0)"
-fi
+info() { printf '%s\n' "==> $*"; }
+ok() { printf '%s\n' "✓ $*"; }
+die() { printf '%s\n' "x $*" >&2; exit 1; }
 
-info()    { printf '%s==>%s %s\n'   "$BLUE"   "$RESET" "$*"; }
-ok()      { printf '%s✓%s %s\n'     "$GREEN"  "$RESET" "$*"; }
-warn()    { printf '%s!%s %s\n'     "$YELLOW" "$RESET" "$*" >&2; }
-die()     { printf '%sx%s %s\n'     "$RED"    "$RESET" "$*" >&2; exit 1; }
-
-need_cmd() {
+need_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
-download() {
-    # download URL -> stdout, preferring curl, falling back to wget.
-    url="$1"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --retry 3 --retry-delay 1 "$url"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "$url"
-    else
-        die "neither curl nor wget is available"
-    fi
 }
 
 local_checkout_root() {
     script_path="${1:-$0}"
     case "$script_path" in
-        */*) script_dir="$(dirname "$script_path")" ;;
+        */*) script_directory="$(CDPATH= cd "$(dirname "$script_path")" 2>/dev/null && pwd -P)" || return 1 ;;
         *) return 1 ;;
     esac
-
-    script_dir="$(CDPATH= cd "$script_dir" 2>/dev/null && pwd -P)" || return 1
-    repo_root="$(CDPATH= cd "$script_dir/.." 2>/dev/null && pwd -P)" || return 1
-    [ -f "$repo_root/pyproject.toml" ] || return 1
-    [ -d "$repo_root/src/python/xerxes" ] || return 1
-    printf '%s\n' "$repo_root"
+    repository_root="$(CDPATH= cd "$script_directory/.." 2>/dev/null && pwd -P)" || return 1
+    [ -f "$repository_root/package.json" ] || return 1
+    [ -f "$repository_root/bun.lock" ] || return 1
+    [ -d "$repository_root/src/typescript" ] || return 1
+    printf '%s\n' "$repository_root"
 }
 
-detect_platform() {
-    uname_s="$(uname -s 2>/dev/null || echo unknown)"
-    uname_m="$(uname -m 2>/dev/null || echo unknown)"
-    case "$uname_s" in
-        Linux)  os=linux ;;
-        Darwin) os=macos ;;
-        MINGW*|MSYS*|CYGWIN*)
-            die "Windows is not supported by this script. Use WSL2 or install uv from https://astral.sh/uv." ;;
-        *) die "unsupported OS: $uname_s" ;;
-    esac
-    case "$uname_m" in
-        x86_64|amd64) arch=x86_64 ;;
-        arm64|aarch64) arch=aarch64 ;;
-        *) die "unsupported architecture: $uname_m" ;;
-    esac
-    PLATFORM="${os}-${arch}"
-}
-
-ensure_build_prereqs() {
-    # Only surface missing-header warnings; don't hard-fail. uv will
-    # try to use prebuilt wheels first.
-    case "$PLATFORM" in
-        linux-*)
-            if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
-                warn "no C compiler found on PATH; native builds will fail."
-                warn "install build-essential (Debian/Ubuntu) or gcc (RHEL/Fedora) first if prebuilt wheels are missing."
-            fi
-            ;;
-        macos-*)
-            if ! xcode-select -p >/dev/null 2>&1; then
-                warn "Xcode command-line tools not found. Run: xcode-select --install"
-            fi
-            ;;
-    esac
-}
-
-install_uv() {
-    if command -v uv >/dev/null 2>&1; then
-        ok "uv already present ($(uv --version))"
+resolve_source() {
+    if [ -n "${XERXES_SOURCE_DIRECTORY:-}" ]; then
+        [ -d "$XERXES_SOURCE_DIRECTORY" ] || die "XERXES_SOURCE_DIRECTORY does not exist: $XERXES_SOURCE_DIRECTORY"
+        (CDPATH= cd "$XERXES_SOURCE_DIRECTORY" 2>/dev/null && pwd -P) || die "cannot resolve XERXES_SOURCE_DIRECTORY"
         return 0
     fi
-    info "installing uv (Astral)"
-    download "https://astral.sh/uv/install.sh" | sh
-    # Common install locations — surface them so the rest of the script can find `uv`.
-    for candidate in "$HOME/.local/bin" "$HOME/.cargo/bin"; do
-        case ":$PATH:" in
-            *":$candidate:"*) ;;
-            *) [ -d "$candidate" ] && PATH="$candidate:$PATH" ;;
-        esac
-    done
-    export PATH
-    command -v uv >/dev/null 2>&1 || die "uv installed but not on PATH; restart your shell and re-run"
-    ok "uv installed ($(uv --version))"
-}
-
-install_xerxes() {
-    # Clean up stale/broken installs from previous attempts.
-    info "cleaning up stale installs"
-    uv tool uninstall xerxes-agent 2>/dev/null || true
-    # Also remove any old pip-installed entry points that might shadow uv's.
-    for old_bin in "$HOME/.local/bin/xerxes" "$HOME/.cargo/bin/xerxes"; do
-        [ -f "$old_bin" ] && rm -f "$old_bin" && ok "removed stale binary: $old_bin"
-    done
-
-    # Default to the local checkout when this script is run from the repository;
-    # curl-piped installs fall back to GitHub because there is no checkout path.
-    if [ -n "${XERXES_PACKAGE_SPEC:-}" ]; then
-        spec="$XERXES_PACKAGE_SPEC"
-    elif [ -n "${XERXES_REF:-}" ]; then
-        spec="xerxes-agent @ git+${REPO_URL}.git@${XERXES_REF}"
-    elif [ -n "${XERXES_VERSION:-}" ]; then
-        spec="xerxes-agent==${XERXES_VERSION}"
-    elif repo_root="$(local_checkout_root "$0" 2>/dev/null)"; then
-        spec="xerxes-agent @ file://${repo_root}"
-    else
-        spec="xerxes-agent @ git+${REPO_URL}.git"
-    fi
-
-    if [ -n "${XERXES_INSTALL_EXTRAS:-}" ]; then
-        case "$spec" in
-            "xerxes-agent @ "*) spec="xerxes-agent[${XERXES_INSTALL_EXTRAS}] ${spec#xerxes-agent }" ;;
-            "xerxes-agent=="*)  spec="xerxes-agent[${XERXES_INSTALL_EXTRAS}]==${spec#xerxes-agent==}" ;;
-            "xerxes-agent")     spec="xerxes-agent[${XERXES_INSTALL_EXTRAS}]" ;;
-        esac
-    fi
-
-    info "creating managed venv at $XERXES_VENV"
-    if ! uv venv --python ">=3.11,<3.14" "$XERXES_VENV"; then
-        die "uv venv failed"
-    fi
-
-    venv_python="$XERXES_VENV/bin/python"
-    [ -x "$venv_python" ] || die "managed venv Python not found: $venv_python"
-
-    info "installing $spec into $XERXES_VENV"
-    if ! uv pip install --python "$venv_python" --upgrade "$spec"; then
-        die "uv pip install failed"
-    fi
-    printf '%s\n' "$spec" > "$XERXES_SOURCE_FILE"
-    ok "xerxes installed in $XERXES_VENV"
-}
-
-install_alias() {
-    if [ "${XERXES_NO_MODIFY_PATH:-0}" = "1" ]; then
+    if source_root="$(local_checkout_root "$0" 2>/dev/null)"; then
+        printf '%s\n' "$source_root"
         return 0
     fi
-    xerxes_bin="$XERXES_VENV/bin/xerxes"
-    [ -x "$xerxes_bin" ] || die "xerxes executable not found: $xerxes_bin"
 
-    # Figure out which rc file the user's shell reads.
-    rc_file=""
-    case "${SHELL:-}" in
-        */zsh)  rc_file="$HOME/.zshrc" ;;
-        */bash) rc_file="$HOME/.bashrc"; [ -f "$HOME/.bash_profile" ] && rc_file="$HOME/.bash_profile" ;;
-        */fish) rc_file="$HOME/.config/fish/config.fish" ;;
+    need_command git
+    if [ -e "$INSTALL_DIRECTORY" ]; then
+        die "install directory already exists: $INSTALL_DIRECTORY (remove it or set XERXES_INSTALL_DIRECTORY)"
+    fi
+    info "cloning native Bun source into $INSTALL_DIRECTORY"
+    git clone --depth 1 "${XERXES_REPOSITORY_URL:-$REPO_URL}" "$INSTALL_DIRECTORY"
+    printf '%s\n' "$INSTALL_DIRECTORY"
+}
+
+write_launcher() {
+    source_root="$1"
+    launcher_name="$2"
+    command_prefix="${3:-}"
+    mkdir -p "$BIN_DIRECTORY"
+    launcher="$BIN_DIRECTORY/$launcher_name"
+    temporary_launcher="$launcher.tmp.$$"
+    cat > "$temporary_launcher" <<EOF
+#!/usr/bin/env sh
+exec bun "$source_root/src/typescript/dist/cli.js" $command_prefix "\$@"
+EOF
+    chmod 755 "$temporary_launcher"
+    mv "$temporary_launcher" "$launcher"
+    ok "installed native launcher at $launcher"
+    case ":$PATH:" in
+        *":$BIN_DIRECTORY:"*) ;;
+        *) printf '%s\n' "Add $BIN_DIRECTORY to PATH to invoke xerxes directly." ;;
     esac
-    [ -z "$rc_file" ] && rc_file="$HOME/.profile"
-
-    line="alias xerxes=\"$xerxes_bin\""
-    case "$rc_file" in
-        *config.fish) line="function xerxes; \"$xerxes_bin\" \$argv; end" ;;
-    esac
-
-    mkdir -p "$(dirname "$rc_file")"
-    [ -f "$rc_file" ] || : > "$rc_file"
-
-    tmp_file="${rc_file}.xerxes-tmp.$$"
-    awk '
-        $0 == "# >>> xerxes installer >>>" { skip = 1; next }
-        $0 == "# <<< xerxes installer <<<" { skip = 0; next }
-        skip != 1 { print }
-    ' "$rc_file" > "$tmp_file"
-    mv "$tmp_file" "$rc_file"
-
-    {
-        printf '\n# >>> xerxes installer >>>\n'
-        printf '%s\n' "$line"
-        printf '# <<< xerxes installer <<<\n'
-    } >> "$rc_file"
-    ok "added xerxes alias to $rc_file"
-    warn "restart your shell or run: source $rc_file"
-}
-
-verify() {
-    xerxes_bin="$XERXES_VENV/bin/xerxes"
-    if [ ! -x "$xerxes_bin" ]; then
-        warn "xerxes binary not found in managed venv: $xerxes_bin"
-        return 0
-    fi
-    if "$xerxes_bin" --help >/dev/null 2>&1; then
-        ok "xerxes is available at $xerxes_bin"
-    else
-        warn "xerxes found but --help failed; the install may still be functional."
-    fi
-}
-
-install_node_runtime() {
-    if [ "${XERXES_SKIP_NODE_INSTALL:-0}" = "1" ]; then
-        warn "skipping managed Node.js runtime install because XERXES_SKIP_NODE_INSTALL=1"
-        return 0
-    fi
-    xerxes_bin="$XERXES_VENV/bin/xerxes"
-    [ -x "$xerxes_bin" ] || die "xerxes executable not found: $xerxes_bin"
-    info "installing managed Node.js runtime for the TypeScript TUI"
-    if ! "$xerxes_bin" install --node; then
-        die "managed Node.js install failed. Re-run after checking network access, or set XERXES_SKIP_NODE_INSTALL=1 and install Node manually."
-    fi
-}
-
-print_banner() {
-    printf '%s\n' "${BOLD}"
-    cat <<'BANNER'
-██╗  ██╗███████╗██████╗ ██╗  ██╗███████╗███████╗
-╚██╗██╔╝██╔════╝██╔══██╗╚██╗██╔╝██╔════╝██╔════╝
- ╚███╔╝ █████╗  ██████╔╝ ╚███╔╝ █████╗  ███████╗
- ██╔██╗ ██╔══╝  ██╔══██╗ ██╔██╗ ██╔══╝  ╚════██║
-██╔╝ ██╗███████╗██║  ██║██╔╝ ██╗███████╗███████║
-╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝
-BANNER
-    printf '%s\n' "${RESET}"
 }
 
 main() {
-    print_banner
-    detect_platform
-    info "target: $PLATFORM"
-    ensure_build_prereqs
-    install_uv
-    install_xerxes
-    install_node_runtime
-    install_alias
-    verify
-    printf '\n'
-    ok "done. Restart your terminal, then run: xerxes"
-    printf '   direct: %s/bin/xerxes\n' "$XERXES_VENV"
-    printf '   docs:  %s\n' "https://erfanzar.github.io/Xerxes-Agents"
-    printf '   issues: %s/issues\n' "$REPO_URL"
+    need_command bun
+    source_root="$(resolve_source)"
+    [ -f "$source_root/package.json" ] || die "native package manifest is missing: $source_root/package.json"
+    [ -f "$source_root/bun.lock" ] || die "native lockfile is missing: $source_root/bun.lock"
+
+    info "installing locked Bun workspace dependencies"
+    (
+        cd "$source_root"
+        bun install --frozen-lockfile
+        bun run build
+    )
+    [ -f "$source_root/src/typescript/dist/cli.js" ] || die "runtime build is missing: $source_root/src/typescript/dist/cli.js"
+    [ -f "$source_root/src/typescript/dist/ui/entry.js" ] || die "TUI build is missing: $source_root/src/typescript/dist/ui/entry.js"
+    write_launcher "$source_root" xerxes
+    write_launcher "$source_root" xerxes-acp acp
+    "$BIN_DIRECTORY/xerxes" --help >/dev/null
+    ok "Xerxes Bun runtime is ready"
 }
 
 if [ "${XERXES_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then

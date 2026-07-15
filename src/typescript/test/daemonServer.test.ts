@@ -1,0 +1,2411 @@
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+
+import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { connect, type Socket } from "node:net";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
+import { DaemonInteractionBoard } from "../src/daemon/interactions.js";
+import { DaemonServer, MIGRATED_ERROR } from "../src/daemon/server.js";
+import { ProfileStore } from "../src/bridge/profiles.js";
+import {
+  ChannelManager,
+  type Channel,
+  type ChannelMessage,
+  type InboundHandler,
+} from "../src/channels/index.js";
+import { CronJob, JobStore } from "../src/cron/jobs.js";
+import { SnapshotManager } from "../src/session/snapshots.js";
+import type { FetchImplementation } from "../src/llms/client.js";
+import type { PermissionRequest } from "../src/streaming/events.js";
+import type {
+  DaemonEvent,
+  DaemonSession,
+  TurnRunControls,
+  TurnRunner,
+} from "../src/daemon/runtime.js";
+
+test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-daemon-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "runtime.status",
+      params: {},
+    });
+    const status = await client.next((frame) => frame.id === 1);
+    expect(status.result).toMatchObject({
+      ok: true,
+      runtime_ready: false,
+      daemon_protocol: 35,
+      runtime: "bun-typescript",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: { session_key: "test-session" },
+    });
+    const initialized = await client.next((frame) => frame.id === 2);
+    const initDone = await client.next(eventFrame("init_done"));
+    const initialStatus = await client.next(eventFrame("status_update"));
+    expect(initialized.result).toMatchObject({
+      ok: true,
+      session: { key: "test-session", status: "idle" },
+    });
+    expect(initDone.params?.payload).toMatchObject({
+      session_id: expect.any(String),
+      context_limit: 128_000,
+      mode: "code",
+    });
+    expect(initialStatus.params?.payload).toMatchObject({
+      max_context: 128_000,
+      mode: "code",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.open",
+      params: { session_key: "test-session" },
+    });
+    const opened = await client.next((frame) => frame.id === 3);
+    expect(opened.result).toMatchObject({
+      ok: true,
+      session: { key: "test-session", messages: 0, status: "idle" },
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { session_key: "test-session", text: "hello" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject(
+      { ok: true },
+    );
+    const turnBegin = await client.next(eventFrame("turn_begin"));
+    const textPart = await client.next(eventFrame("text_part"));
+    const turnEnd = await client.next(eventFrame("turn_end"));
+    expect(turnBegin.params?.payload).toMatchObject({ text: "hello" });
+    expect(textPart.params?.payload).toMatchObject({
+      text: "Bun daemon foundation received: hello",
+    });
+    expect(turnEnd.params?.payload).toMatchObject({ cancelled: false });
+
+    client.send({ jsonrpc: "2.0", id: 5, method: "task.submit", params: {} });
+    expect((await client.next((frame) => frame.id === 5)).result).toEqual({
+      ok: false,
+      error: MIGRATED_ERROR,
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("shutdown RPC notifies the process host so its daemon lifetime can finish", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-shutdown-"));
+  const socketPath = join(directory, "daemon.sock");
+  let shutdowns = 0;
+  const server = new DaemonServer({
+    socketPath,
+    onShutdown: () => {
+      shutdowns += 1;
+    },
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "shutdown", params: {} });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: true,
+    });
+    await waitFor(() => shutdowns === 1);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon shutdown cancels active turns before flushing session state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-order-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new StopOrderRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  try {
+    await server.stop();
+    expect(runtime.shutdownOperations).toEqual(["cancel", "flush"]);
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon derives slash discovery from implemented canonical commands and rejects unsupported definitions", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "xerxes-bun-command-registry-"),
+  );
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "commands" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "commands.catalog",
+      params: {},
+    });
+    const catalog = await client.next((frame) => frame.id === 2);
+    expect(catalog.result).toMatchObject({
+      ok: true,
+      canon: {
+        "/?": "/help",
+        "/compress": "/compact",
+        "/h": "/help",
+      },
+    });
+    expect(catalog.result?.pairs).toEqual(
+      expect.arrayContaining([
+        ["/help", "Show help"],
+        ["/compact", "Compress the conversation"],
+        ["/cron", "Manage scheduled tasks"],
+        ["/history", "Show or search conversation history"],
+        ["/snapshot", "Take a filesystem snapshot"],
+      ]),
+    );
+    expect(catalog.result?.pairs).toContainEqual([
+      "/retry",
+      "Re-run the last turn",
+    ]);
+    expect(catalog.result?.categories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "session",
+          pairs: expect.arrayContaining([
+            ["/compact", "Compress the conversation"],
+          ]),
+        }),
+      ]),
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "complete",
+      params: { text: "/?" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 3)).result?.completions,
+    ).toEqual([{ value: "/help", label: "help", meta: "Show help" }]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "complete",
+      params: { text: "/not-a-command" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 4)).result?.completions,
+    ).toEqual([]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/not-a-command" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toEqual({
+      ok: false,
+      error: "Unknown slash command: /not-a-command",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "warning",
+      body: "Unknown command: /not-a-command (type /help).",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "complete",
+      params: { text: "/his" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 6)).result?.completions,
+    ).toEqual([
+      {
+        value: "/history",
+        label: "history",
+        meta: "Show or search conversation history",
+      },
+    ]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: "/?" },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining("Available Bun daemon commands:"),
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon history reports active session counters over the socket", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-history-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(new UsageRunner(), {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "history" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "history", text: "track this turn" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("status_update"));
+    await client.next(eventFrame("text_part"));
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/history" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      history: {
+        message_count: 2,
+        turn_count: 1,
+        input_tokens: 17,
+        output_tokens: 9,
+      },
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "info",
+      body: "Messages: 2\nTurns: 1\nInput tokens: 17\nOutput tokens: 9",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.status",
+      params: { session_key: "history" },
+    });
+    const status = (await client.next((frame) => frame.id === 4)).result?.session as
+      | Record<string, unknown>
+      | undefined;
+    expect(status).toMatchObject({
+      calls: 1,
+      context_limit: 128_000,
+      input_tokens: 17,
+      max_context: 128_000,
+      output_tokens: 9,
+      total_tokens: 26,
+      usage_complete: true,
+    });
+    expect(Number(status?.context_tokens)).toBeGreaterThan(0);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.usage",
+      params: { session_key: "history" },
+    });
+    const usage = (await client.next((frame) => frame.id === 5)).result;
+    expect(usage).toMatchObject({
+      calls: 1,
+      context_max: 128_000,
+      input: 17,
+      model: "gpt-4o",
+      output: 9,
+      total: 26,
+      usage_complete: true,
+    });
+    expect(Number(usage?.context_used)).toBe(Number(status?.context_tokens));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon usage marks imported counters unknown instead of fabricating cumulative API calls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-imported-usage-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const imported = await runtime.openSession("legacy-slot");
+  imported.turnCount = 2;
+  imported.totalApiCalls = 1;
+  imported.totalInputTokens = 30;
+  imported.totalOutputTokens = 7;
+  delete imported.apiCallsComplete;
+  delete imported.usageComplete;
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session.status",
+      params: { session_key: "legacy-slot" },
+    });
+    const status = (await client.next((frame) => frame.id === 1)).result?.session as
+      | Record<string, unknown>
+      | undefined;
+    expect(status).toMatchObject({
+      calls_complete: false,
+      input_tokens: 30,
+      observed_calls: 1,
+      output_tokens: 7,
+      usage_complete: false,
+    });
+    expect(status?.calls).toBeUndefined();
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session.usage",
+      params: { session_key: "legacy-slot" },
+    });
+    const usage = (await client.next((frame) => frame.id === 2)).result;
+    expect(usage).toMatchObject({
+      calls_complete: false,
+      input: 30,
+      observed_calls: 1,
+      output: 7,
+      total: 37,
+      usage_complete: false,
+    });
+    expect(usage?.calls).toBeUndefined();
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon lists and controls persistent cron jobs through slash commands", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-command-"));
+  const socketPath = join(directory, "daemon.sock");
+  const store = new JobStore(join(directory, "cron", "jobs.json"));
+  const server = new DaemonServer({
+    socketPath,
+    cronStoreFactory: () => store,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "slash",
+      params: { command: "/cron" },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: true,
+      jobs: [],
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: "No cron jobs scheduled.",
+    });
+
+    store.add(
+      new CronJob({
+        id: "active-job",
+        prompt: "summarize changes",
+        schedule: "0 9 * * 1",
+        nextRunAt: "2026-07-20T09:00:00Z",
+      }),
+    );
+    store.add(
+      new CronJob({
+        id: "paused-job",
+        prompt: "send a report",
+        schedule: "30 17 * * 5",
+        paused: true,
+      }),
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/cron list" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject(
+      {
+        ok: true,
+        jobs: [
+          {
+            id: "active-job",
+            prompt: "summarize changes",
+            schedule: "0 9 * * 1",
+            paused: false,
+            next_run_at: "2026-07-20T09:00:00Z",
+          },
+          {
+            id: "paused-job",
+            prompt: "send a report",
+            schedule: "30 17 * * 5",
+            paused: true,
+          },
+        ],
+      },
+    );
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: "Cron jobs (2):\n  `active-job` — `0 9 * * 1` (active)\n  `paused-job` — `30 17 * * 5` (paused)",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/cron add" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: false,
+      error:
+        "Provide exactly one of `--schedule <five-field-cron>` or `--at <ISO-8601-time>`.",
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: {
+        command:
+          '/cron add --schedule "0 9 * * 1" --prompt "summarize native changes"',
+      },
+    });
+    const added = await client.next((frame) => frame.id === 4);
+    expect(added.result).toMatchObject({
+      ok: true,
+      job: {
+        prompt: "summarize native changes",
+        schedule: "0 9 * * 1",
+        paused: false,
+        oneshot: false,
+      },
+    });
+    const job = added.result?.job as Record<string, unknown>;
+    const jobId = String(job.id);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: `/cron pause ${jobId}` },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject(
+      {
+        ok: true,
+        job: { id: jobId, paused: true },
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "slash",
+      params: { command: `/cron resume ${jobId}` },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject(
+      {
+        ok: true,
+        job: { id: jobId, paused: false },
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: `/cron run ${jobId}` },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject(
+      {
+        ok: true,
+        job: { id: jobId },
+        output: "Bun daemon foundation received: summarize native changes",
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "slash",
+      params: { command: `/cron remove ${jobId}` },
+    });
+    expect((await client.next((frame) => frame.id === 8)).result).toEqual({
+      ok: true,
+      id: jobId,
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon automatically runs due cron jobs, archives output, and delivers through a configured native channel", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-cron-lifecycle-"));
+  const socketPath = join(directory, "daemon.sock");
+  const store = new JobStore(join(directory, "cron", "jobs.json"));
+  const channel = new DaemonRecordingChannel("recording");
+  store.add(
+    new CronJob({
+      id: "due-once",
+      prompt: "automatic native report",
+      nextRunAt: new Date(Date.now() - 2_000).toISOString(),
+      oneshot: true,
+      deliver: "recording",
+      recipient: "room-42",
+    }),
+  );
+  const server = new DaemonServer({
+    socketPath,
+    channelManager: new ChannelManager({
+      channels: [["recording", channel]],
+    }),
+    cronArchiveDirectory: join(directory, "cron", "archive"),
+    cronPollInterval: 5,
+    cronStoreFactory: () => store,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  try {
+    await waitFor(() => channel.sent.length === 1);
+    expect(channel.sent[0]).toMatchObject({
+      channel: "recording",
+      direction: "outbound",
+      channelUserId: "room-42",
+      roomId: "room-42",
+      text: "Bun daemon foundation received: automatic native report",
+    });
+    expect(store.get("due-once")).toBeUndefined();
+    const archives = await readdir(
+      join(directory, "cron", "archive", "due-once"),
+    );
+    expect(archives).toHaveLength(1);
+    expect(
+      await Bun.file(
+        join(directory, "cron", "archive", "due-once", archives[0] ?? ""),
+      ).text(),
+    ).toBe("Bun daemon foundation received: automatic native report");
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon exposes a read-only native update status contract", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-update-status-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "update-status", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "runtime.update_status",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject(
+      {
+        ok: true,
+        applied: false,
+        command: "bun run xerxes update",
+        git: { isGit: false },
+        summary: "not a git checkout",
+        next_steps: [
+          "bun run xerxes update --dry-run --spec <package-or-source-spec>",
+          "bun run xerxes update --apply --spec <package-or-source-spec>",
+        ],
+      },
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon exposes real browser management state without fabricating a browser session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-browser-manage-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "browser.manage",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: true,
+      status: { connected: false, kind: "none" },
+      pages: [],
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/browser" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      status: { connected: false, kind: "none" },
+      pages: [],
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining("Native browser: not connected"),
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon supplies real direct session controls used by the native TUI", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-direct-session-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "direct-session", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { text: "persist this native session" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("text_part"));
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.title",
+      params: { title: "native title" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      title: "native title",
+    });
+
+    client.send({ jsonrpc: "2.0", id: 4, method: "session.save", params: {} });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject(
+      {
+        ok: true,
+        session: { title: "native title" },
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.most_recent",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject(
+      {
+        ok: true,
+        session: { title: "native title" },
+      },
+    );
+
+    client.send({ jsonrpc: "2.0", id: 6, method: "session.undo", params: {} });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject(
+      {
+        ok: true,
+        dropped: 2,
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session.compress",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject(
+      {
+        ok: true,
+        compacted: false,
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "session.delete",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 8)).result).toEqual({
+      ok: true,
+      deleted: true,
+      session_id: expect.any(String),
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon saves named sessions and routes the advertised btw alias", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-save-command-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "save-command", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { text: "capture this work" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("text_part"));
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/save release-notes" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject(
+      {
+        ok: true,
+        title: "release-notes",
+        session: { title: "release-notes" },
+      },
+    );
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining("as `release-notes`"),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.list",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject(
+      {
+        ok: true,
+        sessions: [expect.objectContaining({ title: "release-notes" })],
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/btw keep the title" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("steer_input"))).params?.payload,
+    ).toEqual({ content: "keep the title" });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({ category: "slash", body: "Steer accepted." });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon snapshots, lists, and rolls back the active session workspace", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-snapshots-"));
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "daemon.sock");
+  const sourcePath = join(workspace, "state.txt");
+  await mkdir(workspace);
+  await writeFile(sourcePath, "first", "utf8");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: workspace,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    snapshotManagerFactory: (workspaceDirectory) =>
+      new SnapshotManager(workspaceDirectory, {
+        shadowRoot: join(directory, "shadow"),
+      }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "slash",
+      params: { command: "/snapshot" },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: false,
+      error: "no active session",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "warning",
+      body: "No active session yet.",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: { session_key: "snapshots", project_dir: workspace },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/snapshots" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      snapshots: [],
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: "No snapshots yet. Take one with `/snapshot [label]`.",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: "/snapshot first" },
+    });
+    const first = await client.next((frame) => frame.id === 4);
+    const firstId = String(
+      (first.result?.snapshot as Record<string, unknown>).id,
+    );
+    expect(first.result).toMatchObject({
+      ok: true,
+      snapshot: {
+        id: expect.any(String),
+        label: "first",
+        workspace_dir: expect.stringMatching(/\/workspace$/),
+      },
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: `Snapshot \`${firstId}\` saved.`,
+    });
+
+    await writeFile(sourcePath, "second", "utf8");
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/snapshot" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject(
+      {
+        ok: true,
+        snapshot: { label: "manual" },
+      },
+    );
+    await client.next(eventFrame("notification"));
+
+    await writeFile(sourcePath, "third", "utf8");
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "slash",
+      params: { command: "/snapshots" },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject(
+      {
+        ok: true,
+        snapshots: [{ id: firstId, label: "first" }, { label: "manual" }],
+      },
+    );
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining(
+        `Snapshots (2):\n  \`${firstId}\` — \`first\``,
+      ),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: `/rollback ${firstId}` },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject(
+      { ok: true, snapshot: { id: firstId, label: "first" } },
+    );
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: `Rolled back to snapshot \`${firstId}\`.`,
+    });
+    expect(await Bun.file(sourcePath).text()).toBe("first");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "slash",
+      params: { command: "/rollback missing" },
+    });
+    expect((await client.next((frame) => frame.id === 8)).result).toEqual({
+      ok: false,
+      error: "snapshot not found: missing",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "error",
+      body: "Rollback failed: `snapshot not found: missing`",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "slash",
+      params: { command: "/rollback" },
+    });
+    expect((await client.next((frame) => frame.id === 9)).result).toEqual({
+      ok: false,
+      error: "snapshot reference is required",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      severity: "warning",
+      body: "Usage: `/rollback <snapshot-id>` — list with `/snapshots`.",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon resumes only initialize resume IDs and lists saved sessions separately from live sessions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "gpt-4o",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "tui:first", project_dir: directory },
+    });
+    const created = await client.next((frame) => frame.id === 1);
+    const firstSession = created.result?.session as Record<string, unknown>;
+    const firstSessionId = String(firstSession.id);
+    expect(firstSession).toMatchObject({
+      key: "tui:first",
+      messages: 0,
+      model: "gpt-4o",
+    });
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "tui:first", text: "saved question" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("turn_begin"));
+    await client.next(eventFrame("text_part"));
+    await client.next(eventFrame("turn_end"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.active_list",
+      params: {},
+    });
+    const active = await client.next((frame) => frame.id === 3);
+    expect(active.result).toMatchObject({
+      ok: true,
+      sessions: [{ id: firstSessionId, key: "tui:first", messages: 2 }],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.list",
+      params: { limit: 200 },
+    });
+    const saved = await client.next((frame) => frame.id === 4);
+    expect(saved.result).toMatchObject({
+      ok: true,
+      sessions: [
+        {
+          session_id: firstSessionId,
+          key: "tui:first",
+          messages: 2,
+          title: "saved question",
+        },
+      ],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "initialize",
+      params: { session_key: "tui:first", project_dir: directory },
+    });
+    const fresh = await client.next((frame) => frame.id === 5);
+    expect(fresh.result?.session).toMatchObject({
+      key: "tui:first",
+      messages: 0,
+    });
+    expect((fresh.result?.session as Record<string, unknown>).id).not.toBe(
+      firstSessionId,
+    );
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "initialize",
+      params: {
+        resume_session_id: firstSessionId,
+        session_key: "ignored-slot",
+        project_dir: directory,
+      },
+    });
+    const resumed = await client.next((frame) => frame.id === 6);
+    expect(resumed.result).toMatchObject({
+      ok: true,
+      daemon_protocol: 35,
+      daemon_build_id: expect.any(String),
+      session: { id: firstSessionId, key: firstSessionId, messages: 2 },
+    });
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    const replayedUser = await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        frame.params.payload?.type === "replay_user",
+    );
+    expect(replayedUser.params?.payload?.body).toBe("✨ saved question");
+    await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        frame.params.payload?.type === "resumed",
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "runtime.status",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject(
+      {
+        ok: true,
+        runtime_ready: true,
+        daemon_protocol: 35,
+        daemon_build_id: expect.any(String),
+        channels: [],
+        channels_available: false,
+        channels_configured: false,
+        model: "gpt-4o",
+      },
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "session.status",
+      params: { session_key: "missing" },
+    });
+    expect((await client.next((frame) => frame.id === 8)).result).toEqual({
+      ok: false,
+      session: null,
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon implements native completion, slash, steering, mode, and provider controls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-controls-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, profileStore });
+  await writeFile(join(directory, "alpha.txt"), "alpha", "utf8");
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  const nativeFetch = globalThis.fetch;
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "controls", project_dir: directory },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject(
+      { ok: true, session: { key: "controls" } },
+    );
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "complete",
+      params: { text: "/mo" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 2)).result?.completions,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "/model", meta: expect.any(String) }),
+      ]),
+    );
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "complete",
+      params: { text: "./al" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 3)).result?.completions,
+    ).toEqual([{ value: "./alpha.txt", label: "alpha.txt", meta: "file" }]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "steer",
+      params: { session_key: "controls", content: "keep it concise" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("steer_input"))).params?.payload,
+    ).toEqual({ content: "keep it concise" });
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.status",
+      params: { session_key: "controls" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 5)).result?.session,
+    ).toMatchObject({ messages: 1 });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "set_plan_mode",
+      params: { enabled: true },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject(
+      { ok: true, mode: "plan", plan_mode: true },
+    );
+    expect(
+      (await client.next(eventFrame("status_update"))).params?.payload,
+    ).toMatchObject({ mode: "plan", plan_mode: true });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: "/title Bun control plane" },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toEqual({
+      ok: true,
+      title: "Bun control plane",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      category: "slash",
+      body: expect.stringContaining("Bun control plane"),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "provider_save",
+      params: {
+        name: "native",
+        base_url: "https://provider.example/v1",
+        api_key: "do-not-echo",
+        model: "native-model",
+        provider: "openai",
+      },
+    });
+    const saved = await client.next((frame) => frame.id === 8);
+    expect(saved.result).toMatchObject({
+      ok: true,
+      profile: { name: "native", model: "native-model", active: true },
+    });
+    expect(JSON.stringify(saved.result)).not.toContain("do-not-echo");
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({ jsonrpc: "2.0", id: 9, method: "provider_list", params: {} });
+    expect(
+      (await client.next((frame) => frame.id === 9)).result?.profiles,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "native", active: true }),
+      ]),
+    );
+
+    const mockFetch: FetchImplementation = async () =>
+      new Response(JSON.stringify({ data: [{ id: "remote-model" }] }), {
+        status: 200,
+      });
+    globalThis.fetch = mockFetch as typeof globalThis.fetch;
+    client.send({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "fetch_models",
+      params: { base_url: "https://provider.example/v1", provider: "openai" },
+    });
+    expect((await client.next((frame) => frame.id === 10)).result).toEqual({
+      ok: true,
+      models: ["remote-model"],
+      source: "remote",
+    });
+    globalThis.fetch = nativeFetch;
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 11,
+      method: "provider_delete",
+      params: { name: "native" },
+    });
+    expect((await client.next((frame) => frame.id === 11)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+  } finally {
+    globalThis.fetch = nativeFetch;
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon yolo toggles the live permission mode in both directions", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-yolo-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "yolo", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    expect((await client.next(eventFrame("init_done"))).params?.payload).toMatchObject({
+      permission_mode: "accept-all",
+    });
+    expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
+      permission_mode: "accept-all",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/yolo" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      permission_mode: "auto",
+    });
+    expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
+      permission_mode: "auto",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toBe("YOLO mode OFF.");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "runtime.status",
+      params: {},
+    });
+    expect(
+      (await client.next((frame) => frame.id === 3)).result?.permission_mode,
+    ).toBe("auto");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: "/yolo" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toEqual({
+      ok: true,
+      permission_mode: "accept-all",
+    });
+    expect((await client.next(eventFrame("status_update"))).params?.payload).toMatchObject({
+      permission_mode: "accept-all",
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toBe("YOLO mode ON.");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "runtime.status",
+      params: {},
+    });
+    expect(
+      (await client.next((frame) => frame.id === 5)).result?.permission_mode,
+    ).toBe("accept-all");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon slash config, sampling, agents, and platforms use native backing state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-slash-parity-"));
+  const socketPath = join(directory, "daemon.sock");
+  const rebuiltSettings: Array<Readonly<Record<string, unknown>>> = [];
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: {
+      api_key: "must-not-leak",
+      base_url: "https://native.example/v1",
+      max_tokens: 512,
+      model: "native-model",
+      provider: "openai",
+      reasoning_effort: "high",
+      temperature: 0.2,
+      thinking: true,
+      thinking_budget: 1_024,
+      top_p: 0.8,
+    },
+    sessionDirectory: join(directory, "sessions"),
+    turnRunnerFactory: (settings) => {
+      rebuiltSettings.push({ ...settings });
+      return undefined;
+    },
+  });
+  const channelManager = new ChannelManager({
+    channels: [["telegram", new DaemonRecordingChannel("telegram")]],
+    onInbound: async () => {},
+  });
+  const server = new DaemonServer({
+    socketPath,
+    channelManager,
+    runtime,
+    agentDefinitionLoader: () => [
+      {
+        allowedTools: ["ReadFile"],
+        description: "Reviews native changes.",
+        excludeTools: [],
+        isolation: "",
+        maxDepth: 3,
+        model: "native-model",
+        name: "reviewer",
+        source: "project",
+        systemPrompt: "This private prompt must not be returned by /agents.",
+        tools: ["ReadFile"],
+      },
+    ],
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "slash-parity", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "commands.catalog",
+      params: {},
+    });
+    const catalog = await client.next((frame) => frame.id === 2);
+    expect(catalog.result?.pairs).toEqual(
+      expect.arrayContaining([
+        ["/agents", "List native agent definitions"],
+        ["/config", "Show effective native runtime configuration"],
+        ["/platforms", "List configured messaging platforms"],
+        ["/sampling", "Show or set next-turn native sampling options"],
+      ]),
+    );
+    expect(catalog.result?.pairs).toContainEqual([
+      "/reasoning",
+      "Show/set thinking effort (off|low|medium|high)",
+    ]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: "/config" },
+    });
+    const config = await client.next((frame) => frame.id === 3);
+    expect(config.result).toMatchObject({
+      ok: true,
+      config: {
+        base_url: "https://native.example/v1",
+        max_tokens: 512,
+        model: "native-model",
+        permission_mode: "accept-all",
+        provider: "openai",
+        temperature: 0.2,
+        top_p: 0.8,
+      },
+    });
+    expect(JSON.stringify(config.result)).not.toContain("must-not-leak");
+    expect(config.result?.config).not.toHaveProperty("reasoning_effort");
+    expect(config.result?.config).not.toHaveProperty("thinking");
+    expect(config.result?.config).not.toHaveProperty("thinking_budget");
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toContain("Effective native runtime config");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "slash",
+      params: { command: "/sampling temperature 0.35" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject(
+      {
+        ok: true,
+        sampling: { temperature: 0.35, top_p: 0.8, max_tokens: 512 },
+      },
+    );
+    expect(rebuiltSettings.at(-1)).toMatchObject({ temperature: 0.35 });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toContain("temperature");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "slash",
+      params: { command: "/sampling top_k 10" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject(
+      {
+        ok: true,
+        sampling: { top_k: 10 },
+      },
+    );
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({
+      severity: "info",
+      body: expect.stringContaining("top_k"),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "slash",
+      params: { command: "/agents" },
+    });
+    const agents = await client.next((frame) => frame.id === 6);
+    expect(agents.result).toMatchObject({
+      ok: true,
+      agents: [
+        {
+          name: "reviewer",
+          source: "project",
+          tools: ["ReadFile"],
+        },
+      ],
+    });
+    expect(JSON.stringify(agents.result)).not.toContain("private prompt");
+    await client.next(eventFrame("notification"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "slash",
+      params: { command: "/platforms" },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result).toMatchObject(
+      {
+        ok: true,
+        platforms: [{ name: "telegram", enabled: false }],
+        channels_available: true,
+        channels_configured: true,
+      },
+    );
+    await client.next(eventFrame("notification"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "channel.enable",
+      params: { name: "telegram" },
+    });
+    await client.next((frame) => frame.id === 8);
+    await client.next(eventFrame("channel_status"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "slash",
+      params: { command: "/platforms" },
+    });
+    expect((await client.next((frame) => frame.id === 9)).result).toMatchObject(
+      {
+        ok: true,
+        platforms: [{ name: "telegram", enabled: true }],
+      },
+    );
+    await client.next(eventFrame("notification"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "slash",
+      params: { command: "/reasoning high" },
+    });
+    expect((await client.next((frame) => frame.id === 10)).result).toEqual({
+      ok: true,
+      reasoning_effort: "high",
+    });
+    await client.next(eventFrame("status_update"));
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload,
+    ).toMatchObject({ severity: "info", body: "Thinking: `high`." });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon routes approval and question replies through the active connection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replies-"));
+  const socketPath = join(directory, "daemon.sock");
+  const interactions = new DaemonInteractionBoard();
+  const runner = new ReplyRunner(interactions);
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      interactions,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    interactions,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "replies" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "replies", text: "run control flow" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+    });
+    await client.next(eventFrame("turn_begin"));
+    const approval = await client.next(eventFrame("approval_request"));
+    expect(approval.params?.payload).toMatchObject({
+      id: "approval-1",
+      request_id: "approval-1",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "permission_response",
+      params: { request_id: "approval-1", response: "approve" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("approval_response"))).params?.payload,
+    ).toEqual({ request_id: "approval-1", response: "approve" });
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "approval:approve" });
+
+    const question = await client.next(eventFrame("question_request"));
+    const requestId = String(question.params?.payload?.id);
+    expect(question.params?.payload).toMatchObject({
+      questions: [
+        { id: "answer", question: "Continue?", allow_free_form: false },
+      ],
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "question_response",
+      params: { request_id: requestId, answers: { answer: "yes" } },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("question_response"))).params?.payload,
+    ).toEqual({ id: requestId, answers: { answer: "yes" } });
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "answer:yes" });
+    await client.next(eventFrame("turn_end"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("disconnecting an interaction owner cancels approval and question waits", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-disconnect-"));
+  const socketPath = join(directory, "daemon.sock");
+  const interactions = new DaemonInteractionBoard();
+  const runtime = new InMemoryDaemonRuntime(new ReplyRunner(interactions), {
+    currentProjectDirectory: directory,
+    interactions,
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime, interactions });
+  await server.start();
+  try {
+    const approvalClient = await SocketTestClient.connect(socketPath);
+    approvalClient.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "disconnect-approval" },
+    });
+    await approvalClient.next((frame) => frame.id === 1);
+    await approvalClient.next(eventFrame("init_done"));
+    await approvalClient.next(eventFrame("status_update"));
+    approvalClient.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "disconnect-approval", text: "wait for approval" },
+    });
+    await approvalClient.next((frame) => frame.id === 2);
+    await approvalClient.next(eventFrame("turn_begin"));
+    await approvalClient.next(eventFrame("approval_request"));
+    expect(interactions.pendingPermissionIds()).toEqual(["approval-1"]);
+    approvalClient.close();
+
+    await waitFor(
+      () =>
+        interactions.pendingPermissionIds().length === 0 &&
+        runtime.sessionStatus("disconnect-approval")?.activeTurnId === "",
+    );
+    expect(runtime.sessionStatus("disconnect-approval")?.cancelRequested).toBeTrue();
+
+    const questionClient = await SocketTestClient.connect(socketPath);
+    questionClient.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "initialize",
+      params: { session_key: "disconnect-question" },
+    });
+    await questionClient.next((frame) => frame.id === 3);
+    await questionClient.next(eventFrame("init_done"));
+    await questionClient.next(eventFrame("status_update"));
+    questionClient.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { session_key: "disconnect-question", text: "wait for question" },
+    });
+    await questionClient.next((frame) => frame.id === 4);
+    await questionClient.next(eventFrame("turn_begin"));
+    await questionClient.next(eventFrame("approval_request"));
+    questionClient.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "permission_response",
+      params: { request_id: "approval-1", response: "approve" },
+    });
+    await questionClient.next((frame) => frame.id === 5);
+    await questionClient.next(eventFrame("approval_response"));
+    await questionClient.next(eventFrame("text_part"));
+    await questionClient.next(eventFrame("question_request"));
+    expect(interactions.pendingQuestionIds()).toHaveLength(1);
+    questionClient.close();
+
+    await waitFor(
+      () =>
+        interactions.pendingQuestionIds().length === 0 &&
+        runtime.sessionStatus("disconnect-question")?.activeTurnId === "",
+    );
+    expect(runtime.sessionStatus("disconnect-question")?.cancelRequested).toBeTrue();
+  } finally {
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon applies queued steering at a native runner boundary", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-steer-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new SteerRunner();
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(runner, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "steer" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "steer", text: "start" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "waiting for steer" });
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "steer",
+      params: { session_key: "steer", content: "focus tests" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+    });
+    expect(
+      (await client.next(eventFrame("steer_input"))).params?.payload,
+    ).toEqual({ content: "focus tests" });
+    runner.release();
+    expect(
+      (await client.next(eventFrame("text_part"))).params?.payload,
+    ).toEqual({ text: "steer:focus tests" });
+    await client.next(eventFrame("turn_end"));
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon exposes only host-configured channel lifecycle controls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-channels-"));
+  const socketPath = join(directory, "daemon.sock");
+  const channel = new DaemonRecordingChannel("telegram");
+  const channelManager = new ChannelManager({
+    channels: [["telegram", channel]],
+    onInbound: async () => {},
+  });
+  const server = new DaemonServer({
+    socketPath,
+    channelManager,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "runtime.status",
+      params: {},
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject(
+      {
+        ok: true,
+        channels_available: true,
+        channels_configured: true,
+        channels: [
+          { name: "telegram", adapter_name: "telegram", enabled: false },
+        ],
+      },
+    );
+
+    client.send({ jsonrpc: "2.0", id: 2, method: "channel.list", params: {} });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      channels_available: true,
+      channels_configured: true,
+      channels: [
+        { name: "telegram", adapter_name: "telegram", enabled: false },
+      ],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "channel.enable",
+      params: { name: "telegram" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject(
+      {
+        ok: true,
+        channel: { name: "telegram", enabled: true },
+      },
+    );
+    expect(
+      (await client.next(eventFrame("channel_status"))).params?.payload,
+    ).toMatchObject({
+      channels: [{ name: "telegram", enabled: true }],
+    });
+    expect(channel.starts).toBe(1);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "channel.enable",
+      params: { name: "missing" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toEqual({
+      ok: false,
+      error: "channel 'missing' is not configured",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "channel.disable",
+      params: { channel: "telegram" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toMatchObject(
+      {
+        ok: true,
+        channel: { name: "telegram", enabled: false },
+      },
+    );
+    expect(
+      (await client.next(eventFrame("channel_status"))).params?.payload,
+    ).toMatchObject({
+      channels: [{ name: "telegram", enabled: false }],
+    });
+    expect(channel.stops).toBe(1);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "channel.enable",
+      params: { name: "telegram" },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject(
+      {
+        ok: true,
+        channel: { name: "telegram", enabled: true },
+      },
+    );
+    await client.next(eventFrame("channel_status"));
+    await server.stop();
+    expect(channel.stops).toBe(2);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon returns explicit channel-manager errors when no host adapters are configured", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-no-channels-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({ jsonrpc: "2.0", id: 1, method: "channel.list", params: {} });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: false,
+      error: "channel manager is not configured",
+      channels: [],
+      channels_available: false,
+      channels_configured: false,
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "channel.enable",
+      params: { name: "telegram" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: false,
+      error: "channel manager is not configured",
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+class DaemonRecordingChannel implements Channel {
+  readonly name: string;
+  readonly sent: ChannelMessage[] = [];
+  starts = 0;
+  stops = 0;
+  private handler: InboundHandler | undefined;
+
+  constructor(name: string) {
+    this.name = name;
+  }
+
+  async start(onInbound: InboundHandler): Promise<void> {
+    this.starts += 1;
+    this.handler = onInbound;
+  }
+
+  async stop(): Promise<void> {
+    this.stops += 1;
+    this.handler = undefined;
+  }
+
+  async send(message: ChannelMessage): Promise<void> {
+    this.sent.push(message);
+  }
+}
+
+class UsageRunner implements TurnRunner {
+  async *run(): AsyncGenerator<DaemonEvent> {
+    yield {
+      type: "status_update",
+      payload: {
+        calls: 1,
+        calls_complete: true,
+        usage: { input_tokens: 17, output_tokens: 9 },
+        usage_complete: true,
+      },
+    };
+    yield { type: "text_part", payload: { text: "usage recorded" } };
+  }
+}
+
+class StopOrderRuntime extends InMemoryDaemonRuntime {
+  readonly shutdownOperations: string[] = [];
+
+  override cancelAllTurns(): number {
+    this.shutdownOperations.push("cancel");
+    return super.cancelAllTurns();
+  }
+
+  override async flushSessions(): Promise<void> {
+    this.shutdownOperations.push("flush");
+    await super.flushSessions();
+  }
+}
+
+class ReplyRunner implements TurnRunner {
+  constructor(private readonly interactions: DaemonInteractionBoard) {}
+
+  async *run(
+    session: DaemonSession,
+    _text: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<DaemonEvent> {
+    const request: PermissionRequest = {
+      requestId: "approval-1",
+      description: "Run a native control-flow test.",
+      inputs: {},
+      toolCall: {
+        id: "tool-1",
+        type: "function",
+        function: { name: "WriteFile", arguments: {} },
+      },
+    };
+    yield {
+      type: "approval_request",
+      payload: {
+        id: request.requestId,
+        request_id: request.requestId,
+        description: request.description,
+      },
+    };
+    const decision = await this.interactions
+      .permissionBroker(session.id)
+      .request(request, signal);
+    yield { type: "text_part", payload: { text: `approval:${decision}` } };
+    const answer = await this.interactions.ask(
+      session.id,
+      { question: "Continue?", options: ["yes", "no"], allowFreeform: false },
+      signal,
+    );
+    yield { type: "text_part", payload: { text: `answer:${answer}` } };
+  }
+}
+
+class SteerRunner implements TurnRunner {
+  private resolveGate: (() => void) | undefined;
+  private readonly gate = new Promise<void>((resolve) => {
+    this.resolveGate = resolve;
+  });
+
+  release(): void {
+    this.resolveGate?.();
+  }
+
+  async *run(
+    _session: DaemonSession,
+    _text: string,
+    _signal: AbortSignal,
+    controls?: TurnRunControls,
+  ): AsyncGenerator<DaemonEvent> {
+    yield { type: "text_part", payload: { text: "waiting for steer" } };
+    await this.gate;
+    yield {
+      type: "text_part",
+      payload: { text: `steer:${controls?.drainSteer?.().join("|") ?? ""}` },
+    };
+  }
+}
+
+interface Frame {
+  readonly id?: number;
+  readonly method?: string;
+  readonly params?: {
+    readonly payload?: Record<string, unknown>;
+    readonly type?: string;
+  };
+  readonly result?: Record<string, unknown>;
+}
+
+function eventFrame(type: string): (frame: Frame) => boolean {
+  return (frame) => frame.method === "event" && frame.params?.type === type;
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeout = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for native daemon state");
+    }
+    await Bun.sleep(10);
+  }
+}
+
+class SocketTestClient {
+  private buffer = "";
+  private readonly frames: Frame[] = [];
+  private readonly waiters: Array<{
+    predicate: (frame: Frame) => boolean;
+    resolve: (frame: Frame) => void;
+  }> = [];
+
+  private constructor(private readonly socket: Socket) {
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) =>
+      this.receive(
+        typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+      ),
+    );
+  }
+
+  static async connect(socketPath: string): Promise<SocketTestClient> {
+    const socket = connect({ path: socketPath });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    return new SocketTestClient(socket);
+  }
+
+  close(): void {
+    this.socket.destroy();
+  }
+
+  next(predicate: (frame: Frame) => boolean): Promise<Frame> {
+    const index = this.frames.findIndex(predicate);
+    if (index >= 0) {
+      const frame = this.frames.splice(index, 1)[0];
+      if (frame) {
+        return Promise.resolve(frame);
+      }
+    }
+    return new Promise((resolve) => this.waiters.push({ predicate, resolve }));
+  }
+
+  send(frame: Record<string, unknown>): void {
+    this.socket.write(`${JSON.stringify(frame)}\n`);
+  }
+
+  private receive(chunk: string): void {
+    this.buffer += chunk;
+    let newline = this.buffer.indexOf("\n");
+    while (newline >= 0) {
+      const line = this.buffer.slice(0, newline);
+      this.buffer = this.buffer.slice(newline + 1);
+      if (line.trim()) {
+        this.handle(JSON.parse(line) as Frame);
+      }
+      newline = this.buffer.indexOf("\n");
+    }
+  }
+
+  private handle(frame: Frame): void {
+    const waiterIndex = this.waiters.findIndex((waiter) =>
+      waiter.predicate(frame),
+    );
+    const waiter =
+      waiterIndex >= 0 ? this.waiters.splice(waiterIndex, 1)[0] : undefined;
+    if (waiter) {
+      waiter.resolve(frame);
+      return;
+    }
+    this.frames.push(frame);
+  }
+}

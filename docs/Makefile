@@ -1,20 +1,12 @@
-# Minimal makefile for Sphinx documentation
-#
+# Native Bun documentation build entrypoint.
 
-# You can set these variables from the command line, and also
-# from the environment for the first two.
-SPHINXOPTS    ?=
-SPHINXBUILD   ?= sphinx-build
-SOURCEDIR     = .
-BUILDDIR      = _build
+BUN ?= bun
+RUNTIME_DIRECTORY ?= ../src/typescript
 
-# Put it first so that "make" without argument is like "make help".
+.PHONY: help html
+
 help:
-	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	@echo "Use 'make html' to build documentation with Bun."
 
-.PHONY: help Makefile
-
-# Catch-all target: route all unknown targets to Sphinx using the new
-# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
-%: Makefile
-	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+html:
+	@$(BUN) run --cwd $(RUNTIME_DIRECTORY) docs:build
