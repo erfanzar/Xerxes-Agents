@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -80,6 +80,90 @@ test("native installer writes Bun and ACP launchers against an explicit local so
   }
 }, 30_000);
 
+test("remote installer clones and safely fast-forwards its managed checkout", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-managed-installer-"));
+  try {
+    const seed = join(temporaryRoot, "seed");
+    const origin = join(temporaryRoot, "origin.git");
+    const otherOrigin = join(temporaryRoot, "other.git");
+    const installDirectory = join(temporaryRoot, "managed");
+    await mkdir(join(seed, "xerxes"), { recursive: true });
+    await writeFile(join(seed, "package.json"), '{}\n', "utf8");
+    await writeFile(join(seed, "bun.lock"), "fixture lock\n", "utf8");
+    await writeFile(join(seed, "xerxes", "revision.txt"), "first\n", "utf8");
+    await git(["init", "-b", "main"], seed);
+    await git(["config", "user.email", "installer-test@xerxes.invalid"], seed);
+    await git(["config", "user.name", "Xerxes Installer Test"], seed);
+    await git(["add", "."], seed);
+    await git(["commit", "-m", "initial fixture"], seed);
+    await git(["clone", "--bare", seed, origin], temporaryRoot);
+    await git(["clone", "--bare", seed, otherOrigin], temporaryRoot);
+    await git(["remote", "add", "origin", `file://${origin}`], seed);
+
+    const additions = {
+      XERXES_INSTALLER_SOURCE_ONLY: "1",
+      XERXES_INSTALL_DIRECTORY: installDirectory,
+      XERXES_REPOSITORY_URL: `file://${origin}`,
+    };
+    const cloned = await resolveRemoteSource(additions);
+    const canonicalInstallDirectory = await realpath(installDirectory);
+    expect(cloned.exitCode, cloned.stderr).toBe(0);
+    expect(cloned.stdout).toBe(`${canonicalInstallDirectory}\n`);
+    expect(cloned.stderr).toContain("cloning native Bun source");
+    expect(await readFile(join(installDirectory, "xerxes", "revision.txt"), "utf8")).toBe(
+      "first\n",
+    );
+
+    await git(["remote", "add", "other", `file://${otherOrigin}`], installDirectory);
+    await git(["fetch", "other"], installDirectory);
+    await git(["branch", "--set-upstream-to", "other/main", "main"], installDirectory);
+
+    await writeFile(join(seed, "xerxes", "revision.txt"), "second\n", "utf8");
+    await git(["add", "."], seed);
+    await git(["commit", "-m", "advance fixture"], seed);
+    await git(["push", "origin", "main"], seed);
+
+    const updated = await resolveRemoteSource(additions);
+    expect(updated.exitCode, updated.stderr).toBe(0);
+    expect(updated.stdout).toBe(`${canonicalInstallDirectory}\n`);
+    expect(updated.stderr).toContain("updating native Bun source");
+    expect(await gitOutput(["rev-parse", "HEAD"], installDirectory)).toBe(
+      await gitOutput(["rev-parse", "refs/remotes/origin/main"], installDirectory),
+    );
+    expect(await gitOutput(["rev-parse", "HEAD"], installDirectory)).not.toBe(
+      await gitOutput(["rev-parse", "refs/remotes/other/main"], installDirectory),
+    );
+    expect(await readFile(join(installDirectory, "xerxes", "revision.txt"), "utf8")).toBe(
+      "second\n",
+    );
+
+    await writeFile(join(installDirectory, "xerxes", "revision.txt"), "local edit\n", "utf8");
+    const dirty = await resolveRemoteSource(additions);
+    expect(dirty.exitCode).not.toBe(0);
+    expect(dirty.stdout).toBe("");
+    expect(dirty.stderr).toContain("has local changes; refusing to update");
+  } finally {
+    await rm(temporaryRoot, { force: true, recursive: true });
+  }
+}, 30_000);
+
+test("remote installer refuses an unrelated existing directory", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-invalid-installer-"));
+  try {
+    const installDirectory = join(temporaryRoot, "managed");
+    await mkdir(installDirectory);
+    const result = await resolveRemoteSource({
+      XERXES_INSTALLER_SOURCE_ONLY: "1",
+      XERXES_INSTALL_DIRECTORY: installDirectory,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("is not a managed Git checkout");
+  } finally {
+    await rm(temporaryRoot, { force: true, recursive: true });
+  }
+});
+
 test("native installer removes the retired Xerxes alias without changing other shell settings", async () => {
   const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-shell-home-"));
   const zshrc = join(temporaryHome, ".zshrc");
@@ -126,6 +210,51 @@ async function execute(
   const child = Bun.spawn([...command], {
     cwd: PROJECT_ROOT,
     env: { ...process.env, ...additions },
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { exitCode, stderr, stdout };
+}
+
+async function resolveRemoteSource(
+  additions: Readonly<Record<string, string>>,
+): Promise<Awaited<ReturnType<typeof execute>>> {
+  return execute(
+    [
+      "sh",
+      "-c",
+      '. "$INSTALLER_PATH"; resolve_source',
+    ],
+    {
+      ...additions,
+      INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+    },
+  );
+}
+
+async function git(arguments_: readonly string[], cwd: string): Promise<void> {
+  const result = await executeIn(["git", ...arguments_], cwd);
+  expect(result.exitCode, result.stderr).toBe(0);
+}
+
+async function gitOutput(arguments_: readonly string[], cwd: string): Promise<string> {
+  const result = await executeIn(["git", ...arguments_], cwd);
+  expect(result.exitCode, result.stderr).toBe(0);
+  return result.stdout.trim();
+}
+
+async function executeIn(
+  command: readonly string[],
+  cwd: string,
+): Promise<Awaited<ReturnType<typeof execute>>> {
+  const child = Bun.spawn([...command], {
+    cwd,
+    env: process.env,
     stderr: "pipe",
     stdout: "pipe",
   });
