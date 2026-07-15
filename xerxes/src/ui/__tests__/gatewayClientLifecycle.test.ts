@@ -15,6 +15,12 @@ interface SessionCreateResult {
   session_id: string
 }
 
+interface SessionResumeResult extends SessionCreateResult {
+  message_count: number
+  messages: Array<{ role: string; text?: string }>
+  resumed: string
+}
+
 const initGitProject = () => {
   const dir = mkdtempSync(join(tmpdir(), 'xerxes-tui-project-'))
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'xerxes-agent', version: '9.9.9' }, null, 2))
@@ -374,5 +380,57 @@ describe('GatewayClient session lifecycle', () => {
     } finally {
       rmSync(projectDir, { force: true, recursive: true })
     }
+  })
+
+  it('batches initialize replay events into the resumed transcript when the daemon returns only a count', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:resume' })
+    const forwarded: string[] = []
+    const privateClient = client as unknown as {
+      onLine: (line: string) => void
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    client.on('event', event => {
+      if ((event as { type?: string }).type === 'transcript.append') {
+        forwarded.push((event as { type: string }).type)
+      }
+    })
+
+    privateClient.rawRequest = async (method, params) => {
+      expect(method).toBe('initialize')
+      expect(params).toMatchObject({ resume_session_id: 'aabbccdd', session_key: 'aabbccdd' })
+
+      for (const payload of [
+        { body: '✨ inspect the auth flow', category: 'history', type: 'replay_user' },
+        { body: 'The flow starts in auth.ts.', category: 'history', type: 'replay_assistant' }
+      ]) {
+        privateClient.onLine(
+          JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { payload, type: 'notification' } })
+        )
+      }
+
+      return {
+        cwd: process.cwd(),
+        model: 'kimi-for-coding',
+        ok: true,
+        session: {
+          cwd: process.cwd(),
+          id: 'aabbccdd',
+          message_count: 2,
+          messages: 2,
+          mode: 'code',
+          model: 'kimi-for-coding'
+        }
+      }
+    }
+
+    const result = (await client.request('session.resume', { session_id: 'aabbccdd' })) as SessionResumeResult
+
+    expect(result).toMatchObject({ message_count: 2, resumed: 'aabbccdd', session_id: 'aabbccdd' })
+    expect(result.messages).toEqual([
+      { role: 'user', text: 'inspect the auth flow' },
+      { role: 'assistant', text: 'The flow starts in auth.ts.' }
+    ])
+    expect(forwarded).toEqual([])
   })
 })

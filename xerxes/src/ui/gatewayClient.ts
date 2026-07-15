@@ -24,7 +24,7 @@ import {
   transcriptFromStoredMessages,
   usageFromStatus
 } from './gatewayAdapter.js'
-import type { AnyEvent } from './gatewayTypes.js'
+import type { AnyEvent, GatewayTranscriptMessage } from './gatewayTypes.js'
 import type { SessionInfo, Usage } from './types.js'
 
 const MAX_GATEWAY_LOG_LINES = 200
@@ -318,6 +318,7 @@ export class GatewayClient extends EventEmitter {
   private nextId = 1
   private readonly pending = new Map<number, Pending>()
   private buffer = ''
+  private initializeTranscriptCapture: GatewayTranscriptMessage[] | null = null
   private readonly stderrRing: string[] = []
   private spawnError: Error | null = null
   private spawnedDaemon = false
@@ -935,51 +936,78 @@ export class GatewayClient extends EventEmitter {
 
   private async sessionCreate(_params: Record<string, unknown>): Promise<RpcObject> {
     this.activeSessionKey = `tui:${randomKey()}`
-    const capture = this.captureInitializeInfo()
-    const raw = await this.nativeSuccess('initialize', {
-      project_dir: this.projectDir,
-      session_key: this.activeSessionKey
-    })
-    const captured = capture()
-    const session = (raw.session ?? {}) as RpcObject
-    const sessionId = String(session.id ?? '').trim()
+    const finishCapture = this.captureInitializeInfo()
 
-    if (!sessionId) {
-      throw new Error('native daemon initialize returned no session id')
-    }
+    try {
+      const raw = await this.nativeSuccess('initialize', {
+        project_dir: this.projectDir,
+        session_key: this.activeSessionKey
+      })
+      const captured = finishCapture()
+      const session = (raw.session ?? {}) as RpcObject
+      const sessionId = String(session.id ?? '').trim()
 
-    this.sessionKeys.set(sessionId, this.activeSessionKey)
-    return {
-      info: this.sessionInfoFromInitialize(raw, session, captured),
-      session_id: sessionId
+      if (!sessionId) {
+        throw new Error('native daemon initialize returned no session id')
+      }
+
+      this.sessionKeys.set(sessionId, this.activeSessionKey)
+      return {
+        info: this.sessionInfoFromInitialize(raw, session, captured),
+        session_id: sessionId
+      }
+    } catch (error) {
+      finishCapture()
+      throw error
     }
   }
 
   private async sessionResume(params: Record<string, unknown>): Promise<RpcObject> {
     const id = String(params.session_id ?? '')
     this.activeSessionKey = id || this.sessionKey
-    const capture = this.captureInitializeInfo()
-    const raw = await this.nativeSuccess('initialize', {
-      project_dir: this.projectDir,
-      resume_session_id: id,
-      session_key: this.activeSessionKey
-    })
-    const captured = capture()
-    const session = (raw.session ?? {}) as RpcObject
-    const sessionId = String(session.id ?? '').trim()
+    // `initialize` replays persisted history as notifications before its RPC
+    // response. Capture those rows at the transport boundary and hydrate the
+    // React transcript once: the v35 response intentionally exposes only a
+    // numeric `session.messages` count, and forwarding every replay event
+    // would otherwise cause one render per historical message.
+    const finishCapture = this.captureInitializeInfo(true)
 
-    if (!sessionId) {
-      throw new Error('native daemon resume returned no session id')
-    }
+    try {
+      const raw = await this.nativeSuccess('initialize', {
+        project_dir: this.projectDir,
+        resume_session_id: id,
+        session_key: this.activeSessionKey
+      })
+      const captured = finishCapture()
+      const session = (raw.session ?? {}) as RpcObject
+      const sessionId = String(session.id ?? '').trim()
 
-    this.sessionKeys.set(sessionId, this.activeSessionKey)
-    return {
-      info: this.sessionInfoFromInitialize(raw, session, captured),
-      messages: transcriptFromStoredMessages(session.messages),
-      resumed: sessionId,
-      running: Boolean(session.active_turn_id),
-      session_id: sessionId,
-      status: session.active_turn_id ? 'working' : 'idle'
+      if (!sessionId) {
+        throw new Error('native daemon resume returned no session id')
+      }
+
+      const responseMessages = transcriptFromStoredMessages(session.messages)
+      const messages = responseMessages.length ? responseMessages : captured.transcript
+      const messageCount =
+        typeof session.message_count === 'number'
+          ? session.message_count
+          : typeof session.messages === 'number'
+            ? session.messages
+            : messages.length
+
+      this.sessionKeys.set(sessionId, this.activeSessionKey)
+      return {
+        info: this.sessionInfoFromInitialize(raw, session, captured),
+        message_count: messageCount,
+        messages,
+        resumed: sessionId,
+        running: Boolean(session.active_turn_id),
+        session_id: sessionId,
+        status: session.active_turn_id ? 'working' : 'idle'
+      }
+    } catch (error) {
+      finishCapture()
+      throw error
     }
   }
 
@@ -1215,9 +1243,20 @@ export class GatewayClient extends EventEmitter {
     return sid ? (this.sessionKeys.get(sid) ?? sid) : this.activeSessionKey
   }
 
-  private captureInitializeInfo(): () => { info: null | SessionInfo; usage: null | Usage } {
+  private captureInitializeInfo(
+    captureTranscript = false
+  ): () => { info: null | SessionInfo; transcript: GatewayTranscriptMessage[]; usage: null | Usage } {
     let info: null | SessionInfo = null
     let usage: null | Usage = null
+    let stopped = false
+    const transcript: GatewayTranscriptMessage[] = []
+
+    if (captureTranscript) {
+      if (this.initializeTranscriptCapture) {
+        throw new Error('cannot initialize two resumed sessions concurrently')
+      }
+      this.initializeTranscriptCapture = transcript
+    }
     const onInfo = (ev: AnyEvent) => {
       const incoming = ev.payload as SessionInfo | undefined
       if (!incoming) {
@@ -1238,9 +1277,15 @@ export class GatewayClient extends EventEmitter {
     this.on('session.info', onInfo)
     this.on('status.update', onStatus)
     return () => {
-      this.off('session.info', onInfo)
-      this.off('status.update', onStatus)
-      return { info, usage }
+      if (!stopped) {
+        stopped = true
+        this.off('session.info', onInfo)
+        this.off('status.update', onStatus)
+        if (this.initializeTranscriptCapture === transcript) {
+          this.initializeTranscriptCapture = null
+        }
+      }
+      return { info, transcript, usage }
     }
   }
 
@@ -1275,6 +1320,11 @@ export class GatewayClient extends EventEmitter {
   }
 
   private emitEvent(evt: AnyEvent): void {
+    if (evt.type === 'transcript.append' && this.initializeTranscriptCapture) {
+      this.initializeTranscriptCapture.push({ ...(evt.payload as GatewayTranscriptMessage) })
+      return
+    }
+
     this.emit('event', evt)
     if (evt.type) {
       this.emit(evt.type, evt)

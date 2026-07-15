@@ -16,6 +16,7 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import { capTranscriptHistory } from '../lib/messages.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { releaseTerminalCaches } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
@@ -269,7 +270,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           resetSession()
           setSessionStartedAt(r.started_at ? r.started_at * 1000 : Date.now())
           const transcript = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
-          setHistoryItems(info ? [introMsg(info), ...transcript] : transcript)
+          setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...transcript] : transcript))
           writeActiveSessionFile(r.session_key ?? r.session_id)
           patchUiState({
             busy: running,
@@ -322,7 +323,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
             const resumed = [...toTranscriptMessages(r.messages), ...liveSessionInflightMessages(r.inflight)]
 
-            setHistoryItems(info ? [introMsg(info), ...resumed] : resumed)
+            setHistoryItems(capTranscriptHistory(info ? [introMsg(info), ...resumed] : resumed))
             writeActiveSessionFile(r.resumed ?? r.session_id)
             patchUiState({
               busy: running,
