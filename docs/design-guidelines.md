@@ -1,6 +1,6 @@
 # Terminal design guidelines
 
-Xerxes' terminal client is a React application rendered by OpenTUI from `src/typescript/src/ui/`.
+Xerxes' terminal client is a React application rendered by OpenTUI from `xerxes/src/ui/`.
 It should feel calm and fast: the prompt is the focus, session context is compact, and tools or
 approvals appear only when needed.
 
@@ -33,5 +33,5 @@ Then run:
 bun run typecheck
 bun run test:ui
 bun run build:ui
-bun run --cwd src/typescript smoke:ui
+bun run --cwd xerxes smoke:ui
 ```

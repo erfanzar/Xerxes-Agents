@@ -1,7 +1,7 @@
 .git
 node_modules
-src/typescript/node_modules
-src/typescript/dist
+xerxes/node_modules
+xerxes/dist
 tests
 playground
 docs/_build

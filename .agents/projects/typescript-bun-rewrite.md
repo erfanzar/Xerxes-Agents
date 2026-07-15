@@ -84,7 +84,7 @@ At this historical checkpoint, Python was deliberately preserved as the behavior
 
 ### Historical implementation status
 
-At that earlier checkpoint, the executable Bun runtime lived in src/typescript/ with strict type checking, a bundled CLI, and contract/integration coverage. Before the expansion checkpoint above, it contained 316 TypeScript source files (79,369 lines) and 153 TypeScript test files (21,463 lines). The last complete root verification before the newer additive slices completed 581 Bun runtime tests with 3,221 assertions, strict TypeScript checks for both packages, both production builds, and the generated legacy UI bundle smoke check; the legacy UI suite also passed 377 tests with one intentional skip. A new complete root gate was required after each expansion wave.
+At that earlier checkpoint, the executable Bun runtime lived in xerxes/ with strict type checking, a bundled CLI, and contract/integration coverage. Before the expansion checkpoint above, it contained 316 TypeScript source files (79,369 lines) and 153 TypeScript test files (21,463 lines). The last complete root verification before the newer additive slices completed 581 Bun runtime tests with 3,221 assertions, strict TypeScript checks for both packages, both production builds, and the generated legacy UI bundle smoke check; the legacy UI suite also passed 377 tests with one intentional skip. A new complete root gate was required after each expansion wave.
 
 Implemented slices include provider routing plus OpenAI-compatible and direct Anthropic SSE; portable streaming, permission, tool, objective-guard, interaction-mode, interrupt, nudge, auxiliary-model contracts, core registries, and async stream buffering; v35 Unix-socket NDJSON daemon and native WebSocket transport with persisted Python-readable transcripts; OpenAI-compatible HTTP chat completions; the Xerxes embedded facade; native filesystem/process/data/system/math/web tools with a bounded output cache; policy/path/URL/prompt security; an allow-listed Bun subprocess sandbox; agent-spec loading and routing; MCP stdio, legacy SSE, Streamable HTTP, OSV package checks, native tool-registry integration, and stdio server; ACP stdio server/runner; session search/replay/branching/snapshots/export/workspace identities; skills/plugins/hooks, guarded skill hub, manifest sync, slash-plugin registry, and the skill-authoring pipeline; operator managers; four-tier memory foundations, an explicit persistence-compatible memory facade, external-memory provider registry, and fenced recalled-memory context; context compression, headroom, window accounting, and repository mapping; audit; console/structured logging; OAuth credentials; cron; Cortex orchestration; training utilities; setup wizard and doctor diagnostics; Bun distribution/install/update planning; and bridge command metadata.
 
@@ -107,7 +107,7 @@ The runtime is deliberately **not** declared cut over. Python still occupies 408
 ## Target layout
 
 ```text
-src/typescript/
+xerxes/
 ├── package.json                 # Bun scripts and package metadata
 ├── tsconfig.json                # strict ESNext compiler settings
 ├── src/

@@ -3,7 +3,7 @@
 
 /** Scenario 2: concurrent TypeScript code analysis through native tool ports. */
 
-import { ToolRegistry, type JsonObject, type ToolDefinition } from '../src/typescript/src/index.js'
+import { ToolRegistry, type JsonObject, type ToolDefinition } from '../xerxes/src/index.js'
 import { divider, runMain } from './native_demo_support.js'
 
 export interface CodeAnalysis {

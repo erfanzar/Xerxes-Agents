@@ -2,7 +2,11 @@
 
 Xerxes is a Bun-native TypeScript runtime for building, serving, and operating LLM-powered
 agents. The public command, daemon protocol, HTTP surface, and OpenTUI terminal client share typed
-contracts from `src/typescript/`.
+contracts from `xerxes/`.
+
+The npm package is `xerxes-bun` (the package named `xerxes` is unrelated). With Bun 1.3.12 or
+newer installed, either install it globally with `bun add --global xerxes-bun` or run it directly
+with `bunx xerxes-bun`.
 
 ## Start here
 
@@ -30,9 +34,9 @@ credentials without attempting a remote request.
 
 ## Source layout
 
-- `src/typescript/src/` — runtime, daemon, provider, tool, service, and OpenTUI implementation.
-- `src/typescript/src/ui/` — OpenTUI terminal client that speaks the native v35 gateway.
-- `src/typescript/test/` — Bun unit, protocol, and integration coverage.
+- `xerxes/src/` — runtime, daemon, provider, tool, service, and OpenTUI implementation.
+- `xerxes/src/ui/` — OpenTUI terminal client that speaks the native v35 gateway.
+- `xerxes/test/` — Bun unit, protocol, and integration coverage.
 - `examples/` — runnable Bun examples.
 
 The generated TypeScript API reference is available in the built site under `typescript-api/`.

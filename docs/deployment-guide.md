@@ -1,7 +1,22 @@
 # Deployment guide
 
-Xerxes ships as a Bun workspace. Install Bun, fetch the repository, and install the locked
-dependencies:
+Xerxes is published to npm as `xerxes-bun` and requires Bun 1.3.12 or newer. Install the
+package globally with either package manager:
+
+```sh
+bun add --global xerxes-bun
+# or
+npm install --global xerxes-bun
+
+xerxes doctor
+xerxes
+```
+
+The package provides `xerxes`, `xerxes-acp`, and the package-name alias `xerxes-bun`. To run it
+without a global install, use `bunx xerxes-bun` or `npx --yes xerxes-bun`. The unscoped npm
+package named `xerxes` is unrelated to this project; install `xerxes-bun`.
+
+For source deployments, fetch the Bun workspace and install its locked dependencies:
 
 ```sh
 git clone https://github.com/erfanzar/Xerxes-Agents.git
@@ -19,6 +34,10 @@ sh scripts/install.sh
 It requires Bun, installs the locked workspace, and writes `xerxes` to
 `$XERXES_BIN_DIRECTORY` (default `~/.local/bin`). Set `XERXES_SOURCE_DIRECTORY` to install from a
 specific existing checkout, or `XERXES_INSTALL_DIRECTORY` for the clone destination.
+
+The sole terminal renderer is OpenTUI. After changing `xerxes/src/ui/`, rebuild only the UI
+bundle with `bun run --cwd xerxes build:ui`; the generated entry is
+`xerxes/dist/ui/entry.js`.
 
 ## CLI and daemon
 
@@ -52,7 +71,7 @@ export XERXES_UID="$(id -u)"
 
 docker build -t xerxes:local .
 docker run --rm xerxes:local --version
-docker run --rm --entrypoint bun xerxes:local /app/src/typescript/dist/ui/entry.js
+docker run --rm --entrypoint bun xerxes:local /app/xerxes/dist/ui/entry.js
 docker compose build
 docker compose run --rm --entrypoint sh xerxes -c \
   'probe=/workspace/.xerxes-write-probe-$$; test -w /workspace && : > "$probe" && rm "$probe"'

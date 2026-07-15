@@ -58,7 +58,7 @@ jobs:
         run: bun run verify
 
       - name: Verify the committed TUI bundle is current
-        run: git diff --exit-code -- src/typescript/dist/ui/entry.js
+        run: git diff --exit-code -- xerxes/dist/ui/entry.js
 
       - name: Smoke daemon RPC and completion flows
         run: bun run smoke
@@ -86,7 +86,7 @@ jobs:
           XERXES_DAEMON_TOKEN=ci-compose-config-only docker compose config
           docker build --build-arg XERXES_UID="$(id -u)" -t xerxes:ci .
           docker run --rm xerxes:ci --version
-          docker run --rm --entrypoint bun xerxes:ci /app/src/typescript/dist/ui/entry.js
+          docker run --rm --entrypoint bun xerxes:ci /app/xerxes/dist/ui/entry.js
           docker run --rm --entrypoint sh -v "$PWD:/workspace" xerxes:ci -c \
             'probe=/workspace/.xerxes-write-probe-$$; test -w /workspace && : > "$probe" && rm "$probe"'
 

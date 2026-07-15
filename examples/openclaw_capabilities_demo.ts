@@ -19,7 +19,7 @@ import {
   SkillRegistry,
   ToolPolicy,
   createSystemPromptContextHost,
-} from '../src/typescript/src/index.js'
+} from '../xerxes/src/index.js'
 import { divider, runMain } from './native_demo_support.js'
 
 export function webSearch(query: string): string {

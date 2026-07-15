@@ -7,7 +7,7 @@ FROM oven/bun:1.3.12 AS build
 WORKDIR /app
 
 COPY package.json bun.lock ./
-COPY src/typescript/package.json src/typescript/package.json
+COPY xerxes/package.json xerxes/package.json
 RUN bun install --frozen-lockfile
 
 COPY . ./
@@ -32,10 +32,10 @@ ENV HOME=/home/xerxes \
 COPY packaging/runtime/package.json packaging/runtime/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-COPY --from=build --chown=xerxes:xerxes /app/src/typescript/dist/cli.js ./src/typescript/dist/cli.js
-COPY --from=build --chown=xerxes:xerxes /app/src/typescript/dist/default ./src/typescript/dist/default
-COPY --from=build --chown=xerxes:xerxes /app/src/typescript/dist/skills ./src/typescript/dist/skills
-COPY --from=build --chown=xerxes:xerxes /app/src/typescript/dist/ui/entry.js ./src/typescript/dist/ui/entry.js
+COPY --from=build --chown=xerxes:xerxes /app/xerxes/dist/cli.js ./xerxes/dist/cli.js
+COPY --from=build --chown=xerxes:xerxes /app/xerxes/dist/default ./xerxes/dist/default
+COPY --from=build --chown=xerxes:xerxes /app/xerxes/dist/skills ./xerxes/dist/skills
+COPY --from=build --chown=xerxes:xerxes /app/xerxes/dist/ui/entry.js ./xerxes/dist/ui/entry.js
 RUN mkdir -p "$XERXES_HOME" /workspace \
     && chown -R xerxes:xerxes /app /home/xerxes /workspace
 
@@ -44,7 +44,7 @@ USER xerxes
 EXPOSE 11996
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD ["bun", "/app/src/typescript/dist/cli.js", "--version"]
+    CMD ["bun", "/app/xerxes/dist/cli.js", "--version"]
 
-ENTRYPOINT ["bun", "/app/src/typescript/dist/cli.js"]
+ENTRYPOINT ["bun", "/app/xerxes/dist/cli.js"]
 CMD ["daemon"]

@@ -6,7 +6,7 @@
 import { readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline/promises'
 
-import { ShortTermMemory, Xerxes } from '../src/typescript/src/index.js'
+import { ShortTermMemory, Xerxes } from '../xerxes/src/index.js'
 import { divider, exampleLlm, hasFlag, runMain } from './native_demo_support.js'
 
 export class InteractiveWorkspace {

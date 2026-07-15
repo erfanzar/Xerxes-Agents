@@ -19,11 +19,11 @@ frontend command that has no tool-call contract.
 
 ## 1. Choose a native module and inspect the contract
 
-Create a descriptive camel-case module under `src/typescript/src/tools/`, such
+Create a descriptive camel-case module under `xerxes/src/tools/`, such
 as `financeTools.ts`. Read:
 
-- `src/typescript/src/executors/toolRegistry.ts`
-- `src/typescript/src/types/toolCalls.ts`
+- `xerxes/src/executors/toolRegistry.ts`
+- `xerxes/src/types/toolCalls.ts`
 - a small nearby module such as `clarify.ts` or `mathTools.ts`
 
 Every tool definition uses the OpenAI-style native shape:
@@ -66,7 +66,7 @@ execution error.
 
 ## 2. Register the tool at the correct surface
 
-Export the module from `src/typescript/src/tools/index.ts`. Add its registration
+Export the module from `xerxes/src/tools/index.ts`. Add its registration
 to `registerCoreTools()` only when it belongs to the baseline runtime surface.
 Otherwise keep it opt-in behind an explicit option or host port.
 
@@ -86,13 +86,13 @@ credential, start a child process, or report success when the port is absent.
 
 ## 4. Add observable Bun tests
 
-Create or extend a focused file in `src/typescript/test/`. Test schema
+Create or extend a focused file in `xerxes/test/`. Test schema
 validation through `ToolRegistry.execute()`, the happy path, an invalid input,
 and failure/cancellation behavior for external or asynchronous work.
 
 ```bash
-bun test src/typescript/test/<matching-tool>.test.ts
-bun run --cwd src/typescript check
+bun test xerxes/test/<matching-tool>.test.ts
+bun run --cwd xerxes check
 ```
 
 Use injected ports, temporary directories, and deterministic fake fetchers;

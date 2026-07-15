@@ -13,7 +13,7 @@ import { resolve } from 'node:path'
 import { divider, hasFlag, runMain } from './native_demo_support.js'
 
 export function nativeTuiLaunchCommand(projectRoot = process.cwd()): string[] {
-  return [process.execPath, resolve(projectRoot, 'src/typescript/dist/ui/entry.js')]
+  return [process.execPath, resolve(projectRoot, 'xerxes/dist/ui/entry.js')]
 }
 
 export async function launchNativeTui(projectRoot = process.cwd()): Promise<number> {

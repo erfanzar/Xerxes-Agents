@@ -5,7 +5,7 @@
   "outputDirectory": "_bun",
   "staticDirectory": "_static",
   "typescriptApi": {
-    "sourceDirectory": "../src/typescript/src",
+    "sourceDirectory": "../xerxes/src",
     "packageName": "@xerxes/runtime",
     "outputDirectory": "typescript-api"
   }

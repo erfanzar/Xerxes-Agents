@@ -37,7 +37,7 @@ local_checkout_root() {
     repository_root="$(CDPATH= cd "$script_directory/.." 2>/dev/null && pwd -P)" || return 1
     [ -f "$repository_root/package.json" ] || return 1
     [ -f "$repository_root/bun.lock" ] || return 1
-    [ -d "$repository_root/src/typescript" ] || return 1
+    [ -d "$repository_root/xerxes" ] || return 1
     printf '%s\n' "$repository_root"
 }
 
@@ -70,7 +70,7 @@ write_launcher() {
     temporary_launcher="$launcher.tmp.$$"
     cat > "$temporary_launcher" <<EOF
 #!/usr/bin/env sh
-exec bun "$source_root/src/typescript/dist/cli.js" $command_prefix "\$@"
+exec bun "$source_root/xerxes/dist/cli.js" $command_prefix "\$@"
 EOF
     chmod 755 "$temporary_launcher"
     mv "$temporary_launcher" "$launcher"
@@ -93,8 +93,8 @@ main() {
         bun install --frozen-lockfile
         bun run build
     )
-    [ -f "$source_root/src/typescript/dist/cli.js" ] || die "runtime build is missing: $source_root/src/typescript/dist/cli.js"
-    [ -f "$source_root/src/typescript/dist/ui/entry.js" ] || die "TUI build is missing: $source_root/src/typescript/dist/ui/entry.js"
+    [ -f "$source_root/xerxes/dist/cli.js" ] || die "runtime build is missing: $source_root/xerxes/dist/cli.js"
+    [ -f "$source_root/xerxes/dist/ui/entry.js" ] || die "TUI build is missing: $source_root/xerxes/dist/ui/entry.js"
     write_launcher "$source_root" xerxes
     write_launcher "$source_root" xerxes-acp acp
     "$BIN_DIRECTORY/xerxes" --help >/dev/null

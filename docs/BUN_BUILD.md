@@ -3,7 +3,7 @@
 Build the static documentation site with:
 
 ```sh
-bun run --cwd src/typescript docs:build
+bun run --cwd xerxes docs:build
 ```
 
 The command reads `bun-docs.json`, writes deterministic HTML into `docs/_bun/`, and generates

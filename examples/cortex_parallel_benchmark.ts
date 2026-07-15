@@ -9,9 +9,9 @@ import {
   Cortex,
   type CortexOutput,
   type LlmClient,
-} from '../src/typescript/src/index.js'
-import { CortexAgent } from '../src/typescript/src/cortex/agents/agent.js'
-import { ProcessType } from '../src/typescript/src/cortex/core/enums.js'
+} from '../xerxes/src/index.js'
+import { CortexAgent } from '../xerxes/src/cortex/agents/agent.js'
+import { ProcessType } from '../xerxes/src/cortex/core/enums.js'
 import {
   approximateTokens,
   divider,

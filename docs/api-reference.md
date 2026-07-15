@@ -1,7 +1,7 @@
 # HTTP API reference
 
 The native HTTP surface is implemented in
-[`src/typescript/src/api-server/server.ts`](../src/typescript/src/api-server/server.ts). It exposes
+[`xerxes/src/api-server/server.ts`](../xerxes/src/api-server/server.ts). It exposes
 an OpenAI-compatible chat-completions handler that an embedding host starts with Bun's HTTP server.
 
 ## Endpoints

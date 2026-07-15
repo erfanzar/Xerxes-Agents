@@ -19,9 +19,9 @@ new wire protocol.
 
 Read:
 
-- `src/typescript/src/llms/providerRegistry.ts`
-- `src/typescript/src/llms/client.ts`
-- `src/typescript/test/providerRegistry.test.ts`
+- `xerxes/src/llms/providerRegistry.ts`
+- `xerxes/src/llms/client.ts`
+- `xerxes/test/providerRegistry.test.ts`
 
 `ProviderConfig` uses native camel-case fields: `apiKeyEnv`, `baseUrl`,
 `contextLimit`, `models`, and `transport`. Provider selection supports explicit
@@ -30,7 +30,7 @@ Read:
 ## 2. Add the provider metadata
 
 Add a `provider(...)` entry to `PROVIDERS` in
-`src/typescript/src/llms/providerRegistry.ts`:
+`xerxes/src/llms/providerRegistry.ts`:
 
 ```ts
 myprovider: provider('myprovider', 'openai', {
@@ -65,23 +65,23 @@ rules, context overrides, documentation, and tests.
 ## 4. Implement a new transport when required
 
 Do not pretend a non-compatible endpoint is OpenAI-compatible. Add an explicit
-native client in `src/typescript/src/llms/`, make the transport discriminant
+native client in `xerxes/src/llms/`, make the transport discriminant
 and `createLlmClient()` handle it, and use a deterministic injected fetch or
 transport in tests. Surface provider errors with redacted context; never log an
 API key.
 
 ## 5. Add Bun tests and verify
 
-Extend `src/typescript/test/providerRegistry.test.ts` for prefix resolution,
+Extend `xerxes/test/providerRegistry.test.ts` for prefix resolution,
 explicit provider notation, context limit, pricing, and required headers. Add a
 client test when transport behavior changes.
 
 Run:
 
 ```bash
-bun test src/typescript/test/providerRegistry.test.ts
-bun test src/typescript/test/llmTypesParity.test.ts
-bun run --cwd src/typescript check
+bun test xerxes/test/providerRegistry.test.ts
+bun test xerxes/test/llmTypesParity.test.ts
+bun run --cwd xerxes check
 ```
 
 ## Common pitfalls
