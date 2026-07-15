@@ -1,8 +1,8 @@
 # Configuration guide
 
 Xerxes keeps host-dependent configuration explicit. The native value models live in
-[`src/typescript/src/core/config.ts`](../src/typescript/src/core/config.ts), while daemon settings
-are read by [`src/typescript/src/daemon/config.ts`](../src/typescript/src/daemon/config.ts).
+[`xerxes/src/core/config.ts`](../xerxes/src/core/config.ts), while daemon settings
+are read by [`xerxes/src/daemon/config.ts`](../xerxes/src/daemon/config.ts).
 
 ## Local runtime home
 

@@ -5,7 +5,7 @@
     "": {
       "name": "xerxes-agents",
     },
-    "src/typescript": {
+    "xerxes": {
       "name": "@xerxes/runtime",
       "version": "0.3.0",
       "dependencies": {
@@ -174,7 +174,7 @@
 
     "@vitest/utils": ["@vitest/utils@4.1.10", "", { "dependencies": { "@vitest/pretty-format": "4.1.10", "convert-source-map": "^2.0.0", "tinyrainbow": "^3.1.0" } }, "sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA=="],
 
-    "@xerxes/runtime": ["@xerxes/runtime@workspace:src/typescript"],
+    "@xerxes/runtime": ["@xerxes/runtime@workspace:xerxes"],
 
     "ansi-regex": ["ansi-regex@6.2.2", "", {}, "sha512-Bq3SmSpyFHaWjPk8If9yc6svM8c56dB5BAtW4Qbw5jHTwwXXcTLoRMkpDJp6VL0XzlWaCHTXrkFURMYmD0sLqg=="],
 

@@ -1,10 +1,10 @@
 # Codebase summary
 
 Xerxes is a Bun-native TypeScript multi-agent runtime. Runtime and terminal-client source share the
-single `src/typescript/` package.
+single `xerxes/` package.
 
 ```text
-src/typescript/
+xerxes/
   src/
     cli.ts             command dispatch
     core/              validation, paths, typed errors

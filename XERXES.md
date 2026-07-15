@@ -7,7 +7,7 @@
 ## Current status
 
 Xerxes is a Bun-native TypeScript multi-agent framework. The runtime and OpenTUI terminal UI live
-in one package under `src/typescript/`, with the UI source in `src/typescript/src/ui/`. The CLI, daemon,
+in one package under `xerxes/`, with the UI source in `xerxes/src/ui/`. The CLI, daemon,
 ACP server, one-shot path, session export, API surface, and TUI execute through
 the Bun runtime.
 
@@ -43,8 +43,8 @@ bun run real-use
 bun run swarm
 
 # Focused runtime tests
-bun test src/typescript/test/streamingLoopParity.test.ts
-bun test src/typescript/test/playgroundEval.test.ts
+bun test xerxes/test/streamingLoopParity.test.ts
+bun test xerxes/test/playgroundEval.test.ts
 
 # Native warm-up evaluation (caller provides the runtime transport)
 bun run playground:warmup -- --transport /absolute/path/to/evaluation-transport.ts
@@ -68,7 +68,7 @@ creates a launcher in XERXES_BIN_DIRECTORY (default: ~/.local/bin).
 
 ~~~text
 Xerxes-Agents/
-├── src/typescript/                 # Native runtime package
+├── xerxes/                         # Native runtime package
 │   ├── src/cli.ts                  # Bun CLI and service dispatch
 │   ├── src/core/                   # Configuration, errors, paths, validation
 │   ├── src/llms/                   # Provider registry and wire clients
@@ -86,10 +86,11 @@ Xerxes-Agents/
 │   ├── src/extensions/             # Skills, plugins, hooks, authoring
 │   ├── src/cortex/                 # Multi-agent topology orchestration
 │   ├── src/ui/                     # React + OpenTUI terminal client
+│   ├── playground/                 # Evaluation fixtures and local artifacts
+│   ├── skills/                     # Bundled SKILL.md content and safe assets
 │   └── test/                       # Bun unit, contract, and integration tests
 ├── examples/                       # Root TypeScript examples
 ├── docs/                           # Native static documentation configuration
-├── src/typescript/playground/      # Evaluation fixtures and local artifacts
 ├── scripts/                        # Bun-native installer and repository scripts
 └── .agents/projects/               # Project planning and verification notes
 ~~~
@@ -111,15 +112,15 @@ CLI / OpenTUI / daemon / API
 
 Important native boundaries:
 
-- src/typescript/src/streaming/loop.ts owns cancellation repair, tool-turn
+- xerxes/src/streaming/loop.ts owns cancellation repair, tool-turn
   iteration, late steer handling, and event emission.
-- src/typescript/src/daemon/server.ts exposes the v35 local protocol and
+- xerxes/src/daemon/server.ts exposes the v35 local protocol and
   persists session changes after commands such as compaction.
-- src/typescript/src/runtime/ composes prompt profiles, features, budgets,
+- xerxes/src/runtime/ composes prompt profiles, features, budgets,
   transcript state, diagnostics, and CLI bootstrap.
-- src/typescript/src/executors/ and src/typescript/src/tools/ validate,
+- xerxes/src/executors/ and xerxes/src/tools/ validate,
   authorize, execute, and audit tool calls.
-- src/typescript/src/memory/, context/, and session/ own durable memory,
+- xerxes/src/memory/, context/, and session/ own durable memory,
   retrieval, prompt injection bounds, compaction, search, replay, and export.
 
 Provider calls, browser/computer control, media APIs, hardware training, and
@@ -161,7 +162,7 @@ succeed.
 - Use apply_patch for source edits. Do not overwrite unrelated dirty changes,
   reset the worktree, or restore files just to simplify a rewrite.
 - Every new TypeScript source file starts with the Apache-2.0 copyright header
-  used by the native tree. Run bun run --cwd src/typescript
+  used by the native tree. Run bun run --cwd xerxes
   fix-license-headers to normalize supported headers.
 
 ## Native maintenance rules
@@ -179,7 +180,7 @@ succeed.
 
 ## Evaluation playground
 
-The native evaluation building blocks live in src/typescript/playground/. They
+The native evaluation building blocks live in xerxes/playground/. They
 create private run directories without mutating global environment state, accept
 a caller-owned evaluation session port, and run warm-up or typed hard tasks with
 behavioral graders. The playground does not discover credentials, start a hidden
@@ -187,12 +188,12 @@ provider client, execute a foreign-language grader, or run shell commands
 through a shell.
 
 ~~~bash
-bun test src/typescript/test/playgroundEval.test.ts
+bun test xerxes/test/playgroundEval.test.ts
 ~~~
 
 `createNativeHardTasks()` supplies the complete 16-task hard battery. Its
 fixtures and behavioral checkers are TypeScript/Bun-native, and
-`bun run --cwd src/typescript playground:hard -- --transport <module>` runs it
+`bun run --cwd xerxes playground:hard -- --transport <module>` runs it
 through an explicitly supplied host transport.
 
 ## Delivery gate

@@ -9,7 +9,7 @@ import {
   type CompletionRequest,
   type LlmClient,
   type LlmDelta,
-} from '../src/typescript/src/index.js'
+} from '../xerxes/src/index.js'
 
 export type DemoResponder = (request: CompletionRequest) => Promise<string> | string
 

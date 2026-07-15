@@ -7,11 +7,11 @@
 # Bun workspaces and generated package output.
 node_modules/
 dist/
-!src/typescript/dist/
-src/typescript/dist/*
-!src/typescript/dist/ui/
-src/typescript/dist/ui/*
-!src/typescript/dist/ui/entry.js
+!xerxes/dist/
+xerxes/dist/*
+!xerxes/dist/ui/
+xerxes/dist/ui/*
+!xerxes/dist/ui/entry.js
 build/
 coverage/
 cover/

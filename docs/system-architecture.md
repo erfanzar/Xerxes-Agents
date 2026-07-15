@@ -23,14 +23,14 @@ CLI / OpenTUI / channel / HTTP API / ACP
 
 | Area | Native location | Responsibility |
 | --- | --- | --- |
-| CLI | `src/typescript/src/cli.ts` | One-shot, TUI, daemon, ACP, diagnostics, export. |
+| CLI | `xerxes/src/cli.ts` | One-shot, TUI, daemon, ACP, diagnostics, export. |
 | Streaming | `streaming/` | Normalized async events, thinking parsing, cancellation repair, tool turns. |
 | Runtime | `runtime/` | Bootstrap, profiles, budgets, sessions, diagnostics, update/install planning. |
 | Executors and tools | `executors/`, `tools/` | Schema lookup, policy/permission gates, native operations, host ports. |
 | State | `session/`, `memory/`, `context/` | Durable transcripts, replay, retrieval, bounded prompt context. |
 | Services | `daemon/`, `api-server/`, `acp/`, `mcp/` | v35 local protocol, OpenAI-compatible API, ACP, MCP transports. |
 | Integrations | `channels/`, `extensions/`, `cortex/`, `skills/` | Channels, plugins, skills, topology orchestration, native skill modules. |
-| Terminal client | `src/typescript/src/ui/` | React + OpenTUI renderer and v35 gateway client. |
+| Terminal client | `xerxes/src/ui/` | React + OpenTUI renderer and v35 gateway client. |
 
 ## Turn lifecycle
 

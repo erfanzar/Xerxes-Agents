@@ -1,7 +1,7 @@
 # Native Bun documentation build entrypoint.
 
 BUN ?= bun
-RUNTIME_DIRECTORY ?= ../src/typescript
+RUNTIME_DIRECTORY ?= ../xerxes
 
 .PHONY: help html
 

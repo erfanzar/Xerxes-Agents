@@ -7,7 +7,7 @@ import {
   ShortTermMemory,
   Xerxes,
   type StreamEvent,
-} from '../src/typescript/src/index.js'
+} from '../xerxes/src/index.js'
 import { divider, exampleLlm, runMain } from './native_demo_support.js'
 
 export interface KnowledgeEntry {

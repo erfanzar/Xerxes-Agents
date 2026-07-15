@@ -19,10 +19,10 @@ adapter.
 
 ## 1. Choose the right definition directory
 
-Read `src/typescript/src/agents/definitions.ts` and
-`src/typescript/src/agents/agentSpec.ts` before editing.
+Read `xerxes/src/agents/definitions.ts` and
+`xerxes/src/agents/agentSpec.ts` before editing.
 
-- Bundled definitions live in `src/typescript/src/agents/default/`.
+- Bundled definitions live in `xerxes/src/agents/default/`.
 - A user override lives in `$XERXES_HOME/agents/`.
 - A project override lives in `.xerxes/agents/`.
 - A project may also provide `agent.yaml` or `agents.yaml` at its root.
@@ -33,7 +33,7 @@ the framework itself needs a new built-in agent.
 
 ## 2. Start from the native base definition
 
-Read `src/typescript/src/agents/default/agent.yaml`, its `system.md`, and one
+Read `xerxes/src/agents/default/agent.yaml`, its `system.md`, and one
 specialist such as `coder.yaml` or `planner.yaml`. The loader supports YAML
 specification version `1`, relative prompt paths, and `extend: default`.
 
@@ -69,7 +69,7 @@ definition.
   allow-list.
 - `exclude_tools` removes named tools from the resolved list.
 - Tool names must match native `ToolDefinition.function.name` values exactly.
-  Inspect `src/typescript/src/tools/index.ts` and the relevant tool module
+  Inspect `xerxes/src/tools/index.ts` and the relevant tool module
   instead of guessing a class or file name.
 
 Use an allow-list for an agent that should be read-only or otherwise narrowly
@@ -92,7 +92,7 @@ and set `max_depth` only when the default depth of five is not appropriate.
 
 ## 5. Add an observable Bun test
 
-Add or extend `src/typescript/test/agents.test.ts`. Test inheritance, prompt
+Add or extend `xerxes/test/agents.test.ts`. Test inheritance, prompt
 substitution, tool restrictions, and the source-precedence behavior that your
 definition changes. Use a temporary directory in the test rather than writing
 to a real user agent directory.
@@ -100,8 +100,8 @@ to a real user agent directory.
 Run:
 
 ```bash
-bun test src/typescript/test/agents.test.ts
-bun run --cwd src/typescript check
+bun test xerxes/test/agents.test.ts
+bun run --cwd xerxes check
 ```
 
 ## Common pitfalls

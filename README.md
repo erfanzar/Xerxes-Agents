@@ -27,10 +27,37 @@ research, planning, and objectives.
 
 ## Install
 
-You need [Bun 1.3.12 or newer](https://bun.sh/) and Git. For live turns, provide
-provider credentials or configure a local backend.
+You need [Bun 1.3.12 or newer](https://bun.sh/). Git is required only for a source
+checkout. For live turns, provide provider credentials or configure a local backend.
 
-Install the current `main` build and launchers:
+Install the published [`xerxes-bun`](https://www.npmjs.com/package/xerxes-bun)
+package globally with Bun or npm:
+
+```bash
+bun add --global xerxes-bun
+# or
+npm install --global xerxes-bun
+
+xerxes
+```
+
+The global package installs three executable names: `xerxes` for normal use,
+`xerxes-acp` for Agent Client Protocol hosts, and `xerxes-bun` as an explicit
+package-name alias. The runtime still requires Bun even when npm installs the
+package.
+
+Run the same published CLI without a global install:
+
+```bash
+bunx xerxes-bun
+# or
+npx --yes xerxes-bun
+```
+
+> **Package-name note:** install `xerxes-bun`, not `xerxes`. The unscoped npm
+> package named `xerxes` is unrelated to this project.
+
+To install the current `main` checkout and local launchers instead:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
@@ -80,7 +107,7 @@ project skills can extend it.
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | Native OpenTUI         | React 19 interface with streaming Markdown, thinking, compact tool activity, queues, overlays, and keyboard-first input |
 | Bring your provider    | Provider profiles for hosted APIs, local backends, and custom OpenAI-compatible endpoints                               |
-| Permission modes      | YOLO by default, plus automatic, manual, plan, and explicit allow/deny workflows                                         |
+| Permission modes       | YOLO by default, plus automatic, manual, plan, and explicit allow/deny workflows                                        |
 | Persistent sessions    | Resume, branch, compact, search, replay, snapshot, and roll back project-scoped work                                    |
 | Sub-agents             | YAML-defined specialists with inheritance, scoped tools, delegation, and live progress                                  |
 | Skills and MCP         | Recursive `SKILL.md` discovery plus explicit MCP server integration                                                     |
@@ -238,15 +265,15 @@ Start with:
 xerxes doctor
 ```
 
-| Problem                         | Fix                                                                                                     |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `xerxes: command not found`     | Add `${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}` to `PATH`, or use `bun run xerxes` from the checkout    |
-| No model is configured          | Open `/provider`, select or create a profile, then choose a model                                       |
-| Local backend will not connect  | Confirm the backend is already running and its configured base URL is reachable                         |
-| Terminal colors are wrong       | Use a modern Unicode terminal; set `XERXES_TUI_THEME=dark` or `light` when automatic detection is wrong |
-| Animation is unwanted           | Set `XERXES_TUI_ANIMATIONS=0`                                                                           |
-| A source UI edit is not visible | Run `bun run build:ui`; `xerxes` launches the generated TUI bundle                                      |
-| A project daemon is stale       | Exit the TUI, stop the project daemon, then relaunch so the current runtime is loaded                   |
+| Problem                         | Fix                                                                                                           |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `xerxes: command not found`     | Reinstall `xerxes-bun` globally, use `bunx xerxes-bun`, or add the source installer's bin directory to `PATH` |
+| No model is configured          | Open `/provider`, select or create a profile, then choose a model                                             |
+| Local backend will not connect  | Confirm the backend is already running and its configured base URL is reachable                               |
+| Terminal colors are wrong       | Use a modern Unicode terminal; set `XERXES_TUI_THEME=dark` or `light` when automatic detection is wrong       |
+| Animation is unwanted           | Set `XERXES_TUI_ANIMATIONS=0`                                                                                 |
+| A source UI edit is not visible | Run `bun run build:ui`; `xerxes` launches the generated TUI bundle                                            |
+| A project daemon is stale       | Exit the TUI, stop the project daemon, then relaunch so the current runtime is loaded                         |
 
 Apple Terminal is directly exercised during visual development. Other terminals must
 support Unicode and normal interactive TTY input; report renderer-specific issues with
@@ -272,11 +299,11 @@ bun run docs:build
 git diff --check
 ```
 
-`bun run xerxes` launches the generated `src/typescript/dist/ui/entry.js`. Always rebuild
-after editing `src/typescript/src/ui`:
+`bun run xerxes` launches the generated `xerxes/dist/ui/entry.js`. OpenTUI is
+the only renderer; after editing `xerxes/src/ui`, rebuild only its bundle with:
 
 ```bash
-bun run build:ui
+bun run --cwd xerxes build:ui
 bun run xerxes
 ```
 

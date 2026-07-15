@@ -7,7 +7,7 @@ import {
   ShortTermMemory,
   Xerxes,
   type LlmClient,
-} from '../src/typescript/src/index.js'
+} from '../xerxes/src/index.js'
 import { divider, exampleLlm, runMain, textOf } from './native_demo_support.js'
 
 const KNOWLEDGE: Readonly<Record<string, string>> = {

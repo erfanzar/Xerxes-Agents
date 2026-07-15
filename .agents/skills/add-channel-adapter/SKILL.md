@@ -21,10 +21,10 @@ frontend-only integration.
 
 Read these files before writing an adapter:
 
-- `src/typescript/src/channels/base.ts` for `Channel` and `InboundHandler`.
-- `src/typescript/src/channels/types.ts` for `ChannelMessage` and
+- `xerxes/src/channels/base.ts` for `Channel` and `InboundHandler`.
+- `xerxes/src/channels/types.ts` for `ChannelMessage` and
   `createChannelMessage()`.
-- `src/typescript/src/channels/webhooks.ts` for `WebhookChannel` and raw-byte
+- `xerxes/src/channels/webhooks.ts` for `WebhookChannel` and raw-byte
   webhook handling.
 - A comparable adapter such as `telegram.ts`, `slack.ts`, or
   `genericWebhook.ts`.
@@ -47,7 +47,7 @@ inbound handler.
 
 ## 2. Implement a concrete TypeScript adapter
 
-Create a descriptive camel-case module under `src/typescript/src/channels/`,
+Create a descriptive camel-case module under `xerxes/src/channels/`,
 for example `myPlatform.ts`. Start it with the Apache-2.0 header used by nearby
 native modules.
 
@@ -83,20 +83,20 @@ transport into a success response.
 ## 3. Register configuration deliberately
 
 For a built-in configured channel, add its constructor to the `switch` in
-`src/typescript/src/channels/configured.ts`, then export the module from
-`src/typescript/src/channels/index.ts`. Use the `ConfiguredChannelManager`
+`xerxes/src/channels/configured.ts`, then export the module from
+`xerxes/src/channels/index.ts`. Use the `ConfiguredChannelManager`
 contract so `channel.list`, `channel.enable`, and `channel.disable` expose
 configuration and lifecycle errors accurately.
 
 If the adapter needs host-owned non-serializable ports, extend
 `ConfiguredChannelTransportPorts` or supply a `ConfiguredChannelFactory` from
-`src/typescript/src/daemon/channels.ts`. Keep credentials in the resolved
+`xerxes/src/daemon/channels.ts`. Keep credentials in the resolved
 daemon configuration or explicitly supplied host ports, never in source or
 tests.
 
 ## 4. Add focused Bun tests
 
-Place tests under `src/typescript/test/` alongside the closest channel suite.
+Place tests under `xerxes/test/` alongside the closest channel suite.
 Cover observable behavior:
 
 - `start()` and `stop()` lifecycle,
@@ -111,9 +111,9 @@ the test suite.
 Run the relevant suite, for example:
 
 ```bash
-bun test src/typescript/test/channelAdapters.test.ts
-bun test src/typescript/test/channels.test.ts
-bun run --cwd src/typescript check
+bun test xerxes/test/channelAdapters.test.ts
+bun test xerxes/test/channels.test.ts
+bun run --cwd xerxes check
 ```
 
 ## Common pitfalls

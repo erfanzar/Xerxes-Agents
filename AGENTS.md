@@ -10,11 +10,11 @@ subagents, channels, persistent sessions, and tiered memory.
 
 - Runtime: Bun 1.3+
 - Language: TypeScript (strict)
-- Runtime source: `src/typescript/src/`
-- Runtime tests: `src/typescript/test/`
-- TUI source: `src/typescript/src/ui/`
-- TUI tests: `src/typescript/src/ui/__tests__/`
-- Bundled skill content: `src/typescript/skills/`
+- Runtime source: `xerxes/src/`
+- Runtime tests: `xerxes/test/`
+- TUI source: `xerxes/src/ui/`
+- TUI tests: `xerxes/src/ui/__tests__/`
+- Bundled skill content: `xerxes/skills/`
 
 The repository is Bun-native. Do not add a Python runtime, Python test, Python packaging
 metadata, or a Python subprocess fallback. User-requested tools may operate on Python files in a
@@ -36,13 +36,13 @@ bun run xerxes daemon --project-dir .
 bun run xerxes acp --project-dir .
 
 # Runtime validation
-bun run --cwd src/typescript check
-bun test src/typescript/test/<file>.test.ts
-bun run --cwd src/typescript test:runtime
+bun run --cwd xerxes check
+bun test xerxes/test/<file>.test.ts
+bun run --cwd xerxes test:runtime
 
 # TUI validation
-bun run --cwd src/typescript check:ui
-bun run --cwd src/typescript test:ui
+bun run --cwd xerxes check:ui
+bun run --cwd xerxes test:ui
 
 # Full repository gate
 bun run check && bun run test && bun run build
@@ -50,7 +50,7 @@ git diff --check
 
 # Documentation and maintenance
 bun run docs:build
-bun run --cwd src/typescript fix-license-headers
+bun run --cwd xerxes fix-license-headers
 ```
 
 Do not validate repository changes with `python`, `python3`, `uv`, `pytest`, `ruff`, or `mypy`.
@@ -59,7 +59,7 @@ Do not add Node/npm lifecycle wrappers when Bun can run the command directly.
 ## Repository layout
 
 ```text
-src/typescript/
+xerxes/
 ├── src/
 │   ├── cli.ts              # CLI entry point
 │   ├── xerxes.ts           # Embedded facade
@@ -86,7 +86,7 @@ scripts/install.sh           # Bun installer and launcher setup
 
 ## How a turn works
 
-1. `src/typescript/src/cli.ts` selects interactive TUI, one-shot, daemon, ACP, or an explicit
+1. `xerxes/src/cli.ts` selects interactive TUI, one-shot, daemon, ACP, or an explicit
    command such as `doctor`, `export`, or `skill`.
 2. The TUI communicates with the Bun daemon through the v35 newline-delimited JSON-RPC protocol.
 3. `streaming/loop.ts` normalizes provider deltas into serializable stream events, routes tool
@@ -131,15 +131,15 @@ and make the external call opt-in. Offline tests must use a deterministic inject
 
 ## Skills, extensions, and assets
 
-`src/typescript/skills/` is recursively copied into the runtime distribution by
-`src/typescript/scripts/copyBundledSkills.ts`. Preserve safe references, templates, and assets when
+`xerxes/skills/` is recursively copied into the runtime distribution by
+`xerxes/scripts/copyBundledSkills.ts`. Preserve safe references, templates, and assets when
 moving a bundled skill. Do not leave a duplicate `name` frontmatter entry that can shadow the native
 skill. Executable or privileged integrations belong in native TypeScript with an explicit host port;
 do not revive unsafe legacy scripts.
 
 ## TUI and daemon behavior
 
-Keep the UI protocol-independent: `src/typescript/src/ui` talks only to the documented daemon RPC
+Keep the UI protocol-independent: `xerxes/src/ui` talks only to the documented daemon RPC
 surface.
 When changing a slash command, update all three layers together:
 

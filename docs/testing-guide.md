@@ -14,7 +14,7 @@ relevant test while iterating:
 
 ```sh
 # Runtime test file
-bun test src/typescript/test/streamingLoopParity.test.ts
+bun test xerxes/test/streamingLoopParity.test.ts
 
 # Terminal client tests
 bun run test:ui

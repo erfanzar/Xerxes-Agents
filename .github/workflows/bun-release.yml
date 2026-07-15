@@ -84,7 +84,7 @@ jobs:
         run: |
           bun run verify
           bun run docs:build
-          git diff --exit-code -- src/typescript/dist/ui/entry.js
+          git diff --exit-code -- xerxes/dist/ui/entry.js
 
       - name: Package and validate the Bun distribution
         env:

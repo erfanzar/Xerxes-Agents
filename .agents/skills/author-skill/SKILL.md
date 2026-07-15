@@ -17,9 +17,9 @@ tool implementation.
 
 ## 1. Choose a discovery location
 
-Read `src/typescript/src/extensions/skills.ts` before creating a skill.
+Read `xerxes/src/extensions/skills.ts` before creating a skill.
 
-- Framework-bundled skills live in `src/typescript/skills/<skill-name>/`.
+- Framework-bundled skills live in `xerxes/skills/<skill-name>/`.
 - Project skills can live in `skills/<skill-name>/` or
   `.agents/skills/<skill-name>/`.
 - User skills live in `~/.xerxes/skills/<skill-name>/`.
@@ -69,7 +69,7 @@ unsafe bypass workflow in a bundled skill.
 
 Place reference Markdown under `references/` and reusable templates under
 `templates/`. Preserve only safe assets. Bundled skills are copied recursively
-to the runtime distribution by `src/typescript/scripts/copyBundledSkills.ts`.
+to the runtime distribution by `xerxes/scripts/copyBundledSkills.ts`.
 
 ## 4. Validate discovery
 
@@ -77,13 +77,13 @@ Add or update the closest Bun test. For a bundled skill, verify its name is
 unique and its required safe assets survive the copy step.
 
 ```bash
-bun test src/typescript/test/skills.test.ts
-bun test src/typescript/test/bundledSkillAssets.test.ts
-bun run --cwd src/typescript build
+bun test xerxes/test/skills.test.ts
+bun test xerxes/test/bundledSkillAssets.test.ts
+bun run --cwd xerxes build
 ```
 
 Run `git diff --check` after adding templates or copied assets. Do not edit the
-generated `src/typescript/dist/skills/` tree manually.
+generated `xerxes/dist/skills/` tree manually.
 
 ## Common pitfalls
 

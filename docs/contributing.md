@@ -15,7 +15,7 @@ git diff --check
 ```
 
 Run the narrowest relevant test while iterating, then the root checks once concurrent work has
-settled. Use `bun test src/typescript/test/<file>.test.ts` for a runtime test and
+settled. Use `bun test xerxes/test/<file>.test.ts` for a runtime test and
 `bun run test:ui` for the terminal client.
 
 ## Change rules

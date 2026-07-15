@@ -10,8 +10,8 @@ import {
   ShortTermMemory,
   type CortexAgent,
   type CortexOutput,
-} from '../src/typescript/src/index.js'
-import { ProcessType } from '../src/typescript/src/cortex/core/enums.js'
+} from '../xerxes/src/index.js'
+import { ProcessType } from '../xerxes/src/cortex/core/enums.js'
 import { divider, runMain } from './native_demo_support.js'
 
 export interface CollaborationReport {

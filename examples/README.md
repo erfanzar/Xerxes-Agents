@@ -26,5 +26,5 @@ without running external services with:
 
 ```sh
 bunx tsc --noEmit -p examples/tsconfig.json
-bun test src/typescript/test/rootExamples.test.ts
+bun test xerxes/test/rootExamples.test.ts
 ```

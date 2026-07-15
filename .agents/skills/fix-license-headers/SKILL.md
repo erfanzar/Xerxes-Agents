@@ -18,14 +18,14 @@ Apache-2.0 copyright header, or when a review reports a malformed header.
 The maintenance entry point is TypeScript and runs with Bun:
 
 ```bash
-bun run --cwd src/typescript fix-license-headers -- --root . --dry-run
+bun run --cwd xerxes fix-license-headers -- --root . --dry-run
 ```
 
 Review the output, then run it without `--dry-run` only when the listed changes
 are in scope:
 
 ```bash
-bun run --cwd src/typescript fix-license-headers -- --root .
+bun run --cwd xerxes fix-license-headers -- --root .
 ```
 
 The command normalizes the repository's comment-style Apache header in the file
@@ -52,8 +52,8 @@ For a focused TypeScript tree, list files that lack the canonical copyright
 line:
 
 ```bash
-rg -L "^// Copyright 2026 The Xerxes-Agents Author" src/typescript/src -g '*.ts' -g '*.tsx'
-bun test src/typescript/test/maintenanceScripts.test.ts
+rg -L "^// Copyright 2026 The Xerxes-Agents Author" xerxes/src -g '*.ts' -g '*.tsx'
+bun test xerxes/test/maintenanceScripts.test.ts
 git diff --check
 ```
 
