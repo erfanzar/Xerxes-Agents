@@ -54,11 +54,45 @@ resolve_source() {
 
     need_command git
     if [ -e "$INSTALL_DIRECTORY" ]; then
-        die "install directory already exists: $INSTALL_DIRECTORY (remove it or set XERXES_INSTALL_DIRECTORY)"
+        managed_root="$(CDPATH= cd "$INSTALL_DIRECTORY" 2>/dev/null && pwd -P)" \
+            || die "cannot resolve managed install directory: $INSTALL_DIRECTORY"
+        git_root="$(git -C "$managed_root" rev-parse --show-toplevel 2>/dev/null)" \
+            || die "install directory is not a managed Git checkout: $managed_root"
+        [ "$git_root" = "$managed_root" ] \
+            || die "install directory is nested inside another Git checkout: $managed_root"
+        [ -f "$managed_root/package.json" ] \
+            || die "managed checkout package manifest is missing: $managed_root/package.json"
+        [ -f "$managed_root/bun.lock" ] \
+            || die "managed checkout lockfile is missing: $managed_root/bun.lock"
+        [ -d "$managed_root/xerxes" ] \
+            || die "managed checkout runtime directory is missing: $managed_root/xerxes"
+
+        expected_remote="${XERXES_REPOSITORY_URL:-$REPO_URL}"
+        actual_remote="$(git -C "$managed_root" remote get-url origin 2>/dev/null)" \
+            || die "managed checkout has no origin remote: $managed_root"
+        [ "$actual_remote" = "$expected_remote" ] \
+            || die "managed checkout origin does not match $expected_remote: $actual_remote"
+        managed_branch="$(git -C "$managed_root" symbolic-ref --quiet --short HEAD 2>/dev/null)" \
+            || die "managed checkout is detached; refusing to update: $managed_root"
+        [ "$managed_branch" = "main" ] \
+            || die "managed checkout is on $managed_branch, expected main: $managed_root"
+        managed_status="$(git -C "$managed_root" status --porcelain --untracked-files=normal)" \
+            || die "cannot inspect managed checkout state: $managed_root"
+        [ -z "$managed_status" ] \
+            || die "managed checkout has local changes; refusing to update: $managed_root"
+
+        info "updating native Bun source in $managed_root" >&2
+        git -C "$managed_root" pull --ff-only origin main 1>&2 \
+            || die "managed checkout cannot be fast-forwarded: $managed_root"
+        printf '%s\n' "$managed_root"
+        return 0
     fi
-    info "cloning native Bun source into $INSTALL_DIRECTORY"
-    git clone --depth 1 "${XERXES_REPOSITORY_URL:-$REPO_URL}" "$INSTALL_DIRECTORY"
-    printf '%s\n' "$INSTALL_DIRECTORY"
+    info "cloning native Bun source into $INSTALL_DIRECTORY" >&2
+    git clone --depth 1 "${XERXES_REPOSITORY_URL:-$REPO_URL}" "$INSTALL_DIRECTORY" 1>&2 \
+        || die "could not clone native Bun source into $INSTALL_DIRECTORY"
+    managed_root="$(CDPATH= cd "$INSTALL_DIRECTORY" 2>/dev/null && pwd -P)" \
+        || die "cannot resolve managed install directory after clone: $INSTALL_DIRECTORY"
+    printf '%s\n' "$managed_root"
 }
 
 write_launcher() {

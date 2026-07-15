@@ -65,8 +65,10 @@ xerxes
 ```
 
 The installer uses the locked workspace, builds the runtime and TUI, and writes
-`xerxes` and `xerxes-acp` to `${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}`. Set
-`XERXES_INSTALL_DIRECTORY` to choose the managed checkout location.
+`xerxes` and `xerxes-acp` to `${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}`. Repeat
+the same curl command to safely fast-forward and rebuild a managed install. Set
+`XERXES_INSTALL_DIRECTORY` to choose the managed checkout location; the updater
+refuses dirty, unrelated, or diverged checkouts instead of overwriting them.
 
 Or run from source:
 
