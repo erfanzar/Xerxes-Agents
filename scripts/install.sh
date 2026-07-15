@@ -81,6 +81,47 @@ EOF
     esac
 }
 
+remove_legacy_xerxes_aliases() {
+    for shell_file in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+        [ -f "$shell_file" ] || continue
+        grep -F '.xerxes-venv/bin/xerxes' "$shell_file" >/dev/null 2>&1 || continue
+
+        temporary_file="$shell_file.xerxes.$$"
+        if ! awk '
+            function is_legacy_alias(line) {
+                return line ~ /^[[:space:]]*alias[[:space:]]+xerxes=/ \
+                    && index(line, ".xerxes-venv/bin/xerxes") > 0
+            }
+            $0 == "# >>> xerxes installer >>>" {
+                in_block = 1
+                block = $0 ORS
+                legacy = 0
+                next
+            }
+            in_block {
+                block = block $0 ORS
+                if (is_legacy_alias($0)) legacy = 1
+                if ($0 == "# <<< xerxes installer <<<") {
+                    if (!legacy) printf "%s", block
+                    in_block = 0
+                    block = ""
+                    legacy = 0
+                }
+                next
+            }
+            is_legacy_alias($0) { next }
+            { print }
+            END { if (in_block) printf "%s", block }
+        ' "$shell_file" > "$temporary_file"; then
+            rm -f "$temporary_file"
+            die "could not remove the retired Xerxes alias from $shell_file"
+        fi
+        cat "$temporary_file" > "$shell_file"
+        rm -f "$temporary_file"
+        ok "removed retired Xerxes alias from $shell_file"
+    done
+}
+
 main() {
     need_command bun
     source_root="$(resolve_source)"
@@ -95,6 +136,7 @@ main() {
     )
     [ -f "$source_root/xerxes/dist/cli.js" ] || die "runtime build is missing: $source_root/xerxes/dist/cli.js"
     [ -f "$source_root/xerxes/dist/ui/entry.js" ] || die "TUI build is missing: $source_root/xerxes/dist/ui/entry.js"
+    remove_legacy_xerxes_aliases
     write_launcher "$source_root" xerxes
     write_launcher "$source_root" xerxes-acp acp
     "$BIN_DIRECTORY/xerxes" --help >/dev/null

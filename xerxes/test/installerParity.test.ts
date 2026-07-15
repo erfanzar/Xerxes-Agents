@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -79,6 +79,41 @@ test("native installer writes Bun and ACP launchers against an explicit local so
     await rm(temporaryRoot, { force: true, recursive: true });
   }
 }, 30_000);
+
+test("native installer removes the retired Xerxes alias without changing other shell settings", async () => {
+  const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-shell-home-"));
+  const zshrc = join(temporaryHome, ".zshrc");
+  try {
+    await writeFile(
+      zshrc,
+      [
+        "export KEEP_BEFORE=1",
+        "# >>> xerxes installer >>>",
+        `alias xerxes="${temporaryHome}/.xerxes-venv/bin/xerxes"`,
+        "# <<< xerxes installer <<<",
+        "export KEEP_AFTER=1",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const migrated = await execute(
+      ["sh", "-c", ". ./scripts/install.sh; remove_legacy_xerxes_aliases"],
+      {
+        HOME: temporaryHome,
+        XERXES_INSTALLER_SOURCE_ONLY: "1",
+      },
+    );
+
+    expect(migrated.exitCode, migrated.stderr).toBe(0);
+    expect(migrated.stdout).toContain("removed retired Xerxes alias");
+    expect(await readFile(zshrc, "utf8")).toBe(
+      "export KEEP_BEFORE=1\nexport KEEP_AFTER=1\n",
+    );
+  } finally {
+    await rm(temporaryHome, { force: true, recursive: true });
+  }
+});
 
 async function execute(
   command: readonly string[],
