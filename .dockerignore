@@ -1,0 +1,8 @@
+.git
+node_modules
+src/typescript/node_modules
+src/typescript/dist
+tests
+playground
+docs/_build
+docs/_bun

@@ -1,113 +1,72 @@
 ---
 name: fix-license-headers
-description: Normalize Apache-2.0 copyright headers across Python, shell, YAML, and Dockerfile files in the repository. Uses scripts/fix_license_headers.py.
-version: 1.0.0
-tags: [license, headers, hygiene, xerxes]
+description: Normalize Xerxes Apache-2.0 headers with the native Bun maintenance command and verify TypeScript sources.
+version: 2.0.0
+tags: [license, headers, hygiene, typescript, bun, xerxes]
 required_tools: [exec_command, ReadFile]
 ---
 
 # When to use
 
-Use this skill when:
-- You've created new files that need the Apache-2.0 copyright header.
-- You've modified existing files and want to verify the header is correct.
-- You're preparing a release or PR and need to normalize headers across the repo.
-- A lint or CI check flagged a missing or malformed header.
+Use this skill when a source, shell, YAML, or Docker file needs the repository
+Apache-2.0 copyright header, or when a review reports a malformed header.
 
 # How to use
 
-## 1. Run the existing script
+## 1. Run the native maintenance command in preview mode
 
-The repository includes a script that handles this automatically:
-
-```bash
-uv run python scripts/fix_license_headers.py
-```
-
-This script:
-- Recursively scans the repo for `.py`, `.sh`, `.yml`, `.yaml`, and `Dockerfile` files.
-- Skips `.git/`, `.venv/`, `__pycache__/`, `dist/`, `build/`, and other generated directories.
-- Adds the Apache-2.0 header if missing.
-- Fixes the copyright line if it contains the wrong article (e.g., `a author` → `The author`).
-- Splices the Apache 2.0 trailer block (`Unless required by applicable law...`) after the `LICENSE-2.0` line if missing.
-
-## 2. Verify the header format
-
-Every Python file should start with exactly this header:
-
-```python
-# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-```
-
-## 3. Check specific files
-
-If you want to check a specific file or directory without running the full script:
+The maintenance entry point is TypeScript and runs with Bun:
 
 ```bash
-# Check if a file has the header
-grep -c "Copyright 2026" src/python/xerxes/my_new_module.py
-
-# Find all Python files missing the header
-find src/python/xerxes/ -name "*.py" -exec sh -c 'head -1 "$1" | grep -q "Copyright" || echo "$1"' _ {} \;
+bun run --cwd src/typescript fix-license-headers -- --root . --dry-run
 ```
 
-## 4. Manual fix for a single file
-
-If the script misses a file or you need to add the header manually:
-
-```python
-# Read the file
-with open("src/python/xerxes/my_new_module.py") as f:
-    content = f.read()
-
-# Add the header if missing
-header = """# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""
-
-if not content.startswith("# Copyright"):
-    with open("src/python/xerxes/my_new_module.py", "w") as f:
-        f.write(header + content)
-```
-
-## 5. Verify after running
-
-After running the script, check the diff to confirm changes:
+Review the output, then run it without `--dry-run` only when the listed changes
+are in scope:
 
 ```bash
-git diff --stat
+bun run --cwd src/typescript fix-license-headers -- --root .
 ```
 
-If the script touched files you didn't expect, review the changes before committing.
+The command normalizes the repository's comment-style Apache header in the file
+kinds it manages and skips generated directories such as `node_modules`,
+`dist`, `build`, and `.git`.
+
+## 2. Add a TypeScript header deliberately
+
+Every TypeScript source file begins with the same compact native header used by
+adjacent modules:
+
+```ts
+// Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
+// Licensed under the Apache License, Version 2.0.
+```
+
+The maintenance scanner does not insert TypeScript headers automatically, so
+copy this header into a new `.ts` or `.tsx` file at creation time and review it
+as part of the source change.
+
+## 3. Verify the result
+
+For a focused TypeScript tree, list files that lack the canonical copyright
+line:
+
+```bash
+rg -L "^// Copyright 2026 The Xerxes-Agents Author" src/typescript/src -g '*.ts' -g '*.tsx'
+bun test src/typescript/test/maintenanceScripts.test.ts
+git diff --check
+```
+
+The `rg` command should produce no paths for a fully normalized tree. Inspect
+the diff before any commit; the maintenance command must not rewrite generated
+output or unrelated user changes.
 
 ## Common pitfalls
 
-- **Script modifies generated files:** The script should skip `__pycache__`, `.venv`, `dist`, `build`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, but if you have custom generated directories, add them to the skip list in `scripts/fix_license_headers.py`.
-- **Wrong year:** The header says `2026`. If the year changes, update the script's `YEAR` constant.
-- **Missing newline after header:** The script ensures a blank line after the header. If you add it manually, include the blank line.
-- **Shell scripts with shebang:** For `.sh` files, the shebang (`#!/bin/bash`) must come BEFORE the copyright header. The script handles this correctly; manual edits must preserve this order.
-- **YAML files with `---`:** For `.yml`/`.yaml` files, the copyright header is a comment block. The `---` YAML document separator should come AFTER the header, not before it.
+- Preserve a shell shebang as the first line; the comment header follows it.
+- Preserve YAML document separators: the comment header belongs before `---`.
+- Do not add an alternate license text or a different copyright year without an
+  explicit repository-wide decision.
+- Do not use a non-Bun script or external formatter to make header changes.
+- If the scanner omits a file type, make the minimal manual header change and
+  add a native test before broadening scanner behavior.

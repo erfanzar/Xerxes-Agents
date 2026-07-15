@@ -2,11 +2,27 @@
 
 Selected highlights from the project's git history, grouped by major theme. For the full history, run `git log --oneline --no-merges`.
 
-Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, then `Calute`, and now **`xerxes-agent`** (with Python module name `xerxes`).
+The current native work is the Bun/TypeScript cutover. Historical entries below intentionally
+describe the earlier implementation and are not current setup instructions.
 
 ---
 
-## 0.2.6 — 2026-06-23 (current)
+## 0.3.0 — Native Bun/TypeScript migration
+
+- Added the native runtime, CLI, daemon, session, streaming, API, and OpenTUI client paths under the
+  Bun workspace.
+- Replaced the handwritten RST/Sphinx documentation branch with Markdown sources and generated
+  TypeScript API pages.
+- Added native examples, installer, CI/release paths, and focused contract/parity coverage.
+- Completed the Bun-only cutover: retired Python source, tests, tooling, playground paths,
+  virtual-environment artifacts, caches, and distributions are removed; the frozen install,
+  typecheck, full native test suites, build, release-package check, and Bun-only guard pass.
+
+Project identity has shifted over time: originally `eLLM`, renamed to `AgentX`, then `Calute`, and now **`xerxes-agent`** with the native `xerxes` command.
+
+---
+
+## 0.2.6 — 2026-06-23
 
 - Added the bundled `bug-bounty-hunter` multi-iteration swarm repair skill.
 - Bumped the package/runtime version to 0.2.6.

@@ -1,78 +1,55 @@
-# Telegram Gateway
+# Telegram gateway
 
-Xerxes can run as a Telegram bot through the channel gateway.
+The native CLI can start a daemon with Telegram settings:
 
-Long polling is the default, so no public HTTPS endpoint is required:
-
-```bash
-export TELEGRAM_BOT_TOKEN="123456:..."
-xerxes telegram
+```sh
+export TELEGRAM_BOT_TOKEN="…"
+bun run xerxes telegram --project-dir .
 ```
 
-Webhook mode is also supported:
+Pass `--token` to supply a token for the process without storing it in a command profile:
 
-```bash
-export TELEGRAM_BOT_TOKEN="123456:..."
-xerxes telegram \
-  --transport webhook \
-  --host 0.0.0.0 \
-  --port 11997 \
-  --webhook-url https://your-domain.example/telegram/webhook
+```sh
+bun run xerxes telegram --token "$TELEGRAM_BOT_TOKEN" --project-dir .
 ```
 
-If `--transport webhook` is used and `--webhook-url` is omitted, the server
-still exposes `POST /telegram/webhook`; you can register the webhook yourself
-through Telegram's Bot API.
+The command loads the native daemon configuration, enables the Telegram channel, and then starts
+the configured daemon control surfaces. Use `--host`, `--port`, `--socket`, and `--pid-file` for
+the documented daemon launch options. Channel-specific behavior and webhook setup belong in the
+explicit daemon configuration; do not assume a transport or remote registration occurred without a
+configured adapter.
 
-The gateway uses the active Xerxes provider profile. Configure that first in the
-TUI with `/provider`, or pass `--model`, `--base-url`, and `--api-key`.
+For a webhook deployment, configure the native adapter explicitly. The channel router keeps one
+daemon session per Telegram conversation, journals safe input and final replies into the Markdown
+workspace, and loads that workspace as trusted per-turn system context. Telegram replies stream as
+one edited preview by default; set `stream_previews` to `false` to send only the final reply.
 
-## Workspace Memory
-
-Telegram sessions load a Markdown workspace before every agent turn. The default
-location is:
-
-```text
-$XERXES_HOME/agents/default
+```json
+{
+  "workspace": { "root": "~/.xerxes/agents/default" },
+  "channels": {
+    "telegram": {
+      "type": "telegram",
+      "enabled": true,
+      "settings": {
+        "token_env": "TELEGRAM_BOT_TOKEN",
+        "transport": "webhook",
+        "webhook_url": "https://bot.example/channels/telegram/webhook",
+        "webhook_secret_token_env": "XERXES_TELEGRAM_WEBHOOK_SECRET",
+        "allowed_user_ids": ["123456789"],
+        "bot_username": "xerxes_bot",
+        "require_allowed_sender": true,
+        "stream_previews": true,
+        "preview_interval": 1
+      }
+    }
+  }
+}
 ```
 
-If `XERXES_HOME` is not set, this is `~/.xerxes/agents/default`.
+`preview_interval` is in seconds. Long-polling clears an existing Telegram webhook before it
+receives updates. The allowlist is fail-closed when `require_allowed_sender` is enabled.
 
-Files:
-
-| File | Purpose |
-|---|---|
-| `AGENTS.md` | Operating rules for channel sessions |
-| `SOUL.md` | Personality, values, tone, and boundaries |
-| `IDENTITY.md` | Optional presentation identity |
-| `USER.md` | Operator/user preferences and stable context |
-| `TOOLS.md` | Environment-specific tool notes |
-| `MEMORY.md` | Durable long-term memory |
-| `memory/YYYY-MM-DD.md` | Daily notes; today and yesterday are loaded |
-
-The gateway creates safe default files on first run. Each Telegram turn appends
-a short inbound/outbound note to today's daily memory file. `SOUL.md` and
-`MEMORY.md` are loaded as context, but the gateway does not directly rewrite
-them.
-
-## Channel Behavior
-
-- Long polling is the default transport; webhook is optional.
-- Telegram receives a single preview message while the agent streams. The
-  gateway edits that message as text arrives, then edits it to the final answer.
-  Use `--no-stream-previews` to send only final replies.
-- Private chats are handled directly.
-- Group and supergroup messages are ignored unless they mention `xerxes` or use
-  `/xerxes`.
-- Sessions are isolated by private user ID, or by group chat plus forum topic
-  thread ID when present.
-- Channel messages are treated as untrusted input in the default `AGENTS.md`.
-
-## Local Testing
-
-For local webhook testing, expose the port with a tunnel and use that public URL:
-
-```bash
-ngrok http 11997
-xerxes telegram --webhook-url https://<ngrok-id>.ngrok-free.app/telegram/webhook
-```
+Treat inbound channel content as untrusted. The configured runtime still applies policy,
+permissions, prompt scanning, path safety, and the selected tool sandbox before executing a turn.
+Use injected transports in tests so no real Telegram credential or network call is required.

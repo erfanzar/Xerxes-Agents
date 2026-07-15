@@ -1,0 +1,56 @@
+version: 1
+agent:
+  name: default
+  system_prompt_path: ./system.md
+  system_prompt_args:
+    ROLE_ADDITIONAL: ""
+  tools:
+    - ReadFile
+    - WriteFile
+    - FileEditTool
+    - GlobTool
+    - GrepTool
+    - exec_command
+    - write_stdin
+    - list_terminal_sessions
+    - close_terminal_session
+    - DuckDuckGoSearch
+    - agent_memory_status
+    - agent_memory_read
+    - agent_memory_write
+    - agent_memory_append
+    - agent_memory_list
+    - agent_memory_search
+    - agent_memory_journal
+    - AgentTool
+    - SpawnAgents
+    - SendMessageTool
+    - TaskCreateTool
+    - TaskGetTool
+    - TaskListTool
+    - TaskOutputTool
+    - TaskStopTool
+    - TaskUpdateTool
+    - AwaitAgents
+    - CheckAgentMessages
+    - PeekAgent
+    - ResetAgent
+    - HandoffTool
+    - AskUserQuestionTool
+    - SetInteractionModeTool
+    - SkillTool
+    - TodoWriteTool
+    - ToolSearchTool
+  subagents:
+    coder:
+      path: ./coder.yaml
+      description: "Good at general software engineering tasks."
+    researcher:
+      path: ./researcher.yaml
+      description: "Fast codebase exploration with prompt-enforced read-only behavior."
+    planner:
+      path: ./planner.yaml
+      description: "Read-only implementation planning and architecture design."
+    objective:
+      path: ./objective.yaml
+      description: "Hard-goal execution loop with verification gates."

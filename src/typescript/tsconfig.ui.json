@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "jsx": "react-jsx",
+    "outDir": "dist/ui",
+    "rootDir": "src/ui",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["bun", "node"],
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "sourceMap": false,
+    "resolveJsonModule": true
+  },
+  "include": ["src/ui/**/*.d.ts", "src/ui/**/*.ts", "src/ui/**/*.tsx"],
+  "exclude": ["src/ui/__tests__", "node_modules", "dist"]
+}

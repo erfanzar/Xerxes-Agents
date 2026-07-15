@@ -1,206 +1,130 @@
 ---
 name: add-channel-adapter
-description: Scaffold a new messaging channel adapter in the Xerxes channels/ directory. Covers Channel/WebhookChannel subclassing, start/stop/send/parse_inbound, and registry registration.
-version: 1.0.0
-tags: [channels, adapter, messaging, xerxes]
+description: Add a Bun-native messaging channel adapter with lifecycle, webhook, and configuration coverage.
+version: 2.0.0
+tags: [channels, adapter, messaging, typescript, bun, xerxes]
 required_tools: [ReadFile, WriteFile, FileEditTool, GlobTool]
 ---
 
 # When to use
 
-Use this skill when adding a new messaging platform adapter to Xerxes. The framework supports 14+ adapters (Telegram, Slack, Discord, Email, Matrix, WhatsApp, etc.) and adding a new one follows a well-defined pattern.
+Use this skill when adding a native messaging platform adapter or webhook relay
+to Xerxes. An adapter normalizes inbound data into `ChannelMessage`, sends
+outbound messages, and has an explicit asynchronous lifecycle.
 
-Examples:
-- A new chat platform (e.g., Microsoft Teams, Discord forum channels, IRC)
-- A new webhook-based gateway (e.g., custom internal notification system)
-- A new SMS/notification provider (e.g., Twilio, Vonage, PagerDuty)
-
-Do NOT use this for:
-- Adding a new LLM provider (use `add-llm-provider` skill)
-- Adding a new tool (use `add-tool-module` skill)
-- Adding a new memory backend (use `add-memory-backend` skill)
+Do not use this skill for a one-off web client, a provider adapter, or a
+frontend-only integration.
 
 # How to use
 
-## 1. Inspect the base classes
+## 1. Inspect the native channel contracts
 
-Read `src/python/xerxes/channels/base.py` to understand the `Channel` ABC:
+Read these files before writing an adapter:
 
-```python
-class Channel(ABC):
-    name: str = ""
+- `src/typescript/src/channels/base.ts` for `Channel` and `InboundHandler`.
+- `src/typescript/src/channels/types.ts` for `ChannelMessage` and
+  `createChannelMessage()`.
+- `src/typescript/src/channels/webhooks.ts` for `WebhookChannel` and raw-byte
+  webhook handling.
+- A comparable adapter such as `telegram.ts`, `slack.ts`, or
+  `genericWebhook.ts`.
 
-    @abstractmethod
-    def start(self, on_inbound: Callable[[ChannelMessage], None]) -> None: ...
+Every adapter implements this lifecycle:
 
-    @abstractmethod
-    def stop(self) -> None: ...
-
-    @abstractmethod
-    def send(self, message: ChannelMessage) -> None: ...
+```ts
+interface Channel {
+  readonly name: string
+  start(onInbound: InboundHandler): Promise<void>
+  stop(): Promise<void>
+  send(message: ChannelMessage): Promise<void>
+}
 ```
 
-For webhook-based platforms, read `WebhookChannel` in the same file:
+Use `WebhookChannel` when the provider pushes raw HTTP callbacks. It preserves
+the original headers and bytes for signature validation, normalizes errors into
+safe HTTP responses, and dispatches parsed messages through the installed
+inbound handler.
 
-```python
-class WebhookChannel(Channel, ABC):
-    @abstractmethod
-    def _parse_inbound(self, headers: dict, body: bytes) -> list[ChannelMessage]: ...
+## 2. Implement a concrete TypeScript adapter
 
-    @abstractmethod
-    def _send_outbound(self, message: ChannelMessage) -> None: ...
+Create a descriptive camel-case module under `src/typescript/src/channels/`,
+for example `myPlatform.ts`. Start it with the Apache-2.0 header used by nearby
+native modules.
+
+```ts
+import type { Channel, InboundHandler } from './base.js'
+import type { ChannelMessage } from './types.js'
+
+export class MyPlatformChannel implements Channel {
+  readonly name = 'my_platform'
+  #onInbound: InboundHandler | undefined
+
+  async start(onInbound: InboundHandler): Promise<void> {
+    this.#onInbound = onInbound
+    // Start only the configured platform transport.
+  }
+
+  async stop(): Promise<void> {
+    this.#onInbound = undefined
+    // Close owned sockets or timers.
+  }
+
+  async send(message: ChannelMessage): Promise<void> {
+    // Send a normalized outbound message with an explicit HTTP/WebSocket port.
+  }
+}
 ```
 
-Also read one existing adapter as a reference:
-- `src/python/xerxes/channels/adapters/telegram.py` — polling-based
-- `src/python/xerxes/channels/adapters/slack.py` — webhook-based
-- `src/python/xerxes/channels/adapters/email_imap.py` — IMAP polling
+Use injected `fetch`, WebSocket, REST, or SDK ports where tests need a
+deterministic fake. Validate provider payloads at the adapter boundary. Do not
+discover credentials, silently start an unrelated daemon, or turn an unconfigured
+transport into a success response.
 
-## 2. Create the adapter module
+## 3. Register configuration deliberately
 
-Create a new file under `src/python/xerxes/channels/adapters/` (e.g., `my_platform.py`):
+For a built-in configured channel, add its constructor to the `switch` in
+`src/typescript/src/channels/configured.ts`, then export the module from
+`src/typescript/src/channels/index.ts`. Use the `ConfiguredChannelManager`
+contract so `channel.list`, `channel.enable`, and `channel.disable` expose
+configuration and lifecycle errors accurately.
 
-```python
-# Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
-# ... (Apache-2.0 header)
+If the adapter needs host-owned non-serializable ports, extend
+`ConfiguredChannelTransportPorts` or supply a `ConfiguredChannelFactory` from
+`src/typescript/src/daemon/channels.ts`. Keep credentials in the resolved
+daemon configuration or explicitly supplied host ports, never in source or
+tests.
 
-from __future__ import annotations
-import logging
-from typing import Any
+## 4. Add focused Bun tests
 
-from ..base import Channel, ChannelMessage, WebhookChannel
+Place tests under `src/typescript/test/` alongside the closest channel suite.
+Cover observable behavior:
 
-logger = logging.getLogger(__name__)
+- `start()` and `stop()` lifecycle,
+- inbound normalization and `ChannelMessage` ownership,
+- outbound serialization and error propagation,
+- webhook signature/raw-body behavior when applicable, and
+- configured manager enable/disable behavior if the adapter is built in.
 
+Mock every external HTTP or WebSocket call. Do not contact a real platform from
+the test suite.
 
-class MyPlatformChannel(Channel):
-    """Adapter for MyPlatform messaging."""
-
-    name = "my_platform"
-
-    def __init__(self, token: str | None = None, **kwargs: Any) -> None:
-        self.token = token
-        self._client = None
-        self._on_inbound: Callable[[ChannelMessage], None] | None = None
-
-    def start(self, on_inbound: Callable[[ChannelMessage], None]) -> None:
-        """Start receiving messages."""
-        self._on_inbound = on_inbound
-        # For polling: start a background thread or asyncio task
-        # For webhook: register URL handler with the daemon
-        logger.info("MyPlatform channel started")
-
-    def stop(self) -> None:
-        """Stop receiving messages and close connections."""
-        if self._client:
-            self._client.close()
-        logger.info("MyPlatform channel stopped")
-
-    def send(self, message: ChannelMessage) -> None:
-        """Send an outbound message."""
-        # Implement platform-specific send logic
-        pass
-```
-
-**Rules:**
-- The class MUST set `name` as a class attribute (snake_case, matching the module name convention).
-- `start()`, `stop()`, and `send()` are mandatory for all channels.
-- For webhook-based channels, subclass `WebhookChannel` and implement `_parse_inbound()` and `_send_outbound()` instead.
-
-## 3. Register the adapter
-
-Open `src/python/xerxes/channels/registry.py` (or the equivalent registration point) and add:
-
-```python
-from .adapters.my_platform import MyPlatformChannel
-
-# In the registry setup or factory function:
-registry.register("my_platform", MyPlatformChannel)
-```
-
-If the framework uses entry-point or auto-discovery registration, add the adapter to the discovery list. Check how existing adapters are registered (grep for `registry.register` or `ChannelRegistry` in `channels/`).
-
-## 4. Add to `__init__.py` re-exports
-
-Open `src/python/xerxes/channels/__init__.py` and add the adapter to `__all__` if the package re-exports adapters:
-
-```python
-from .adapters.my_platform import MyPlatformChannel
-
-__all__ = [
-    # ... existing adapters ...
-    "MyPlatformChannel",
-]
-```
-
-## 5. Add configuration support (if needed)
-
-If the channel requires configuration (e.g., API token, webhook URL), check how existing channels load config:
-
-- Read `src/python/xerxes/channels/_helpers.py` for config parsing helpers.
-- Read `src/python/xerxes/core/config.py` to see if channel config is part of `XerxesConfig`.
-
-Many channels accept config via:
-- Environment variables (e.g., `TELEGRAM_BOT_TOKEN`)
-- Constructor arguments passed by the daemon or bridge
-- YAML config files
-
-## 6. Add tests
-
-Create `tests/channels/adapters/test_my_platform.py`:
-
-```python
-import pytest
-from xerxes.channels.adapters.my_platform import MyPlatformChannel
-from xerxes.channels.base import ChannelMessage
-
-
-class TestMyPlatformChannel:
-    def test_name_is_set(self):
-        assert MyPlatformChannel.name == "my_platform"
-
-    def test_start_and_stop(self):
-        ch = MyPlatformChannel(token="dummy")
-        received = []
-        ch.start(lambda msg: received.append(msg))
-        ch.stop()
-        # Assert no exceptions and proper cleanup
-
-    def test_send_outbound(self):
-        ch = MyPlatformChannel(token="dummy")
-        msg = ChannelMessage(text="hello", channel="my_platform", sender_id="u1")
-        # Mock the HTTP client and assert send() calls it correctly
-```
-
-**Rules:**
-- Mock all external HTTP/API calls. Never hit real endpoints in tests.
-- Test `start()`/`stop()` lifecycle, `send()` outbound, and `_parse_inbound()` for webhooks.
-- For webhook channels, test `_parse_inbound()` with sample HTTP request bodies.
-
-## 7. Run lint and type check
+Run the relevant suite, for example:
 
 ```bash
-uv run ruff check --fix src/python/xerxes/channels/adapters/my_platform.py
-uv run mypy src/python/xerxes/channels/adapters/my_platform.py --ignore-missing-imports
-```
-
-## 8. Verify registration
-
-Run:
-
-```bash
-uv run python -c "
-from xerxes.channels.registry import ChannelRegistry
-# or whatever the registration mechanism is
-print('my_platform' in registry.list_channels())
-"
+bun test src/typescript/test/channelAdapters.test.ts
+bun test src/typescript/test/channels.test.ts
+bun run --cwd src/typescript check
 ```
 
 ## Common pitfalls
 
-- **Missing `name` attribute:** The channel won't be discoverable by the registry.
-- **Not implementing `stop()`:** Resource leaks (open HTTP connections, background threads) will accumulate.
-- **Blocking `start()`:** `start()` should return immediately and spin up background work asynchronously. Don't block the caller.
-- **Uncaught exceptions in background threads:** Any exception in the polling loop should be logged and the channel should attempt to reconnect, not crash silently.
-- **Webhook URL construction without `urllib.parse`:** Always use `urllib.parse` for URL construction to avoid injection bugs (e.g., `urllib.parse.urljoin(base, endpoint)`).
-- **Forgetting to handle `ChannelMessage` type:** Ensure `send()` accepts the correct `ChannelMessage` type from `channels/base.py`.
+- Adapter `name` must be stable and match the configured channel type or
+  registry name that users select.
+- Never block `start()` while waiting for a remote message. Start a managed
+  asynchronous loop and stop it cleanly.
+- Preserve raw webhook bytes for verification; parsing before signature checks
+  can invalidate the provider contract.
+- Copy message metadata and attachments rather than sharing mutable input
+  objects across turns.
+- A configured but unavailable transport must be listed with its real error;
+  it must not be replaced with a fabricated relay or fallback.

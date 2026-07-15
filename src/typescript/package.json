@@ -1,0 +1,49 @@
+{
+  "name": "@xerxes/runtime",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Bun-native TypeScript runtime for Xerxes.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "bun run build:runtime && bun run build:ui",
+    "build:runtime": "bun build ./src/cli.ts --target=bun --minify --outdir ./dist && bun ./scripts/copyBundledSkills.ts",
+    "build:ui": "bun ./scripts/buildTui.ts && bun ./scripts/verifyTuiBuild.ts",
+    "check": "bun run check:runtime && bun run check:ui",
+    "check:runtime": "bunx tsc --noEmit -p tsconfig.json",
+    "check:ui": "bunx --bun --no-install tsc --noEmit -p tsconfig.ui.json",
+    "cleanup-docstrings": "bun ./src/maintenance/cleanupDuplicateDocstrings.ts",
+    "dev": "bun --watch ./src/cli.ts",
+    "docs:build": "bun ./src/docs/cli.ts",
+    "docs:api": "bun ./src/maintenance/apiDocsGenerator.ts",
+    "fix-license-headers": "bun ./src/maintenance/fixLicenseHeaders.ts",
+    "generate-jsdoc": "bun ./src/maintenance/generateJSDoc.ts",
+    "playground:warmup": "bun ./playground/cli.ts",
+    "playground:hard": "bun ./playground/hardCli.ts",
+    "real-use": "bun ./scripts/realUseCheck.ts",
+    "remove-docstrings": "bun ./src/maintenance/removeDocstrings.ts",
+    "smoke:ui": "bun ./scripts/smokeTuiGateway.ts && bun ./scripts/smokeTuiComplete.ts",
+    "start": "bun ./src/cli.ts",
+    "start:ui": "bun run build:ui && bun ./dist/ui/entry.js",
+    "swarm": "bun ./scripts/swarmIntegration.ts",
+    "test": "bun run test:runtime && bun run test:ui",
+    "test:runtime": "bun test ./test",
+    "test:ui": "bunx --bun --no-install vitest run --config vitest.ui.config.ts",
+    "test:ui:watch": "bunx --bun --no-install vitest --config vitest.ui.config.ts"
+  },
+  "dependencies": {
+    "@nanostores/react": "^1.1.0",
+    "@opentui/core": "0.4.3",
+    "@opentui/react": "0.4.3",
+    "nanostores": "^1.2.0",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.12",
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.14",
+    "prettier": "^3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.3"
+  }
+}

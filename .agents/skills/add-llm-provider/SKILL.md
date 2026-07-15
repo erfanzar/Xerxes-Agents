@@ -1,131 +1,96 @@
 ---
 name: add-llm-provider
-description: Scaffold a new LLM provider entry in the Xerxes registry. Covers ProviderConfig, COSTS, prefix detection, default headers, and context limits.
-version: 1.0.0
-tags: [llm, provider, registry, xerxes]
+description: Add a Bun-native LLM provider entry with routing, pricing, headers, limits, and Bun tests.
+version: 2.0.0
+tags: [llm, provider, registry, typescript, bun, xerxes]
 required_tools: [ReadFile, WriteFile, FileEditTool]
 ---
 
 # When to use
 
-Use this skill when you need to add support for a new LLM provider to Xerxes-Agents. The provider must expose an OpenAI-compatible API (or an API that the existing `OpenAILLM` / `AnthropicLLM` / `GeminiLLM` adapter can speak to with minor tweaks).
-
-Examples:
-- A new inference provider (e.g., Fireworks, Together AI, Groq, AI21, etc.)
-- A new local endpoint (e.g., vLLM, TGI, custom internal API)
-- A new cloud provider with an OpenAI-compatible gateway
-
-Do NOT use this for providers that require a completely new wire protocol (e.g., a new non-OpenAI, non-Anthropic, non-Gemini protocol). In that case, you need a new `BaseLLM` subclass in `llms/` too.
+Use this skill when adding a provider that can use one of Xerxes' native
+transports: OpenAI-compatible HTTP, Anthropic, or the local Claude Code
+transport. Use a separate native client implementation when a provider needs a
+new wire protocol.
 
 # How to use
 
-## 1. Inspect the current registry
+## 1. Inspect the native registry and client boundary
 
-Read `src/python/xerxes/llms/registry.py` to understand the current `PROVIDERS`, `COSTS`, `_PREFIX_MAP`, `_PROVIDER_DEFAULT_HEADERS`, and `_MODEL_CONTEXT_LIMITS` structures.
+Read:
 
-## 2. Add a `ProviderConfig` entry to `PROVIDERS`
+- `src/typescript/src/llms/providerRegistry.ts`
+- `src/typescript/src/llms/client.ts`
+- `src/typescript/test/providerRegistry.test.ts`
 
-In `src/python/xerxes/llms/registry.py`, locate the `PROVIDERS` dict and add a new entry:
+`ProviderConfig` uses native camel-case fields: `apiKeyEnv`, `baseUrl`,
+`contextLimit`, `models`, and `transport`. Provider selection supports explicit
+`provider/model` notation before model-prefix routing.
 
-```python
-"myprovider": ProviderConfig(
-    name="myprovider",
-    type="openai",          # or "anthropic", "gemini", etc. depending on adapter
-    api_key_env="MYPROVIDER_API_KEY",
-    base_url="https://api.myprovider.com/v1",
-    context_limit=128_000,  # default for this provider
-    models=[
-        "myprovider-model-1",
-        "myprovider-model-2",
-    ],
-    default_api_key=None,
-),
+## 2. Add the provider metadata
+
+Add a `provider(...)` entry to `PROVIDERS` in
+`src/typescript/src/llms/providerRegistry.ts`:
+
+```ts
+myprovider: provider('myprovider', 'openai', {
+  apiKeyEnv: 'MYPROVIDER_API_KEY',
+  baseUrl: 'https://api.myprovider.example/v1',
+  contextLimit: 128_000,
+  models: ['myprovider-chat-1', 'myprovider-chat-2'],
+}),
 ```
 
-**Rules:**
-- `name` must match the dict key exactly.
-- `type` must be one of the supported adapter types: `"openai"`, `"anthropic"`, `"gemini"`, `"custom"`.
-- `api_key_env` is the environment variable name the user should set. If the provider requires no key (e.g., local Ollama), set it to `None`.
-- `base_url` is the default base URL. If the provider is just a prefix alias for an existing provider (e.g., `groq` uses OpenAI-compatible API), set `base_url` to the provider's actual endpoint.
+Use an existing `ProviderTransport` only when the client can actually speak the
+provider's protocol. A local endpoint that needs no key can omit `apiKeyEnv` and
+use `defaultApiKey` only when the endpoint requires a non-secret placeholder.
 
-## 3. Add per-model pricing to `COSTS`
+## 3. Complete routing and accounting
 
-In the same file, locate the `COSTS` dict (USD per 1M tokens). Add:
+Update every applicable native registry location in the same change:
 
-```python
-"myprovider-model-1": (0.50, 1.50),   # (input_cost_per_1M, output_cost_per_1M)
-"myprovider-model-2": (5.00, 15.00),
-```
+1. Add model rates to `COSTS` as `[inputUsdPerMillion,
+   outputUsdPerMillion]`. Use `[0, 0]` only when the model is genuinely free
+   or its price is intentionally unknown.
+2. Add distinctive model prefixes to `PREFIX_MAP`. It is sorted longest-first;
+   avoid collisions with existing providers.
+3. Add a `MODEL_CONTEXT_LIMITS` entry only when a model differs from the
+   provider-wide `contextLimit`.
+4. Add a `providerDefaultHeaders()` branch only when the provider explicitly
+   requires a header.
 
-**Rules:**
-- Every model listed in `PROVIDERS[...].models` MUST have a `COSTS` entry, even if free (use `(0.0, 0.0)`).
-- Costs are per **1 million tokens**.
+Keep model spellings consistent between the provider entry, cost table, prefix
+rules, context overrides, documentation, and tests.
 
-## 4. Add prefix detection to `_PREFIX_MAP`
+## 4. Implement a new transport when required
 
-Locate `_PREFIX_MAP` (longest-match prefix → provider name). Add:
+Do not pretend a non-compatible endpoint is OpenAI-compatible. Add an explicit
+native client in `src/typescript/src/llms/`, make the transport discriminant
+and `createLlmClient()` handle it, and use a deterministic injected fetch or
+transport in tests. Surface provider errors with redacted context; never log an
+API key.
 
-```python
-"myprovider-": "myprovider",
-"myprovider-model-": "myprovider",
-```
+## 5. Add Bun tests and verify
 
-**Rules:**
-- Longest match wins. Be specific enough to avoid collisions with other providers.
-- Include both the bare model prefix and the provider-prefixed form if users might write `provider/model` notation.
-- If the provider has no distinctive prefix (e.g., a custom local endpoint), you can skip this step and rely on `detect_provider()` fallback logic, but it's better to add a prefix.
+Extend `src/typescript/test/providerRegistry.test.ts` for prefix resolution,
+explicit provider notation, context limit, pricing, and required headers. Add a
+client test when transport behavior changes.
 
-## 5. Add custom headers if needed
-
-Locate `_PROVIDER_DEFAULT_HEADERS`. If the provider requires a custom User-Agent or other header (e.g., Kimi Code's `claude-code/1.0.0` spoof), add:
-
-```python
-"myprovider": {
-    "User-Agent": "myprovider-client/1.0.0",
-},
-```
-
-**Rules:**
-- Only add headers if the provider documentation explicitly requires them.
-- Headers are merged into every request made by the adapter.
-
-## 6. Add context limit overrides if needed
-
-Locate `_MODEL_CONTEXT_LIMITS`. If any model has a non-default context window, add:
-
-```python
-"myprovider-model-1": 256_000,
-```
-
-**Rules:**
-- Only add overrides for models that deviate from the provider's default `context_limit` set in `ProviderConfig`.
-- Use the exact model name string as the key.
-
-## 7. Verify
-
-After editing, run the following to confirm the provider is discoverable:
+Run:
 
 ```bash
-uv run python -c "
-from xerxes.llms.registry import detect_provider, list_all_models
-print(detect_provider('myprovider-model-1'))
-print(list_all_models())
-"
+bun test src/typescript/test/providerRegistry.test.ts
+bun test src/typescript/test/llmTypesParity.test.ts
+bun run --cwd src/typescript check
 ```
-
-## 8. Run lint
-
-```bash
-uv run ruff check --fix src/python/xerxes/llms/registry.py
-```
-
-## 9. Add a test
-
-If the provider has distinctive behavior (custom headers, special prefix, context limit overrides), add a test in `tests/llms/test_registry.py` following the existing pattern (e.g., `test_detect_provider_*`).
 
 ## Common pitfalls
 
-- **Mismatched model names:** `PROVIDERS["myprovider"].models` and `COSTS` keys must be identical strings. Typos here cause `calc_cost()` to return `None` silently.
-- **Missing COSTS entry:** Even free models need `(0.0, 0.0)`.
-- **Prefix collisions:** `_PREFIX_MAP` is longest-match. If two providers share a prefix (e.g., `mistral` and `mistral-large`), the longer key wins. Check the existing map before adding.
-- **Provider type mismatch:** If the provider is NOT OpenAI-compatible, you need a new `BaseLLM` subclass. See `llms/openai.py` for the OpenAI-compatible adapter pattern and `llms/anthropic.py` for a non-OpenAI adapter.
+- `transport` is a native protocol choice, not a marketing label.
+- The explicit `provider/model` form takes precedence over prefixes; test both.
+- Do not use environment discovery in tests. Pass an environment record or
+  provider override explicitly.
+- Prefix collisions route the wrong client. Add the narrowest distinctive
+  prefix and inspect the sorted map.
+- Keep costs and context limits as source-controlled metadata, not ad-hoc
+  runtime configuration.
