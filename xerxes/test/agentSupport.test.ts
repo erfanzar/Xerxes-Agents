@@ -122,6 +122,8 @@ test('subagent manager layers definitions, queues native runner input, reports t
   expect(settled?.status).toBe('completed')
   expect(calls.map(call => call.prompt)).toEqual(['inspect the service', 'inspect tests too'])
   expect(calls[0]?.systemPrompt).toContain('You are now running as a subagent')
+  expect(calls[0]?.systemPrompt).toContain('The filesystem is shared with the parent and other agents.')
+  expect(calls[0]?.systemPrompt).toContain('Return a distilled final summary')
   expect(calls[0]?.config).toMatchObject({ model: 'gpt-test', _toolsAllowed: ['ReadFile', 'WriteFile'] })
   expect(task.readFiles).toEqual(new Set(['/workspace/src/service.ts']))
   expect(manager.peekMailbox().map(event => event.type)).toEqual(expect.arrayContaining(['spawn', 'tool_start', 'tool_end', 'done']))
@@ -131,16 +133,17 @@ test('subagent manager layers definitions, queues native runner input, reports t
   await manager.close()
 })
 
-test('subagent tool filtering prevents recursive delegation through the provided executor', async () => {
+test('subagent tool filtering prevents recursive delegation and parent-mode mutation', async () => {
   const calls: string[] = []
   const filtered = filterSubagentTools({
     isSubagent: true,
     toolSchemas: [
       { name: 'ReadFile' },
+      { name: 'SetInteractionModeTool' },
       { name: 'SpawnAgents' },
       { name: 'WriteFile' },
     ],
-    config: { _toolsAllowed: ['ReadFile', 'SpawnAgents'] },
+    config: { _toolsAllowed: ['ReadFile', 'SetInteractionModeTool', 'SpawnAgents'] },
     toolExecutor: toolName => {
       calls.push(toolName)
       return 'ok'
@@ -149,6 +152,9 @@ test('subagent tool filtering prevents recursive delegation through the provided
 
   expect(filtered.toolSchemas.map(schema => schema.name)).toEqual(['ReadFile'])
   expect(await filtered.execute?.('ReadFile', {})).toBe('ok')
+  expect(await filtered.execute?.('SetInteractionModeTool', {})).toBe(
+    "Error: tool 'SetInteractionModeTool' is not allowed for this agent.",
+  )
   expect(await filtered.execute?.('SpawnAgents', {})).toBe("Error: tool 'SpawnAgents' is not allowed for this agent.")
   expect(calls).toEqual(['ReadFile'])
 })

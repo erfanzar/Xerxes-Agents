@@ -48,7 +48,7 @@ test('bootstrap prompt retains guidance only for the supplied terminal, mode, an
     '- objective: hard-goal loop for measurable outcomes.',
   )
   expect(prompt).toContain(
-    'Switch modes with SetInteractionModeTool and follow its supplied schema.',
+    'SetInteractionModeTool schedules a mode for the next user turn',
   )
   expect(prompt).toContain(
     'Do not final-answer in objective mode while acceptance criteria are unmet',

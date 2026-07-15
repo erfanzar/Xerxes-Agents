@@ -5,6 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
 import { createAgentState } from '../src/streaming/events.js'
 import { runTurn } from '../src/streaming/loop.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
@@ -81,9 +82,21 @@ class ObjectiveClient implements LlmClient {
   async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
     this.requests.push(request)
     this.attempts += 1
-    yield {
-      content: this.attempts === 1 ? 'I need to investigate more.' : 'All tests pass.',
+    if (this.attempts === 1) {
+      yield { content: 'I need to investigate more.' }
+      return
     }
+    if (this.attempts === 2) {
+      yield {
+        toolCalls: [{
+          id: 'call-objective-tests',
+          type: 'function',
+          function: { name: 'exec_command', arguments: { cmd: 'bun', args: ['test'] } },
+        }],
+      }
+      return
+    }
+    yield { content: 'All tests pass.' }
   }
 }
 
@@ -96,9 +109,118 @@ class UnverifiedObjectiveClient implements LlmClient {
   }
 }
 
+class UnsupportedSuccessObjectiveClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    yield { content: 'All tests pass.' }
+  }
+}
+
+class ModeThenObjectiveClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    if (this.requests.length === 1) {
+      yield {
+        toolCalls: [{
+          id: 'call-mode-objective',
+          type: 'function',
+          function: { name: 'SetInteractionModeTool', arguments: { mode: 'objective' } },
+        }],
+      }
+      return
+    }
+    if (this.requests.length === 2) {
+      yield { content: 'I still need to finish.' }
+      return
+    }
+    if (this.requests.length === 3) {
+      yield {
+        toolCalls: [{
+          id: 'call-mode-objective-tests',
+          type: 'function',
+          function: { name: 'exec_command', arguments: { cmd: 'bun', args: ['test'] } },
+        }],
+      }
+      return
+    }
+    yield { content: 'Verified complete: all tests pass.' }
+  }
+}
+
+class FailedBlockerObjectiveClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    if (this.requests.length === 1) {
+      yield {
+        toolCalls: [{
+          id: 'call-objective-failure',
+          type: 'function',
+          function: { name: 'exec_command', arguments: { cmd: 'bun', args: ['test'] } },
+        }],
+      }
+      return
+    }
+    yield { content: 'BLOCKED: missing dependency. Evidence: command stderr says package not installed.' }
+  }
+}
+
+class VerificationThenMutationClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    if (this.requests.length === 1) {
+      yield {
+        toolCalls: [{
+          id: 'call-stale-tests',
+          type: 'function',
+          function: { name: 'exec_command', arguments: { cmd: 'bun', args: ['test'] } },
+        }],
+      }
+      return
+    }
+    if (this.requests.length === 2) {
+      yield {
+        toolCalls: [{
+          id: 'call-post-test-write',
+          type: 'function',
+          function: { name: 'WriteFile', arguments: { file_path: 'answer.ts', content: 'changed' } },
+        }],
+      }
+      return
+    }
+    yield { content: 'All tests pass.' }
+  }
+}
+
 const readFile: ToolDefinition = {
   type: 'function',
   function: { name: 'ReadFile', description: 'Read a file.', parameters: {} },
+}
+
+const execCommand: ToolDefinition = {
+  type: 'function',
+  function: { name: 'exec_command', description: 'Run a command.', parameters: {} },
+}
+
+const writeFile: ToolDefinition = {
+  type: 'function',
+  function: { name: 'WriteFile', description: 'Write a file.', parameters: {} },
+}
+
+function registerSuccessfulVerification(registry: ToolRegistry): void {
+  registry.register(execCommand, () => ({
+    exitCode: 0,
+    stderr: '',
+    stdout: '1 pass',
+    timedOut: false,
+  }))
 }
 
 test('agent loop pairs model tool calls with results and preserves thinking separation', async () => {
@@ -185,19 +307,23 @@ test('agent loop removes a long cross-tool suffix overlap without hiding new fin
 
 test('objective mode feeds premature text-only stops back into the loop until verified completion', async () => {
   const client = new ObjectiveClient()
+  const registry = new ToolRegistry()
+  registerSuccessfulVerification(registry)
   const state = createAgentState()
   const events = []
 
   for await (const event of runTurn({
     interactionMode: 'objective',
     model: 'gpt-4o',
+    permissionMode: 'accept-all',
     state,
+    tools: registry.definitions(),
     userMessage: 'finish the task',
-  }, { llm: client })) {
+  }, { llm: client, toolExecutor: registry })) {
     events.push(event)
   }
 
-  expect(client.requests).toHaveLength(2)
+  expect(client.requests).toHaveLength(3)
   expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
     'I need to investigate more.',
     '\n[Objective gate: no verified completion or concrete blocker evidence. Continuing.]',
@@ -208,7 +334,59 @@ test('objective mode feeds premature text-only stops back into the loop until ve
       && typeof message.content === 'string'
       && message.content.includes('[Objective gate]')
   ))).toBe(true)
-  expect(state.messages.map(message => message.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+  expect(state.messages.map(message => message.role)).toEqual([
+    'user', 'assistant', 'user', 'assistant', 'tool', 'assistant',
+  ])
+})
+
+test('a model mode transition is deferred so the next turn receives the enforced objective policy', async () => {
+  const client = new ModeThenObjectiveClient()
+  const registry = new ToolRegistry()
+  registerInteractionModeTool(registry, {
+    setMode({ mode }) {
+      return { mode, planMode: mode === 'plan' }
+    },
+  })
+  registerSuccessfulVerification(registry)
+  const state = createAgentState()
+  const events = []
+
+  for await (const event of runTurn({
+    interactionMode: 'code',
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: registry.definitions(),
+    userMessage: 'switch to objective mode and finish',
+  }, { llm: client, toolExecutor: registry })) {
+    events.push(event)
+  }
+
+  expect(client.requests).toHaveLength(2)
+  expect(state.metadata).toMatchObject({ pending_interaction_mode: 'objective' })
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).not.toContain(
+    '\n[Objective gate: no verified completion or concrete blocker evidence. Continuing.]',
+  )
+  const modeResult = state.messages.find(message => message.role === 'tool')
+  expect(String(modeResult?.content)).toContain('apply on the next user turn')
+
+  state.metadata.interaction_mode = 'objective'
+  delete state.metadata.pending_interaction_mode
+  for await (const event of runTurn({
+    interactionMode: 'objective',
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: registry.definitions(),
+    userMessage: 'continue under objective mode',
+  }, { llm: client, toolExecutor: registry })) {
+    events.push(event)
+  }
+
+  expect(client.requests).toHaveLength(4)
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toContain(
+    'Verified complete: all tests pass.',
+  )
 })
 
 test('objective mode stops visibly after its configured retry ceiling', async () => {
@@ -227,5 +405,91 @@ test('objective mode stops visibly after its configured retry ceiling', async ()
   }
 
   expect(client.requests).toHaveLength(2)
+  expect(output.at(-1)).toContain('after 1 retries')
+})
+
+test('objective mode ignores verification executions retained from an earlier turn', async () => {
+  const client = new UnsupportedSuccessObjectiveClient()
+  const state = createAgentState()
+  state.toolExecutions.push({
+    durationMs: 1,
+    inputs: { cmd: 'bun', args: ['test'] },
+    name: 'exec_command',
+    permitted: true,
+    result: JSON.stringify({ exitCode: 0, stdout: '1 pass', timedOut: false }),
+    toolCallId: 'prior-turn-test',
+  })
+  const output: string[] = []
+
+  for await (const event of runTurn({
+    interactionMode: 'objective',
+    model: 'gpt-4o',
+    objectiveGuardMaxRetries: 1,
+    state,
+    userMessage: 'finish a new task',
+  }, { llm: client })) {
+    if (event.type === 'text') output.push(event.text)
+  }
+
+  expect(client.requests).toHaveLength(2)
+  expect(output).toContain(
+    '\n[Objective gate: unsupported success claim `all tests pass` without current-turn verification evidence. Continuing.]',
+  )
+  expect(output.at(-1)).toContain('after 1 retries')
+})
+
+test('objective mode accepts a blocker only when the current turn recorded a runtime failure', async () => {
+  const client = new FailedBlockerObjectiveClient()
+  const registry = new ToolRegistry()
+  registry.register(execCommand, () => ({
+    exitCode: 1,
+    stderr: 'package not installed',
+    stdout: '',
+    timedOut: false,
+  }))
+  const state = createAgentState()
+  const output: string[] = []
+
+  for await (const event of runTurn({
+    interactionMode: 'objective',
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: registry.definitions(),
+    userMessage: 'finish or report a concrete blocker',
+  }, { llm: client, toolExecutor: registry })) {
+    if (event.type === 'text') output.push(event.text)
+  }
+
+  expect(client.requests).toHaveLength(2)
+  expect(output).toEqual([
+    'BLOCKED: missing dependency. Evidence: command stderr says package not installed.',
+  ])
+})
+
+test('objective mode expires successful verification after a later mutating tool', async () => {
+  const client = new VerificationThenMutationClient()
+  const registry = new ToolRegistry()
+  registerSuccessfulVerification(registry)
+  registry.register(writeFile, () => 'Wrote answer.ts.')
+  const state = createAgentState()
+  const output: string[] = []
+
+  for await (const event of runTurn({
+    interactionMode: 'objective',
+    model: 'gpt-4o',
+    objectiveGuardMaxRetries: 1,
+    permissionMode: 'accept-all',
+    state,
+    tools: registry.definitions(),
+    userMessage: 'verify, change, and finish',
+  }, { llm: client, toolExecutor: registry })) {
+    if (event.type === 'text') output.push(event.text)
+  }
+
+  expect(client.requests).toHaveLength(4)
+  expect(output).toContain(
+    '\n[Objective gate: unsupported success claim `all tests pass` without current-turn verification evidence. Continuing.]',
+  )
   expect(output.at(-1)).toContain('after 1 retries')
 })

@@ -143,9 +143,21 @@ Useful commands:
 ```
 
 Press `Tab` with no completion menu open to cycle interaction modes. Mode changes
-update the interface palette only: code is neutral gray, researcher is blue, plan is
-gold, and objective is purple. They do not add transcript messages or spend a model
-turn.
+only change the interface palette visually: code is neutral gray, researcher is blue,
+plan is gold, and objective is purple. They do not add transcript messages or spend a
+model turn. On the next request, a hidden mode overlay gives the model the matching
+behavior: normal implementation, evidence-first research, plan-only design, or an
+iterative objective loop with verification gates. Researcher and plan modes also
+enforce read-only tool ceilings and a non-YOLO permission policy; changing the palette
+cannot silently retain write or command execution access.
+
+When delegation tools are available, every non-trivial request makes the main agent
+proactively decide whether independent work should be delegated. It keeps the critical path and final integration, while
+bounded coder, researcher, planner, reviewer, tester, or objective agents handle
+parallel side work with explicit ownership and return distilled results. Greetings,
+simple questions, one-step changes, and tightly coupled edits stay in the main agent.
+The same native delegation surface is available in the TUI, one-shot CLI, daemon, and
+ACP server.
 
 YOLO mode (`accept-all`) is the default permission mode and is shown beside the
 active model while enabled. Use `/yolo` to switch between YOLO and automatic

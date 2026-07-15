@@ -4,6 +4,7 @@
 import type { AgentDefinition } from '../agents/definitions.js'
 import type { AuditEmitter } from '../audit/emitter.js'
 import { estimateContextTokens } from '../context/windowUsage.js'
+import { ValidationError } from '../core/errors.js'
 import type { ToolExecutor } from '../executors/toolRegistry.js'
 import type { AgentMemory } from '../memory/agentMemory.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
@@ -11,13 +12,19 @@ import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
 import type { LlmClient } from '../llms/client.js'
 import { getContextLimit } from '../llms/providerRegistry.js'
+import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
+import { withActiveSession } from '../runtime/sessionContext.js'
+import { captureUserWorkflowMemory } from '../runtime/workflowMemory.js'
 import { createAgentState, type AgentState, type StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
-import type { PermissionBroker, PermissionMode, ToolPolicy } from '../streaming/permissions.js'
+import {
+  DEFAULT_PERMISSION_MODE,
+  type PermissionBroker,
+  type PermissionMode,
+  type ToolPolicy,
+} from '../streaming/permissions.js'
 import type { ChatMessage, MessageContent } from '../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
-import { captureUserWorkflowMemory } from '../runtime/workflowMemory.js'
-import { withActiveSession } from '../runtime/sessionContext.js'
 import type { DaemonInteractionBoard, DaemonQuestion } from './interactions.js'
 import type { DaemonEvent, DaemonSession, TurnRunControls, TurnRunner } from './runtime.js'
 import type { DaemonSubagentEventSource } from './subagentEvents.js'
@@ -31,7 +38,7 @@ export interface AgentTurnRunnerOptions {
   readonly agentSelfMemory?: (
     session: DaemonSession,
   ) => AgentSelfMemory | undefined | Promise<AgentSelfMemory | undefined>
-  /** Native bootstrap prompt provider, cached per workspace/model pair. */
+  /** Native bootstrap prompt provider, cached per workspace/model/agent/tool surface. */
   readonly bootstrapSystemPrompt?: BootstrapSystemPromptProvider
   /** Optional structured audit sink fed from the canonical streaming events. */
   readonly auditEmitter?: AuditEmitter
@@ -55,6 +62,8 @@ export interface AgentTurnRunnerOptions {
 }
 
 export interface BootstrapSystemPromptInput {
+  /** Effective profile supplying mode-specific prompt and child catalog. */
+  readonly agentId: string
   readonly model: string
   readonly session: DaemonSession
   readonly tools: readonly ToolDefinition[] | undefined
@@ -83,10 +92,33 @@ export class AgentTurnRunner implements TurnRunner {
     const state = this.states.get(session.id) ?? stateFromSession(session)
     this.states.set(session.id, state)
     state.metadata.project_root = session.cwd
+    state.metadata.interaction_mode = session.interactionMode
+    state.metadata.plan_mode = session.planMode
+    delete state.metadata.pending_interaction_mode
     const agent = this.options.agentDefinitions?.get(session.agentId)
+    if (this.options.agentDefinitions && !agent) {
+      throw new ValidationError('agent_id', 'is not a registered agent profile', session.agentId)
+    }
     const model = agent?.model || session.model || this.options.model
-    const tools = toolsForAgent(this.options.tools, agent)
-    const bootstrapPrompt = await this.bootstrapSystemPrompt(session, model, tools)
+    const modeAgent = interactionModeAgent(this.options.agentDefinitions, session.interactionMode)
+    if (modeAgent === null) {
+      throw new ValidationError(
+        'interaction_mode',
+        'does not have a registered enforcement profile',
+        session.interactionMode,
+      )
+    }
+    const selectedTools = toolsForAgent(this.options.tools, agent)
+    const tools = toolsForAgent(selectedTools, modeAgent)
+    const permissionMode = permissionModeForInteraction(session.interactionMode, this.options.permissionMode)
+    state.metadata.permission_mode = permissionMode
+    const promptAgent = modeAgent ?? agent
+    const bootstrapPrompt = await this.bootstrapSystemPrompt(
+      session,
+      model,
+      tools,
+      promptAgent?.name ?? session.agentId,
+    )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
     await captureUserWorkflowMemory(displayText, memory, { projectRoot: session.cwd })
     const memoryPrompt = memory ? await memory.toPromptSection() : ''
@@ -94,7 +126,11 @@ export class AgentTurnRunner implements TurnRunner {
     const selfMemoryPrompt = selfMemory ? await selfMemory.systemPromptAddendum() : ''
     const systemPrompt = [
       bootstrapPrompt,
-      agent?.systemPrompt,
+      promptAgent?.systemPrompt,
+      modeSwitchHint(
+        session.interactionMode,
+        tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
+      ),
       memoryPrompt,
       selfMemoryPrompt,
       systemPromptAddendum(session),
@@ -112,14 +148,14 @@ export class AgentTurnRunner implements TurnRunner {
     let auditTurnEnded = false
     try {
       const turnEvents = withActiveSession(session, runTurn({
-        agentId: session.agentId,
+        agentId: promptAgent?.name ?? session.agentId,
         interactionMode: session.interactionMode,
         model,
         sessionId: session.id,
         state,
         userMessage: text,
         ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
-        ...(this.options.permissionMode ? { permissionMode: this.options.permissionMode } : {}),
+        permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
         ...(tools ? { tools } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
@@ -146,7 +182,7 @@ export class AgentTurnRunner implements TurnRunner {
         const event = item.event
         auditStreamEvent(this.options.auditEmitter, event, auditContext, state)
         auditTurnEnded ||= event.type === 'turn_done'
-        yield daemonEventFromStream(event, state)
+        yield daemonEventFromStream(event, state, session)
       }
     } catch (error) {
       this.options.auditEmitter?.emitError({
@@ -180,13 +216,18 @@ export class AgentTurnRunner implements TurnRunner {
     session: DaemonSession,
     model: string,
     tools: readonly ToolDefinition[] | undefined,
+    agentId: string,
   ): Promise<string> {
     const provider = this.options.bootstrapSystemPrompt
     if (!provider) return ''
-    const key = session.cwd + '\u0000' + model
+    const toolSignature = (tools ?? [])
+      .map(tool => tool.function.name)
+      .sort()
+      .join('\u0001')
+    const key = [session.cwd, model, session.agentId, agentId, toolSignature].join('\u0000')
     const existing = this.bootstrapPrompts.get(key)
     if (existing) return existing
-    const prompt = Promise.resolve(provider({ session, model, tools })).catch(error => {
+    const prompt = Promise.resolve(provider({ agentId, session, model, tools })).catch(error => {
       this.bootstrapPrompts.delete(key)
       throw error
     })
@@ -383,6 +424,24 @@ function toolsForAgent(
   })
 }
 
+/** Non-code modes use their declared profile as both prompt and enforceable tool ceiling. */
+function interactionModeAgent(
+  definitions: ReadonlyMap<string, AgentDefinition> | undefined,
+  mode: string,
+): AgentDefinition | null | undefined {
+  const normalized = normalizeInteractionMode(mode)
+  if (normalized === 'code') return undefined
+  return definitions?.get(agentNameForMode(normalized)) ?? null
+}
+
+/** Restricted interaction modes never inherit the default YOLO permission policy. */
+function permissionModeForInteraction(mode: string, configured: PermissionMode | undefined): PermissionMode {
+  const normalized = normalizeInteractionMode(mode)
+  return normalized === 'plan' || normalized === 'researcher'
+    ? 'plan'
+    : configured ?? DEFAULT_PERMISSION_MODE
+}
+
 function stateFromSession(session: DaemonSession): AgentState {
   const state = createAgentState(session.messages.flatMap(messageToChatMessage))
   state.apiCallsComplete = session.apiCallsComplete ?? session.turnCount === 0
@@ -476,7 +535,7 @@ function isToolExecutionRecord(value: unknown): value is AgentState['toolExecuti
     && !Array.isArray(record.inputs)
 }
 
-function daemonEventFromStream(event: StreamEvent, state: AgentState): DaemonEvent {
+function daemonEventFromStream(event: StreamEvent, state: AgentState, session: DaemonSession): DaemonEvent {
   switch (event.type) {
     case 'text':
       return { type: 'text_part', payload: { text: event.text } }
@@ -543,6 +602,8 @@ function daemonEventFromStream(event: StreamEvent, state: AgentState): DaemonEve
           total_tokens: state.totalInputTokens + state.totalOutputTokens,
           context_tokens: contextTokens,
           max_context: getContextLimit(event.model),
+          mode: session.interactionMode,
+          plan_mode: session.planMode,
           ...(state.totalCacheReadTokens ? { cache_read_tokens: state.totalCacheReadTokens } : {}),
           ...(state.totalCacheCreationTokens ? { cache_creation_tokens: state.totalCacheCreationTokens } : {}),
         },

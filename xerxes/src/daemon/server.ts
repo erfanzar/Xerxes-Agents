@@ -455,6 +455,7 @@ export class DaemonServer {
     DaemonTransportConnection
   >();
   private readonly runtime: DaemonRuntime;
+  private runtimeShutdown = false;
   private readonly skillDirectories: readonly string[] | undefined;
   private readonly skillRegistry: SkillRegistry;
   private readonly skillCreates = new Map<
@@ -580,6 +581,7 @@ export class DaemonServer {
       await closeServer(this.server);
       this.server = undefined;
       await rm(this.socketPath, { force: true });
+      await this.shutdownRuntime();
       throw error;
     }
   }
@@ -609,29 +611,40 @@ export class DaemonServer {
     const gateway = this.websocketGateway;
     const channelWebhook = this.channelWebhookServer;
     if (!server && !gateway && !channelWebhook && !this.cronSchedulerStarted) {
+      await this.shutdownRuntime();
       return;
     }
-    this.cronScheduler.stop();
-    this.cronSchedulerStarted = false;
-    await channelWebhook?.stop();
-    await this.channelManager?.stopAll();
-    this.runtime.cancelAllTurns();
-    await this.runtime.flushSessions();
-    for (const connection of this.connections) {
-      connection.socket.destroy();
+    try {
+      this.cronScheduler.stop();
+      this.cronSchedulerStarted = false;
+      await channelWebhook?.stop();
+      await this.channelManager?.stopAll();
+      this.runtime.cancelAllTurns();
+      await this.runtime.flushSessions();
+      for (const connection of this.connections) {
+        connection.socket.destroy();
+      }
+      await gateway?.stop();
+      this.websocketGateway = undefined;
+      if (server) {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+      this.server = undefined;
+      await rm(this.socketPath, { force: true });
+      if (this.pidPath) {
+        await rm(this.pidPath, { force: true });
+      }
+    } finally {
+      await this.shutdownRuntime();
     }
-    await gateway?.stop();
-    this.websocketGateway = undefined;
-    if (server) {
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
-    }
-    this.server = undefined;
-    await rm(this.socketPath, { force: true });
-    if (this.pidPath) {
-      await rm(this.pidPath, { force: true });
-    }
+  }
+
+  private async shutdownRuntime(): Promise<void> {
+    if (this.runtimeShutdown) return;
+    this.runtimeShutdown = true;
+    await this.runtime.shutdown?.();
   }
 
   private attach(socket: Socket): void {

@@ -130,6 +130,8 @@ export interface DaemonRuntime {
     planMode?: boolean,
   ): Promise<DaemonSession | undefined>;
   sessionStatus(sessionKey: string): DaemonSession | undefined;
+  /** Release host-owned resources such as native delegated-agent managers. */
+  shutdown?(): Promise<void>;
   steerTurn(sessionKey: string, content: string): boolean;
   status(): JsonRpcPayload;
   submitTurn(
@@ -151,6 +153,12 @@ export interface InMemoryDaemonRuntimeOptions {
   /** Live daemon settings used for status, reload, and runner reconstruction. */
   readonly runtimeSettings?: JsonRpcPayload;
   readonly sessionDirectory?: string;
+  /** Cancel resources owned exclusively by a session before it is evicted. */
+  readonly onSessionEvict?: (sessionId: string) => void;
+  /** Reconcile session-owned resources after an interaction-policy change. */
+  readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
+  /** Release resources captured by the host that constructed this runtime. */
+  readonly shutdown?: () => Promise<void> | void;
   /** Live tool/skill counts owned by the embedding daemon host. */
   readonly statusInventory?: () => {
     readonly skills?: number;
@@ -175,6 +183,7 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly options: InMemoryDaemonRuntimeOptions;
   private readonly runtimeSettings: JsonRpcPayload;
   private readonly sessions = new Map<string, DaemonSession>();
+  private shutdownPromise: Promise<void> | undefined;
   private readonly steerQueues = new Map<string, string[]>();
   private readonly transcriptStore: DaemonTranscriptStore;
   private turnRunner: TurnRunner;
@@ -246,9 +255,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
   }
 
   evictSession(sessionKey: string): void {
+    const sessionId = this.sessions.get(sessionKey)?.id ?? sessionKey;
     this.options.interactions?.cancelSession(
-      this.sessions.get(sessionKey)?.id ?? sessionKey,
+      sessionId,
     );
+    this.options.onSessionEvict?.(sessionId);
     this.steerQueues.delete(sessionKey);
     this.sessions.delete(sessionKey);
   }
@@ -362,11 +373,17 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.interactionMode = normalized;
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
+    this.options.onSessionModeChange?.(session.id, normalized);
     return session;
   }
 
   sessionStatus(sessionKey: string): DaemonSession | undefined {
     return this.sessions.get(sessionKey);
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownPromise ??= Promise.resolve().then(() => this.options.shutdown?.());
+    await this.shutdownPromise;
   }
 
   steerTurn(sessionKey: string, content: string): boolean {

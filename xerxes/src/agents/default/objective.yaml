@@ -29,10 +29,17 @@ agent:
     - DuckDuckGoSearch
     - AgentTool
     - SpawnAgents
+    - SendMessageTool
+    - TaskGetTool
     - TaskListTool
+    - TaskOutputTool
     - TaskStopTool
+    - TaskUpdateTool
+    - AwaitAgents
+    - CheckAgentMessages
+    - PeekAgent
+    - ResetAgent
     - TodoWriteTool
-    - SetInteractionModeTool
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write
@@ -55,10 +62,17 @@ agent:
     - DuckDuckGoSearch
     - AgentTool
     - SpawnAgents
+    - SendMessageTool
+    - TaskGetTool
     - TaskListTool
+    - TaskOutputTool
     - TaskStopTool
+    - TaskUpdateTool
+    - AwaitAgents
+    - CheckAgentMessages
+    - PeekAgent
+    - ResetAgent
     - TodoWriteTool
-    - SetInteractionModeTool
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write
@@ -70,3 +84,18 @@ agent:
     - AskUserQuestionTool
     - SkillTool
   subagents:
+    coder:
+      path: ./coder.yaml
+      description: "Focused implementation for a disjoint part of the objective."
+    researcher:
+      path: ./researcher.yaml
+      description: "Read-only evidence gathering for a bounded objective question."
+    planner:
+      path: ./planner.yaml
+      description: "Read-only planning for a complex objective phase."
+    reviewer:
+      path: ./reviewer.yaml
+      description: "Independent read-only review when changed paths or diff context are supplied."
+    tester:
+      path: ./tester.yaml
+      description: "Focused test authoring and verification for the current objective."

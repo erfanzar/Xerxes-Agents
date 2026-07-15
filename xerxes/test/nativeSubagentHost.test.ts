@@ -33,6 +33,16 @@ function agentDefinition(name: string): AgentDefinition {
   }
 }
 
+function creatorDefinition(...children: readonly string[]): AgentDefinition {
+  return {
+    ...agentDefinition('default'),
+    subagents: Object.freeze(Object.fromEntries(children.map(name => [
+      name,
+      Object.freeze({ path: `${name}.yaml`, description: `${name} child` }),
+    ]))),
+  }
+}
+
 function session(id = 'parent-session'): DaemonSession {
   return {
     activeTurnId: 'parent-turn',
@@ -149,6 +159,136 @@ test('agent turn runner exposes registered delegation tools to the provider', as
   }
 })
 
+test('agent turn runner refreshes the model-visible mode overlay on an existing session', async () => {
+  const client = new ToolCapturingParentClient()
+  const activeSession = session('mode-session')
+  const modeTool: ToolDefinition = {
+    type: 'function',
+    function: { name: 'SetInteractionModeTool', description: 'switch modes', parameters: {} },
+  }
+  const runner = new AgentTurnRunner({
+    agentDefinitions: BUILTIN_AGENTS,
+    llm: client,
+    model: 'test-model',
+    tools: [modeTool],
+  })
+
+  for await (const _event of runner.run(activeSession, 'inspect the implementation', new AbortController().signal)) {
+    // Consume the first turn.
+  }
+  activeSession.interactionMode = 'researcher'
+  activeSession.planMode = false
+  for await (const _event of runner.run(activeSession, 'continue in research mode', new AbortController().signal)) {
+    // Consume the second turn after the mode change.
+  }
+
+  const firstSystem = client.requests[0]?.messages.filter(message => message.role === 'system') ?? []
+  const secondSystem = client.requests[1]?.messages.filter(message => message.role === 'system') ?? []
+  expect(firstSystem).toHaveLength(1)
+  expect(secondSystem).toHaveLength(1)
+  expect(String(firstSystem[0]?.content)).toContain('Use code mode for normal implementation.')
+  expect(String(firstSystem[0]?.content)).not.toContain('You are in researcher mode.')
+  expect(String(secondSystem[0]?.content)).toContain('You are in researcher mode.')
+  expect(String(secondSystem[0]?.content)).not.toContain('Use code mode for normal implementation.')
+})
+
+test('native subagent host rejects unknown profiles instead of granting a generic child surface', async () => {
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: new ToolCapturingParentClient(),
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    await expect(host.managerPort.spawn({
+      message: 'review the change',
+      promptProfile: 'review',
+      title: 'Review change',
+    })).rejects.toThrow('is not a registered agent profile')
+    expect(host.managerPort.listHandles()).toEqual([])
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
+test('native subagent host enforces the creator profile child catalog after alias resolution', async () => {
+  const registry = new ToolRegistry()
+  const researcher = agentDefinition('researcher')
+  const creator: AgentDefinition = {
+    ...agentDefinition('default'),
+    subagents: Object.freeze({
+      researcher: Object.freeze({ path: 'researcher.yaml', description: 'read-only research' }),
+    }),
+  }
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creator],
+      ['researcher', researcher],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: new ToolCapturingParentClient(),
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    await expect(host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'implement it',
+      promptProfile: 'general-purpose',
+      title: 'Implement change',
+    })).rejects.toThrow("is not allowed by agent 'default'")
+    expect(host.managerPort.listHandles()).toEqual([])
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
+test('native subagent host rejects unknown creators and creators without a child catalog', async () => {
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', agentDefinition('default')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: new ToolCapturingParentClient(),
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    await expect(host.managerPort.spawn({
+      creatorAgentId: 'missing-parent',
+      message: 'implement it',
+      promptProfile: 'coder',
+      title: 'Implement change',
+    })).rejects.toThrow('is not a registered agent profile')
+    await expect(host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'implement it',
+      promptProfile: 'coder',
+      title: 'Implement change',
+    })).rejects.toThrow("allowed profiles: (none)")
+    expect(host.managerPort.listHandles()).toEqual([])
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
 class ConcurrentChildClient implements LlmClient {
   active = 0
   calls = 0
@@ -208,6 +348,117 @@ class ReloadGenerationChildClient implements LlmClient {
     yield { content: `${this.label}:${request.model}:${text}` }
   }
 }
+
+test('native child spawning honors the creator-local resolved catalog profile', async () => {
+  const client = new ReloadGenerationChildClient('catalog-provider')
+  const registry = new ToolRegistry()
+  const globalCoder = { ...agentDefinition('coder'), model: 'global-model' }
+  const boundCoder = { ...agentDefinition('coder'), model: 'bound-model' }
+  const creator: AgentDefinition = {
+    ...agentDefinition('default'),
+    subagents: {
+      coder: {
+        description: 'creator-local coder',
+        path: '/profiles/readonly-coder.yaml',
+        resolvedProfile: '@catalog:coder:/profiles/readonly-coder.yaml',
+      },
+    },
+  }
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['@catalog:coder:/profiles/readonly-coder.yaml', boundCoder],
+      ['coder', globalCoder],
+      ['default', creator],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'connection-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  registerClaudeAgentTools(registry, { manager: host.managerPort })
+
+  try {
+    await registry.execute(toolCall('AgentTool', {
+      prompt: 'use the creator-local profile',
+      subagent_type: 'coder',
+      title: 'Bound catalog',
+    }), { agentId: 'default', metadata: {}, sessionId: 'catalog-parent' })
+    expect(client.models).toEqual(['bound-model'])
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
+test('native child models follow explicit, profile, parent-session, then connection precedence', async () => {
+  const client = new ReloadGenerationChildClient('model-provider')
+  const registry = new ToolRegistry()
+  const profiled: AgentDefinition = {
+    ...agentDefinition('profiled'),
+    model: 'profile-model',
+  }
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['default', creatorDefinition('plain', 'profiled')],
+      ['plain', agentDefinition('plain')],
+      ['profiled', profiled],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'connection-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  registerClaudeAgentTools(registry, { manager: host.managerPort })
+  const parentContext = {
+    agentId: 'default',
+    metadata: { model: 'parent-session-model', permission_mode: 'plan' },
+    sessionId: 'parent-session',
+  }
+
+  try {
+    await registry.execute(toolCall('AgentTool', {
+      model: 'explicit-model',
+      prompt: 'use the explicit model',
+      subagent_type: 'profiled',
+      title: 'Explicit model',
+    }), parentContext)
+    await registry.execute(toolCall('AgentTool', {
+      prompt: 'use the profile model',
+      subagent_type: 'profiled',
+      title: 'Profile model',
+    }), parentContext)
+    await registry.execute(toolCall('AgentTool', {
+      prompt: 'inherit the parent model',
+      subagent_type: 'plain',
+      title: 'Parent model',
+    }), parentContext)
+    await registry.execute(toolCall('AgentTool', {
+      prompt: 'use the connection fallback',
+      subagent_type: 'plain',
+      title: 'Connection model',
+    }), { agentId: 'default', metadata: {}, sessionId: 'fallback-session' })
+
+    expect(client.models).toEqual([
+      'explicit-model',
+      'profile-model',
+      'parent-session-model',
+      'connection-model',
+    ])
+    expect(host.managerPort.listHandles().map(snapshot => snapshot.rules?.[0])).toEqual([
+      'permission:plan',
+      'permission:plan',
+      'permission:plan',
+      'permission:accept-all',
+    ])
+  } finally {
+    await host.manager.shutdown()
+  }
+})
 
 test('native subagent handles survive runtime reloads while new spawns use the latest generation', async () => {
   const oldClient = new ReloadGenerationChildClient('old-provider', true)
@@ -295,6 +546,298 @@ test('native subagent handles survive runtime reloads while new spawns use the l
   }
 })
 
+test('tightening YOLO permissions cancels active children and prevents old-policy resume', async () => {
+  const client = new ReloadGenerationChildClient('yolo-provider', true)
+  const eventBus = new DaemonSubagentEventBus()
+  const definitions = new Map([['coder', agentDefinition('coder')]])
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'yolo-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'keep working under yolo',
+      nickname: 'yolo-worker',
+      promptProfile: 'coder',
+      title: 'YOLO worker',
+    })
+    await client.started.promise
+
+    host.reconfigure({
+      agentDefinitions: definitions,
+      cwd: process.cwd(),
+      eventBus,
+      llm: client,
+      model: 'safe-model',
+      permissionMode: 'auto',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: true,
+      id: task.id,
+      status: 'cancelled',
+    }))
+    expect(() => host.managerPort.resume(task.id)).toThrow(
+      'was invalidated when permissions were tightened',
+    )
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('stale parent metadata cannot spawn a child above the current permission ceiling', async () => {
+  const client = new ReloadGenerationChildClient('ceiling-provider')
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'safe-model',
+    permissionMode: 'auto',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'continue from a stale yolo parent turn',
+      permissionMode: 'accept-all',
+      promptProfile: 'coder',
+      title: 'Ceiling worker',
+    })
+    expect(task.rules).toContain('permission:auto')
+    expect(task.rules).not.toContain('permission:accept-all')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('agent catalog changes invalidate old handles before they can resume', async () => {
+  const client = new ReloadGenerationChildClient('catalog-version-provider')
+  const registry = new ToolRegistry()
+  const eventBus = new DaemonSubagentEventBus()
+  const coder = agentDefinition('coder')
+  const initialDefinitions = new Map([
+    ['coder', coder],
+    ['default', creatorDefinition('coder')],
+  ])
+  const host = createNativeSubagentHost({
+    agentDefinitions: initialDefinitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'finish before catalog reload',
+      promptProfile: 'coder',
+      title: 'Catalog worker',
+    })
+    await host.managerPort.wait([task.id], 1_000)
+    host.reconfigure({
+      agentDefinitions: new Map([
+        ['coder', coder],
+        ['default', agentDefinition('default')],
+      ]),
+      cwd: process.cwd(),
+      eventBus,
+      llm: client,
+      model: 'test-model',
+      permissionMode: 'accept-all',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+    expect(() => host.managerPort.resume(task.id)).toThrow('invalidated')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('removing a parent session cancels and invalidates its background children', async () => {
+  const client = new ReloadGenerationChildClient('background-provider', true)
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'keep working in the background',
+      promptProfile: 'coder',
+      sourceAgentId: 'session-a',
+      title: 'Background worker',
+    })
+    await client.started.promise
+
+    expect(host.cancelSource('session-b')).toBe(0)
+    expect(host.cancelSource('session-a')).toBe(1)
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: true,
+      id: task.id,
+      status: 'cancelled',
+    }))
+    expect(() => host.managerPort.resume(task.id)).toThrow('invalidated')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('tightening auto permissions to plan also cancels broader-policy children', async () => {
+  const client = new ReloadGenerationChildClient('auto-provider', true)
+  const eventBus = new DaemonSubagentEventBus()
+  const definitions = new Map([['coder', agentDefinition('coder')]])
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'auto-model',
+    permissionMode: 'auto',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'keep working under auto policy',
+      promptProfile: 'coder',
+      title: 'Auto worker',
+    })
+    await client.started.promise
+
+    host.reconfigure({
+      agentDefinitions: definitions,
+      cwd: process.cwd(),
+      eventBus,
+      llm: client,
+      model: 'plan-model',
+      permissionMode: 'plan',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: true,
+      id: task.id,
+      status: 'cancelled',
+    }))
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('switching delegated permissions from plan to manual cancels children that retained automatic read access', async () => {
+  const client = new ReloadGenerationChildClient('plan-provider', true)
+  const eventBus = new DaemonSubagentEventBus()
+  const definitions = new Map([['coder', agentDefinition('coder')]])
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'plan-model',
+    permissionMode: 'plan',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'keep reading under plan policy',
+      promptProfile: 'coder',
+      title: 'Plan worker',
+    })
+    await client.started.promise
+
+    host.reconfigure({
+      agentDefinitions: definitions,
+      cwd: process.cwd(),
+      eventBus,
+      llm: client,
+      model: 'manual-model',
+      permissionMode: 'manual',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: true,
+      id: task.id,
+      status: 'cancelled',
+    }))
+    expect(() => host.managerPort.resume(task.id)).toThrow('invalidated')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
+test('invalidating a native host cancels every child and prevents later resume', async () => {
+  const client = new ReloadGenerationChildClient('retired-provider', true)
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'retired-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'continue until the runtime disappears',
+      promptProfile: 'coder',
+      title: 'Retired worker',
+    })
+    await client.started.promise
+
+    expect(host.invalidateAll()).toBe(1)
+    expect(host.managerPort.listHandles()).toContainEqual(expect.objectContaining({
+      closed: true,
+      id: task.id,
+      status: 'cancelled',
+    }))
+    expect(() => host.managerPort.resume(task.id)).toThrow('invalidated')
+  } finally {
+    client.release()
+    await host.manager.shutdown()
+  }
+})
+
 test('native SpawnAgents runs two real child turns concurrently and routes their lifecycle to the parent session', async () => {
   const client = new ConcurrentChildClient()
   const eventBus = new DaemonSubagentEventBus()
@@ -303,6 +846,7 @@ test('native SpawnAgents runs two real child turns concurrently and routes their
   const release = eventBus.subscribe('session-a', event => events.push(event))
   const definitions = new Map([
     ['coder', agentDefinition('coder')],
+    ['default', creatorDefinition('coder', 'researcher')],
     ['researcher', agentDefinition('researcher')],
   ])
   const host = createNativeSubagentHost({
@@ -480,7 +1024,10 @@ test('native completion events expose exact title, hierarchy, policy, file, tool
   const events: DaemonEvent[] = []
   const release = eventBus.subscribe('metadata-session', event => events.push(event))
   const host = createNativeSubagentHost({
-    agentDefinitions: new Map([['coder', agentDefinition('coder')]]),
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
     cwd: process.cwd(),
     eventBus,
     llm: new MetadataChildClient(),
@@ -546,6 +1093,7 @@ class ToolCallingParentClient implements LlmClient {
 test('agent turn runner multiplexes a child event between parent tool start and result with turn correlation', async () => {
   const eventBus = new DaemonSubagentEventBus()
   const registry = new ToolRegistry()
+  let delegatedPermissionMode: unknown
   const definition: ToolDefinition = {
     type: 'function',
     function: {
@@ -555,6 +1103,7 @@ test('agent turn runner multiplexes a child event between parent tool start and 
     },
   }
   registry.register(definition, async (_inputs, context) => {
+    delegatedPermissionMode = context.metadata.permission_mode
     eventBus.publish(context.sessionId ?? '', {
       type: 'subagent_event',
       payload: {
@@ -596,6 +1145,7 @@ test('agent turn runner multiplexes a child event between parent tool start and 
     },
   })
   expect(events).toContainEqual({ type: 'text_part', payload: { text: 'parent finished' } })
+  expect(delegatedPermissionMode).toBe('accept-all')
 })
 
 function nestedEventType(event: DaemonEvent): unknown {

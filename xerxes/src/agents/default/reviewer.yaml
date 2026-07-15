@@ -1,0 +1,29 @@
+version: 1
+agent:
+  extend: ./agent.yaml
+  name: reviewer
+  system_prompt_args:
+    ROLE_ADDITIONAL: |
+      You are a read-only code review specialist.
+      - Inspect the changed paths or diff context supplied by the parent, then read relevant surrounding code without modifying files
+      - If the parent did not identify the change set, ask it for changed paths or diff excerpts instead of pretending to know what changed
+      - Prioritize correctness, security, regressions, and missing tests
+      - Report only concrete, actionable findings with file paths and line numbers
+      - Distinguish confirmed defects from risks or suggestions
+  when_to_use: |
+    Use this agent for an independent read-only review when the delegation includes changed paths or diff context. Return prioritized findings and verification gaps to the parent agent.
+  allowed_tools:
+    - ReadFile
+    - GlobTool
+    - GrepTool
+    - ListDir
+  exclude_tools:
+    - AgentTool
+    - SpawnAgents
+    - AskUserQuestionTool
+    - WriteFile
+    - FileEditTool
+    - exec_command
+    - TodoWriteTool
+    - SkillTool
+  subagents:

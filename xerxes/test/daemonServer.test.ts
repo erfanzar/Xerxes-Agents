@@ -148,19 +148,42 @@ test("shutdown RPC notifies the process host so its daemon lifetime can finish",
 test("daemon shutdown cancels active turns before flushing session state", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-order-"));
   const socketPath = join(directory, "daemon.sock");
+  let childHostShutdowns = 0;
   const runtime = new StopOrderRuntime(undefined, {
     currentProjectDirectory: directory,
     sessionDirectory: join(directory, "sessions"),
+    shutdown: () => {
+      childHostShutdowns += 1;
+    },
   });
   const server = new DaemonServer({ socketPath, runtime });
   await server.start();
   try {
     await server.stop();
-    expect(runtime.shutdownOperations).toEqual(["cancel", "flush"]);
+    expect(runtime.shutdownOperations).toEqual(["cancel", "flush", "shutdown"]);
+    expect(childHostShutdowns).toBe(1);
   } finally {
     await server.stop();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("daemon stop releases its runtime even when the transport was never started", async () => {
+  let shutdowns = 0;
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    shutdown: () => {
+      shutdowns += 1;
+    },
+  });
+  const server = new DaemonServer({
+    runtime,
+    socketPath: join(tmpdir(), `xerxes-never-started-${crypto.randomUUID()}.sock`),
+  });
+
+  await server.stop();
+  await server.stop();
+
+  expect(shutdowns).toBe(1);
 });
 
 test("daemon derives slash discovery from implemented canonical commands and rejects unsupported definitions", async () => {
@@ -2244,6 +2267,11 @@ class StopOrderRuntime extends InMemoryDaemonRuntime {
   override async flushSessions(): Promise<void> {
     this.shutdownOperations.push("flush");
     await super.flushSessions();
+  }
+
+  override async shutdown(): Promise<void> {
+    this.shutdownOperations.push("shutdown");
+    await super.shutdown();
   }
 }
 

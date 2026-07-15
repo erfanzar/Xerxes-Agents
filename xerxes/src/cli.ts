@@ -35,7 +35,10 @@ import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { createNativeSubagentHost } from "./daemon/subagentHost.js";
 import { AgentTurnRunner } from "./daemon/turnRunner.js";
-import { SkillRegistry } from "./extensions/skills.js";
+import {
+  defaultSkillDiscoveryDirectories,
+  SkillRegistry,
+} from "./extensions/skills.js";
 import {
   ToolRegistry,
   type ToolExecutionContext,
@@ -49,13 +52,14 @@ import {
   registerBrowserManagerTools,
 } from "./operators/browser.js";
 import { INSTALL_HELP, runInstallCommand } from "./runtime/companionInstall.js";
-import { bootstrap } from "./runtime/bootstrap.js";
+import { bootstrap, bootstrapSubagentsForAgent } from "./runtime/bootstrap.js";
 import {
   formatDoctorReport,
   hasDoctorFailures,
   runAllDoctorChecks,
 } from "./runtime/doctor.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
+import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { UPDATE_HELP, runUpdateCommand } from "./runtime/update.js";
 import {
   DEFAULT_EXPORT_FORMAT,
@@ -66,7 +70,11 @@ import {
   savedSessionSummary,
   selectSavedSession,
 } from "./runtime/sessionExport.js";
-import { registerClaudeAgentTools, registerCoreTools } from "./tools/index.js";
+import {
+  registerClaudeAgentTools,
+  registerClaudeSkillTool,
+  registerCoreTools,
+} from "./tools/index.js";
 import type { MemoryToolContext } from "./tools/memoryTools.js";
 import { createAgentState } from "./streaming/events.js";
 import { runTurn } from "./streaming/loop.js";
@@ -254,6 +262,7 @@ async function runDaemon(
     await channelManager.startConfigured();
   } catch (error) {
     await channelManager.stopAll();
+    await daemon.stop();
     throw error;
   }
   console.error("Xerxes Bun daemon listening on " + socketPath);
@@ -574,6 +583,7 @@ function daemonRuntime(
   };
   const subagentEvents = new DaemonSubagentEventBus();
   let subagentHost: ReturnType<typeof createNativeSubagentHost> | undefined;
+  let runtime: InMemoryDaemonRuntime | undefined;
   let activeToolCount = 0;
   const runnerFactory = (settings: Readonly<Record<string, unknown>>) => {
     const connection = runtimeConnection(
@@ -581,6 +591,7 @@ function daemonRuntime(
       profileStore.active(),
     );
     if (!connection || connection.provider === "claude-code") {
+      subagentHost?.invalidateAll();
       activeToolCount = 0;
       return undefined;
     }
@@ -605,6 +616,31 @@ function daemonRuntime(
     if (interactions) {
       registerDaemonQuestionTool(tools);
     }
+    if (host.skillRegistry) {
+      registerClaudeSkillTool(tools, host.skillRegistry);
+    }
+    registerInteractionModeTool(tools, {
+      async setMode({ context, mode }) {
+        const activeRuntime = runtime;
+        const session = activeRuntime
+          ?.listSessions()
+          .find((candidate) => candidate.id === context.sessionId);
+        if (!activeRuntime || !session) {
+          throw new Error("SetInteractionModeTool requires an active daemon session");
+        }
+        const changed = await activeRuntime.setSessionMode(
+          session.sessionKey,
+          mode,
+        );
+        if (!changed) {
+          throw new Error("SetInteractionModeTool could not update the active daemon session");
+        }
+        return {
+          mode,
+          planMode: changed.planMode,
+        };
+      },
+    });
     const agentDefinitions = loadAgentDefinitions({ cwd: workspaceRoot });
     const llm = createLlmClient(connection.model, {
       ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
@@ -640,10 +676,14 @@ function daemonRuntime(
       agentDefinitions,
       agentMemory: (session) => memoryForProject(session.cwd),
       agentSelfMemory: (session) => getAgentSelfMemory(session.agentId),
-      bootstrapSystemPrompt: ({ session, model, tools: runnerTools }) =>
+      bootstrapSystemPrompt: ({ agentId, session, model, tools: runnerTools }) =>
         bootstrap({
           cwd: session.cwd,
+          ...(host.skillRegistry?.markdownIndex()
+            ? { extraContext: host.skillRegistry.markdownIndex() }
+            : {}),
           model,
+          subagents: bootstrapSubagentsForAgent(agentDefinitions, agentId),
           ...(runnerTools === undefined ? {} : { tools: runnerTools }),
         }).then((result) => result.systemPrompt),
       llm,
@@ -662,7 +702,7 @@ function daemonRuntime(
       ...(interactions ? { interactions } : {}),
     });
   };
-  return new InMemoryDaemonRuntime(undefined, {
+  runtime = new InMemoryDaemonRuntime(undefined, {
     ...(host.buildId ? { buildId: host.buildId } : {}),
     currentProjectDirectory: workspaceRoot,
     runtimeSettings: initialSettings,
@@ -670,9 +710,17 @@ function daemonRuntime(
       skills: host.skillRegistry?.all().length ?? 0,
       tools: activeToolCount,
     }),
+    shutdown: () => subagentHost?.manager.shutdown(),
+    onSessionEvict: sessionId => subagentHost?.cancelSource(sessionId),
+    onSessionModeChange: (sessionId, mode) => {
+      if (mode === "plan" || mode === "researcher") {
+        subagentHost?.cancelSource(sessionId);
+      }
+    },
     turnRunnerFactory: runnerFactory,
     ...(interactions ? { interactions } : {}),
   });
+  return runtime;
 }
 
 function websocketOptions(
@@ -740,7 +788,10 @@ async function acpServer(
   config: DaemonConfig,
   projectDirectory: string | undefined,
   defaultPermissionMode: AcpPermissionMode,
-): Promise<AcpServer> {
+): Promise<{
+  readonly server: AcpServer;
+  readonly shutdown: () => Promise<void>;
+}> {
   const connection = runtimeConnection(config, new ProfileStore().active());
   if (!connection) {
     throw new Error(
@@ -749,6 +800,8 @@ async function acpServer(
   }
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
   const tools = new ToolRegistry();
+  const skillRegistry = new SkillRegistry();
+  await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
   registerCoreTools(tools, {
     workspaceRoot,
@@ -759,15 +812,42 @@ async function acpServer(
     },
     memoryTools: { resolveContext: memoryToolContext },
   });
+  registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   const agent = definitions.get("default");
   const agentId = agent?.name ?? "default";
   const selfMemory = getAgentSelfMemory(agentId);
   const model = agent?.model || connection.model;
+  const llm = createLlmClient(connection.model, {
+    ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
+    ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
+    ...(connection.provider ? { provider: connection.provider } : {}),
+    ...(connection.responsesApi ? { responsesApi: true } : {}),
+  });
+  const subagentHost = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: workspaceRoot,
+    eventBus: new DaemonSubagentEventBus(),
+    llm,
+    ...(connection.maxTokens === undefined
+      ? {}
+      : { maxTokens: connection.maxTokens }),
+    model,
+    permissionMode: defaultPermissionMode,
+    ...(connection.temperature === undefined
+      ? {}
+      : { temperature: connection.temperature }),
+    toolExecutor: tools,
+    tools: tools.definitions(),
+    ...(connection.topP === undefined ? {} : { topP: connection.topP }),
+  });
+  registerClaudeAgentTools(tools, { manager: subagentHost.managerPort });
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
     cwd: workspaceRoot,
+    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
     model,
+    subagents: bootstrapSubagentsForAgent(definitions, agentId),
     tools: selectedTools,
   });
   const systemPrompt = joinSystemPrompts(
@@ -775,12 +855,6 @@ async function acpServer(
     agent?.systemPrompt,
     await selfMemory.systemPromptAddendum(),
   );
-  const llm = createLlmClient(connection.model, {
-    ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
-    ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
-    ...(connection.provider ? { provider: connection.provider } : {}),
-    ...(connection.responsesApi ? { responsesApi: true } : {}),
-  });
   const runner = new AcpAgentRunner({
     llm,
     model,
@@ -797,7 +871,10 @@ async function acpServer(
     toolExecutor: tools,
     ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
   });
-  return new AcpServer({ runner });
+  return {
+    server: new AcpServer({ runner, onSessionClose: sessionId => subagentHost.cancelSource(sessionId) }),
+    shutdown: () => subagentHost.manager.shutdown(),
+  };
 }
 
 async function runAcp(args: readonly string[]): Promise<void> {
@@ -816,14 +893,18 @@ async function runAcp(args: readonly string[]): Promise<void> {
       ? { projectDirectory: options.projectDirectory }
       : {}),
   });
-  const server = await acpServer(
+  const runtime = await acpServer(
     config,
     options.projectDirectory,
     options.permissionMode,
   );
-  await serveACPStdio(server, Bun.stdin.stream(), (line) => {
-    process.stdout.write(line);
-  });
+  try {
+    await serveACPStdio(runtime.server, Bun.stdin.stream(), (line) => {
+      process.stdout.write(line);
+    });
+  } finally {
+    await runtime.shutdown();
+  }
 }
 
 async function runOneShot(prompt: string): Promise<void> {
@@ -836,6 +917,8 @@ async function runOneShot(prompt: string): Promise<void> {
   }
   const workspaceRoot = config.projectDirectory;
   const tools = new ToolRegistry();
+  const skillRegistry = new SkillRegistry();
+  await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
   registerCoreTools(tools, {
@@ -847,21 +930,42 @@ async function runOneShot(prompt: string): Promise<void> {
     },
     memoryTools: { resolveContext: memoryToolContext },
   });
+  registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
   const agent = definitions.get("default");
   const selfMemory = getAgentSelfMemory(agent?.name ?? "default");
   const model = agent?.model || connection.model;
-  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
-  const boot = await bootstrap({
-    cwd: workspaceRoot,
-    model,
-    tools: selectedTools,
-  });
   const llm = createLlmClient(model, {
     ...(connection.apiKey ? { api_key: connection.apiKey } : {}),
     ...(connection.baseUrl ? { base_url: connection.baseUrl } : {}),
     ...(connection.provider ? { provider: connection.provider } : {}),
     ...(connection.responsesApi ? { responsesApi: true } : {}),
+  });
+  const subagentHost = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: workspaceRoot,
+    eventBus: new DaemonSubagentEventBus(),
+    llm,
+    ...(connection.maxTokens === undefined
+      ? {}
+      : { maxTokens: connection.maxTokens }),
+    model,
+    permissionMode: "accept-all",
+    ...(connection.temperature === undefined
+      ? {}
+      : { temperature: connection.temperature }),
+    toolExecutor: tools,
+    tools: tools.definitions(),
+    ...(connection.topP === undefined ? {} : { topP: connection.topP }),
+  });
+  registerClaudeAgentTools(tools, { manager: subagentHost.managerPort });
+  const selectedTools = agentToolDefinitions(tools.definitions(), agent);
+  const boot = await bootstrap({
+    cwd: workspaceRoot,
+    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
+    model,
+    subagents: bootstrapSubagentsForAgent(definitions, agent?.name ?? "default"),
+    tools: selectedTools,
   });
   const systemPrompt = joinSystemPrompts(
     boot.systemPrompt,
@@ -870,34 +974,39 @@ async function runOneShot(prompt: string): Promise<void> {
     await selfMemory.systemPromptAddendum(),
   );
   let wroteText = false;
-  for await (const event of runTurn(
-    {
-      model,
-      state: createAgentState(),
-      userMessage: prompt,
-      permissionMode: "accept-all",
-      ...(agent?.name ? { agentId: agent.name } : {}),
-      ...(systemPrompt ? { systemPrompt } : {}),
-      ...(connection.maxTokens !== undefined
-        ? { maxTokens: connection.maxTokens }
-        : {}),
-      ...(connection.temperature !== undefined
-        ? { temperature: connection.temperature }
-        : {}),
-      tools: selectedTools,
-      ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
-    },
-    {
-      llm,
-      toolExecutor: tools,
-    },
-  )) {
-    if (event.type === "text") {
-      wroteText = true;
-      process.stdout.write(event.text);
-    } else if (event.type === "provider_retry" && event.final) {
-      console.error(`Provider error: ${event.error}`);
+  try {
+    for await (const event of runTurn(
+      {
+        model,
+        state: createAgentState(),
+        userMessage: prompt,
+        permissionMode: "accept-all",
+        sessionId: `oneshot-${crypto.randomUUID()}`,
+        ...(agent?.name ? { agentId: agent.name } : {}),
+        ...(systemPrompt ? { systemPrompt } : {}),
+        ...(connection.maxTokens !== undefined
+          ? { maxTokens: connection.maxTokens }
+          : {}),
+        ...(connection.temperature !== undefined
+          ? { temperature: connection.temperature }
+          : {}),
+        tools: selectedTools,
+        ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
+      },
+      {
+        llm,
+        toolExecutor: tools,
+      },
+    )) {
+      if (event.type === "text") {
+        wroteText = true;
+        process.stdout.write(event.text);
+      } else if (event.type === "provider_retry" && event.final) {
+        console.error(`Provider error: ${event.error}`);
+      }
     }
+  } finally {
+    await subagentHost.manager.shutdown();
   }
   if (wroteText) process.stdout.write("\n");
 }
@@ -916,31 +1025,35 @@ async function runResumedOneShot(
   const projectDirectory = resolve(process.cwd());
   const config = loadSystemDaemonConfig({ projectDirectory });
   const runtime = daemonRuntime(config, projectDirectory, new ProfileStore());
-  runtime.reload({ permission_mode: "accept-all" });
-  const session = await runtime.openSession(sessionId, undefined, {
-    cwd: projectDirectory,
-    resume: true,
-  });
   let wroteText = false;
-  await runtime.submitTurn(session.sessionKey, prompt, (event) => {
-    if (event.type === "text_part") {
-      // Provider deltas are byte-for-byte text fragments. Trimming each one
-      // removes meaningful leading spaces and joins adjacent streamed words.
-      const text =
-        typeof event.payload.text === "string" ? event.payload.text : "";
-      if (text) {
-        wroteText = true;
-        process.stdout.write(text);
+  try {
+    runtime.reload({ permission_mode: "accept-all" });
+    const session = await runtime.openSession(sessionId, undefined, {
+      cwd: projectDirectory,
+      resume: true,
+    });
+    await runtime.submitTurn(session.sessionKey, prompt, (event) => {
+      if (event.type === "text_part") {
+        // Provider deltas are byte-for-byte text fragments. Trimming each one
+        // removes meaningful leading spaces and joins adjacent streamed words.
+        const text =
+          typeof event.payload.text === "string" ? event.payload.text : "";
+        if (text) {
+          wroteText = true;
+          process.stdout.write(text);
+        }
+        return;
       }
-      return;
-    }
-    if (event.type === "notification" && event.payload.level === "error") {
-      const message = stringSetting(event.payload.message);
-      if (message) {
-        console.error(`Provider error: ${message}`);
+      if (event.type === "notification" && event.payload.level === "error") {
+        const message = stringSetting(event.payload.message);
+        if (message) {
+          console.error(`Provider error: ${message}`);
+        }
       }
-    }
-  });
+    });
+  } finally {
+    await runtime.shutdown();
+  }
   if (wroteText) process.stdout.write("\n");
 }
 

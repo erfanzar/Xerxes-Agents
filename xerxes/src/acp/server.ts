@@ -51,6 +51,7 @@ export interface ServerCapabilitiesOptions {
 export interface AcpServerOptions {
   readonly capabilities?: ServerCapabilities
   readonly modelListProvider?: () => readonly AcpModelInfo[]
+  readonly onSessionClose?: (sessionId: string) => void
   readonly promptHandler?: AcpPromptHandler
   readonly runner?: AcpPromptRunner
   readonly toolListProvider?: () => readonly ToolDefinition[]
@@ -69,6 +70,8 @@ export class AcpServer {
   readonly sessions = new AcpSessionStore()
 
   private readonly modelListProvider: () => readonly AcpModelInfo[]
+  private readonly onSessionClose: ((sessionId: string) => void) | undefined
+  private readonly releasedSessions = new Set<string>()
   private readonly promptHandler: AcpPromptHandler
   private readonly runner: AcpPromptRunner | undefined
   private readonly toolListProvider: () => readonly ToolDefinition[]
@@ -84,6 +87,7 @@ export class AcpServer {
       ?? (options.runner?.listTools ? () => options.runner?.listTools?.() ?? [] : () => [])
     this.modelListProvider = options.modelListProvider
       ?? (options.runner?.listModels ? () => options.runner?.listModels?.() ?? [] : () => [])
+    this.onSessionClose = options.onSessionClose
     options.runner?.setPermissionBoard?.(this.permissions)
   }
 
@@ -129,6 +133,7 @@ export class AcpServer {
     const cancelled = this.sessions.cancel(sessionId)
     if (cancelled) {
       this.runner?.cancel(sessionId)
+      this.releaseSession(sessionId)
     }
     return { ok: cancelled }
   }
@@ -138,8 +143,15 @@ export class AcpServer {
     if (closed) {
       this.runner?.cancel(sessionId)
       this.runner?.resetSession?.(sessionId)
+      this.releaseSession(sessionId)
     }
     return { ok: closed }
+  }
+
+  private releaseSession(sessionId: string): void {
+    if (this.releasedSessions.has(sessionId)) return
+    this.onSessionClose?.(sessionId)
+    this.releasedSessions.add(sessionId)
   }
 
   async prompt(sessionId: string, text: string, emit?: (event: AcpWireEvent) => void | Promise<void>): Promise<unknown> {
@@ -187,6 +199,17 @@ export class AcpServer {
 
   pendingQuestions(): readonly Record<string, unknown>[] {
     return this.runner?.pendingQuestions?.() ?? []
+  }
+
+  /** Abort every active prompt so transport shutdown cannot wait forever. */
+  shutdown(): number {
+    let cancelled = 0
+    for (const session of this.sessions.list()) {
+      this.sessions.cancel(session.sessionId)
+      if (this.runner?.cancel(session.sessionId)) cancelled += 1
+      this.releaseSession(session.sessionId)
+    }
+    return cancelled
   }
 }
 

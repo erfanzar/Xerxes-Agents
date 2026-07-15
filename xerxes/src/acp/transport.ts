@@ -58,6 +58,7 @@ export class StdioJsonRpcServer {
       }
     } finally {
       reader.releaseLock()
+      this.server.shutdown()
       await Promise.allSettled([...this.workers])
       await this.writeQueue
     }
@@ -202,6 +203,7 @@ export class StdioJsonRpcServer {
       case 'exit':
         this.running = false
         await this.result(request, { ok: true }, send)
+        this.server.shutdown()
         return
       default:
         if (request.canReply) {

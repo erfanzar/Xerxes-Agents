@@ -143,6 +143,16 @@ export interface ClaudeWorkflowToolsOptions {
   readonly worktreeManager?: WorktreeManager
 }
 
+export const SKILL_TOOL_DEFINITION: ToolDefinition = definition(
+  'SkillTool',
+  'Render instructions for a discovered named skill.',
+  {
+    skill_name: stringSchema('Skill name.'),
+    args: stringSchema('Optional user request appended to the skill instructions.'),
+  },
+  ['skill_name'],
+)
+
 export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   definition('TodoWriteTool', 'Replace the session-scoped structured todo list.', {
     todos: { description: 'Array or JSON string of {content, status} todo objects.', type: ['array', 'string'] },
@@ -166,10 +176,7 @@ export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   definition('ToolSearchTool', 'Search currently registered tool names and descriptions.', {
     query: stringSchema('Tool capability query.'),
   }, ['query']),
-  definition('SkillTool', 'Render instructions for a discovered named skill.', {
-    skill_name: stringSchema('Skill name.'),
-    args: stringSchema('Optional user request appended to the skill instructions.'),
-  }, ['skill_name']),
+  SKILL_TOOL_DEFINITION,
   definition('PlanTool', 'Generate and optionally execute a structured multi-agent plan through an attached planner.', {
     objective: stringSchema('High-level objective.'),
     execute: booleanSchema('Run the generated steps through the subagent manager.'),
@@ -187,6 +194,16 @@ export function registerClaudeWorkflowTools(
     registry.replace(tool, (inputs, context, signal) => adapter.execute(tool.function.name, inputs, context, signal), agentId)
   }
   return CLAUDE_WORKFLOW_TOOL_DEFINITIONS
+}
+
+/** Register only the safe, read-only skill activation surface for a live registry. */
+export function registerClaudeSkillTool(
+  registry: ToolRegistry,
+  skillRegistry: SkillRegistry,
+  agentId = 'default',
+): ToolDefinition {
+  registry.replace(SKILL_TOOL_DEFINITION, inputs => renderSkill(skillRegistry, inputs), agentId)
+  return SKILL_TOOL_DEFINITION
 }
 
 /** Adapter that owns one session's Claude workflow state and host ports. */
@@ -288,14 +305,7 @@ export class ClaudeWorkflowTools {
     if (registry === undefined) {
       throw new ClientError('skills', 'no SkillRegistry is attached to this Claude workflow session')
     }
-    const skillName = requiredString(inputs, 'skill_name')
-    const skill = registry.get(skillName)
-    if (skill === undefined) {
-      const names = registry.names
-      return names.length ? `Skill '${skillName}' not found. Available: ${names.slice(0, 20).join(', ')}` : `Skill '${skillName}' not found. No skills discovered.`
-    }
-    const args = optionalString(inputs, 'args')?.trim()
-    return `[Skill: ${skillName}]\n${skillPromptSection(skill)}${args ? `\n\nUser request: ${args}` : ''}`
+    return renderSkill(registry, inputs)
   }
 
   private async plan(inputs: JsonObject, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -363,6 +373,19 @@ export class ClaudeWorkflowTools {
     }
     return results
   }
+}
+
+function renderSkill(registry: SkillRegistry, inputs: JsonObject): string {
+  const skillName = requiredString(inputs, 'skill_name')
+  const skill = registry.get(skillName)
+  if (skill === undefined) {
+    const names = registry.names
+    return names.length
+      ? `Skill '${skillName}' not found. Available: ${names.slice(0, 20).join(', ')}`
+      : `Skill '${skillName}' not found. No skills discovered.`
+  }
+  const args = optionalString(inputs, 'args')?.trim()
+  return `[Skill: ${skillName}]\n${skillPromptSection(skill)}${args ? `\n\nUser request: ${args}` : ''}`
 }
 
 /** Parse the XML shape emitted by the legacy Python planner. */

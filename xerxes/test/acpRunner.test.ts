@@ -134,6 +134,7 @@ test('ACP agent runner waits for editor approval and feeds the decision back int
     { role: 'tool', content: 'wrote note.txt', tool_call_id: 'call-write' },
     { role: 'assistant', content: 'Write complete.' },
   ])
+  expect(runner.stateFor(sessionId)?.metadata.permission_mode).toBe('manual')
 })
 
 test('ACP cancellation aborts a pending approval without leaving the turn blocked', async () => {

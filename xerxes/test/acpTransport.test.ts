@@ -4,7 +4,9 @@
 import { expect, test } from 'bun:test'
 
 import { AcpServer } from '../src/acp/server.js'
+import { AcpAgentRunner } from '../src/acp/runner.js'
 import { StdioJsonRpcServer, serveACPStdio } from '../src/acp/transport.js'
+import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 
 test('ACP stdio transport preserves NDJSON framing, aliases, streamed updates, and final result', async () => {
   const server = new AcpServer({
@@ -71,6 +73,36 @@ test('ACP stdio transport reports parse and method errors but does not answer no
   expect(frames.filter(frame => frame.error).map(frame => (frame.error as { code: number }).code)).toEqual([-32700, -32601])
   expect(frames.some(frame => frame.id === 2 && frame.result)).toBe(true)
   expect(frames.filter(frame => frame.id === undefined)).toHaveLength(0)
+})
+
+test('ACP EOF aborts active runner prompts before awaiting transport workers', async () => {
+  const started = Promise.withResolvers<void>()
+  const llm: LlmClient = {
+    async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+      started.resolve()
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve()
+        signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      throw signal?.reason ?? new Error('expected ACP shutdown cancellation')
+    },
+  }
+  const runner = new AcpAgentRunner({ llm, model: 'test-model' })
+  const server = new AcpServer({ runner })
+  const sessionId = String(server.openSession('/tmp').session_id)
+  const output: string[] = []
+  const serving = serveACPStdio(server, readableChunks([
+    `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/prompt', params: { session_id: sessionId, text: 'wait' } })}\n`,
+  ]), line => {
+    output.push(line)
+  })
+
+  await started.promise
+  await expect(Promise.race([
+    serving.then(() => 'done'),
+    Bun.sleep(500).then(() => 'timeout'),
+  ])).resolves.toBe('done')
+  expect(output.some(line => line.includes('ACP prompt cancelled'))).toBe(true)
 })
 
 function readableChunks(chunks: readonly string[]): ReadableStream<Uint8Array> {

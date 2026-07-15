@@ -11,6 +11,7 @@ import { LoopDetector, ToolLoopError } from '../runtime/loopDetector.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
+  type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import type { ChatMessage } from '../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
@@ -109,6 +110,7 @@ export async function* runTurn(
   let usageComplete = true
   let apiCallsCount = 0
   let objectiveGuardRetries = 0
+  const objectiveToolExecutions: ObjectiveToolExecutionEvidence[] = []
   let toolCallsCount = 0
   let latestToolRoundText: string | undefined
   const objectiveGuardLimit = objectiveGuardRetryLimit(
@@ -245,7 +247,7 @@ export async function* runTurn(
       toolCallsCount += unconfigured.length
       for (const call of unconfigured) {
         const result = unconfiguredToolResult(call)
-        appendToolResult(state, result, call)
+        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
       }
       if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
@@ -270,7 +272,8 @@ export async function* runTurn(
         }
       }
       const objectiveDecision = inspectObjectiveResponse(assistantText, {
-        mode: request.interactionMode ?? 'code',
+        evidence: { toolExecutions: objectiveToolExecutions },
+        mode: currentInteractionMode(state, request.interactionMode),
       })
       if (!objectiveDecision.shouldContinue) {
         break
@@ -306,7 +309,7 @@ export async function* runTurn(
       if (signal?.aborted) {
         for (const cancelled of roundToolCalls.slice(index)) {
           const result = cancelledToolResult(cancelled)
-          appendToolResult(state, result, cancelled)
+          appendToolResult(state, result, cancelled, objectiveToolExecutions)
           yield { type: 'tool_end', result }
         }
         break
@@ -317,7 +320,7 @@ export async function* runTurn(
       )
       if (loopEvent.severity === 'critical') {
         const result = failedToolResult(call, new ToolLoopError(loopEvent))
-        appendToolResult(state, result, call)
+        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
         continue
       }
@@ -330,7 +333,7 @@ export async function* runTurn(
       )
       if (permission === 'deny') {
         const result = deniedToolResult(call)
-        appendToolResult(state, result, call)
+        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
         continue
       }
@@ -347,13 +350,13 @@ export async function* runTurn(
         // must not start a privileged tool with an already-aborted signal.
         if (signal?.aborted) {
           const result = cancelledToolResult(call)
-          appendToolResult(state, result, call)
+          appendToolResult(state, result, call, objectiveToolExecutions)
           yield { type: 'tool_end', result }
           continue
         }
         if (decision === 'reject') {
           const result = deniedToolResult(call)
-          appendToolResult(state, result, call)
+          appendToolResult(state, result, call, objectiveToolExecutions)
           yield { type: 'tool_end', result }
           continue
         }
@@ -372,7 +375,7 @@ export async function* runTurn(
           toolCallId: call.id,
           durationMs: performance.now() - startedAt,
         }
-        appendToolResult(state, result, call)
+        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
       } catch (error) {
         const result = failedToolResult(
@@ -380,7 +383,7 @@ export async function* runTurn(
           error,
           performance.now() - startedAt,
         )
-        appendToolResult(state, result, call)
+        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
       }
     }
@@ -405,6 +408,11 @@ export async function* runTurn(
       ...(usageComplete && reasoningUsageComplete ? { reasoningTokens } : {}),
     },
   }
+}
+
+function currentInteractionMode(state: AgentState, initialMode: string | undefined): string {
+  const liveMode = state.metadata.interaction_mode
+  return typeof liveMode === 'string' && liveMode.trim() ? liveMode : initialMode ?? 'code'
 }
 
 type IncrementalTextEvent = Extract<StreamEvent, { readonly type: 'text' | 'thinking' }>
@@ -536,10 +544,13 @@ function ensureSystemPrompt(
   messages: ChatMessage[],
   systemPrompt: string | undefined,
 ): void {
-  if (!systemPrompt || messages.some((message) => message.role === 'system')) {
+  if (!systemPrompt) return
+  const index = messages.findIndex((message) => message.role === 'system')
+  if (index < 0) {
+    messages.unshift({ role: 'system', content: systemPrompt })
     return
   }
-  messages.unshift({ role: 'system', content: systemPrompt })
+  messages[index] = { role: 'system', content: systemPrompt }
 }
 
 /** Separate model-visible calls from provider calls outside the configured surface. */
@@ -641,6 +652,7 @@ function appendToolResult(
   state: AgentState,
   result: ToolResult,
   call: ToolCall,
+  objectiveToolExecutions: ObjectiveToolExecutionEvidence[],
 ): void {
   state.messages.push({
     role: 'tool',
@@ -648,14 +660,16 @@ function appendToolResult(
     name: result.name,
     tool_call_id: result.toolCallId,
   })
-  state.toolExecutions.push({
+  const execution = {
     name: result.name,
     inputs: call.function.arguments,
     result: result.result,
     permitted: result.permitted,
     toolCallId: result.toolCallId,
     durationMs: result.durationMs,
-  })
+  }
+  state.toolExecutions.push(execution)
+  objectiveToolExecutions.push(execution)
 }
 
 function deniedToolResult(call: ToolCall): ToolResult {

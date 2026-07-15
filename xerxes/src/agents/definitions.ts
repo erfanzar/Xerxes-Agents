@@ -7,7 +7,13 @@ import { fileURLToPath } from 'node:url'
 
 import { xerxesHome } from '../daemon/paths.js'
 import { AgentSpecError } from '../core/errors.js'
-import { loadAgentSpec, loadAgentSpecData, type AgentSpecLoadOptions, type ResolvedAgentSpec } from './agentSpec.js'
+import {
+  loadAgentSpec,
+  loadAgentSpecData,
+  type AgentSpecLoadOptions,
+  type ResolvedAgentSpec,
+  type SubagentSpec,
+} from './agentSpec.js'
 import { parseYaml, yamlMap, type YamlMap, type YamlValue } from './yaml.js'
 
 export interface AgentDefinition {
@@ -19,8 +25,16 @@ export interface AgentDefinition {
   readonly model: string
   readonly name: string
   readonly source: string
+  /** Named child profiles declared by this agent's resolved YAML specification. */
+  readonly subagents?: Readonly<Record<string, AgentSubagentSpec>>
   readonly systemPrompt: string
   readonly tools: readonly string[]
+}
+
+/** A creator-local catalog entry optionally bound to an exact loaded profile. */
+export interface AgentSubagentSpec extends SubagentSpec {
+  /** Internal definition-map key used when an alias would collide globally. */
+  readonly resolvedProfile?: string
 }
 
 export interface AgentDefinitionLoadOptions extends AgentSpecLoadOptions {
@@ -75,6 +89,7 @@ export function loadAgentDefinitions(options: AgentDefinitionLoadOptions = {}): 
       recordLoadError(candidate, error)
     }
   }
+  loadReferencedSubagentDefinitions(definitions, options)
   return definitions
 }
 
@@ -140,6 +155,59 @@ function loadDefinitionDirectory(
   }
 }
 
+/** Bind every catalog path to the exact profile it declares, even when its alias collides globally. */
+function loadReferencedSubagentDefinitions(
+  definitions: Map<string, AgentDefinition>,
+  options: AgentDefinitionLoadOptions,
+): void {
+  const queue = [...definitions.entries()]
+  const loadedPaths = new Map<string, string>()
+  while (queue.length) {
+    const entry = queue.shift()
+    if (!entry) continue
+    const [creatorKey, creator] = entry
+    const boundSubagents: Record<string, AgentSubagentSpec> = {}
+    for (const [alias, reference] of Object.entries(creator.subagents ?? {})) {
+      try {
+        const referenceKey = `${alias}\u0000${reference.path}`
+        let profileKey = loadedPaths.get(referenceKey)
+        if (!profileKey) {
+          const loaded = definitionFromSpec(loadAgentSpec(reference.path, options), creator.source)
+          const definition = loaded.name === alias ? loaded : freezeDefinition({ ...loaded, name: alias })
+          const existing = definitions.get(alias)
+          profileKey = existing && !sameDefinition(existing, definition)
+            ? catalogDefinitionKey(alias, reference.path)
+            : alias
+          definitions.set(profileKey, definition)
+          loadedPaths.set(referenceKey, profileKey)
+          queue.push([profileKey, definition])
+        }
+        boundSubagents[alias] = Object.freeze({ ...reference, resolvedProfile: profileKey })
+      } catch (error) {
+        recordLoadError(reference.path, error)
+      }
+    }
+    definitions.set(creatorKey, freezeDefinition({ ...creator, subagents: boundSubagents }))
+  }
+}
+
+function catalogDefinitionKey(alias: string, path: string): string {
+  return `@catalog:${alias}:${path}`
+}
+
+function sameDefinition(left: AgentDefinition, right: AgentDefinition): boolean {
+  return left.name === right.name
+    && left.description === right.description
+    && left.systemPrompt === right.systemPrompt
+    && left.model === right.model
+    && left.isolation === right.isolation
+    && left.maxDepth === right.maxDepth
+    && JSON.stringify(left.tools) === JSON.stringify(right.tools)
+    && JSON.stringify(left.allowedTools) === JSON.stringify(right.allowedTools)
+    && JSON.stringify(left.excludeTools) === JSON.stringify(right.excludeTools)
+    && JSON.stringify(left.subagents ?? {}) === JSON.stringify(right.subagents ?? {})
+}
+
 function parseProjectAgentFile(
   path: string,
   source: string,
@@ -176,6 +244,7 @@ function definitionFromSpec(spec: ResolvedAgentSpec, source: string): AgentDefin
     tools: spec.tools,
     allowedTools: spec.allowedTools,
     excludeTools: spec.excludeTools,
+    subagents: spec.subagents,
     source,
     maxDepth: spec.maxDepth,
     isolation: spec.isolation,
@@ -188,7 +257,16 @@ function freezeDefinition(definition: AgentDefinition): AgentDefinition {
     tools: Object.freeze([...definition.tools]),
     allowedTools: definition.allowedTools === null ? null : Object.freeze([...definition.allowedTools]),
     excludeTools: Object.freeze([...definition.excludeTools]),
+    subagents: freezeSubagents(definition.subagents),
   })
+}
+
+function freezeSubagents(
+  subagents: Readonly<Record<string, AgentSubagentSpec>> | undefined,
+): Readonly<Record<string, AgentSubagentSpec>> {
+  return Object.freeze(Object.fromEntries(
+    Object.entries(subagents ?? {}).map(([name, spec]) => [name, Object.freeze({ ...spec })]),
+  ))
 }
 
 function markdownFrontmatter(content: string): { readonly body: string; readonly fields: string } | undefined {

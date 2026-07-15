@@ -12,6 +12,7 @@ import {
   listAgentDefinitionLoadErrors,
   loadAgentDefinitions,
   loadBuiltinAgentDefinitions,
+  type AgentDefinition,
 } from '../src/agents/definitions.js'
 import {
   AgentOrchestrator,
@@ -73,7 +74,15 @@ agent:
 
 test('built-in definitions are TypeScript-owned and retain resolved specialist prompts', () => {
   const definitions = loadBuiltinAgentDefinitions()
-  expect([...definitions.keys()].sort()).toEqual(['coder', 'default', 'objective', 'planner', 'researcher'])
+  expect([...definitions.keys()].sort()).toEqual([
+    'coder',
+    'default',
+    'objective',
+    'planner',
+    'researcher',
+    'reviewer',
+    'tester',
+  ])
   expect(BUILTIN_AGENTS.get('coder')?.systemPrompt).toContain('coding specialist focused on software engineering implementation')
   expect(definitions.get('default')?.tools).toEqual(expect.arrayContaining([
     'SpawnAgents',
@@ -85,6 +94,16 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
     'agent_memory_search',
     'agent_memory_journal',
   ]))
+  expect(definitions.get('default')?.subagents).toMatchObject({
+    coder: { description: 'Good at general software engineering tasks.' },
+    objective: { description: 'Hard-goal execution loop with verification gates.' },
+    planner: { description: 'Read-only implementation planning and architecture design.' },
+    researcher: { description: 'Fast codebase exploration with prompt-enforced read-only behavior.' },
+    reviewer: { description: 'Independent read-only code review with prioritized findings.' },
+    tester: { description: 'Focused test authoring and verification without recursive delegation.' },
+  })
+  expect(Object.isFrozen(definitions.get('default')?.subagents)).toBeTrue()
+  expect(Object.isFrozen(definitions.get('default')?.subagents?.coder)).toBeTrue()
   expect(definitions.get('researcher')?.tools).toEqual(expect.arrayContaining([
     'agent_memory_status',
     'agent_memory_read',
@@ -95,6 +114,44 @@ test('built-in definitions are TypeScript-owned and retain resolved specialist p
     'agent_memory_journal',
   ]))
   expect(definitions.get('objective')?.tools).toContain('agent_memory_journal')
+  expect(definitions.get('objective')?.tools).toEqual(expect.arrayContaining([
+    'AgentTool',
+    'SpawnAgents',
+    'AwaitAgents',
+    'TaskOutputTool',
+  ]))
+  expect(definitions.get('objective')?.subagents).toMatchObject({
+    coder: { description: 'Focused implementation for a disjoint part of the objective.' },
+    researcher: { description: 'Read-only evidence gathering for a bounded objective question.' },
+    reviewer: { description: 'Independent read-only review when changed paths or diff context are supplied.' },
+    tester: { description: 'Focused test authoring and verification for the current objective.' },
+  })
+  expect(definitions.get('reviewer')?.allowedTools).toEqual([
+    'ReadFile',
+    'GlobTool',
+    'GrepTool',
+    'ListDir',
+  ])
+  expect(definitions.get('reviewer')?.excludeTools).toEqual(expect.arrayContaining([
+    'AgentTool',
+    'SpawnAgents',
+    'WriteFile',
+    'FileEditTool',
+    'exec_command',
+  ]))
+  expect(definitions.get('reviewer')?.systemPrompt).toContain('read-only code review specialist')
+  expect(definitions.get('tester')?.allowedTools).toEqual(expect.arrayContaining([
+    'ReadFile',
+    'WriteFile',
+    'FileEditTool',
+    'exec_command',
+    'ListDir',
+  ]))
+  expect(definitions.get('tester')?.excludeTools).toEqual(expect.arrayContaining([
+    'AgentTool',
+    'SpawnAgents',
+  ]))
+  expect(definitions.get('tester')?.systemPrompt).toContain('testing specialist')
 })
 
 test('definition loader applies user/project precedence, multi-agent files, and isolated errors', async () => {
@@ -103,7 +160,7 @@ test('definition loader applies user/project precedence, multi-agent files, and 
   const projectAgents = join(root, '.xerxes', 'agents')
   try {
     await mkdir(user, { recursive: true })
-    await mkdir(projectAgents, { recursive: true })
+    await mkdir(join(projectAgents, 'nested'), { recursive: true })
     await writeFile(join(user, 'shared.yaml'), `version: 1
 agent:
   name: shared
@@ -123,6 +180,18 @@ agents:
     system_prompt: embedded prompt
     allowed_tools:
       - ReadFile
+  parent:
+    system_prompt: parent prompt
+    subagents:
+      audit:
+        path: ./.xerxes/agents/nested/reviewer.yaml
+        description: Nested audit alias
+`, 'utf8')
+    await writeFile(join(projectAgents, 'nested', 'reviewer.yaml'), `version: 1
+agent:
+  name: internal-reviewer
+  system_prompt: nested reviewer prompt
+  allowed_tools: [ReadFile]
 `, 'utf8')
 
     const definitions = loadAgentDefinitions({
@@ -143,8 +212,73 @@ agents:
       allowedTools: ['ReadFile'],
       source: 'project',
     })
+    expect(definitions.get('audit')).toMatchObject({
+      name: 'audit',
+      source: 'project',
+      systemPrompt: 'nested reviewer prompt',
+      allowedTools: ['ReadFile'],
+    })
     expect(listAgentDefinitionLoadErrors()).toHaveLength(1)
     expect(listAgentDefinitionLoadErrors()[0]).toContain('broken.yaml')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('creator catalogs bind colliding aliases to their declared paths and omit broken references', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-catalog-'))
+  const projectAgents = join(root, '.xerxes', 'agents')
+  const globalCoder: AgentDefinition = {
+    allowedTools: ['WriteFile'],
+    description: 'global writable coder',
+    excludeTools: [],
+    isolation: '',
+    maxDepth: 3,
+    model: 'global-model',
+    name: 'coder',
+    source: 'built-in',
+    systemPrompt: 'global coder prompt',
+    tools: ['WriteFile'],
+  }
+  try {
+    await mkdir(projectAgents, { recursive: true })
+    await writeFile(join(projectAgents, 'readonly-coder.yaml'), `version: 1
+agent:
+  name: internal-readonly-coder
+  system_prompt: creator-local readonly coder
+  model: child-model
+  allowed_tools: [ReadFile]
+`, 'utf8')
+    await writeFile(join(root, 'agents.yaml'), `version: 1
+agents:
+  parent:
+    system_prompt: parent prompt
+    subagents:
+      coder:
+        path: ./.xerxes/agents/readonly-coder.yaml
+        description: Creator-local coder
+      missing:
+        path: ./.xerxes/agents/missing.yaml
+        description: Broken child
+`, 'utf8')
+
+    const definitions = loadAgentDefinitions({
+      builtinDefinitions: new Map([['coder', globalCoder]]),
+      cwd: root,
+      projectDirectory: projectAgents,
+      userDirectory: join(root, 'user'),
+    })
+    const reference = definitions.get('parent')?.subagents?.coder
+    expect(reference?.resolvedProfile).toStartWith('@catalog:coder:')
+    expect(definitions.get(reference?.resolvedProfile ?? '')).toMatchObject({
+      name: 'coder',
+      model: 'child-model',
+      systemPrompt: 'creator-local readonly coder',
+      allowedTools: ['ReadFile'],
+    })
+    expect(definitions.get('coder')).toMatchObject({ model: 'global-model', allowedTools: ['WriteFile'] })
+    expect(definitions.get('parent')?.subagents?.missing).toBeUndefined()
+    expect(listAgentDefinitionLoadErrors().some(error => error.includes('missing.yaml'))).toBeTrue()
   } finally {
     await rm(root, { recursive: true, force: true })
   }

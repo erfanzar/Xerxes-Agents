@@ -40,7 +40,11 @@ async function executeJson(registry: ToolRegistry, name: string, arguments_: Jso
   return JSON.parse(await registry.execute(toolCall(name, arguments_), { metadata: {} })) as unknown
 }
 
-function agentSnapshot(id: string, status: SpawnedAgentSnapshot['status'] = 'running'): SpawnedAgentSnapshot {
+function agentSnapshot(
+  id: string,
+  status: SpawnedAgentSnapshot['status'] = 'running',
+  sourceAgentId?: string,
+): SpawnedAgentSnapshot {
   return {
     agentId: 'coder',
     closed: status === 'closed',
@@ -51,6 +55,7 @@ function agentSnapshot(id: string, status: SpawnedAgentSnapshot['status'] = 'run
     title: `Task ${id}`,
     promptProfile: 'coder',
     queueSize: 0,
+    ...(sourceAgentId === undefined ? {} : { sourceAgentId }),
     status,
     updatedAt: '2026-01-01T00:00:00.000Z',
   }
@@ -103,6 +108,82 @@ test('Claude agent tools map task lifecycle, outputs, and mailbox events to Spaw
   expect(batch.map(entry => entry.last_output)).toEqual(['one:FIRST', 'two:SECOND'])
 })
 
+test('Claude agent management tools cannot inspect or mutate another session handles', async () => {
+  const snapshots = [
+    agentSnapshot('session-a-task', 'completed', 'session-a'),
+    agentSnapshot('session-b-task', 'running', 'session-b'),
+  ]
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshots.find(snapshot => snapshot.id === id)!, closed: true, previousStatus: 'running', status: 'closed' }),
+    listHandles: () => snapshots,
+    resume: id => snapshots.find(snapshot => snapshot.id === id)!,
+    sendInput: async id => snapshots.find(snapshot => snapshot.id === id)!,
+    spawn: async () => snapshots[0]!,
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const sessionA = { agentId: 'session-b', metadata: {}, sessionId: 'session-a' }
+  const sessionBByAgentFallback = { agentId: 'session-b', metadata: {} }
+
+  const listedA = await tools.execute('TaskListTool', {}, sessionA) as Array<{ id: string }>
+  const listedB = await tools.execute('TaskListTool', {}, sessionBByAgentFallback) as Array<{ id: string }>
+  expect(listedA.map(snapshot => snapshot.id)).toEqual(['session-a-task'])
+  expect(listedB.map(snapshot => snapshot.id)).toEqual(['session-b-task'])
+
+  const crossSessionCalls: Array<{ readonly inputs: JsonObject; readonly name: string }> = [
+    { name: 'SendMessageTool', inputs: { target: 'session-b-task', message: 'leak' } },
+    { name: 'TaskGetTool', inputs: { task_id: 'session-b-task' } },
+    { name: 'TaskOutputTool', inputs: { task_id: 'session-b-task' } },
+    { name: 'TaskStopTool', inputs: { task_id: 'session-b-task' } },
+    { name: 'TaskUpdateTool', inputs: { task_id: 'session-b-task', message: 'leak' } },
+    { name: 'AwaitAgents', inputs: { agent_ids: ['session-b-task'], timeout_seconds: 0 } },
+    { name: 'PeekAgent', inputs: { target: 'session-b-task' } },
+    { name: 'ResetAgent', inputs: { target: 'session-b-task', new_prompt: 'leak' } },
+  ]
+  for (const call of crossSessionCalls) {
+    await expect(tools.execute(call.name, call.inputs, sessionA)).rejects.toThrow('managed subagent not found')
+  }
+
+  const awaited = await tools.execute('AwaitAgents', {
+    timeout_seconds: 0,
+    wake_on: 'none',
+  }, sessionA) as { agents: Array<{ id: string }> }
+  expect(awaited.agents).toEqual([])
+})
+
+test('Claude agent message drains are filtered and cursor-isolated by session owner', async () => {
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
+    listHandles: () => [
+      agentSnapshot('session-a-task', 'running', 'session-a'),
+      agentSnapshot('session-b-task', 'running', 'session-b'),
+    ],
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async () => agentSnapshot('unused'),
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const sessionA = { metadata: {}, sessionId: 'session-a' }
+  const sessionB = { metadata: {}, sessionId: 'session-b' }
+
+  const firstA = await tools.execute('CheckAgentMessages', {}, sessionA) as {
+    events: Array<{ agentId: string; sourceAgentId?: string }>
+    latest_seq: number
+  }
+  const firstB = await tools.execute('CheckAgentMessages', {}, sessionB) as {
+    events: Array<{ agentId: string; sourceAgentId?: string }>
+    latest_seq: number
+  }
+  expect(firstA.events).toMatchObject([{ agentId: 'session-a-task', sourceAgentId: 'session-a' }])
+  expect(firstB.events).toMatchObject([{ agentId: 'session-b-task', sourceAgentId: 'session-b' }])
+  expect(firstA.latest_seq).toBeGreaterThan(0)
+  expect(firstB.latest_seq).toBeGreaterThan(firstA.latest_seq)
+
+  expect(await tools.execute('CheckAgentMessages', {}, sessionA)).toMatchObject({ events: [] })
+  expect(await tools.execute('CheckAgentMessages', {}, sessionB)).toMatchObject({ events: [] })
+})
+
 test('agent creation schemas require concise titles for single and batch delegation', async () => {
   const byName = new Map(CLAUDE_AGENT_TOOL_DEFINITIONS.map(tool => [tool.function.name, tool]))
   const required = (name: string) => byName.get(name)?.function.parameters.required as string[] | undefined
@@ -113,14 +194,22 @@ test('agent creation schemas require concise titles for single and batch delegat
   expect(properties.title?.maxLength).toBe(48)
 
   const registry = new ToolRegistry()
+  const manager = new SpawnedAgentManager({ runner: async () => ({ content: 'done' }) })
   registerClaudeAgentTools(registry, {
-    manager: new SpawnedAgentManager({ runner: async () => ({ content: 'done' }) }),
+    manager,
   })
   await expect(registry.execute(toolCall('AgentTool', { prompt: 'missing title' }), { metadata: {} }))
     .rejects.toThrow('title')
   await expect(registry.execute(toolCall('SpawnAgents', {
     agents: [{ prompt: 'missing batch title' }],
   }), { metadata: {} })).rejects.toThrow('title')
+  const oversized = Array.from({ length: 9 }, (_, index) => ({
+    prompt: `task ${index}`,
+    title: `Task ${index}`,
+  }))
+  await expect(registry.execute(toolCall('SpawnAgents', { agents: oversized }), { metadata: {} }))
+    .rejects.toThrow('at most 8 agents')
+  expect(manager.listHandles()).toEqual([])
 })
 
 test('foreground agent waits stop promptly when the parent turn is cancelled', async () => {
