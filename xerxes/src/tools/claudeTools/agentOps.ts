@@ -12,10 +12,12 @@ import {
   type SpawnedAgentSnapshot,
 } from '../../operators/subagents.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
+import type { PermissionMode } from '../../streaming/permissions.js'
 import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
 
 const DEFAULT_WAIT_SECONDS = 120
 const MAILBOX_EVENT_LIMIT = 1_000
+const MAX_PARALLEL_AGENTS = 8
 const POLL_INTERVAL_MS = 25
 
 const TERMINAL_STATUSES = new Set(['cancelled', 'closed', 'completed', 'error'])
@@ -46,6 +48,7 @@ export interface ClaudeAgentEvent {
   readonly reasoningTokens?: number
   readonly rules?: readonly string[]
   readonly seq: number
+  readonly sourceAgentId?: string
   readonly status: string
   readonly title: string
   readonly toolCalls?: number
@@ -58,8 +61,9 @@ export interface ClaudeAgentEvent {
  * `record` when their runner has richer streamed progress than a snapshot.
  */
 export class AgentEventMailbox {
-  private cursor = 0
+  private readonly cursors = new Map<string, number>()
   private readonly events: ClaudeAgentEvent[] = []
+  private floorCursor = 0
   private readonly observed = new Map<string, SpawnedAgentSnapshot>()
   private sequence = 0
 
@@ -103,25 +107,38 @@ export class AgentEventMailbox {
     this.events.push(recorded)
     if (this.events.length > MAILBOX_EVENT_LIMIT) {
       this.events.splice(0, this.events.length - MAILBOX_EVENT_LIMIT)
-      this.cursor = Math.max(this.cursor, (this.events[0]?.seq ?? this.sequence) - 1)
+      this.floorCursor = Math.max(this.floorCursor, (this.events[0]?.seq ?? this.sequence) - 1)
     }
     return recorded
   }
 
-  drain(sinceSeq = 0): readonly ClaudeAgentEvent[] {
-    const after = Math.max(this.cursor, normalizeSequence(sinceSeq))
-    const events = this.events.filter(event => event.seq > after)
-    this.cursor = this.sequence
+  drain(sinceSeq?: number): readonly ClaudeAgentEvent[]
+  drain(ownerId: string, sinceSeq?: number): readonly ClaudeAgentEvent[]
+  drain(ownerOrSince: string | number = 0, scopedSince = 0): readonly ClaudeAgentEvent[] {
+    const scope = mailboxScope(ownerOrSince)
+    const sinceSeq = typeof ownerOrSince === 'number' ? ownerOrSince : scopedSince
+    const after = Math.max(this.floorCursor, this.cursors.get(scope) ?? 0, normalizeSequence(sinceSeq))
+    const events = this.events.filter(event => event.seq > after && eventMatchesScope(event, scope))
+    this.cursors.set(scope, this.sequence)
     return Object.freeze(events)
   }
 
-  peek(sinceSeq = 0): readonly ClaudeAgentEvent[] {
+  peek(sinceSeq?: number): readonly ClaudeAgentEvent[]
+  peek(ownerId: string, sinceSeq?: number): readonly ClaudeAgentEvent[]
+  peek(ownerOrSince: string | number = 0, scopedSince = 0): readonly ClaudeAgentEvent[] {
+    const scope = mailboxScope(ownerOrSince)
+    const sinceSeq = typeof ownerOrSince === 'number' ? ownerOrSince : scopedSince
     const after = normalizeSequence(sinceSeq)
-    return Object.freeze(this.events.filter(event => event.seq > after))
+    return Object.freeze(this.events.filter(event => event.seq > after && eventMatchesScope(event, scope)))
   }
 
-  latestSeq(): number {
-    return this.sequence
+  latestSeq(ownerId?: string): number {
+    if (ownerId === undefined) return this.sequence
+    const scope = normalizeOwnerId(ownerId)
+    return this.events.reduce(
+      (latest, event) => eventMatchesScope(event, scope) ? Math.max(latest, event.seq) : latest,
+      0,
+    )
   }
 }
 
@@ -159,6 +176,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     agents: {
       description: 'Array or JSON string of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title.',
       type: ['array', 'string'],
+      maxItems: MAX_PARALLEL_AGENTS,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -248,18 +266,18 @@ export class ClaudeAgentTools {
   ): Promise<unknown> {
     switch (name) {
       case 'AgentTool': return this.agentTool(inputs, context, signal)
-      case 'SendMessageTool': return this.sendMessage(inputs)
+      case 'SendMessageTool': return this.sendMessage(inputs, context)
       case 'TaskCreateTool': return this.taskCreate(inputs, context)
       case 'SpawnAgents': return this.spawnAgents(inputs, context, signal)
-      case 'TaskGetTool': return this.taskGet(requiredString(inputs, 'task_id'))
-      case 'TaskListTool': return this.taskList()
-      case 'TaskOutputTool': return this.taskOutput(requiredString(inputs, 'task_id'))
-      case 'TaskStopTool': return this.taskStop(requiredString(inputs, 'task_id'))
-      case 'TaskUpdateTool': return this.taskUpdate(inputs)
-      case 'AwaitAgents': return this.awaitAgents(inputs, signal)
-      case 'CheckAgentMessages': return this.checkMessages(inputs)
-      case 'PeekAgent': return this.taskGet(requiredString(inputs, 'target'))
-      case 'ResetAgent': return this.resetAgent(inputs)
+      case 'TaskGetTool': return this.taskGet(requiredString(inputs, 'task_id'), context)
+      case 'TaskListTool': return this.taskList(context)
+      case 'TaskOutputTool': return this.taskOutput(requiredString(inputs, 'task_id'), context)
+      case 'TaskStopTool': return this.taskStop(requiredString(inputs, 'task_id'), context)
+      case 'TaskUpdateTool': return this.taskUpdate(inputs, context)
+      case 'AwaitAgents': return this.awaitAgents(inputs, context, signal)
+      case 'CheckAgentMessages': return this.checkMessages(inputs, context)
+      case 'PeekAgent': return this.taskGet(requiredString(inputs, 'target'), context)
+      case 'ResetAgent': return this.resetAgent(inputs, context)
       case 'HandoffTool': return this.handoff(inputs, context, signal)
       default: throw new ValidationError('tool', 'is not handled by ClaudeAgentTools', name)
     }
@@ -300,8 +318,8 @@ export class ClaudeAgentTools {
     }
   }
 
-  private async sendMessage(inputs: JsonObject): Promise<Record<string, unknown>> {
-    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'target')), {
+  private async sendMessage(inputs: JsonObject, context: ToolExecutionContext): Promise<Record<string, unknown>> {
+    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'target'), context), {
       message: requiredString(inputs, 'message'),
     })
     this.capture()
@@ -327,6 +345,9 @@ export class ClaudeAgentTools {
   ): Promise<readonly Record<string, unknown>[]> {
     const specs = parseAgentSpecs(inputs.agents)
     if (!specs.length) throw new ValidationError('agents', 'must contain at least one agent specification', inputs.agents)
+    if (specs.length > MAX_PARALLEL_AGENTS) {
+      throw new ValidationError('agents', `must contain at most ${MAX_PARALLEL_AGENTS} agents`, specs.length)
+    }
     const results = await Promise.allSettled(specs.map(spec => this.spawnSpec(spec, context)))
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
     const snapshots = results
@@ -361,48 +382,52 @@ export class ClaudeAgentTools {
     }
   }
 
-  private taskGet(target: string): Record<string, unknown> {
+  private taskGet(target: string, context: ToolExecutionContext): Record<string, unknown> {
     this.capture()
-    return agentSnapshotWire(this.requireSnapshot(target))
+    return agentSnapshotWire(this.requireSnapshot(target, context))
   }
 
-  private taskList(): readonly Record<string, unknown>[] {
+  private taskList(context: ToolExecutionContext): readonly Record<string, unknown>[] {
     this.capture()
-    return this.options.manager.listHandles().map(agentSnapshotWire)
+    return this.ownedHandles(context).map(agentSnapshotWire)
   }
 
-  private taskOutput(target: string): string {
-    const snapshot = this.requireSnapshot(target)
+  private taskOutput(target: string, context: ToolExecutionContext): string {
+    const snapshot = this.requireSnapshot(target, context)
     if (snapshot.lastOutput !== undefined) return snapshot.lastOutput
     return `No output for task '${target}' (may still be running).`
   }
 
-  private taskStop(target: string): Record<string, unknown> {
-    const snapshot = this.options.manager.close(this.resolveId(target))
+  private taskStop(target: string, context: ToolExecutionContext): Record<string, unknown> {
+    const snapshot = this.options.manager.close(this.resolveId(target, context))
     this.capture()
     return agentSnapshotWire(snapshot)
   }
 
-  private async taskUpdate(inputs: JsonObject): Promise<Record<string, unknown>> {
-    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'task_id')), {
+  private async taskUpdate(inputs: JsonObject, context: ToolExecutionContext): Promise<Record<string, unknown>> {
+    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'task_id'), context), {
       message: requiredString(inputs, 'message'),
     })
     this.capture()
     return agentSnapshotWire(snapshot)
   }
 
-  private async awaitAgents(inputs: JsonObject, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  private async awaitAgents(
+    inputs: JsonObject,
+    context: ToolExecutionContext,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
     const requested = parseAgentIds(inputs.agent_ids)
     const targets = requested.length
-      ? requested.map(target => this.resolveId(target))
-      : this.options.manager.listHandles().filter(snapshot => !isTerminal(snapshot)).map(snapshot => snapshot.id)
+      ? requested.map(target => this.resolveId(target, context))
+      : this.ownedHandles(context).filter(snapshot => !isTerminal(snapshot)).map(snapshot => snapshot.id)
     const wakeOn = normalizeWakeOn(optionalString(inputs, 'wake_on'))
     const timeout = timeoutMilliseconds(inputs, 'timeout_seconds', 30)
     const started = this.now()
     let wakeReason: 'agents_done' | 'cancelled' | 'timeout' = 'timeout'
     while (true) {
       this.capture()
-      const snapshots = targets.map(target => this.requireSnapshot(target))
+      const snapshots = targets.map(target => this.requireSnapshot(target, context))
       if (signal?.aborted) {
         wakeReason = 'cancelled'
         return awaitResult(wakeReason, wakeOn, started, this.now(), snapshots)
@@ -417,17 +442,18 @@ export class ClaudeAgentTools {
     }
   }
 
-  private checkMessages(inputs: JsonObject): Record<string, unknown> {
+  private checkMessages(inputs: JsonObject, context: ToolExecutionContext): Record<string, unknown> {
     this.capture()
     const sinceSeq = nonnegativeInteger(inputs, 'since_seq', 0)
     const peek = optionalBoolean(inputs, 'peek', false)
-    const events = peek ? this.mailbox.peek(sinceSeq) : this.mailbox.drain(sinceSeq)
-    return { latest_seq: this.mailbox.latestSeq(), events }
+    const owner = contextOwnerId(context)
+    const events = peek ? this.mailbox.peek(owner, sinceSeq) : this.mailbox.drain(owner, sinceSeq)
+    return { latest_seq: this.mailbox.latestSeq(owner), events }
   }
 
-  private async resetAgent(inputs: JsonObject): Promise<Record<string, unknown>> {
+  private async resetAgent(inputs: JsonObject, context: ToolExecutionContext): Promise<Record<string, unknown>> {
     const target = requiredString(inputs, 'target')
-    const current = this.requireSnapshot(target)
+    const current = this.requireSnapshot(target, context)
     const replacement = optionalString(inputs, 'new_prompt')?.trim() || current.lastInput
     if (!replacement) throw new ValidationError('new_prompt', 'is required when the agent has no prior input')
     this.options.manager.close(current.id)
@@ -464,6 +490,7 @@ export class ClaudeAgentTools {
 
   private async spawnSpec(spec: ClaudeAgentSpec, context: ToolExecutionContext): Promise<SpawnedAgentSnapshot> {
     const type = spec.subagentType?.trim() || 'general-purpose'
+    const parentPermissionMode = contextPermissionMode(context)
     const resolved = this.options.agentResolver?.(type, spec.model)
     const agent: SpawnedAgentDescriptor = Object.freeze({
       id: resolved?.id ?? type,
@@ -476,6 +503,10 @@ export class ClaudeAgentTools {
       message: spec.prompt,
       promptProfile: type,
       title: spec.title,
+      ...(typeof context.metadata.model === 'string' && context.metadata.model.trim()
+        ? { parentModel: context.metadata.model.trim() }
+        : {}),
+      ...(parentPermissionMode === undefined ? {} : { permissionMode: parentPermissionMode }),
       ...(context.sessionId ? { sourceAgentId: context.sessionId } : context.agentId ? { sourceAgentId: context.agentId } : {}),
       ...(context.agentId ? { creatorAgentId: context.agentId, parentAgentId: context.agentId } : {}),
       ...(spec.name?.trim() ? { nickname: spec.name.trim() } : {}),
@@ -512,18 +543,23 @@ export class ClaudeAgentTools {
     }
   }
 
-  private requireSnapshot(target: string): SpawnedAgentSnapshot {
-    const id = this.resolveId(target)
-    const snapshot = this.options.manager.listHandles().find(candidate => candidate.id === id)
+  private requireSnapshot(target: string, context: ToolExecutionContext): SpawnedAgentSnapshot {
+    const id = this.resolveId(target, context)
+    const snapshot = this.ownedHandles(context).find(candidate => candidate.id === id)
     if (snapshot === undefined) throw new ValidationError('target', 'managed subagent not found', target)
     return snapshot
   }
 
-  private resolveId(target: string): string {
+  private resolveId(target: string, context: ToolExecutionContext): string {
     const normalized = target.trim()
-    const snapshot = this.options.manager.listHandles().find(candidate => candidate.id === normalized || candidate.name === normalized)
+    const snapshot = this.ownedHandles(context).find(candidate => candidate.id === normalized || candidate.name === normalized)
     if (snapshot === undefined) throw new ValidationError('target', 'managed subagent not found', target)
     return snapshot.id
+  }
+
+  private ownedHandles(context: ToolExecutionContext): SpawnedAgentSnapshot[] {
+    const owner = contextOwnerId(context)
+    return this.options.manager.listHandles().filter(snapshot => normalizeOwnerId(snapshot.sourceAgentId) === owner)
   }
 
   private capture(): void {
@@ -766,6 +802,7 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
 function snapshotEventMetadata(snapshot: SpawnedAgentSnapshot): Omit<ClaudeAgentEvent, 'agentId' | 'event' | 'name' | 'output' | 'previousStatus' | 'seq' | 'status'> {
   return {
     title: snapshot.title,
+    ...(snapshot.sourceAgentId === undefined ? {} : { sourceAgentId: snapshot.sourceAgentId }),
     ...(snapshot.creatorAgentId === undefined ? {} : { creatorAgentId: snapshot.creatorAgentId }),
     ...(snapshot.parentAgentId === undefined ? {} : { parentAgentId: snapshot.parentAgentId }),
     ...(snapshot.model === undefined ? {} : { model: snapshot.model }),
@@ -805,6 +842,31 @@ function isString(value: unknown): value is string {
 
 function normalizeSequence(value: number): number {
   return Number.isInteger(value) && value >= 0 ? value : 0
+}
+
+const ALL_MAILBOX_EVENTS = '\0all'
+
+function mailboxScope(ownerOrSince: string | number): string {
+  return typeof ownerOrSince === 'number' ? ALL_MAILBOX_EVENTS : normalizeOwnerId(ownerOrSince)
+}
+
+function eventMatchesScope(event: ClaudeAgentEvent, scope: string): boolean {
+  return scope === ALL_MAILBOX_EVENTS || normalizeOwnerId(event.sourceAgentId) === scope
+}
+
+function contextOwnerId(context: ToolExecutionContext): string {
+  return normalizeOwnerId(context.sessionId) || normalizeOwnerId(context.agentId)
+}
+
+function normalizeOwnerId(value: string | undefined): string {
+  return value?.trim() ?? ''
+}
+
+function contextPermissionMode(context: ToolExecutionContext): PermissionMode | undefined {
+  const value = context.metadata.permission_mode ?? context.metadata.permissionMode
+  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan'
+    ? value
+    : undefined
 }
 
 function sleep(milliseconds: number): Promise<void> {

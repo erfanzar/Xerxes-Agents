@@ -79,6 +79,7 @@ export interface SpawnAgentOptions {
   readonly creatorAgentId?: string
   readonly message?: string
   readonly nickname?: string
+  readonly parentModel?: string
   readonly parentAgentId?: string
   readonly permissionMode?: string
   readonly promptProfile?: string

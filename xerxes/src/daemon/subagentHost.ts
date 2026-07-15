@@ -44,10 +44,15 @@ export interface NativeSubagentHostOptions {
 export interface NativeSubagentHost {
   readonly manager: SubAgentManager
   readonly managerPort: SpawnedAgentManagerPort
+  /** Cancel and invalidate every child owned by this host. */
+  invalidateAll(): number
+  /** Cancel and invalidate every child owned by one parent session. */
+  cancelSource(sourceAgentId: string): number
   /**
    * Apply the latest daemon/provider generation without discarding delegated
    * task handles. Existing tasks keep the execution generation they were
-   * created with; subsequently spawned tasks use these options.
+   * created with unless permissions are tightened; subsequently spawned tasks
+   * use these options.
    */
   reconfigure(options: NativeSubagentHostOptions): void
 }
@@ -56,6 +61,7 @@ export interface NativeSubagentHost {
 export function createNativeSubagentHost(options: NativeSubagentHostOptions): NativeSubagentHost {
   let activeGeneration = 0
   let activeOptions = options
+  let activeDefinitionsFingerprint = agentDefinitionsFingerprint(options.agentDefinitions)
   const generationOptions = new Map<number, NativeSubagentHostOptions>([[activeGeneration, options]])
   const manager = new SubAgentManager({
     maxConcurrent: 8,
@@ -74,12 +80,21 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
   return {
     manager,
     managerPort,
+    invalidateAll: () => managerPort.invalidateAll(),
+    cancelSource: sourceAgentId => managerPort.invalidateSource(sourceAgentId),
     reconfigure(nextOptions) {
       if (nextOptions.eventBus !== options.eventBus) {
         throw new Error('A native subagent host cannot be moved to a different event bus')
       }
+      const nextDefinitionsFingerprint = agentDefinitionsFingerprint(nextOptions.agentDefinitions)
+      if (nextDefinitionsFingerprint !== activeDefinitionsFingerprint) {
+        managerPort.invalidateAll()
+      } else {
+        managerPort.invalidateHandlesExceeding(nextOptions.permissionMode)
+      }
       activeGeneration += 1
       activeOptions = nextOptions
+      activeDefinitionsFingerprint = nextDefinitionsFingerprint
       generationOptions.set(activeGeneration, nextOptions)
       managerPort.reconfigure(nextOptions, activeGeneration)
     },
@@ -93,6 +108,7 @@ interface HandleMetadata {
   readonly creatorAgentId: string | undefined
   lastInput: string | undefined
   readonly parentAgentId: string | undefined
+  readonly permissionMode: PermissionMode
   readonly promptProfile: string
   readonly sourceAgentId: string | undefined
 }
@@ -105,6 +121,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
   private fallbackPermissionMode: PermissionMode
   private generation: number
   private readonly handles = new Map<string, HandleMetadata>()
+  private readonly invalidatedHandles = new Set<string>()
   private readonly pendingResume = new Set<string>()
 
   constructor(
@@ -140,27 +157,39 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     }
 
     const requestedType = options.promptProfile?.trim() || options.agent?.name?.trim() || 'coder'
-    const definition = resolveDefinition(this.definitions, requestedType)
-    const model = options.agent?.model || definition?.model || this.fallbackModel
-    const permissionMode = permissionModeConfig(options.permissionMode, this.fallbackPermissionMode)
+    const definition = this.resolveChildDefinition(options.creatorAgentId, requestedType)
+    if (!definition) {
+      throw new ValidationError(
+        'subagent_type',
+        `is not a registered agent profile; available profiles: ${visibleDefinitionNames(this.definitions).join(', ') || '(none)'}`,
+        requestedType,
+      )
+    }
+    const model = stringConfig(options.agent?.model)
+      || stringConfig(definition.model)
+      || stringConfig(options.parentModel)
+      || this.fallbackModel
+    const requestedPermissionMode = permissionModeConfig(options.permissionMode, this.fallbackPermissionMode)
+    const permissionMode = delegatedPermissionExceeds(requestedPermissionMode, this.fallbackPermissionMode)
+      ? this.fallbackPermissionMode
+      : requestedPermissionMode
     const config = {
       model,
       permissionMode,
       _nativeSubagentHostGeneration: this.generation,
-      ...(definition?.allowedTools === null || definition?.allowedTools === undefined
+      ...(definition.allowedTools === null
         ? {}
         : { _toolsAllowed: [...definition.allowedTools] }),
-      ...(definition?.excludeTools.length ? { _toolsExcluded: [...definition.excludeTools] } : {}),
-      ...(definition?.tools.length ? { _toolsWhitelist: [...definition.tools] } : {}),
+      ...(definition.excludeTools.length ? { _toolsExcluded: [...definition.excludeTools] } : {}),
+      ...(definition.tools.length ? { _toolsWhitelist: [...definition.tools] } : {}),
     }
     const toolsets = subagentTools(this.availableTools, config).map(tool => tool.function.name)
-    const rules = nativeRuleLabels(permissionMode, definition?.isolation || '')
+    const rules = nativeRuleLabels(permissionMode, definition.isolation)
     const task = await this.manager.spawn({
       prompt,
       ...(options.title ? { title: options.title } : {}),
       ...(name ? { name } : {}),
-      ...(definition ? { agentDefinition: definition } : {}),
-      ...(definition ? {} : options.agent?.systemPrompt ? { systemPrompt: options.agent.systemPrompt } : {}),
+      agentDefinition: definition,
       ...(options.sourceAgentId ? { sourceId: options.sourceAgentId } : {}),
       ...(options.creatorAgentId ? { creatorId: options.creatorAgentId } : {}),
       ...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
@@ -170,16 +199,84 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       config,
     })
     this.handles.set(task.id, {
-      agentId: definition?.name || requestedType,
+      agentId: definition.name,
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: options.creatorAgentId,
       lastInput: prompt,
       parentAgentId: options.parentAgentId ?? options.creatorAgentId,
-      promptProfile: definition?.name || requestedType,
+      permissionMode,
+      promptProfile: definition.name,
       sourceAgentId: options.sourceAgentId,
     })
     return this.snapshot(task)
+  }
+
+  /** Cancel handles whose delegated policy grants capabilities absent from the new parent policy. */
+  invalidateHandlesExceeding(nextMode: PermissionMode): number {
+    return this.invalidateMatching(metadata => delegatedPermissionExceeds(metadata.permissionMode, nextMode))
+  }
+
+  /** Cancel and permanently close every handle owned by this host. */
+  invalidateAll(): number {
+    return this.invalidateMatching(() => true)
+  }
+
+  /** Cancel and permanently close children whose owning session is being removed. */
+  invalidateSource(sourceAgentId: string): number {
+    const source = sourceAgentId.trim()
+    if (!source) return 0
+    return this.invalidateMatching(metadata => metadata.sourceAgentId === source)
+  }
+
+  private invalidateMatching(predicate: (metadata: HandleMetadata) => boolean): number {
+    let cancelled = 0
+    for (const task of this.manager.listTasks()) {
+      const metadata = this.handles.get(task.id)
+      if (!metadata || !predicate(metadata)) continue
+      this.invalidatedHandles.add(task.id)
+      this.pendingResume.delete(task.id)
+      metadata.closed = true
+      if (task.status === 'pending' || task.status === 'running') {
+        if (this.manager.cancel(task.id)) cancelled += 1
+      }
+    }
+    return cancelled
+  }
+
+  private resolveChildDefinition(
+    creatorAgentId: string | undefined,
+    requestedType: string,
+  ): AgentDefinition | undefined {
+    const creator = creatorAgentId?.trim()
+    if (!creator) return resolveDefinition(this.definitions, requestedType)
+    const creatorDefinition = this.definitions.get(creator)
+    if (!creatorDefinition) {
+      throw new ValidationError('creator_agent_id', 'is not a registered agent profile', creator)
+    }
+    const catalog = creatorDefinition.subagents ?? {}
+    const catalogName = Object.hasOwn(catalog, requestedType)
+      ? requestedType
+      : canonicalProfileAlias(requestedType)
+    const reference = catalogName ? catalog[catalogName] : undefined
+    if (!catalogName || !reference) {
+      const allowed = Object.keys(catalog)
+      throw new ValidationError(
+        'subagent_type',
+        `is not allowed by agent '${creator}'; allowed profiles: ${allowed.sort().join(', ') || '(none)'}`,
+        requestedType,
+      )
+    }
+    const profileKey = reference.resolvedProfile ?? catalogName
+    const definition = this.definitions.get(profileKey)
+    if (!definition) {
+      throw new ValidationError(
+        'subagent_type',
+        `catalog entry '${catalogName}' for agent '${creator}' does not resolve to a registered profile`,
+        requestedType,
+      )
+    }
+    return definition
   }
 
   async sendInput(handleId: string | undefined, options: SendAgentInputOptions): Promise<SpawnedAgentSnapshot> {
@@ -218,6 +315,13 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
 
   resume(handleId: string): SpawnedAgentSnapshot {
     const task = this.requireTask(handleId)
+    if (this.invalidatedHandles.has(task.id)) {
+      throw new ValidationError(
+        'handle_id',
+        'was invalidated when permissions were tightened; spawn a new agent under the current policy',
+        task.id,
+      )
+    }
     this.pendingResume.add(task.id)
     const metadata = this.handles.get(task.id)
     if (metadata) metadata.closed = false
@@ -250,6 +354,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       creatorAgentId: task.creatorId || undefined,
       lastInput: task.prompt,
       parentAgentId: task.parentId || undefined,
+      permissionMode: permissionModeFromRules(task.rules),
       promptProfile: task.agentDefName || 'coder',
       sourceAgentId: task.sourceId || undefined,
     }
@@ -292,7 +397,7 @@ async function runNativeSubagent(
   request: SubagentTaskRunRequest,
   options: NativeSubagentHostOptions,
 ): Promise<{ readonly content: string }> {
-  const model = stringConfig(request.config.model) || options.model
+  const model = request.task.model.trim() || stringConfig(request.config.model) || options.model
   const permissionMode = permissionModeConfig(request.config.permissionMode, options.permissionMode)
   const permissionBroker = delegatedPermissionBroker(permissionMode)
   const tools = subagentTools(options.tools, request.config)
@@ -505,10 +610,17 @@ function resolveDefinition(
   definitions: ReadonlyMap<string, AgentDefinition>,
   requested: string,
 ): AgentDefinition | undefined {
-  return definitions.get(requested)
-    ?? (requested === 'general-purpose' || requested === 'general' || requested === 'explore'
-      ? definitions.get(requested === 'explore' ? 'researcher' : 'coder')
-      : undefined)
+  return definitions.get(requested) ?? definitions.get(canonicalProfileAlias(requested) ?? '')
+}
+
+function canonicalProfileAlias(requested: string): string | undefined {
+  if (requested === 'general-purpose' || requested === 'general') return 'coder'
+  if (requested === 'explore') return 'researcher'
+  return undefined
+}
+
+function visibleDefinitionNames(definitions: ReadonlyMap<string, AgentDefinition>): string[] {
+  return [...definitions.keys()].filter(name => !name.startsWith('@catalog:')).sort()
 }
 
 function spawnedStatus(task: SubAgentTask): SpawnedAgentStatus {
@@ -523,6 +635,49 @@ function spawnedStatus(task: SubAgentTask): SpawnedAgentStatus {
 
 function permissionModeConfig(value: unknown, fallback: PermissionMode): PermissionMode {
   return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan' ? value : fallback
+}
+
+function permissionModeFromRules(rules: readonly string[]): PermissionMode {
+  const configured = rules.find(rule => rule.startsWith('permission:'))?.slice('permission:'.length)
+  return permissionModeConfig(configured, 'manual')
+}
+
+function agentDefinitionsFingerprint(definitions: ReadonlyMap<string, AgentDefinition>): string {
+  return JSON.stringify([...definitions.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, definition]) => ({
+      key,
+      name: definition.name,
+      description: definition.description,
+      systemPrompt: definition.systemPrompt,
+      model: definition.model,
+      source: definition.source,
+      tools: definition.tools,
+      allowedTools: definition.allowedTools,
+      excludeTools: definition.excludeTools,
+      maxDepth: definition.maxDepth,
+      isolation: definition.isolation,
+      subagents: Object.entries(definition.subagents ?? {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, spec]) => ({
+          name,
+          description: spec.description,
+          path: spec.path,
+          resolvedProfile: spec.resolvedProfile,
+        })),
+    })))
+}
+
+/**
+ * Compare the effective unattended child policies, not their UI labels.
+ * Delegated manual prompts have no interactive broker and are rejected, while
+ * plan admits safe read-only tools; auto adds the bounded automatic surface.
+ */
+function delegatedPermissionExceeds(candidate: PermissionMode, ceiling: PermissionMode): boolean {
+  if (candidate === ceiling || ceiling === 'accept-all') return false
+  if (ceiling === 'manual') return candidate !== 'manual'
+  if (ceiling === 'plan') return candidate === 'auto' || candidate === 'accept-all'
+  return candidate === 'accept-all'
 }
 
 function nativeHostGeneration(config: Readonly<Record<string, unknown>>): number | undefined {

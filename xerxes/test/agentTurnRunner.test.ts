@@ -9,9 +9,11 @@ import { join } from 'node:path'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
+import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { AgentMemory } from '../src/memory/agentMemory.js'
 import { AgentSelfMemory } from '../src/memory/agentSelfMemory.js'
-import type { AgentDefinition } from '../src/agents/definitions.js'
+import { registerInteractionModeTool } from '../src/runtime/interactionModeTool.js'
+import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import { AuditEmitter, InMemoryCollector } from '../src/index.js'
 import type { DaemonEvent, DaemonSession } from '../src/daemon/runtime.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
@@ -29,6 +31,25 @@ class CapturingClient implements LlmClient {
   async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
     this.requests.push(request)
     yield { content: 'configured agent reply' }
+  }
+}
+
+class ModeSwitchClient implements LlmClient {
+  private calls = 0
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.calls += 1
+    if (this.calls === 1) {
+      yield {
+        toolCalls: [{
+          id: 'mode-plan',
+          type: 'function',
+          function: { name: 'SetInteractionModeTool', arguments: { mode: 'plan' } },
+        }],
+      }
+      return
+    }
+    yield { content: 'Plan ready.' }
   }
 }
 
@@ -123,10 +144,41 @@ test('agent turn runner maps portable loop events to daemon v35 event names', as
         total_tokens: 8,
         context_tokens: 13,
         max_context: 128_000,
+        mode: 'code',
+        plan_mode: false,
       },
     },
   ])
   expect(runner.stateFor('session-1')?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+})
+
+test('agent turn runner reports a model-scheduled next-turn mode in the terminal status event', async () => {
+  const activeSession: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id: 'mode-status',
+    interactionMode: 'code', sessionKey: 'mode-status', lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o',
+    planMode: false, status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0,
+    totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  const registry = new ToolRegistry()
+  registerInteractionModeTool(registry, {
+    setMode({ mode }) {
+      activeSession.interactionMode = mode
+      activeSession.planMode = mode === 'plan'
+      return { mode, planMode: activeSession.planMode }
+    },
+  })
+  const runner = new AgentTurnRunner({
+    llm: new ModeSwitchClient(), model: 'gpt-4o', permissionMode: 'accept-all',
+    toolExecutor: registry, tools: registry.definitions(),
+  })
+  const events: DaemonEvent[] = []
+
+  for await (const event of runner.run(activeSession, 'plan this', new AbortController().signal)) events.push(event)
+
+  expect(events.at(-1)).toMatchObject({
+    type: 'status_update',
+    payload: { mode: 'plan', plan_mode: true },
+  })
 })
 
 test('agent turn runner synchronizes persisted daemon sessions for explicit resume', async () => {
@@ -161,6 +213,20 @@ test('agent turn runner synchronizes persisted daemon sessions for explicit resu
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test('daemon session eviction releases resources owned by the evicted session id', async () => {
+  const evicted: string[] = []
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: '/workspace',
+    onSessionEvict: sessionId => evicted.push(sessionId),
+  })
+  const active = await runtime.openSession('tui:evict-owned')
+
+  runtime.evictSession(active.sessionKey)
+
+  expect(evicted).toEqual([active.id])
+  expect(runtime.sessionStatus(active.sessionKey)).toBeUndefined()
 })
 
 test('agent turn runner keeps streamed and resumed transcripts aligned when a tool sentinel repeats', async () => {
@@ -291,7 +357,123 @@ test('agent turn runner applies the selected agent prompt, model, and allowed to
   expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
 })
 
-test('agent turn runner injects and caches a native bootstrap prompt by workspace and model', async () => {
+test('agent turn runner rejects an unknown selected profile before contacting the model', async () => {
+  const client = new CapturingClient()
+  const runner = new AgentTurnRunner({
+    agentDefinitions: new Map(),
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const unknownSession: DaemonSession = {
+    activeTurnId: '', agentId: 'missing-profile', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'unknown-agent-session', interactionMode: 'code', sessionKey: 'unknown-agent', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/missing-profile',
+  }
+
+  const consume = async (): Promise<void> => {
+    for await (const _event of runner.run(unknownSession, 'do work', new AbortController().signal)) {
+      // The runner must reject before producing events or calling the provider.
+    }
+  }
+  await expect(consume()).rejects.toThrow('is not a registered agent profile')
+  expect(client.requests).toEqual([])
+})
+
+test('plan and researcher modes enforce read-only tool ceilings and a non-YOLO permission mode', async () => {
+  const availableTools: ToolDefinition[] = [
+    { type: 'function', function: { name: 'ReadFile', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'WriteFile', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'exec_command', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'SpawnAgents', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'SetInteractionModeTool', description: '', parameters: {} } },
+  ]
+
+  for (const mode of ['plan', 'researcher'] as const) {
+    const client = new CapturingClient()
+    const runner = new AgentTurnRunner({
+      agentDefinitions: BUILTIN_AGENTS,
+      llm: client,
+      model: 'gpt-4o',
+      permissionMode: 'accept-all',
+      tools: availableTools,
+    })
+    const restrictedSession: DaemonSession = {
+      activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+      id: `${mode}-restricted-session`, interactionMode: mode, sessionKey: `${mode}-restricted`, lastActive: 0,
+      messages: [], metadata: {}, model: '', planMode: mode === 'plan', status: 'working', thinkingContent: [],
+      toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+      workspace: `/tmp/agents/${mode}`,
+    }
+
+    for await (const _event of runner.run(restrictedSession, 'inspect only', new AbortController().signal)) {
+      // Consume the turn so state and the provider request are final.
+    }
+    expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+    expect(restrictedSession.metadata.permission_mode).toBe('plan')
+    const systemPrompt = String(client.requests[0]?.messages[0]?.content)
+    expect(systemPrompt).toContain(mode === 'plan'
+      ? 'You are an expert software architect and planner.'
+      : 'You are a research assistant focused on understanding codebases.')
+  }
+})
+
+test('objective mode applies its profile prompt, tool ceiling, and creator identity', async () => {
+  const client = new CapturingClient()
+  const availableTools: ToolDefinition[] = [
+    { type: 'function', function: { name: 'ReadFile', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'WriteFile', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'AskUserQuestionTool', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'SkillTool', description: '', parameters: {} } },
+    { type: 'function', function: { name: 'SpawnAgents', description: '', parameters: {} } },
+  ]
+  let bootstrapAgentId = ''
+  const runner = new AgentTurnRunner({
+    agentDefinitions: BUILTIN_AGENTS,
+    bootstrapSystemPrompt: ({ agentId }) => {
+      bootstrapAgentId = agentId
+      return `Catalog for ${agentId}`
+    },
+    llm: client,
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    tools: availableTools,
+  })
+  const objectiveSession: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'objective-profile-session', interactionMode: 'objective', sessionKey: 'objective-profile', lastActive: 0,
+    messages: [], metadata: {}, model: '', planMode: false, status: 'working', thinkingContent: [],
+    toolExecutions: [], totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0,
+    workspace: '/tmp/agents/objective',
+  }
+
+  for await (const _event of runner.run(objectiveSession, 'reach the target', new AbortController().signal)) {}
+
+  expect(bootstrapAgentId).toBe('objective')
+  expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual([
+    'ReadFile', 'WriteFile', 'SpawnAgents',
+  ])
+  const systemPrompt = String(client.requests[0]?.messages[0]?.content)
+  expect(systemPrompt).toContain('Catalog for objective')
+  expect(systemPrompt).toContain('You are an objective runner for hard engineering goals.')
+  expect(systemPrompt).not.toContain('Catalog for default')
+})
+
+test('session mode changes notify the host with the durable session id', async () => {
+  const changes: Array<{ id: string; mode: string }> = []
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: process.cwd(),
+    onSessionModeChange: (id, mode) => changes.push({ id, mode }),
+  })
+  const active = await runtime.openSession('mode-callback')
+
+  await runtime.setSessionMode('mode-callback', 'researcher')
+
+  expect(changes).toEqual([{ id: active.id, mode: 'researcher' }])
+})
+
+test('agent turn runner caches a native bootstrap prompt only for the same workspace, model, agent, and tools', async () => {
   const client = new CapturingClient()
   let bootstrapCalls = 0
   const runner = new AgentTurnRunner({
@@ -325,6 +507,48 @@ test('agent turn runner injects and caches a native bootstrap prompt by workspac
     role: 'system',
     content: 'Bootstrap gpt-4o in /workspace/bootstrap',
   })
+
+  const alternateSession = { ...session, agentId: 'reviewer', id: 'reviewer-bootstrap-session' }
+  for await (const _event of runner.run(alternateSession, 'review', new AbortController().signal)) {
+    // A different agent profile must not reuse the default agent's bootstrap prompt.
+  }
+  expect(bootstrapCalls).toBe(2)
+})
+
+test('agent turn runner invalidates its bootstrap cache when the visible tool surface changes', async () => {
+  const client = new CapturingClient()
+  let bootstrapCalls = 0
+  const readTool = { type: 'function' as const, function: { name: 'ReadFile', description: '', parameters: {} } }
+  const writeTool = { type: 'function' as const, function: { name: 'WriteFile', description: '', parameters: {} } }
+  const definition = (tools: readonly string[]): AgentDefinition => ({
+    name: 'default', description: 'test', systemPrompt: '', model: '', tools, allowedTools: null,
+    excludeTools: [], source: 'test', maxDepth: 3, isolation: '',
+  })
+  const activeDefinitions = new Map<string, AgentDefinition>([['default', definition(['ReadFile'])]])
+  const runner = new AgentTurnRunner({
+    agentDefinitions: activeDefinitions,
+    bootstrapSystemPrompt: ({ tools }) => {
+      bootstrapCalls += 1
+      return `Tools: ${(tools ?? []).map(tool => tool.function.name).join(',')}`
+    },
+    llm: client,
+    model: 'gpt-4o',
+    tools: [readTool, writeTool],
+  })
+  const activeSession: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/tool-cache', extra: {},
+    id: 'tool-cache-session', interactionMode: 'code', sessionKey: 'tool-cache', lastActive: 0, messages: [],
+    metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [], toolExecutions: [],
+    totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+  }
+
+  for await (const _event of runner.run(activeSession, 'read', new AbortController().signal)) {}
+  activeDefinitions.set('default', definition(['WriteFile']))
+  for await (const _event of runner.run(activeSession, 'write', new AbortController().signal)) {}
+
+  expect(bootstrapCalls).toBe(2)
+  expect(client.requests[0]?.messages[0]?.content).toContain('Tools: ReadFile')
+  expect(client.requests[1]?.messages[0]?.content).toContain('Tools: WriteFile')
 })
 
 test('agent turn runner includes a trusted session system-prompt addendum', async () => {

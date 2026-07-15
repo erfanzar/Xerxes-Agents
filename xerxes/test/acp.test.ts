@@ -87,6 +87,7 @@ test('ACP permission board resolves pending decisions and cleans up aborted wait
 
 test('ACP server exposes capabilities, live sessions, prompts, and approval responses', async () => {
   let received: { readonly sessionId: string; readonly text: string } | undefined
+  const closedSessions: string[] = []
   const server = new AcpServer({
     capabilities: new ServerCapabilities({ protocolVersion: '0.9-test', fork: false }),
     promptHandler: async ({ session, text }) => {
@@ -98,6 +99,7 @@ test('ACP server exposes capabilities, live sessions, prompts, and approval resp
       function: { name: 'echo', description: 'Echo text.', parameters: { type: 'object' } },
     }],
     modelListProvider: () => [{ id: 'gpt-4o', name: 'GPT-4o' }],
+    onSessionClose: sessionId => closedSessions.push(sessionId),
   })
 
   expect(server.initialize()).toEqual({
@@ -129,5 +131,7 @@ test('ACP server exposes capabilities, live sessions, prompts, and approval resp
   expect(server.respondPermission(permissionId, true)).toEqual({ ok: true })
   expect(server.pendingPermissions()).toEqual([])
   expect(server.cancel(sessionId)).toEqual({ ok: true })
+  expect(closedSessions).toEqual([sessionId])
   expect(server.closeSession(sessionId)).toEqual({ ok: true })
+  expect(closedSessions).toEqual([sessionId])
 })

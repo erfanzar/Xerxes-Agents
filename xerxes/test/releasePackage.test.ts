@@ -61,7 +61,9 @@ describe("native release package staging", () => {
       "bin/default/objective.yaml",
       "bin/default/planner.yaml",
       "bin/default/researcher.yaml",
+      "bin/default/reviewer.yaml",
       "bin/default/system.md",
+      "bin/default/tester.yaml",
       "bin/xerxes",
       "bin/xerxes-acp",
       "bin/xerxes-bun",
@@ -513,8 +515,18 @@ async function releaseFixture(): Promise<string> {
       "utf8",
     ),
     writeFile(
+      join(repositoryRoot, "xerxes/dist/default/reviewer.yaml"),
+      "version: 1\nagent:\n  name: reviewer\n",
+      "utf8",
+    ),
+    writeFile(
       join(repositoryRoot, "xerxes/dist/default/system.md"),
       "You are Xerxes.\n",
+      "utf8",
+    ),
+    writeFile(
+      join(repositoryRoot, "xerxes/dist/default/tester.yaml"),
+      "version: 1\nagent:\n  name: tester\n",
       "utf8",
     ),
     writeFile(

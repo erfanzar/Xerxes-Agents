@@ -48,19 +48,21 @@ export function agentNameForMode(mode: unknown): InteractionModeAgentName {
   }
 }
 
-/** Return model-facing guidance for switching among session interaction modes. */
-export function modeSwitchHint(mode: unknown): string {
+/** Return model-facing mode guidance without advertising an unavailable switch tool. */
+export function modeSwitchHint(mode: unknown, canSwitch = true): string {
   switch (normalizeInteractionMode(mode)) {
     case 'plan':
       return '[Mode control]\n'
-        + 'You are in plan mode. Produce a plan only. If implementation should begin in a later turn, '
-        + 'call SetInteractionModeTool(mode="code"). If the user gave measurable acceptance criteria and '
-        + 'expects iterative implementation until they pass, call SetInteractionModeTool(mode="objective").'
+        + 'You are in plan mode. Produce a plan only.'
+        + (canSwitch
+          ? ' Do not use SetInteractionModeTool to leave this mode; only the user or session host may do that.'
+          : '')
     case 'researcher':
       return '[Mode control]\n'
-        + 'You are in researcher mode. Gather evidence and answer with citations. If implementation is needed '
-        + 'after your findings, call SetInteractionModeTool(mode="code"). If the task needs repeated '
-        + 'change/verify iterations against acceptance criteria, call SetInteractionModeTool(mode="objective").'
+        + 'You are in researcher mode. Gather evidence and answer with citations.'
+        + (canSwitch
+          ? ' Do not use SetInteractionModeTool to leave this mode; only the user or session host may do that.'
+          : '')
     case 'objective':
       return '[Mode control]\n'
         + "You are in objective mode. Treat the user's requested outcome as a hard objective with acceptance "
@@ -68,15 +70,18 @@ export function modeSwitchHint(mode: unknown): string {
         + 'compare results to the acceptance criteria, keep or revert based on evidence, and continue. Do not '
         + 'final-answer with a narrative status while the acceptance criteria are unmet. Leave objective mode '
         + 'only after verification proves the objective is met, the user changes modes, or you are concretely '
-        + 'blocked and can name the blocker plus the exact evidence. For pure research call '
-        + 'SetInteractionModeTool(mode="researcher"); for design-only work call SetInteractionModeTool(mode="plan"); '
-        + 'after verified completion call SetInteractionModeTool(mode="code").'
+        + 'blocked and can name the blocker plus the exact evidence.'
+        + (canSwitch
+          ? ' Do not use SetInteractionModeTool to leave this mode; report verified completion or a concrete blocker and let the user or session host switch modes.'
+          : '')
     case 'code':
-      return '[Mode control]\n'
-        + 'Use code mode for normal implementation. If this task should first be researched or planned, call '
-        + 'SetInteractionModeTool(mode="researcher") or SetInteractionModeTool(mode="plan"). If the user asks for '
-        + 'a measurable outcome that requires repeated attempts until tests, benchmarks, or checks pass, call '
-        + 'SetInteractionModeTool(mode="objective").'
+      return canSwitch
+        ? '[Mode control]\n'
+          + 'Use code mode for normal implementation. To schedule a different policy for the next user turn, call '
+          + 'SetInteractionModeTool(mode="researcher") or SetInteractionModeTool(mode="plan"). If the user asks for '
+          + 'a measurable outcome that requires repeated attempts until tests, benchmarks, or checks pass, call '
+          + 'SetInteractionModeTool(mode="objective").'
+        : ''
   }
 }
 

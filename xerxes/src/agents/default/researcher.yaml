@@ -17,7 +17,6 @@ agent:
     - GrepTool
     - ListDir
     - DuckDuckGoSearch
-    - SetInteractionModeTool
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write

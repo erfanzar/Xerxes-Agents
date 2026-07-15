@@ -14,6 +14,9 @@ export const SUBAGENT_CALLER_PROMPT = [
   'The main agent cannot see your context; it can only see your last message when you finish the task.',
   'You must treat the parent agent as your caller. Do not directly ask the end user questions.',
   'If something is unclear, explain the ambiguity in your final summary to the parent agent.',
+  'Stay within the delegated objective and ownership boundary; do not duplicate or broaden the parent task.',
+  'The filesystem is shared with the parent and other agents. Preserve unrelated and concurrent changes.',
+  'Return a distilled final summary with the outcome, concrete evidence, files read or changed, verification, and any blocker or remaining risk.',
 ].join(' ')
 
 export const SUBAGENT_BLOCKED_TOOLS = Object.freeze(new Set([
@@ -24,6 +27,7 @@ export const SUBAGENT_BLOCKED_TOOLS = Object.freeze(new Set([
   'PeekAgent',
   'ResetAgent',
   'SendMessageTool',
+  'SetInteractionModeTool',
   'SpawnAgents',
   'TaskCreateTool',
   'TaskGetTool',

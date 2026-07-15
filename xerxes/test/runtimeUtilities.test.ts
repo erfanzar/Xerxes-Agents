@@ -59,6 +59,25 @@ test('iteration budgets enforce bounded charges, refund safely, and honor inject
 })
 
 test('objective guard accepts verified outcomes or evidenced blockers and rejects premature objective final answers', () => {
+  const passingTests = {
+    inputs: { cmd: 'bun', args: ['test'] },
+    name: 'exec_command',
+    permitted: true,
+    result: JSON.stringify({ exitCode: 0, timedOut: false, stdout: '12 pass' }),
+  }
+  const failedTests = {
+    inputs: { cmd: 'bun', args: ['test'] },
+    name: 'exec_command',
+    permitted: true,
+    result: JSON.stringify({ exitCode: 1, stderr: 'package not installed', timedOut: false }),
+  }
+  const successfulWrite = {
+    inputs: { file_path: 'src/answer.ts', content: 'export const answer = 42' },
+    name: 'WriteFile',
+    permitted: true,
+    result: 'Wrote src/answer.ts.',
+  }
+
   expect(normalizeInteractionMode('goal-runner')).toBe('objective')
   expect(normalizeInteractionMode('anything', true)).toBe('plan')
   expect(objectiveGuardRetryLimit({}, {
@@ -69,10 +88,85 @@ test('objective guard accepts verified outcomes or evidenced blockers and reject
     environment: { XERXES_OBJECTIVE_GUARD_MAX_RETRIES: '8' },
   })).toBe(8)
 
-  expect(inspectObjectiveResponse('Verified complete: all tests pass.', { mode: 'objective' }).shouldContinue).toBe(false)
-  expect(inspectObjectiveResponse('BLOCKED: missing dependency. Evidence: command stderr says not installed.', {
+  expect(inspectObjectiveResponse('', { mode: 'objective' })).toMatchObject({
+    shouldContinue: true,
+    reason: 'empty assistant response',
+  })
+  expect(inspectObjectiveResponse('Verified complete: all tests pass.', { mode: 'objective' })).toMatchObject({
+    shouldContinue: true,
+    reason: expect.stringContaining('without current-turn verification evidence'),
+  })
+  expect(inspectObjectiveResponse('Verified complete: all tests pass.', {
+    evidence: { verificationSignals: ['bun test completed with exit code 0'] },
     mode: 'objective',
   }).shouldContinue).toBe(false)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: { toolExecutions: [passingTests] },
+    mode: 'objective',
+  }).shouldContinue).toBe(false)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: { toolExecutions: [failedTests] },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: {
+      toolExecutions: [{
+        inputs: { cmd: 'bun test' },
+        name: 'exec_command',
+        permitted: true,
+        result: JSON.stringify({ command: 'bun test', exit_code: null, running: true }),
+      }],
+    },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('All checks pass.', {
+    evidence: {
+      toolExecutions: [{
+        inputs: { scope: 'tests' },
+        name: 'CheckAgentMessages',
+        permitted: true,
+        result: JSON.stringify({ events: [] }),
+      }],
+    },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: {
+      toolExecutions: [{
+        inputs: { cmd: 'echo', args: ['tests'] },
+        name: 'exec_command',
+        permitted: true,
+        result: JSON.stringify({ exitCode: 0, stdout: 'tests', timedOut: false }),
+      }],
+    },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: { toolExecutions: [passingTests, successfulWrite] },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('All tests pass.', {
+    evidence: { toolExecutions: [passingTests, successfulWrite, passingTests] },
+    mode: 'objective',
+  }).shouldContinue).toBe(false)
+  expect(inspectObjectiveResponse('BLOCKED: missing dependency. Evidence: command stderr says not installed.', {
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
+  expect(inspectObjectiveResponse('BLOCKED: missing dependency. Evidence: command stderr says not installed.', {
+    evidence: { toolExecutions: [failedTests] },
+    mode: 'objective',
+  }).shouldContinue).toBe(false)
+  expect(inspectObjectiveResponse('BLOCKED: command is still running. Evidence: command output is pending.', {
+    evidence: {
+      toolExecutions: [{
+        inputs: { cmd: 'bun test' },
+        name: 'exec_command',
+        permitted: true,
+        result: JSON.stringify({ command: 'bun test', exit_code: null, running: true }),
+      }],
+    },
+    mode: 'objective',
+  }).shouldContinue).toBe(true)
   const rejected = inspectObjectiveResponse('Here is the honest final state: ❌ still losing. Want me to continue?', {
     mode: 'objective',
   })

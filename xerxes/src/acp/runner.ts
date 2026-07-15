@@ -128,6 +128,7 @@ export class AcpAgentRunner {
     this.states.set(session.sessionId, state)
     const model = session.modelOverride ?? this.options.model
     const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? 'accept-all')
+    state.metadata.permission_mode = permissionMode
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
 
     try {

@@ -10,6 +10,7 @@ agent:
     - FileEditTool
     - GlobTool
     - GrepTool
+    - ListDir
     - exec_command
     - write_stdin
     - list_terminal_sessions
@@ -51,6 +52,12 @@ agent:
     planner:
       path: ./planner.yaml
       description: "Read-only implementation planning and architecture design."
+    reviewer:
+      path: ./reviewer.yaml
+      description: "Independent read-only code review with prioritized findings."
+    tester:
+      path: ./tester.yaml
+      description: "Focused test authoring and verification without recursive delegation."
     objective:
       path: ./objective.yaml
       description: "Hard-goal execution loop with verification gates."
