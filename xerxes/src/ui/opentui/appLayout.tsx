@@ -11,6 +11,7 @@ import { type MutableRefObject, type ReactNode, useCallback, useEffect, useMemo,
 
 import type { AppLayoutProps, Notice } from '../app/interfaces.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
+import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
@@ -28,7 +29,7 @@ import {
 import { agentSidebarWidth, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
 import { sectionMode } from '../domain/details.js'
 import { completionToApplyOnSubmit } from '../domain/slash.js'
-import { shouldShowStartupWelcome } from '../domain/startupLayout.js'
+import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
 import {
   isProviderPrompt,
   providerPromptCancelAnswer,
@@ -41,6 +42,7 @@ import { unarchivedToolLines } from '../lib/liveProgress.js'
 import { compactProgressRows, type CompactProgressRow } from '../lib/progressRows.js'
 import { isYoloEnabled } from '../lib/statusSnapshot.js'
 import { fmtK, formatToolCall, inlineToolDisplay } from '../lib/text.js'
+import { useTerminalFocus } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 import type { Theme } from '../theme.js'
 
@@ -1171,14 +1173,13 @@ function useDerafshAnimation(
   }, [colors, compact, enabled, linesRef])
 }
 
-function StartupWelcome({ cols }: { cols: number }) {
+function StartupWelcome({ cols, rows }: { cols: number; rows: number }) {
   const ui = useStore($uiState)
   const t = useStore($uiTheme)
-  const terminalRows = process.stdout.rows ?? 24
   const markFits = cols >= DERAFSH_KAVIANI_WIDTH + 4
-  const showFullMark = markFits && terminalRows >= 32
+  const showFullMark = markFits && rows >= 32
   const useGradient = !t.bannerLogo
-  const showCompactMark = useGradient && markFits && !showFullMark && terminalRows >= 22
+  const showCompactMark = useGradient && markFits && !showFullMark && rows >= 22
   const showMark = showFullMark || showCompactMark
   const animationEnabled = useGradient && showMark && derafshAnimationEnabled()
   const markLinesRef = useRef<Array<TextRenderable | null>>([])
@@ -1219,6 +1220,35 @@ function StartupWelcome({ cols }: { cols: number }) {
       {!ui.info?.model?.trim() ? <Text color={t.color.muted}>Choose a model with /provider</Text> : null}
     </Box>
   )
+}
+
+/** Keep stream-cadence scrolling out of the heavyweight app controller. */
+function LiveTailFollower({ scrollRef }: { scrollRef: AppLayoutProps['transcript']['scrollRef'] }) {
+  const active = useTurnSelector(isLiveTailActive)
+  const changeKey = useTurnSelector(liveTailScrollKey)
+  const terminalFocused = useTerminalFocus()
+  const sync = useCallback(() => {
+    const scroll = scrollRef.current
+
+    if (!shouldAutoScrollLiveTail(active, scroll)) {
+      return
+    }
+
+    queueMicrotask(() => {
+      if (shouldAutoScrollLiveTail(active, scrollRef.current)) {
+        scrollRef.current?.scrollToBottom()
+      }
+    })
+  }, [active, scrollRef])
+
+  useEffect(sync, [changeKey, sync])
+  useEffect(() => {
+    if (terminalFocused) {
+      sync()
+    }
+  }, [sync, terminalFocused])
+
+  return null
 }
 
 function openTuiScrollAdapter(scrollbox: ScrollBoxRenderable): ScrollBoxHandle {
@@ -1374,7 +1404,7 @@ export function AppLayout({
     )
   )
   const spawnHistory = useStore($spawnHistory)
-  const { width } = useTerminalDimensions()
+  const { height, width } = useTerminalDimensions()
   const scrollboxRef = useCallback(
     (scrollbox: ScrollBoxRenderable | null) => {
       transcript.virtualHistory.setScrollHandle(scrollbox ? openTuiScrollAdapter(scrollbox) : null)
@@ -1426,6 +1456,7 @@ export function AppLayout({
       position="relative"
       width="100%"
     >
+      <LiveTailFollower scrollRef={transcript.scrollRef} />
       <AgentPanelHotkey
         disabled={agentHotkeyBlocked}
         onToggle={agents => patchOverlayState({ agents })}
@@ -1437,9 +1468,14 @@ export function AppLayout({
             <>
               <Box alignItems="center" flexDirection="column" flexGrow={1} minHeight={0} paddingX={2}>
                 <Box flexGrow={1} minHeight={0} />
-                {composer.completions.length ? null : <StartupWelcome cols={composer.cols} />}
+                {composer.completions.length ? null : <StartupWelcome cols={composer.cols} rows={height} />}
                 <Box flexShrink={1} height={1} minHeight={0} />
-                <Box flexDirection="column" flexShrink={0} maxWidth={75} width="100%">
+                <Box
+                  flexDirection="column"
+                  flexShrink={0}
+                  maxWidth={startupComposerWidth(composer.cols)}
+                  width="100%"
+                >
                   <PromptZone actions={actions} />
                   <Composer composer={composer} />
                 </Box>

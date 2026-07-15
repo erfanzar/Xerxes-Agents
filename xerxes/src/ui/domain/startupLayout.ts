@@ -20,3 +20,11 @@ export const shouldShowStartupWelcome = ({
   pendingInteraction,
   transcriptEmpty
 }: StartupLayoutState): boolean => transcriptEmpty && !busy && !hasLiveTurn && !pendingInteraction
+
+/** Keep the normal 75-column composer, but use ultra-wide terminals better. */
+export const startupComposerWidth = (columns: number): number => {
+  const available = Math.max(1, Math.floor(columns) - 4)
+  const preferred = columns >= 160 ? Math.min(104, Math.floor(columns * 0.55)) : 75
+
+  return Math.min(available, preferred)
+}

@@ -10,6 +10,7 @@ import type {
   SessionCompressResponse,
   SessionUsageResponse
 } from '../../../gatewayTypes.js'
+import { capTranscriptHistory } from '../../../lib/messages.js'
 import { fmtK } from '../../../lib/text.js'
 import type { PanelSection } from '../../../types.js'
 import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
@@ -195,7 +196,7 @@ export const sessionCommands: SlashCommand[] = [
             if (Array.isArray(r.messages)) {
               const rows = toTranscriptMessages(r.messages)
 
-              ctx.transcript.setHistoryItems(r.info ? [introMsg(r.info), ...rows] : rows)
+              ctx.transcript.setHistoryItems(capTranscriptHistory(r.info ? [introMsg(r.info), ...rows] : rows))
             }
 
             if (r.info) {

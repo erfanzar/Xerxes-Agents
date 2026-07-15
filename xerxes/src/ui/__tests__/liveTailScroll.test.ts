@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it } from 'vitest'
 
-import { liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
+import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
 import type { TurnState } from '../app/turnStore.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
 
@@ -28,6 +28,12 @@ const turnState = (patch: Partial<TurnState> = {}): TurnState => ({
 const scroll = (sticky: boolean): ScrollBoxHandle => ({ isSticky: () => sticky }) as ScrollBoxHandle
 
 describe('liveTailScrollKey', () => {
+  it('only activates the follower for live renderable progress', () => {
+    expect(isLiveTailActive(turnState())).toBe(false)
+    expect(isLiveTailActive(turnState({ reasoning: 'working' }))).toBe(true)
+    expect(isLiveTailActive(turnState({ streamPendingTools: ['ReadFile'] }))).toBe(true)
+  })
+
   it('changes for live assistant text, tool progress, and subagent progress', () => {
     const base = liveTailScrollKey(turnState())
 

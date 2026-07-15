@@ -1,5 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { MAX_HISTORY } from '../config/limits.js'
 import type { Msg, Role } from '../types.js'
 
 import {
@@ -10,6 +11,21 @@ import {
 } from './liveProgress.js'
 
 export const appendTranscriptMessage = (prev: Msg[], msg: Msg): Msg[] => appendToolShelfMessage(prev, msg)
+
+/** Bound local rendering work while preserving the session metadata row. */
+export const capTranscriptHistory = (items: Msg[], max = MAX_HISTORY): Msg[] => {
+  const limit = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : MAX_HISTORY
+
+  if (items.length <= limit) {
+    return items
+  }
+
+  if (items[0]?.kind === 'intro') {
+    return limit === 1 ? [items[0]] : [items[0], ...items.slice(-(limit - 1))]
+  }
+
+  return items.slice(-limit)
+}
 
 /** Roll back one optimistic row without deleting an older equal-text turn. */
 export const removeTranscriptMessage = (prev: readonly Msg[], target: Msg): Msg[] =>

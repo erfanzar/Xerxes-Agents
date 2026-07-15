@@ -184,7 +184,7 @@ describe('gatewayAdapter', () => {
 
     expect(
       adaptDaemonEvent('notification', {
-        body: 'old prompt',
+        body: '✨ old prompt',
         category: 'history',
         type: 'replay_user'
       })

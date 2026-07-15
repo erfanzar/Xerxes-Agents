@@ -343,7 +343,10 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
       return [{ type: 'transcript.append', payload: { role: 'assistant', text: body } }]
     }
     if (kind === 'replay_user') {
-      return [{ type: 'transcript.append', payload: { role: 'user', text: body } }]
+      // The daemon prefixes replay-only history notifications with a sparkle
+      // so terminal log consumers can distinguish them. It is transport
+      // metadata, not part of the user's authored message.
+      return [{ type: 'transcript.append', payload: { role: 'user', text: body.replace(/^✨\s?/, '') } }]
     }
     return [
       {

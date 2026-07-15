@@ -4,7 +4,7 @@ import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { STARTUP_RESUME_ID } from '../config/env.js'
-import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
+import { WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { agentContentWidth } from '../domain/agentPanelLayout.js'
 import { hasLeadGap, prevRenderedMsg } from '../domain/blockLayout.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
@@ -22,6 +22,7 @@ import { useVirtualHistory } from '../hooks/useVirtualHistory.js'
 import { composerPromptWidth } from '../lib/inputMetrics.js'
 import {
   appendTranscriptMessage,
+  capTranscriptHistory,
   hasTranscriptContent,
   removeTranscriptMessage,
   visibleTranscriptDetails,
@@ -35,7 +36,6 @@ import {
   useHasSelection,
   useSelection,
   useStdout,
-  useTerminalFocus,
   useTerminalTitle
 } from '../lib/terminalRuntime.opentui.js'
 import type { ScrollBoxHandle } from '../lib/terminalTypes.js'
@@ -48,7 +48,7 @@ import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
-import { liveTailScrollKey, shouldAutoScrollLiveTail } from './liveTailScroll.js'
+import { isLiveTailActive } from './liveTailScroll.js'
 import { $overlayState, clearApprovalOverlay, clearClarifyOverlay, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { $spawnHistory } from './spawnHistoryStore.js'
@@ -66,14 +66,6 @@ const GOOD_VIBES_RE = /\b(good bot|thanks|thank you|thx|ty|ily|love you)\b/i
 const BRACKET_PASTE_ON = '\x1b[?2004h'
 const BRACKET_PASTE_OFF = '\x1b[?2004l'
 const MAX_HEIGHT_CACHE_BUCKETS = 12
-
-const capHistory = (items: Msg[]): Msg[] => {
-  if (items.length <= MAX_HISTORY) {
-    return items
-  }
-
-  return items[0]?.kind === 'intro' ? [items[0]!, ...items.slice(-(MAX_HISTORY - 1))] : items.slice(-MAX_HISTORY)
-}
 
 const statusColorOf = (status: string, t: { error: string; muted: string; ok: string; warn: string }) => {
   if (status === 'ready') {
@@ -154,7 +146,6 @@ export async function startPromptLiveSession({
 export function useMainApp(gw: GatewayClient) {
   const { exit } = useApp()
   const { stdout } = useStdout()
-  const terminalFocused = useTerminalFocus()
   const [terminalCols, setTerminalCols] = useState(stdout?.columns ?? 80)
   const liveAgentCount = useTurnSelector(state => state.subagents.length)
   const spawnHistory = useStore($spawnHistory)
@@ -203,20 +194,7 @@ export function useMainApp(gw: GatewayClient) {
   const theme = useStore($uiTheme)
   const overlay = useStore($overlayState)
 
-  const turnLiveTailActive = useTurnSelector(state =>
-    Boolean(
-      state.streaming ||
-      state.streamPendingTools.length ||
-      state.streamSegments.length ||
-      state.reasoning.trim() ||
-      state.reasoningActive ||
-      state.tools.length ||
-      state.subagents.length ||
-      state.todos.length
-    )
-  )
-  const liveTailKey = useTurnSelector(liveTailScrollKey)
-
+  const turnLiveTailActive = useTurnSelector(isLiveTailActive)
   const slashFlightRef = useRef(0)
   const slashRef = useRef<(cmd: string) => boolean>(() => false)
   const colsRef = useRef(cols)
@@ -449,7 +427,7 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const appendMessage = useCallback(
-    (msg: Msg) => setHistoryItems(prev => capHistory(appendTranscriptMessage(prev, msg))),
+    (msg: Msg) => setHistoryItems(prev => capTranscriptHistory(appendTranscriptMessage(prev, msg))),
     []
   )
 
@@ -653,30 +631,6 @@ export function useMainApp(gw: GatewayClient) {
       stdout.off('resize', onResize)
     }
   }, [stdout, ui.sid])
-
-  const syncLiveTailScroll = useCallback(() => {
-    const scroll = scrollRef.current
-
-    if (!shouldAutoScrollLiveTail(turnLiveTailActive, scroll)) {
-      return
-    }
-
-    queueMicrotask(() => {
-      if (shouldAutoScrollLiveTail(turnLiveTailActive, scrollRef.current)) {
-        scrollRef.current?.scrollToBottom()
-      }
-    })
-  }, [turnLiveTailActive])
-
-  useEffect(() => {
-    syncLiveTailScroll()
-  }, [liveTailKey, syncLiveTailScroll])
-
-  useEffect(() => {
-    if (terminalFocused) {
-      syncLiveTailScroll()
-    }
-  }, [terminalFocused, syncLiveTailScroll])
 
   const answerClarify = useCallback(
     (answer: string) => {

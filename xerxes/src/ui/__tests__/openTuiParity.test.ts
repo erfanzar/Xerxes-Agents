@@ -8,8 +8,8 @@ import { applyVoiceRecordResponse, shouldFallThroughForScroll } from '../app/use
 import { liveSessionInflightMessages } from '../app/useSessionLifecycle.js'
 import { approvalAction } from '../domain/approval.js'
 import { toTranscriptMessages } from '../domain/messages.js'
-import { shouldShowStartupWelcome } from '../domain/startupLayout.js'
-import { visibleTranscriptMessages } from '../lib/messages.js'
+import { shouldShowStartupWelcome, startupComposerWidth } from '../domain/startupLayout.js'
+import { capTranscriptHistory, visibleTranscriptMessages } from '../lib/messages.js'
 
 const promptScrollKey = (patch: Partial<Parameters<typeof shouldFallThroughForScroll>[0]> = {}) => ({
   downArrow: false,
@@ -31,6 +31,13 @@ describe('native OpenTUI semantic parity', () => {
     expect(shouldShowStartupWelcome({ ...idle, hasLiveTurn: true })).toBe(false)
     expect(shouldShowStartupWelcome({ ...idle, pendingInteraction: true })).toBe(false)
     expect(shouldShowStartupWelcome({ ...idle, transcriptEmpty: false })).toBe(false)
+  })
+
+  it('uses more of ultra-wide welcome screens without overflowing narrow terminals', () => {
+    expect(startupComposerWidth(40)).toBe(36)
+    expect(startupComposerWidth(80)).toBe(75)
+    expect(startupComposerWidth(160)).toBe(88)
+    expect(startupComposerWidth(200)).toBe(104)
   })
 
   it('dispatches native approval choices without relying on Prompt Toolkit sentinels', () => {
@@ -128,5 +135,14 @@ describe('native OpenTUI semantic parity', () => {
       { role: 'user', text: 'hello' },
       { kind: 'trail', role: 'system', text: '', thinking: 'working' }
     ])
+  })
+
+  it('caps hydrated transcripts while retaining their metadata intro', () => {
+    const intro = { kind: 'intro' as const, role: 'system' as const, text: '' }
+    const rows = Array.from({ length: 7 }, (_, index) => ({ role: 'user' as const, text: `message ${index}` }))
+
+    expect(capTranscriptHistory([intro, ...rows], 5)).toEqual([intro, ...rows.slice(-4)])
+    expect(capTranscriptHistory([intro, ...rows], 1)).toEqual([intro])
+    expect(capTranscriptHistory(rows, 5)).toEqual(rows.slice(-5))
   })
 })

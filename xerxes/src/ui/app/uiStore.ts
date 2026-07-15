@@ -38,7 +38,23 @@ const buildUiState = (): UiState => ({
 
 export const $uiState = atom<UiState>(buildUiState())
 
-export const $uiTheme = computed($uiState, state => themeForMode(state.theme, state.info?.mode))
+let cachedThemeBase = DEFAULT_THEME
+let cachedThemeMode: string | undefined
+let cachedTheme = themeForMode(cachedThemeBase, cachedThemeMode)
+
+export const $uiTheme = computed($uiState, state => {
+  const mode = state.info?.mode
+
+  if (state.theme === cachedThemeBase && mode === cachedThemeMode) {
+    return cachedTheme
+  }
+
+  cachedThemeBase = state.theme
+  cachedThemeMode = mode
+  cachedTheme = themeForMode(cachedThemeBase, cachedThemeMode)
+
+  return cachedTheme
+})
 export const $uiSessionId = computed($uiState, state => state.sid)
 // A primitive snapshot prevents transcript rows from re-rendering on every
 // unrelated status/usage tick while still making /details changes immediate.
@@ -55,7 +71,17 @@ export const $uiDetailVisibility = computed($uiState, state =>
 
 export const getUiState = () => $uiState.get()
 
-export const patchUiState = (next: Partial<UiState> | ((state: UiState) => UiState)) =>
-  $uiState.set(typeof next === 'function' ? next($uiState.get()) : { ...$uiState.get(), ...next })
+const shallowEqualState = (left: UiState, right: UiState) =>
+  left === right ||
+  (Object.keys(left) as (keyof UiState)[]).every(key => Object.is(left[key], right[key]))
+
+export const patchUiState = (next: Partial<UiState> | ((state: UiState) => UiState)) => {
+  const current = $uiState.get()
+  const updated = typeof next === 'function' ? next(current) : { ...current, ...next }
+
+  if (!shallowEqualState(current, updated)) {
+    $uiState.set(updated)
+  }
+}
 
 export const resetUiState = () => $uiState.set(buildUiState())

@@ -12,6 +12,18 @@ const tail = (value: string | undefined, max = 120): string => {
   return value.length > max ? value.slice(-max) : value
 }
 
+export const isLiveTailActive = (state: TurnState): boolean =>
+  Boolean(
+    state.streaming ||
+      state.streamPendingTools.length ||
+      state.streamSegments.length ||
+      state.reasoning.trim() ||
+      state.reasoningActive ||
+      state.tools.length ||
+      state.subagents.length ||
+      state.todos.length
+  )
+
 export function liveTailScrollKey(state: TurnState): string {
   const lastSegment = state.streamSegments.at(-1)
 

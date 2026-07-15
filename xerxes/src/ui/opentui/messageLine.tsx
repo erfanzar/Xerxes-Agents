@@ -7,6 +7,7 @@
 // call is always visible, while diagnostic and diff detail remains available
 // when it carries information the one-line result cannot safely summarize.
 import { useStore } from '@nanostores/react'
+import { memo } from 'react'
 
 import { $uiDetailVisibility } from '../app/uiStore.js'
 import { messageHasVisibleDetails, trailHasRenderableContent } from '../lib/liveProgress.js'
@@ -265,7 +266,7 @@ function ToolTrail({ msg, t, visibility }: { msg: Msg; t: Theme; visibility: Det
   )
 }
 
-export function MessageLine({ msg, t }: { msg: Msg; t: Theme }) {
+function MessageLineView({ msg, t }: { msg: Msg; t: Theme }) {
   const visibility = detailVisibility(useStore($uiDetailVisibility))
   const hasVisibleDetails = messageHasVisibleDetails(msg, visibility)
 
@@ -309,3 +310,5 @@ export function MessageLine({ msg, t }: { msg: Msg; t: Theme }) {
     <SystemMessage msg={msg} t={t} />
   )
 }
+
+export const MessageLine = memo(MessageLineView)

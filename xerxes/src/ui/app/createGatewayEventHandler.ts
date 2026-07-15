@@ -1,7 +1,6 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { STARTUP_IMAGE, STARTUP_QUERY } from '../config/env.js'
-import { STREAM_BATCH_MS } from '../config/timing.js'
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import {
   reconcileArchivedSubagent,
@@ -113,8 +112,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   const { submitRef } = ctx.submission
   const { setProcessing: setVoiceProcessing, setRecording: setVoiceRecording, setVoiceEnabled } = ctx.voice
 
-  let pendingThinkingStatus = ''
-  let thinkingStatusTimer: null | ReturnType<typeof setTimeout> = null
   let startupPromptSubmitted = false
 
   const reconcileArchived = (payload: SubagentEventPayload, patch: SubagentProgressPatch) => {
@@ -219,27 +216,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   }
 
   const setStatus = (status: string) => {
-    pendingThinkingStatus = ''
-
-    if (thinkingStatusTimer) {
-      clearTimeout(thinkingStatusTimer)
-      thinkingStatusTimer = null
-    }
-
     patchUiState({ status })
-  }
-
-  const scheduleThinkingStatus = (status: string) => {
-    pendingThinkingStatus = status
-
-    if (thinkingStatusTimer) {
-      return
-    }
-
-    thinkingStatusTimer = setTimeout(() => {
-      thinkingStatusTimer = null
-      patchUiState({ status: pendingThinkingStatus || statusFromBusy() })
-    }, STREAM_BATCH_MS)
   }
 
   const restoreStatusAfter = (ms: number) => {
@@ -497,7 +474,6 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         if (text !== undefined) {
           const value = String(text)
-          scheduleThinkingStatus(value || statusFromBusy())
 
           if (value) {
             turnController.recordReasoningDelta(value)
