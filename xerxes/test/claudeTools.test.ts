@@ -142,7 +142,10 @@ test('Claude agent tools map task lifecycle, outputs, and mailbox events to Spaw
 test('Claude agent management tools cannot inspect or mutate another session handles', async () => {
   const snapshots = [
     agentSnapshot('session-a-task', 'completed', 'session-a'),
-    agentSnapshot('session-b-task', 'running', 'session-b'),
+    {
+      ...agentSnapshot('session-b-task', 'running', 'session-b'),
+      historySessionId: '0123456789abcdef0123456789abcdef',
+    },
   ]
   const manager: SpawnedAgentManagerPort = {
     close: id => ({ ...snapshots.find(snapshot => snapshot.id === id)!, closed: true, previousStatus: 'running', status: 'closed' }),
@@ -157,9 +160,18 @@ test('Claude agent management tools cannot inspect or mutate another session han
   const sessionBByAgentFallback = { agentId: 'session-b', metadata: {} }
 
   const listedA = await tools.execute('TaskListTool', {}, sessionA) as Array<{ id: string }>
-  const listedB = await tools.execute('TaskListTool', {}, sessionBByAgentFallback) as Array<{ id: string }>
+  const listedB = await tools.execute('TaskListTool', {}, sessionBByAgentFallback) as Array<{
+    history_session_id?: string
+    id: string
+  }>
   expect(listedA.map(snapshot => snapshot.id)).toEqual(['session-a-task'])
   expect(listedB.map(snapshot => snapshot.id)).toEqual(['session-b-task'])
+  expect(listedB[0]?.history_session_id).toBe('0123456789abcdef0123456789abcdef')
+  expect(await tools.execute('TaskGetTool', {
+    task_id: 'session-b-task',
+  }, sessionBByAgentFallback)).toMatchObject({
+    history_session_id: '0123456789abcdef0123456789abcdef',
+  })
 
   const crossSessionCalls: Array<{ readonly inputs: JsonObject; readonly name: string }> = [
     { name: 'SendMessageTool', inputs: { target: 'session-b-task', message: 'leak' } },

@@ -122,6 +122,220 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
   }
 });
 
+test("session.list scopes history to the active project and exposes additive subagent hierarchy fields", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-session-list-"));
+  const projectDirectory = join(directory, "project-a");
+  const otherProjectDirectory = join(directory, "project-b");
+  const sessionDirectory = join(directory, "sessions");
+  const socketPath = join(directory, "daemon.sock");
+  await mkdir(sessionDirectory, { recursive: true });
+
+  const writeTranscript = async (
+    sessionId: string,
+    projectRoot: string,
+    updatedAt: string,
+    metadata: Record<string, unknown>,
+  ) => {
+    await writeFile(
+      join(sessionDirectory, `${sessionId}.json`),
+      JSON.stringify({
+        format: "xerxes-daemon-session",
+        schema_version: 2,
+        session_id: sessionId,
+        key: sessionId,
+        agent_id: "default",
+        cwd: projectRoot,
+        workspace: "",
+        updated_at: updatedAt,
+        messages: [
+          { role: "user", content: `request ${sessionId}` },
+          { role: "assistant", content: `response ${sessionId}` },
+        ],
+        turn_count: 1,
+        interaction_mode: "code",
+        plan_mode: false,
+        total_input_tokens: 1,
+        total_output_tokens: 1,
+        metadata: { project_root: projectRoot, ...metadata },
+        thinking_content: [],
+        tool_executions: [],
+      }),
+      "utf8",
+    );
+  };
+
+  await writeTranscript("aaaabbbb0001", projectDirectory, "2026-07-17T00:02:00.000Z", {
+    model: "root-model",
+    title: "Project root",
+  });
+  await writeTranscript("aaaabbbb0002", projectDirectory, "2026-07-17T00:01:00.000Z", {
+    parent_session_id: "aaaabbbb0001",
+    title: "Regular branch",
+  });
+  await writeTranscript("ccccdddd0001", projectDirectory, "2026-07-17T00:03:00.000Z", {
+    model: "child-model",
+    parent_session_id: "aaaabbbb0001",
+    root_session_id: "aaaabbbb0001",
+    session_kind: "subagent",
+    status: "completed",
+    subagent_id: "subagent_child_one",
+    title: "Child history",
+  });
+  await writeTranscript("eeeeffff0001", otherProjectDirectory, "2026-07-17T00:04:00.000Z", {
+    title: "Other project root",
+  });
+
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: projectDirectory,
+      sessionDirectory,
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { project_dir: projectDirectory, session_key: "session-list" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session.list",
+      params: { kind: "main", limit: 10 },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          id: "aaaabbbb0001",
+          kind: "main",
+          model: "root-model",
+          session_kind: "main",
+        }),
+        expect.objectContaining({
+          id: "aaaabbbb0002",
+          kind: "main",
+          session_kind: "main",
+          title: "Regular branch",
+        }),
+      ],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.list",
+      params: { kind: "subagent", limit: 10 },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          id: "ccccdddd0001",
+          kind: "subagent",
+          model: "child-model",
+          parent_session_id: "aaaabbbb0001",
+          root_session_id: "aaaabbbb0001",
+          session_kind: "subagent",
+          status: "completed",
+          subagent_id: "subagent_child_one",
+        }),
+      ],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session.list",
+      params: { kind: "main", limit: 10, scope: "global" },
+    });
+    const global = (await client.next((frame) => frame.id === 4)).result?.sessions as Array<Record<string, unknown>>;
+    expect(global.map((session) => session.id)).toEqual([
+      "eeeeffff0001",
+      "aaaabbbb0001",
+      "aaaabbbb0002",
+    ]);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.list",
+      params: { kind: "worker" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result).toEqual({
+      ok: false,
+      error: "session kind must be main, subagent, or all",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 6,
+      method: "session.most_recent",
+      params: { project_dir: projectDirectory },
+    });
+    expect((await client.next((frame) => frame.id === 6)).result).toMatchObject({
+      ok: true,
+      session: { id: "aaaabbbb0001", kind: "main" },
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "initialize",
+      params: {
+        project_dir: projectDirectory,
+        resume_session_id: "ccccdddd0001",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 7)).result?.session).toMatchObject({
+      id: "ccccdddd0001",
+      kind: "subagent",
+      parent_session_id: "aaaabbbb0001",
+      root_session_id: "aaaabbbb0001",
+      session_kind: "subagent",
+      subagent_id: "subagent_child_one",
+      title: "Child history",
+    });
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "initialize",
+      params: {
+        project_dir: otherProjectDirectory,
+        session_key: "project-b-connection",
+      },
+    });
+    await client.next((frame) => frame.id === 8);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "session.open",
+      params: { session_key: "ccccdddd0001" },
+    });
+    expect((await client.next((frame) => frame.id === 9)).error?.message).toContain(
+      "different project",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("shutdown RPC notifies the process host so its daemon lifetime can finish", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-shutdown-"));
   const socketPath = join(directory, "daemon.sock");
@@ -2342,6 +2556,10 @@ class SteerRunner implements TurnRunner {
 }
 
 interface Frame {
+  readonly error?: {
+    readonly code?: number;
+    readonly message?: string;
+  };
   readonly id?: number;
   readonly method?: string;
   readonly params?: {

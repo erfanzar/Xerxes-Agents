@@ -3,7 +3,7 @@
 
 import { version } from "../package.json" with { type: "json" };
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AcpAgentRunner } from "./acp/runner.js";
 import {
@@ -27,7 +27,7 @@ import {
 } from "./daemon/channels.js";
 import { loadSystemDaemonConfig, type DaemonConfig } from "./daemon/config.js";
 import type { DaemonInteractionBoard } from "./daemon/interactions.js";
-import { daemonPaths } from "./daemon/paths.js";
+import { daemonPaths, xerxesHome } from "./daemon/paths.js";
 import { createProductionInteractionBoard } from "./daemon/productionInteractions.js";
 import { runtimeConnection } from "./daemon/runtimeConnection.js";
 import { InMemoryDaemonRuntime } from "./daemon/runtime.js";
@@ -60,6 +60,7 @@ import {
 } from "./runtime/doctor.js";
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
+import { DaemonTranscriptStore } from "./session/daemonTranscript.js";
 import { UPDATE_HELP, runUpdateCommand } from "./runtime/update.js";
 import { withTerminalWatchdog } from "./ui/lib/terminalModes.js";
 import {
@@ -546,6 +547,12 @@ function daemonRuntime(
   } = {},
 ): InMemoryDaemonRuntime {
   const workspaceRoot = projectDirectory ?? config.projectDirectory;
+  const home = xerxesHome();
+  const transcriptStore = new DaemonTranscriptStore({
+    currentProjectDirectory: workspaceRoot,
+    directory: join(home, "sessions"),
+    workspaceRoot: join(home, "agents"),
+  });
   const agentMemories = new Map<string, AgentMemory>();
   const memoryToolContext = memoryToolContextResolver();
   const memoryForProject = (root: string): AgentMemory => {
@@ -670,6 +677,7 @@ function daemonRuntime(
       toolExecutor: tools,
       tools: tools.definitions(),
       ...(connection.topP === undefined ? {} : { topP: connection.topP }),
+      transcriptStore,
     };
     if (subagentHost) {
       subagentHost.reconfigure(subagentOptions);
@@ -683,7 +691,13 @@ function daemonRuntime(
     activeToolCount = tools.definitions().length;
     return new AgentTurnRunner({
       agentDefinitions,
-      agentMemory: (session) => memoryForProject(session.cwd),
+      agentMemory: (session) => memoryForProject(
+        session.metadata.session_kind === "subagent" &&
+        typeof session.metadata.project_root === "string" &&
+        session.metadata.project_root.trim()
+          ? session.metadata.project_root
+          : session.cwd,
+      ),
       agentSelfMemory: (session) => getAgentSelfMemory(session.agentId),
       bootstrapSystemPrompt: ({ agentId, session, model, tools: runnerTools }) =>
         bootstrap({
@@ -716,6 +730,7 @@ function daemonRuntime(
     ...(host.buildId ? { buildId: host.buildId } : {}),
     currentProjectDirectory: workspaceRoot,
     runtimeSettings: initialSettings,
+    transcriptStore,
     statusInventory: () => ({
       activeSubagents:
         subagentHost?.manager

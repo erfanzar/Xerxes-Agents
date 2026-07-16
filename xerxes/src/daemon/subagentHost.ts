@@ -20,7 +20,8 @@ import type {
   SpawnedAgentStatus,
 } from '../operators/subagents.js'
 import { bootstrap } from '../runtime/bootstrap.js'
-import { createAgentState } from '../streaming/events.js'
+import type { DaemonTranscriptStore } from '../session/daemonTranscript.js'
+import type { AgentState, StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
@@ -29,6 +30,11 @@ import {
   NativeSubagentTurnCoordinator,
   type SubagentTurnCoordinator,
 } from './subagentCoordinator.js'
+import {
+  claimSubagentConversation,
+  SubagentConversationPersistence,
+  type SubagentConversationContext,
+} from './subagentConversations.js'
 import { DaemonSubagentEventBus } from './subagentEvents.js'
 
 export interface NativeSubagentHostOptions {
@@ -43,6 +49,8 @@ export interface NativeSubagentHostOptions {
   readonly toolExecutor: ToolExecutor
   readonly tools: readonly ToolDefinition[]
   readonly topP?: number
+  /** Shared daemon store; omitted hosts keep child conversations in memory only. */
+  readonly transcriptStore?: DaemonTranscriptStore
 }
 
 export interface NativeSubagentHost {
@@ -68,20 +76,36 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
   let activeOptions = options
   let activeDefinitionsFingerprint = agentDefinitionsFingerprint(options.agentDefinitions)
   const generationOptions = new Map<number, NativeSubagentHostOptions>([[activeGeneration, options]])
+  const conversations = new SubagentConversationPersistence(options.transcriptStore)
+  const historySessionIds = new Map<string, string>()
   const manager = new SubAgentManager({
+    idFactory: () => {
+      const taskId = `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+      if (options.transcriptStore) {
+        historySessionIds.set(taskId, crypto.randomUUID().replaceAll('-', ''))
+      }
+      return taskId
+    },
     maxConcurrent: 8,
     maxDepth: 5,
-    onEvent: event => publishSubagentEvent(options.eventBus, event),
+    onEvent: event => publishSubagentEvent(options.eventBus, event, historySessionIds.get(event.taskId)),
     pathResolver: rawPath => rawPath,
     runner: request => {
       const generation = nativeHostGeneration(request.config)
       return runNativeSubagent(
         request,
         generation === undefined ? activeOptions : generationOptions.get(generation) ?? activeOptions,
+        conversations,
+        historySessionIds.get(request.task.id),
       )
     },
   })
-  const liveManagerPort = new RichSubagentManagerPort(manager, options, activeGeneration)
+  const liveManagerPort = new RichSubagentManagerPort(
+    manager,
+    options,
+    activeGeneration,
+    historySessionIds,
+  )
   const managerPort = new RecoverableSubagentManagerPort(liveManagerPort)
   const turnCoordinator = new NativeSubagentTurnCoordinator(
     manager,
@@ -99,6 +123,9 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     reconfigure(nextOptions) {
       if (nextOptions.eventBus !== options.eventBus) {
         throw new Error('A native subagent host cannot be moved to a different event bus')
+      }
+      if (nextOptions.transcriptStore !== options.transcriptStore) {
+        throw new Error('A native subagent host cannot be moved to a different transcript store')
       }
       const nextDefinitionsFingerprint = agentDefinitionsFingerprint(nextOptions.agentDefinitions)
       if (nextDefinitionsFingerprint !== activeDefinitionsFingerprint) {
@@ -120,6 +147,7 @@ interface HandleMetadata {
   closed: boolean
   readonly createdAt: string
   readonly creatorAgentId: string | undefined
+  readonly historySessionId: string | undefined
   lastInput: string | undefined
   readonly parentAgentId: string | undefined
   readonly permissionMode: PermissionMode
@@ -142,6 +170,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     private readonly manager: SubAgentManager,
     options: NativeSubagentHostOptions,
     generation: number,
+    private readonly historySessionIds: ReadonlyMap<string, string>,
   ) {
     this.availableTools = options.tools
     this.definitions = options.agentDefinitions
@@ -217,6 +246,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: options.creatorAgentId,
+      historySessionId: this.historySessionIds.get(task.id),
       lastInput: prompt,
       parentAgentId: options.parentAgentId ?? options.creatorAgentId,
       permissionMode,
@@ -303,7 +333,12 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       const previous = this.handles.get(task.id)
       if (previous) {
         previous.closed = true
-        this.handles.set(replacement.id, { ...previous, closed: false, lastInput: input })
+        this.handles.set(replacement.id, {
+          ...previous,
+          closed: false,
+          historySessionId: this.historySessionIds.get(replacement.id),
+          lastInput: input,
+        })
       }
       return this.snapshot(replacement)
     }
@@ -366,6 +401,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: task.creatorId || undefined,
+      historySessionId: this.historySessionIds.get(task.id),
       lastInput: task.prompt,
       parentAgentId: task.parentId || undefined,
       permissionMode: permissionModeFromRules(task.rules),
@@ -380,6 +416,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       closed: metadata.closed || status === 'closed',
       createdAt: metadata.createdAt,
       ...(task.error ? { error: task.error } : {}),
+      ...(metadata.historySessionId ? { historySessionId: metadata.historySessionId } : {}),
       id: task.id,
       ...(metadata.lastInput ? { lastInput: metadata.lastInput } : {}),
       ...(task.result === undefined ? {} : { lastOutput: task.result }),
@@ -576,74 +613,193 @@ function recoveredTombstone(snapshot: SpawnedAgentSnapshot): SpawnedAgentSnapsho
 async function runNativeSubagent(
   request: SubagentTaskRunRequest,
   options: NativeSubagentHostOptions,
+  conversations: SubagentConversationPersistence,
+  persistedHistorySessionId: string | undefined,
 ): Promise<{ readonly content: string }> {
   const model = request.task.model.trim() || stringConfig(request.config.model) || options.model
   const permissionMode = permissionModeConfig(request.config.permissionMode, options.permissionMode)
   const permissionBroker = delegatedPermissionBroker(permissionMode)
   const tools = subagentTools(options.tools, request.config)
   const cwd = request.worktree?.path || options.cwd
-  const boot = await bootstrap({ cwd, model, tools })
-  const state = createAgentState()
-  state.metadata.project_root = cwd
-  let output = ''
-
-  for await (const event of runTurn({
+  const conversation: SubagentConversationContext = {
     agentId: request.task.agentDefName || request.task.id,
-    ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+    ...(request.task.creatorId ? { creatorAgentId: request.task.creatorId } : {}),
+    cwd,
+    handleId: request.task.id,
+    historySessionId: persistedHistorySessionId ?? request.task.id,
     model,
+    ...(request.task.parentId ? { parentAgentId: request.task.parentId } : {}),
+    ...(request.task.sourceId ? { parentSessionId: request.task.sourceId } : {}),
+    permissionCeiling: options.permissionMode,
     permissionMode,
-    state,
-    systemPrompt: [boot.systemPrompt, request.systemPrompt].filter(Boolean).join('\n\n'),
-    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-    tools,
-    ...(options.topP === undefined ? {} : { topP: options.topP }),
-    userMessage: request.prompt,
-  }, {
-    llm: options.llm,
-    ...(permissionBroker === undefined ? {} : { permissionBroker }),
-    toolExecutor: options.toolExecutor,
-  }, request.cancelSignal)) {
-    switch (event.type) {
-      case 'text':
-        output += event.text
-        request.report.text(event.text)
-        break
-      case 'thinking':
-        request.report.thinking(event.text)
-        break
-      case 'tool_start':
-        request.report.toolStart({
-          inputs: event.call.function.arguments,
-          name: event.call.function.name,
-          toolCallId: event.call.id,
-        })
-        break
-      case 'tool_end':
-        request.report.toolEnd({
-          durationMs: event.result.durationMs,
-          name: event.result.name,
-          permitted: event.result.permitted,
-          result: event.result.result,
-          toolCallId: event.result.toolCallId,
-        })
-        break
-      case 'turn_done':
-        request.report.usage({
-          ...(event.apiCallsCount === undefined ? {} : { apiCalls: event.apiCallsCount }),
-          model: event.model,
-          toolCalls: event.toolCallsCount,
-          ...(event.usageComplete ? {
-            inputTokens: event.usage.inputTokens,
-            outputTokens: event.usage.outputTokens,
-            ...(event.usage.reasoningTokens === undefined ? {} : { reasoningTokens: event.usage.reasoningTokens }),
-          } : {}),
-        })
-        break
-      default:
-        break
-    }
+    profile: request.task.agentDefName || 'coder',
+    projectRoot: options.cwd,
+    rules: request.task.rules,
+    title: request.task.title,
+    toolsAllowed: stringList(request.config._toolsAllowed),
+    toolsExcluded: stringList(request.config._toolsExcluded),
+    toolsWhitelist: stringList(request.config._toolsWhitelist),
+    toolsets: request.task.toolsets,
   }
-  return { content: latestAssistantText(state.messages) || output }
+  const releaseConversation = claimSubagentConversation(conversation.historySessionId)
+  let state: AgentState
+  try {
+    state = await conversations.stateFor(conversation)
+  } catch (error) {
+    releaseConversation()
+    throw error
+  }
+  state.metadata.project_root = options.cwd
+  let output = ''
+  const previousMessageCount = state.messages.length
+  const previousTurnCount = state.turnCount
+  let lastCheckpointAt = Date.now()
+  let partialAssistantContent = ''
+  let partialAssistantThinking = ''
+  let partialBaseMessageCount = state.messages.length
+  let partialCheckpointed = false
+
+  try {
+    try {
+      const boot = await bootstrap({ cwd, model, tools })
+      const events = runTurn({
+        agentId: request.task.agentDefName || request.task.id,
+        ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
+        model,
+        permissionMode,
+        sessionId: conversation.historySessionId,
+        state,
+        systemPrompt: [boot.systemPrompt, request.systemPrompt].filter(Boolean).join('\n\n'),
+        ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+        tools,
+        ...(options.topP === undefined ? {} : { topP: options.topP }),
+        userMessage: request.prompt,
+      }, {
+        llm: options.llm,
+        ...(permissionBroker === undefined ? {} : { permissionBroker }),
+        toolExecutor: options.toolExecutor,
+      }, request.cancelSignal)
+      const iterator = events[Symbol.asyncIterator]()
+      const firstEventPromise = iterator.next()
+      await waitForTurnStart(state, previousTurnCount)
+      if (state.turnCount > previousTurnCount) {
+        await conversations.save(conversation, state, 'running')
+        partialBaseMessageCount = state.messages.length
+      }
+      const checkpoint = async (event: StreamEvent): Promise<void> => {
+        if (state.messages.length > partialBaseMessageCount) {
+          partialAssistantContent = ''
+          partialAssistantThinking = ''
+          partialBaseMessageCount = state.messages.length
+          partialCheckpointed = false
+        }
+        const visibleText = reportNativeSubagentEvent(event, request)
+        output += visibleText
+        if (event.type === 'text') partialAssistantContent += visibleText
+        if (event.type === 'thinking') partialAssistantThinking += event.text
+        const now = Date.now()
+        const timedCheckpoint = (event.type === 'text' || event.type === 'thinking')
+          && (!partialCheckpointed || now - lastCheckpointAt >= 1_000)
+        const committedCheckpoint = event.type === 'permission_request'
+          || event.type === 'tool_start'
+          || event.type === 'tool_end'
+        if (committedCheckpoint || timedCheckpoint) {
+          await conversations.save(
+            conversation,
+            state,
+            'running',
+            undefined,
+            timedCheckpoint && !committedCheckpoint
+              ? { content: partialAssistantContent, thinking: partialAssistantThinking }
+              : undefined,
+          )
+          lastCheckpointAt = now
+          if (timedCheckpoint) partialCheckpointed = true
+        }
+      }
+      const firstEvent = await firstEventPromise
+      if (!firstEvent.done) await checkpoint(firstEvent.value)
+      for await (const event of iterator) await checkpoint(event)
+      await conversations.save(
+        conversation,
+        state,
+        request.cancelSignal.aborted ? 'cancelled' : 'completed',
+      )
+    } catch (error) {
+      const attemptedInputPersisted = state.messages.slice(previousMessageCount).some(message => (
+        message.role === 'user' && message.content === request.prompt
+      ))
+      if (!attemptedInputPersisted) state.messages.push({ role: 'user', content: request.prompt })
+      if (state.turnCount === previousTurnCount) state.turnCount = previousTurnCount + 1
+      try {
+        await conversations.save(
+          conversation,
+          state,
+          request.cancelSignal.aborted ? 'cancelled' : 'error',
+          error,
+          state.messages.length === partialBaseMessageCount
+            ? { content: partialAssistantContent, thinking: partialAssistantThinking }
+            : undefined,
+        )
+      } catch (persistenceError) {
+        throw new AggregateError(
+          [error, persistenceError],
+          'Subagent run failed and its conversation could not be persisted',
+        )
+      }
+      throw error
+    }
+    return { content: latestAssistantText(state.messages) || output }
+  } finally {
+    releaseConversation()
+  }
+}
+
+async function waitForTurnStart(state: AgentState, previousTurnCount: number): Promise<void> {
+  for (let attempt = 0; attempt < 16 && state.turnCount === previousTurnCount; attempt += 1) {
+    await Promise.resolve()
+  }
+}
+
+function reportNativeSubagentEvent(event: StreamEvent, request: SubagentTaskRunRequest): string {
+  switch (event.type) {
+    case 'text':
+      request.report.text(event.text)
+      return event.text
+    case 'thinking':
+      request.report.thinking(event.text)
+      return ''
+    case 'tool_start':
+      request.report.toolStart({
+        inputs: event.call.function.arguments,
+        name: event.call.function.name,
+        toolCallId: event.call.id,
+      })
+      return ''
+    case 'tool_end':
+      request.report.toolEnd({
+        durationMs: event.result.durationMs,
+        name: event.result.name,
+        permitted: event.result.permitted,
+        result: event.result.result,
+        toolCallId: event.result.toolCallId,
+      })
+      return ''
+    case 'turn_done':
+      request.report.usage({
+        ...(event.apiCallsCount === undefined ? {} : { apiCalls: event.apiCallsCount }),
+        model: event.model,
+        toolCalls: event.toolCallsCount,
+        ...(event.usageComplete ? {
+          inputTokens: event.usage.inputTokens,
+          outputTokens: event.usage.outputTokens,
+          ...(event.usage.reasoningTokens === undefined ? {} : { reasoningTokens: event.usage.reasoningTokens }),
+        } : {}),
+      })
+      return ''
+    default:
+      return ''
+  }
 }
 
 const DELEGATED_PROJECT_MEMORY_WRITES = new Set([
@@ -684,13 +840,20 @@ function subagentTools(
   })
 }
 
-function publishSubagentEvent(bus: DaemonSubagentEventBus, event: SubAgentEvent): void {
+function publishSubagentEvent(
+  bus: DaemonSubagentEventBus,
+  event: SubAgentEvent,
+  historySessionId: string | undefined,
+): void {
   if (!event.sourceId) return
-  const daemonEvent = daemonEventFromSubagent(event)
+  const daemonEvent = daemonEventFromSubagent(event, historySessionId)
   if (daemonEvent) bus.publish(event.sourceId, daemonEvent)
 }
 
-function daemonEventFromSubagent(event: SubAgentEvent): DaemonEvent | undefined {
+function daemonEventFromSubagent(
+  event: SubAgentEvent,
+  historySessionId: string | undefined,
+): DaemonEvent | undefined {
   const base = {
     agent_id: event.taskId,
     agent_name: event.agent,
@@ -700,6 +863,7 @@ function daemonEventFromSubagent(event: SubAgentEvent): DaemonEvent | undefined 
     files_read: event.filesRead,
     files_written: event.filesWritten,
     goal: event.goal,
+    ...(historySessionId ? { history_session_id: historySessionId } : {}),
     parent_id: event.parentId || null,
     model: event.model || undefined,
     rules: event.rules,

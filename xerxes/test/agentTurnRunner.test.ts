@@ -357,6 +357,68 @@ test('agent turn runner applies the selected agent prompt, model, and allowed to
   expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
 })
 
+test('resumed subagent history keeps its delegated policy and tool ceiling', async () => {
+  const client = new CapturingClient()
+  const definition: AgentDefinition = {
+    name: 'reviewer',
+    description: 'review code',
+    systemPrompt: 'Review safely.',
+    model: '',
+    tools: [],
+    allowedTools: null,
+    excludeTools: [],
+    source: 'test',
+    maxDepth: 3,
+    isolation: '',
+  }
+  const runner = new AgentTurnRunner({
+    agentDefinitions: new Map([[definition.name, definition]]),
+    llm: client,
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    tools: [
+      { type: 'function', function: { name: 'ReadFile', description: '', parameters: {} } },
+      { type: 'function', function: { name: 'WriteFile', description: '', parameters: {} } },
+      { type: 'function', function: { name: 'NewlyRegisteredTool', description: '', parameters: {} } },
+      { type: 'function', function: { name: 'SpawnAgents', description: '', parameters: {} } },
+      { type: 'function', function: { name: 'SetInteractionModeTool', description: '', parameters: {} } },
+    ],
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'reviewer', cancelRequested: false, cwd: process.cwd(), extra: {},
+    id: 'child-history-session', interactionMode: 'code', sessionKey: 'child-history', lastActive: 0,
+    messages: [
+      { role: 'user', content: 'prior request' },
+      {
+        role: 'assistant',
+        content: 'prior answer',
+        thinking: 'signed reasoning',
+        thinking_signature: 'provider-signature',
+      },
+    ], metadata: {
+      delegated_permission_mode: 'plan',
+      project_root: `${process.cwd()}/parent-project`,
+      session_kind: 'subagent',
+      toolsets: ['ReadFile'],
+    },
+    model: '', planMode: false, status: 'working', thinkingContent: [], toolExecutions: [],
+    totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/reviewer',
+  }
+
+  for await (const _event of runner.run(session, 'continue the review', new AbortController().signal)) {
+    // Consume the turn so the request and synchronized policy are final.
+  }
+
+  expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+  expect(client.requests[0]?.messages.find(message => message.role === 'assistant')).toMatchObject({
+    thinking: 'signed reasoning',
+    thinking_signature: 'provider-signature',
+  })
+  expect(session.metadata.permission_mode).toBe('plan')
+  expect(session.metadata.project_root).toBe(`${process.cwd()}/parent-project`)
+  expect(session.metadata.status).toBe('completed')
+})
+
 test('agent turn runner rejects an unknown selected profile before contacting the model', async () => {
   const client = new CapturingClient()
   const runner = new AgentTurnRunner({

@@ -44,6 +44,8 @@ export interface SpawnedAgentSnapshot {
   readonly error?: string
   readonly filesRead?: readonly string[]
   readonly filesWritten?: readonly string[]
+  /** Canonical hex daemon transcript id used to inspect or resume this child conversation. */
+  readonly historySessionId?: string
   readonly id: string
   readonly inputTokens?: number
   readonly lastInput?: string
