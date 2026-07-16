@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -40,18 +40,32 @@ test("native installer writes Bun and ACP launchers against an explicit local so
   try {
     const binDirectory = join(temporaryRoot, "bin");
     const installed = await execute(["sh", "scripts/install.sh"], {
+      HOME: temporaryRoot,
+      SHELL: "/bin/sh",
       XERXES_BIN_DIRECTORY: binDirectory,
       XERXES_SOURCE_DIRECTORY: ".",
     });
     expect(installed.exitCode, installed.stderr).toBe(0);
     expect(installed.stdout).toContain("Xerxes Bun runtime is ready");
 
+    const canonicalBinDirectory = await realpath(binDirectory);
+    const discovered = await execute(
+      ["sh", "-c", '. "$HOME/.profile"; command -v xerxes'],
+      {
+        HOME: temporaryRoot,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        SHELL: "/bin/sh",
+      },
+    );
+    expect(discovered.exitCode, discovered.stderr).toBe(0);
+    expect(discovered.stdout.trim()).toBe(join(canonicalBinDirectory, "xerxes"));
+
     const launcher = await execute([join(binDirectory, "xerxes"), "--version"]);
     expect(launcher.exitCode, launcher.stderr).toBe(0);
     expect(launcher.stdout.trim()).toBe("0.3.0");
 
     const acpLauncher = await Bun.file(join(binDirectory, "xerxes-acp")).text();
-    expect(acpLauncher).toContain('cli.js" acp');
+    expect(acpLauncher).toContain("/xerxes/dist/cli.js' acp \"$@\"");
     expect(
       await Bun.file(join(binDirectory, "xerxes-acp")).exists(),
     ).toBeTrue();
@@ -79,6 +93,167 @@ test("native installer writes Bun and ACP launchers against an explicit local so
     await rm(temporaryRoot, { force: true, recursive: true });
   }
 }, 30_000);
+
+test("native installer persists an idempotent PATH entry for common user shells", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-shell-paths-"));
+  try {
+    const zshHome = join(temporaryRoot, "zsh-home");
+    const zDotDirectory = join(zshHome, "z-dot");
+    const firstZshBin = join(zshHome, "first bin");
+    await mkdir(zshHome, { recursive: true });
+    const firstZsh = await configureInstallerPath({
+      HOME: zshHome,
+      SHELL: "/bin/zsh",
+      XERXES_BIN_DIRECTORY: firstZshBin,
+      ZDOTDIR: zDotDirectory,
+    });
+    expect(firstZsh.exitCode, firstZsh.stderr).toBe(0);
+    const zshrc = join(zDotDirectory, ".zshrc");
+    const firstZshrc = await readFile(zshrc, "utf8");
+    expect(markerCount(firstZshrc)).toBe(1);
+
+    const repeatedZsh = await configureInstallerPath({
+      HOME: zshHome,
+      SHELL: "/bin/zsh",
+      XERXES_BIN_DIRECTORY: firstZshBin,
+      ZDOTDIR: zDotDirectory,
+    });
+    expect(repeatedZsh.exitCode, repeatedZsh.stderr).toBe(0);
+    expect(await readFile(zshrc, "utf8")).toBe(firstZshrc);
+
+    const secondZshBin = join(zshHome, "replacement bin");
+    const changedZsh = await configureInstallerPath({
+      HOME: zshHome,
+      SHELL: "/bin/zsh",
+      XERXES_BIN_DIRECTORY: secondZshBin,
+      ZDOTDIR: zDotDirectory,
+    });
+    expect(changedZsh.exitCode, changedZsh.stderr).toBe(0);
+    const changedZshrc = await readFile(zshrc, "utf8");
+    expect(markerCount(changedZshrc)).toBe(1);
+    expect(changedZshrc).not.toContain(await realpath(firstZshBin));
+    expect(changedZshrc).toContain(await realpath(secondZshBin));
+
+    const bashHome = join(temporaryRoot, "bash-home");
+    const bashProfile = join(bashHome, ".bash_profile");
+    await mkdir(bashHome, { recursive: true });
+    await writeFile(bashProfile, "export KEEP_BASH_SETTING=1\n", "utf8");
+    const bash = await configureInstallerPath({
+      HOME: bashHome,
+      SHELL: "/bin/bash",
+      XERXES_BIN_DIRECTORY: join(bashHome, "bin"),
+    });
+    expect(bash.exitCode, bash.stderr).toBe(0);
+    expect(markerCount(await readFile(join(bashHome, ".bashrc"), "utf8"))).toBe(1);
+    const bashProfileText = await readFile(bashProfile, "utf8");
+    expect(bashProfileText).toContain("export KEEP_BASH_SETTING=1");
+    expect(markerCount(bashProfileText)).toBe(1);
+
+    const fishHome = join(temporaryRoot, "fish-home");
+    const fishConfigHome = join(fishHome, "config");
+    await mkdir(fishHome, { recursive: true });
+    const fish = await configureInstallerPath({
+      HOME: fishHome,
+      SHELL: "/usr/bin/fish",
+      XDG_CONFIG_HOME: fishConfigHome,
+      XERXES_BIN_DIRECTORY: join(fishHome, "bin ' slash\\"),
+    });
+    expect(fish.exitCode, fish.stderr).toBe(0);
+    const fishConfig = await readFile(
+      join(fishConfigHome, "fish", "conf.d", "xerxes.fish"),
+      "utf8",
+    );
+    expect(markerCount(fishConfig)).toBe(1);
+    expect(fishConfig).toContain("set -gx PATH");
+    expect(fishConfig).not.toContain("export PATH");
+    expect(fishConfig).toContain("\\'");
+    expect(fishConfig).toContain("\\\\");
+  } finally {
+    await rm(temporaryRoot, { force: true, recursive: true });
+  }
+});
+
+test("native installer shell-quotes custom launcher and PATH directories", async () => {
+  const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-quoted-path-"));
+  try {
+    const binDirectory = join(temporaryHome, "bin ' quote $(touch SHOULD_NOT_EXIST)");
+    const fakeSource = join(temporaryHome, "source ' quote $(touch SHOULD_NOT_EXIST)");
+    const configured = await execute(
+      [
+        "sh",
+        "-c",
+        '. "$INSTALLER_PATH"; prepare_bin_directory; write_launcher "$XERXES_SOURCE_DIRECTORY" xerxes; persist_bin_path',
+      ],
+      {
+        HOME: temporaryHome,
+        INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+        SHELL: "/bin/sh",
+        XERXES_BIN_DIRECTORY: binDirectory,
+        XERXES_INSTALLER_SOURCE_ONLY: "1",
+        XERXES_SOURCE_DIRECTORY: fakeSource,
+      },
+    );
+    expect(configured.exitCode, configured.stderr).toBe(0);
+
+    const canonicalBinDirectory = await realpath(binDirectory);
+    const launcher = join(canonicalBinDirectory, "xerxes");
+    const launcherSyntax = await execute(["sh", "-n", launcher]);
+    expect(launcherSyntax.exitCode, launcherSyntax.stderr).toBe(0);
+    await chmod(launcher, 0o755);
+
+    const invoked = await execute(
+      ["sh", "-c", 'cd "$HOME"; "$LAUNCHER" --version'],
+      {
+        HOME: temporaryHome,
+        LAUNCHER: launcher,
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+      },
+    );
+    expect(invoked.exitCode).not.toBe(0);
+
+    const discovered = await execute(
+      ["sh", "-c", 'cd "$HOME"; . "$HOME/.profile"; command -v xerxes'],
+      {
+        HOME: temporaryHome,
+        PATH: "/usr/bin:/bin",
+        SHELL: "/bin/sh",
+      },
+    );
+    expect(discovered.exitCode, discovered.stderr).toBe(0);
+    expect(discovered.stdout.trim()).toBe(launcher);
+    expect(await Bun.file(join(temporaryHome, "SHOULD_NOT_EXIST")).exists()).toBeFalse();
+  } finally {
+    await rm(temporaryHome, { force: true, recursive: true });
+  }
+});
+
+test("native installer rejects launcher directories unsafe for PATH", async () => {
+  const temporaryHome = await mkdtemp(join(tmpdir(), "xerxes-invalid-bin-"));
+  try {
+    const invalidDirectories = [
+      "relative/bin",
+      `${temporaryHome}/colon:bin`,
+      `${temporaryHome}/line\nbreak`,
+      `${temporaryHome}/carriage\rreturn`,
+    ];
+    for (const binDirectory of invalidDirectories) {
+      const result = await execute(
+        ["sh", "-c", '. "$INSTALLER_PATH"; prepare_bin_directory'],
+        {
+          HOME: temporaryHome,
+          INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+          SHELL: "/bin/sh",
+          XERXES_BIN_DIRECTORY: binDirectory,
+          XERXES_INSTALLER_SOURCE_ONLY: "1",
+        },
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("XERXES_BIN_DIRECTORY");
+    }
+  } finally {
+    await rm(temporaryHome, { force: true, recursive: true });
+  }
+});
 
 test("remote installer clones and safely fast-forwards its managed checkout", async () => {
   const temporaryRoot = await mkdtemp(join(tmpdir(), "xerxes-managed-installer-"));
@@ -235,6 +410,27 @@ async function resolveRemoteSource(
       INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
     },
   );
+}
+
+async function configureInstallerPath(
+  additions: Readonly<Record<string, string>>,
+): Promise<Awaited<ReturnType<typeof execute>>> {
+  return execute(
+    [
+      "sh",
+      "-c",
+      '. "$INSTALLER_PATH"; prepare_bin_directory; persist_bin_path',
+    ],
+    {
+      ...additions,
+      INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+      XERXES_INSTALLER_SOURCE_ONLY: "1",
+    },
+  );
+}
+
+function markerCount(content: string): number {
+  return content.split("# >>> xerxes PATH >>>").length - 1;
 }
 
 async function git(arguments_: readonly string[], cwd: string): Promise<void> {

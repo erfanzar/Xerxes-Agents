@@ -28,6 +28,41 @@ need_command() {
     command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
+shell_single_quote() {
+    escaped_value="$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+    printf "'%s'" "$escaped_value"
+}
+
+fish_single_quote() {
+    escaped_value="$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")"
+    printf "'%s'" "$escaped_value"
+}
+
+prepare_bin_directory() {
+    [ -n "$BIN_DIRECTORY" ] || die "XERXES_BIN_DIRECTORY cannot be empty"
+    case "$BIN_DIRECTORY" in
+        /*) ;;
+        *) die "XERXES_BIN_DIRECTORY must be an absolute path: $BIN_DIRECTORY" ;;
+    esac
+    case "$BIN_DIRECTORY" in
+        *:*) die "XERXES_BIN_DIRECTORY cannot contain a colon: $BIN_DIRECTORY" ;;
+    esac
+    case "$BIN_DIRECTORY" in
+        *'
+'*) die "XERXES_BIN_DIRECTORY cannot contain control characters" ;;
+    esac
+    carriage_return="$(printf '\r')"
+    case "$BIN_DIRECTORY" in
+        *"$carriage_return"*) die "XERXES_BIN_DIRECTORY cannot contain control characters" ;;
+    esac
+    if LC_ALL=C printf '%s' "$BIN_DIRECTORY" | grep '[[:cntrl:]]' >/dev/null 2>&1; then
+        die "XERXES_BIN_DIRECTORY cannot contain control characters"
+    fi
+    mkdir -p "$BIN_DIRECTORY" || die "cannot create launcher directory: $BIN_DIRECTORY"
+    BIN_DIRECTORY="$(CDPATH= cd "$BIN_DIRECTORY" 2>/dev/null && pwd -P)" \
+        || die "cannot resolve launcher directory: $BIN_DIRECTORY"
+}
+
 local_checkout_root() {
     script_path="${1:-$0}"
     case "$script_path" in
@@ -99,29 +134,115 @@ write_launcher() {
     source_root="$1"
     launcher_name="$2"
     command_prefix="${3:-}"
-    mkdir -p "$BIN_DIRECTORY"
+    case "$command_prefix" in
+        ""|acp) ;;
+        *) die "unsupported launcher command prefix: $command_prefix" ;;
+    esac
     launcher="$BIN_DIRECTORY/$launcher_name"
     temporary_launcher="$launcher.tmp.$$"
-    cat > "$temporary_launcher" <<EOF
-#!/usr/bin/env sh
-exec bun "$source_root/xerxes/dist/cli.js" $command_prefix "\$@"
-EOF
+    quoted_entry="$(shell_single_quote "$source_root/xerxes/dist/cli.js")"
+    if [ -n "$command_prefix" ]; then
+        printf '%s\n' '#!/usr/bin/env sh' "exec bun $quoted_entry $command_prefix \"\$@\"" > "$temporary_launcher"
+    else
+        printf '%s\n' '#!/usr/bin/env sh' "exec bun $quoted_entry \"\$@\"" > "$temporary_launcher"
+    fi
     chmod 755 "$temporary_launcher"
     mv "$temporary_launcher" "$launcher"
     ok "installed native launcher at $launcher"
-    case ":$PATH:" in
-        *":$BIN_DIRECTORY:"*) ;;
-        *) printf '%s\n' "Add $BIN_DIRECTORY to PATH to invoke xerxes directly." ;;
+}
+
+write_path_block() {
+    destination="$1"
+    syntax="$2"
+    if [ "$syntax" = "fish" ]; then
+        quoted_bin="$(fish_single_quote "$BIN_DIRECTORY")"
+        cat >> "$destination" <<EOF
+# >>> xerxes PATH >>>
+if not contains -- $quoted_bin \$PATH
+    set -gx PATH $quoted_bin \$PATH
+end
+# <<< xerxes PATH <<<
+EOF
+        return 0
+    fi
+    quoted_bin="$(shell_single_quote "$BIN_DIRECTORY")"
+    cat >> "$destination" <<EOF
+# >>> xerxes PATH >>>
+case ":\$PATH:" in
+    *":"$quoted_bin":"*) ;;
+    *) export PATH=$quoted_bin":\$PATH" ;;
+esac
+# <<< xerxes PATH <<<
+EOF
+}
+
+configure_path_file() {
+    shell_file="$1"
+    syntax="$2"
+    shell_directory="$(dirname "$shell_file")"
+    mkdir -p "$shell_directory" || die "cannot create shell configuration directory: $shell_directory"
+    if [ -e "$shell_file" ] && [ ! -f "$shell_file" ]; then
+        die "shell configuration is not a regular file: $shell_file"
+    fi
+    [ -f "$shell_file" ] || : > "$shell_file"
+
+    temporary_file="$shell_file.xerxes-path.$$"
+    if ! (umask 077; awk '
+        $0 == "# >>> xerxes PATH >>>" {
+            if (in_block) invalid = 1
+            in_block = 1
+            next
+        }
+        $0 == "# <<< xerxes PATH <<<" {
+            if (!in_block) invalid = 1
+            in_block = 0
+            next
+        }
+        !in_block { print }
+        END { if (in_block || invalid) exit 2 }
+    ' "$shell_file" > "$temporary_file"); then
+        rm -f "$temporary_file"
+        die "malformed Xerxes PATH block in $shell_file"
+    fi
+    write_path_block "$temporary_file" "$syntax"
+    cat "$temporary_file" > "$shell_file"
+    rm -f "$temporary_file"
+    ok "configured $BIN_DIRECTORY on PATH in $shell_file"
+}
+
+persist_bin_path() {
+    shell_path="${SHELL:-sh}"
+    shell_name="${shell_path##*/}"
+    case "$shell_name" in
+        zsh)
+            configure_path_file "${ZDOTDIR:-$HOME}/.zshrc" posix
+            ;;
+        bash)
+            configure_path_file "$HOME/.bashrc" posix
+            if [ -f "$HOME/.bash_profile" ]; then
+                configure_path_file "$HOME/.bash_profile" posix
+            elif [ -f "$HOME/.bash_login" ]; then
+                configure_path_file "$HOME/.bash_login" posix
+            else
+                configure_path_file "$HOME/.profile" posix
+            fi
+            ;;
+        fish)
+            configure_path_file "${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/xerxes.fish" fish
+            ;;
+        *)
+            configure_path_file "$HOME/.profile" posix
+            ;;
     esac
 }
 
 remove_legacy_xerxes_aliases() {
-    for shell_file in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+    for shell_file in "${ZDOTDIR:-$HOME}/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
         [ -f "$shell_file" ] || continue
         grep -F '.xerxes-venv/bin/xerxes' "$shell_file" >/dev/null 2>&1 || continue
 
         temporary_file="$shell_file.xerxes.$$"
-        if ! awk '
+        if ! (umask 077; awk '
             function is_legacy_alias(line) {
                 return line ~ /^[[:space:]]*alias[[:space:]]+xerxes=/ \
                     && index(line, ".xerxes-venv/bin/xerxes") > 0
@@ -146,7 +267,7 @@ remove_legacy_xerxes_aliases() {
             is_legacy_alias($0) { next }
             { print }
             END { if (in_block) printf "%s", block }
-        ' "$shell_file" > "$temporary_file"; then
+        ' "$shell_file" > "$temporary_file"); then
             rm -f "$temporary_file"
             die "could not remove the retired Xerxes alias from $shell_file"
         fi
@@ -158,6 +279,7 @@ remove_legacy_xerxes_aliases() {
 
 main() {
     need_command bun
+    prepare_bin_directory
     source_root="$(resolve_source)"
     [ -f "$source_root/package.json" ] || die "native package manifest is missing: $source_root/package.json"
     [ -f "$source_root/bun.lock" ] || die "native lockfile is missing: $source_root/bun.lock"
@@ -173,8 +295,9 @@ main() {
     remove_legacy_xerxes_aliases
     write_launcher "$source_root" xerxes
     write_launcher "$source_root" xerxes-acp acp
+    persist_bin_path
     "$BIN_DIRECTORY/xerxes" --help >/dev/null
-    ok "Xerxes Bun runtime is ready"
+    ok "Xerxes Bun runtime is ready; open a new terminal to invoke xerxes"
 }
 
 if [ "${XERXES_INSTALLER_SOURCE_ONLY:-0}" != "1" ]; then

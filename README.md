@@ -61,14 +61,24 @@ To install the current `main` checkout and local launchers instead:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh | sh
+# Open a new terminal after installation, then:
 xerxes
 ```
 
 The installer uses the locked workspace, builds the runtime and TUI, and writes
 `xerxes` and `xerxes-acp` to `${XERXES_BIN_DIRECTORY:-$HOME/.local/bin}`. Repeat
-the same curl command to safely fast-forward and rebuild a managed install. Set
-`XERXES_INSTALL_DIRECTORY` to choose the managed checkout location; the updater
-refuses dirty, unrelated, or diverged checkouts instead of overwriting them.
+the same curl command to safely fast-forward and rebuild a managed install. It
+persists the launcher directory for zsh, bash, POSIX login shells, and fish;
+because a piped installer cannot change its parent shell, open a new terminal
+afterward.
+Set `XERXES_INSTALL_DIRECTORY` to choose the managed checkout location; the
+updater refuses dirty, unrelated, or diverged checkouts instead of overwriting
+them. To choose another launcher directory, pass the variable to the piped shell:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/erfanzar/Xerxes-Agents/main/scripts/install.sh \
+  | XERXES_BIN_DIRECTORY="$HOME/bin" sh
+```
 
 Or run from source:
 
