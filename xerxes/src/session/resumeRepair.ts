@@ -151,6 +151,13 @@ function toolCallReplays(value: unknown): PendingResumeReplay[] {
 
 function rawArguments(functionArguments: unknown, input: unknown): string {
   if (typeof functionArguments === 'string' && functionArguments) return functionArguments
+  if (isJsonObject(functionArguments)) {
+    try {
+      return JSON.stringify(functionArguments)
+    } catch {
+      return ''
+    }
+  }
   if (typeof input === 'string') return input
   if (!isJsonObject(input)) return ''
   try {

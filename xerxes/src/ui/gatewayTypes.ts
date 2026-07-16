@@ -202,17 +202,24 @@ export interface SessionResumeResponse {
 }
 
 export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working'
+export type SessionKind = 'main' | 'subagent'
 
 export interface SessionActiveItem {
+  agent_id?: string
   current?: boolean
   id: string
+  kind?: SessionKind
   last_active?: number
   message_count?: number
   model?: string
+  parent_session_id?: null | string
   preview?: string
+  resumable?: boolean
+  root_session_id?: null | string
   session_key?: string
   started_at?: number
   status: LiveSessionStatus
+  subagent_id?: null | string
   title?: string
 }
 
@@ -239,11 +246,19 @@ export interface SessionActivateResponse {
 }
 
 export interface SessionListItem {
+  agent_id?: string
   id: string
+  kind?: SessionKind
   message_count: number
+  model?: string
+  parent_session_id?: null | string
   preview: string
+  resumable?: boolean
+  root_session_id?: null | string
   source?: string
   started_at: number
+  status?: string
+  subagent_id?: null | string
   title: string
 }
 

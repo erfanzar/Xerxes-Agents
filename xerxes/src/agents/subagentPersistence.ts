@@ -61,6 +61,7 @@ function archivedSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, un
     files_written: snapshot.filesWritten?.slice(0, MAX_ARCHIVED_FILES) ?? [],
     summary: boundedText(snapshot.completionSummary, 500) ?? null,
     status: snapshot.status,
+    history_session_id: snapshot.historySessionId ?? null,
     created_at: snapshot.createdAt,
     updated_at: snapshot.updatedAt,
     prompt_profile: snapshot.promptProfile,

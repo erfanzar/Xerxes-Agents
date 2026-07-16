@@ -310,6 +310,9 @@ function recoveredSnapshot(
   const parentAgentId = stringValue(value.parent_id)
     || stringValue(value.parentAgentId)
     || previous?.parentAgentId
+  const historySessionId = stringValue(value.history_session_id)
+    || stringValue(value.historySessionId)
+    || previous?.historySessionId
   const model = stringValue(value.model) || previous?.model
   const rules = stringArray(value.rules)
   const toolsets = stringArray(value.toolsets)
@@ -328,6 +331,7 @@ function recoveredSnapshot(
     id,
     ...(lastInput ? { lastInput } : {}),
     ...(lastOutput ? { lastOutput } : {}),
+    ...(historySessionId ? { historySessionId } : {}),
     name,
     title: stringValue(value.title) || previous?.title || name,
     ...(creatorAgentId ? { creatorAgentId } : {}),

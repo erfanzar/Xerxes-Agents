@@ -12,6 +12,7 @@ import {
   type DaemonSession,
   type TurnRunner,
 } from '../src/daemon/runtime.js'
+import { claimSubagentConversation } from '../src/daemon/subagentConversations.js'
 
 test('daemon runtime persists a project-scoped session and resumes only an explicit ID', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-runtime-parity-'))
@@ -96,6 +97,214 @@ test('daemon runtime persists a project-scoped session and resumes only an expli
       metadata: { title: 'remember the native resume contract' },
     })
     expect(resumed.messages).toEqual(session.messages)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('saved session listing exposes additive hierarchy metadata and limits roots after project and kind filters', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-session-hierarchy-'))
+  const projectDirectory = join(directory, 'project-a')
+  const otherProjectDirectory = join(directory, 'project-b')
+  const sessionDirectory = join(directory, 'sessions')
+  await mkdir(sessionDirectory, { recursive: true })
+
+  const writeTranscript = async (
+    sessionId: string,
+    options: {
+      readonly cwd: string
+      readonly legacy?: boolean
+      readonly metadata?: Record<string, unknown>
+      readonly updatedAt: string
+    },
+  ) => {
+    await writeFile(join(sessionDirectory, `${sessionId}.json`), JSON.stringify({
+      ...(options.legacy ? {} : {
+        format: 'xerxes-daemon-session',
+        schema_version: 2,
+      }),
+      session_id: sessionId,
+      key: sessionId,
+      agent_id: 'default',
+      cwd: options.cwd,
+      workspace: '',
+      updated_at: options.updatedAt,
+      messages: [
+        { role: 'user', content: `request ${sessionId}` },
+        { role: 'assistant', content: `response ${sessionId}` },
+      ],
+      turn_count: 1,
+      interaction_mode: 'code',
+      plan_mode: false,
+      total_input_tokens: 1,
+      total_output_tokens: 1,
+      metadata: options.metadata ?? {},
+      thinking_content: [],
+      tool_executions: [],
+    }), 'utf8')
+  }
+
+  await writeTranscript('aaaabbbb0001', {
+    cwd: projectDirectory,
+    metadata: { model: 'root-model', project_root: projectDirectory, title: 'Root one' },
+    updatedAt: '2026-07-17T00:05:00.000Z',
+  })
+  await writeTranscript('aaaabbbb0002', {
+    cwd: projectDirectory,
+    legacy: true,
+    metadata: { title: 'Root two' },
+    updatedAt: '2026-07-17T00:01:00.000Z',
+  })
+  await writeTranscript('aaaabbbb0003', {
+    cwd: projectDirectory,
+    metadata: {
+      parent_session_id: 'aaaabbbb0001',
+      project_root: projectDirectory,
+      title: 'Regular branch',
+    },
+    updatedAt: '2026-07-17T00:00:00.000Z',
+  })
+  await writeTranscript('ccccdddd0001', {
+    // A child may execute in a worktree while still belonging to its parent's project.
+    cwd: join(directory, 'child-worktree'),
+    metadata: {
+      model: 'child-model',
+      parent_session_id: 'aaaabbbb0001',
+      project_root: projectDirectory,
+      root_session_id: 'aaaabbbb0001',
+      session_kind: 'subagent',
+      status: 'running',
+      subagent_id: 'subagent_child_one',
+      title: 'Child one',
+    },
+    updatedAt: '2026-07-17T00:06:00.000Z',
+  })
+  await writeTranscript('eeeeffff0001', {
+    cwd: otherProjectDirectory,
+    metadata: { project_root: otherProjectDirectory, title: 'Other project' },
+    updatedAt: '2026-07-17T00:07:00.000Z',
+  })
+  await writeTranscript('eeeeffff0002', {
+    cwd: otherProjectDirectory,
+    metadata: {
+      parent_session_id: 'eeeeffff0001',
+      project_root: otherProjectDirectory,
+      root_session_id: 'eeeeffff0001',
+      session_kind: 'subagent',
+      status: 'completed',
+      subagent_id: 'subagent_other_project',
+      title: 'Other project child',
+    },
+    updatedAt: '2026-07-17T00:08:00.000Z',
+  })
+
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: projectDirectory,
+    sessionDirectory,
+  })
+  try {
+    const roots = await runtime.listSavedSessions(0, {
+      kind: 'main',
+      projectDirectory,
+    })
+    expect(roots.map(session => session.id)).toEqual(['aaaabbbb0001', 'aaaabbbb0002', 'aaaabbbb0003'])
+    expect(roots[0]).toMatchObject({
+      kind: 'main',
+      model: 'root-model',
+    })
+
+    const children = await runtime.listSavedSessions(0, {
+      kind: 'subagent',
+      projectDirectory,
+    })
+    expect(children).toEqual([
+      expect.objectContaining({
+        id: 'ccccdddd0001',
+        kind: 'subagent',
+        model: 'child-model',
+        parentSessionId: 'aaaabbbb0001',
+        rootSessionId: 'aaaabbbb0001',
+        resumable: true,
+        status: 'interrupted',
+        subagentId: 'subagent_child_one',
+      }),
+    ])
+
+    const expandedRoot = await runtime.listSavedSessions(1, {
+      includeSubagents: true,
+      projectDirectory,
+    })
+    expect(expandedRoot.map(session => session.id)).toEqual([
+      'ccccdddd0001',
+      'aaaabbbb0001',
+    ])
+    expect((await runtime.listSavedSessions(1, { projectDirectory })).map(session => session.id)).toEqual([
+      'aaaabbbb0001',
+    ])
+    expect((await runtime.listSavedSessions(0, {
+      kind: 'all',
+      projectDirectory,
+    })).map(session => session.id)).toEqual([
+      'ccccdddd0001',
+      'aaaabbbb0001',
+      'aaaabbbb0002',
+      'aaaabbbb0003',
+    ])
+
+    const releaseChild = claimSubagentConversation('ccccdddd0001')
+    try {
+      expect(await runtime.listSavedSessions(0, {
+        kind: 'subagent',
+        projectDirectory,
+      })).toEqual([
+        expect.objectContaining({
+          id: 'ccccdddd0001',
+          resumable: false,
+          status: 'running',
+        }),
+      ])
+      await expect(runtime.openSession('ccccdddd0001', undefined, {
+        cwd: projectDirectory,
+        resume: true,
+      })).rejects.toThrow('still owned by a running subagent')
+    } finally {
+      releaseChild()
+    }
+    await expect(runtime.openSession('ccccdddd0001', undefined, {
+      cwd: otherProjectDirectory,
+      resume: true,
+    })).rejects.toThrow('different project')
+    const resumedChild = await runtime.openSession('ccccdddd0001', undefined, {
+      cwd: projectDirectory,
+      resume: true,
+    })
+    expect(resumedChild.metadata.session_kind).toBe('subagent')
+    expect(resumedChild.cwd).toBe(resolve(directory, 'child-worktree'))
+    await expect(runtime.openSession('ccccdddd0001', undefined, {
+      cwd: otherProjectDirectory,
+      resume: true,
+    })).rejects.toThrow('different project')
+    expect(resumedChild.cwd).toBe(resolve(directory, 'child-worktree'))
+    expect(() => claimSubagentConversation('ccccdddd0001')).toThrow('open as a direct session')
+    runtime.evictSession('ccccdddd0001')
+    const releasedNativeAfterEviction = claimSubagentConversation('ccccdddd0001')
+    releasedNativeAfterEviction()
+    const resumedOtherProjectChild = await runtime.openSession('eeeeffff0002', undefined, {
+      cwd: otherProjectDirectory,
+      resume: true,
+    })
+    expect(resumedOtherProjectChild.metadata).toMatchObject({
+      project_root: otherProjectDirectory,
+      session_kind: 'subagent',
+      subagent_id: 'subagent_other_project',
+    })
+    runtime.evictSession('eeeeffff0002')
+    expect(await runtime.listSavedSessions(0, {
+      kind: 'main',
+      projectDirectory: otherProjectDirectory,
+    })).toEqual([
+      expect.objectContaining({ id: 'eeeeffff0001', kind: 'main' }),
+    ])
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

@@ -3,6 +3,7 @@
 
 import { join, resolve } from "node:path";
 
+import { ValidationError } from "../core/errors.js";
 import { normalizeInteractionMode } from "../runtime/interactionModes.js";
 import {
   DaemonTranscriptStore,
@@ -14,6 +15,10 @@ import type { JsonRpcPayload } from "../protocol/jsonRpc.js";
 import { processAtMentions } from "./atMentions.js";
 import { xerxesHome } from "./paths.js";
 import type { DaemonInteractionBoard } from "./interactions.js";
+import {
+  claimDirectSubagentConversation,
+  isSubagentConversationActive,
+} from "./subagentConversations.js";
 
 export const DAEMON_PROTOCOL_VERSION = 35;
 export const BUN_DAEMON_BUILD_ID =
@@ -78,11 +83,29 @@ export interface SavedDaemonSession {
   readonly agentId: string;
   readonly id: string;
   readonly key: string;
+  /** Persisted session role; legacy transcripts default to main. */
+  readonly kind: "main" | "subagent";
   readonly messageCount: number;
+  readonly model?: string;
+  readonly parentSessionId?: string;
   readonly path: string;
+  /** False while a native child in this daemon still owns the transcript. */
+  readonly resumable: boolean;
+  readonly rootSessionId?: string;
+  readonly status?: string;
+  readonly subagentId?: string;
   readonly title: string;
   readonly turnCount: number;
   readonly updatedAt: string;
+}
+
+export interface SavedSessionListOptions {
+  /** Include child transcripts alongside their selected root sessions. */
+  readonly includeSubagents?: boolean;
+  /** Select only root, only child, or both kinds of transcript. */
+  readonly kind?: "all" | "main" | "subagent";
+  /** Restrict history to the canonical project directory stored by each transcript. */
+  readonly projectDirectory?: string;
 }
 
 export interface TurnRunner {
@@ -116,7 +139,10 @@ export interface DaemonRuntime {
   deleteSavedSession?(sessionId: string): Promise<boolean>;
   evictSession(sessionKey: string): void;
   flushSessions(): Promise<void>;
-  listSavedSessions(limit?: number): Promise<readonly SavedDaemonSession[]>;
+  listSavedSessions(
+    limit?: number,
+    options?: SavedSessionListOptions,
+  ): Promise<readonly SavedDaemonSession[]>;
   listSessions(): readonly DaemonSession[];
   openSession(
     sessionKey: string,
@@ -180,6 +206,7 @@ export interface InMemoryDaemonRuntimeOptions {
  */
 export class InMemoryDaemonRuntime implements DaemonRuntime {
   private readonly abortControllers = new Map<string, AbortController>();
+  private readonly directSubagentClaims = new Map<string, () => void>();
   private readonly currentProjectDirectory: string;
   private readonly options: InMemoryDaemonRuntimeOptions;
   private readonly runtimeSettings: JsonRpcPayload;
@@ -262,6 +289,8 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     );
     this.options.onSessionEvict?.(sessionId);
     this.steerQueues.delete(sessionKey);
+    this.directSubagentClaims.get(sessionKey)?.();
+    this.directSubagentClaims.delete(sessionKey);
     this.sessions.delete(sessionKey);
   }
 
@@ -271,15 +300,27 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     );
   }
 
-  async listSavedSessions(limit = 0): Promise<readonly SavedDaemonSession[]> {
+  async listSavedSessions(
+    limit = 0,
+    options: SavedSessionListOptions = {},
+  ): Promise<readonly SavedDaemonSession[]> {
     const transcripts = await this.transcriptStore.list();
-    const summaries = transcripts.map((transcript) =>
-      savedSessionSummary(
-        transcript,
-        this.transcriptStore.pathFor(transcript.sessionId),
-      ),
-    );
-    return limit > 0 ? summaries.slice(0, limit) : summaries;
+    const projectDirectory = options.projectDirectory
+      ? resolve(options.projectDirectory)
+      : undefined;
+    const summaries = transcripts
+      .filter(
+        (transcript) =>
+          projectDirectory === undefined ||
+          transcriptProjectDirectory(transcript) === projectDirectory,
+      )
+      .map((transcript) =>
+        savedSessionSummary(
+          transcript,
+          this.transcriptStore.pathFor(transcript.sessionId),
+        ),
+      );
+    return selectSavedSessionSummaries(summaries, limit, options);
   }
 
   listSessions(): readonly DaemonSession[] {
@@ -296,13 +337,26 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     const key = sessionKey || "default";
     const existing = this.sessions.get(key);
     if (existing) {
+      const existingIsSubagent = metadataIsSubagent(existing.metadata);
+      const requestedCwd = options.cwd ? resolve(options.cwd) : undefined;
+      if (
+        existingIsSubagent &&
+        requestedCwd &&
+        sessionProjectDirectory(existing) !== requestedCwd
+      ) {
+        throw new ValidationError(
+          "session_id",
+          "belongs to a subagent history from a different project",
+          key,
+        );
+      }
       existing.lastActive = Date.now();
       if (agentId) {
         existing.agentId = agentId;
         existing.workspace = workspaceFor(this.workspaceRoot, agentId);
       }
-      if (options.cwd) {
-        existing.cwd = resolve(options.cwd);
+      if (requestedCwd && !existingIsSubagent) {
+        existing.cwd = requestedCwd;
       }
       if (options.model) {
         existing.model = options.model;
@@ -313,12 +367,30 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
     const cwd = resolve(options.cwd ?? this.currentProjectDirectory);
     const shouldResume = options.resume ?? looksLikeSessionId(key);
+    if (shouldResume && isSubagentConversationActive(key)) {
+      throw new ValidationError(
+        "session_id",
+        "is still owned by a running subagent; wait for it to finish before resuming its history",
+        key,
+      );
+    }
     const transcript = shouldResume
       ? await this.transcriptStore.load(key, {
           currentProjectDirectory: cwd,
           workspaceRoot: this.workspaceRoot,
         })
       : undefined;
+    if (
+      transcript &&
+      transcriptIsSubagent(transcript) &&
+      transcriptProjectDirectory(transcript) !== cwd
+    ) {
+      throw new ValidationError(
+        "session_id",
+        "belongs to a subagent history from a different project",
+        key,
+      );
+    }
     const session = transcript
       ? sessionFromTranscript(
           transcript,
@@ -333,8 +405,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           options.model ?? this.model(),
           this.workspaceRoot,
         );
+    const releaseSubagentClaim = transcript && transcriptIsSubagent(transcript)
+      ? claimDirectSubagentConversation(transcript.sessionId)
+      : undefined;
     applySystemPromptAddendum(session, options.systemPromptAddendum);
     this.sessions.set(key, session);
+    if (releaseSubagentClaim) this.directSubagentClaims.set(key, releaseSubagentClaim);
     return session;
   }
 
@@ -384,7 +460,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   async shutdown(): Promise<void> {
     this.shutdownPromise ??= Promise.resolve().then(() => this.options.shutdown?.());
-    await this.shutdownPromise;
+    try {
+      await this.shutdownPromise;
+    } finally {
+      for (const release of this.directSubagentClaims.values()) release();
+      this.directSubagentClaims.clear();
+    }
   }
 
   steerTurn(sessionKey: string, content: string): boolean {
@@ -732,18 +813,130 @@ function savedSessionSummary(
   transcript: DaemonTranscript,
   path: string,
 ): SavedDaemonSession {
+  const metadata = transcript.metadata;
+  const parentSessionId = nonemptyMetadataString(
+    metadata,
+    "parent_session_id",
+  );
+  const subagentId = nonemptyMetadataString(metadata, "subagent_id");
+  const declaredKind = nonemptyMetadataString(metadata, "session_kind");
+  const kind =
+    declaredKind?.toLowerCase() === "subagent" || subagentId !== undefined
+      ? "subagent"
+      : "main";
+  const rootSessionId = nonemptyMetadataString(metadata, "root_session_id");
+  const resolvedRootSessionId = rootSessionId ?? parentSessionId;
+  const model = nonemptyMetadataString(metadata, "model");
+  const persistedStatus = nonemptyMetadataString(metadata, "status");
+  const activeChild = kind === "subagent" && isSubagentConversationActive(transcript.sessionId);
+  const status = persistedStatus === "running" && !activeChild ? "interrupted" : persistedStatus;
   return {
     id: transcript.sessionId,
     key: transcript.key,
+    kind,
+    resumable: !activeChild,
     title:
-      stringValue(transcript.metadata.title) ||
+      stringValue(metadata.title) ||
       titleFromMessages(transcript.messages),
     agentId: transcript.agentId,
+    ...(model ? { model } : {}),
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(resolvedRootSessionId
+      ? { rootSessionId: resolvedRootSessionId }
+      : {}),
+    ...(status ? { status } : {}),
+    ...(subagentId ? { subagentId } : {}),
     updatedAt: transcript.updatedAt,
     turnCount: transcript.turnCount,
     messageCount: transcript.messages.length,
     path,
   };
+}
+
+function transcriptIsSubagent(transcript: DaemonTranscript): boolean {
+  return metadataIsSubagent(transcript.metadata);
+}
+
+function transcriptProjectDirectory(transcript: DaemonTranscript): string {
+  const persisted = nonemptyMetadataString(transcript.metadata, "project_root");
+  return resolve(persisted ?? transcript.cwd);
+}
+
+function metadataIsSubagent(metadata: Readonly<Record<string, unknown>>): boolean {
+  const declaredKind = nonemptyMetadataString(metadata, "session_kind");
+  return declaredKind?.toLowerCase() === "subagent" ||
+    nonemptyMetadataString(metadata, "subagent_id") !== undefined;
+}
+
+function sessionProjectDirectory(session: DaemonSession): string {
+  const persisted = nonemptyMetadataString(session.metadata, "project_root");
+  return resolve(persisted ?? session.cwd);
+}
+
+function nonemptyMetadataString(
+  metadata: Readonly<Record<string, unknown>>,
+  key: string,
+): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Apply hierarchy policy before the root limit. When child rows are requested,
+ * `limit` selects root histories and then expands their descendants so a busy
+ * swarm can never push every resumable parent out of the picker.
+ */
+function selectSavedSessionSummaries(
+  summaries: readonly SavedDaemonSession[],
+  limit: number,
+  options: SavedSessionListOptions,
+): SavedDaemonSession[] {
+  const kind =
+    options.kind ?? (options.includeSubagents === true ? "all" : "main");
+  if (kind === "main") {
+    return limitSavedSessions(
+      summaries.filter((session) => session.kind === "main"),
+      limit,
+    );
+  }
+  if (kind === "subagent") {
+    return limitSavedSessions(
+      summaries.filter((session) => session.kind === "subagent"),
+      limit,
+    );
+  }
+
+  if (limit <= 0) return [...summaries];
+
+  const roots = summaries.filter((session) => session.kind === "main");
+  const selectedRoots = limitSavedSessions(roots, limit);
+  if (!selectedRoots.length) {
+    return limitSavedSessions(
+      summaries.filter((session) => session.kind === "subagent"),
+      limit,
+    );
+  }
+  const selectedRootIds = new Set(selectedRoots.map((session) => session.id));
+  const children = summaries.filter(
+    (session) =>
+      session.kind === "subagent" &&
+      ((session.rootSessionId !== undefined &&
+        selectedRootIds.has(session.rootSessionId)) ||
+        (session.parentSessionId !== undefined &&
+          selectedRootIds.has(session.parentSessionId))),
+  );
+  const selectedIds = new Set([
+    ...selectedRootIds,
+    ...children.map((session) => session.id),
+  ]);
+  return summaries.filter((session) => selectedIds.has(session.id));
+}
+
+function limitSavedSessions(
+  sessions: readonly SavedDaemonSession[],
+  limit: number,
+): SavedDaemonSession[] {
+  return limit > 0 ? sessions.slice(0, limit) : [...sessions];
 }
 
 function updateFallbackSession(

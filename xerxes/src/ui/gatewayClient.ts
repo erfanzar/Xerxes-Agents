@@ -1026,6 +1026,7 @@ export class GatewayClient extends EventEmitter {
         this.sessionKeys.set(id, String(row.key))
       }
       return {
+        ...optionalSessionLinkFields(row),
         current: this.keyFor(id) === this.activeSessionKey,
         id,
         last_active: Date.now() / 1000,
@@ -1051,6 +1052,7 @@ export class GatewayClient extends EventEmitter {
       const updatedAt = Date.parse(String(row.updated_at ?? '')) / 1000
       const title = String(row.title ?? row.key ?? id)
       return {
+        ...optionalSessionLinkFields(row),
         id,
         message_count: Number(row.message_count ?? row.messages ?? 0),
         preview: title,
@@ -1068,7 +1070,7 @@ export class GatewayClient extends EventEmitter {
   }
 
   private async sessionMostRecent(): Promise<RpcObject> {
-    const raw = await this.nativeSuccess('session.most_recent', {})
+    const raw = await this.nativeSuccess('session.most_recent', { project_dir: this.projectDir })
     const session = raw.session as RpcObject | null | undefined
 
     if (!session || typeof session !== 'object') {
@@ -1343,6 +1345,42 @@ export class GatewayClient extends EventEmitter {
       this.stderrRing.shift()
     }
   }
+}
+
+function optionalSessionLinkFields(row: RpcObject): RpcObject {
+  const agentId = optionalTrimmedText(row.agent_id)
+  const rawKind = optionalTrimmedText(row.kind ?? row.session_kind)
+  const kind = rawKind === 'main' || rawKind === 'subagent' ? rawKind : undefined
+  const model = optionalTrimmedText(row.model)
+  const parentSessionId = nullableTrimmedText(row.parent_session_id)
+  const resumable = typeof row.resumable === 'boolean' ? row.resumable : undefined
+  const rootSessionId = nullableTrimmedText(row.root_session_id)
+  const status = optionalTrimmedText(row.status)
+  const subagentId = nullableTrimmedText(row.subagent_id)
+
+  return {
+    ...(agentId ? { agent_id: agentId } : {}),
+    ...(kind ? { kind } : {}),
+    ...(model ? { model } : {}),
+    ...(parentSessionId !== undefined ? { parent_session_id: parentSessionId } : {}),
+    ...(resumable === undefined ? {} : { resumable }),
+    ...(rootSessionId !== undefined ? { root_session_id: rootSessionId } : {}),
+    ...(status ? { status } : {}),
+    ...(subagentId !== undefined ? { subagent_id: subagentId } : {})
+  }
+}
+
+function optionalTrimmedText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.trim()
+
+  return normalized || undefined
+}
+
+function nullableTrimmedText(value: unknown): null | string | undefined {
+  if (value === null) return null
+
+  return optionalTrimmedText(value)
 }
 
 function positiveInteger(value: unknown): number | undefined {

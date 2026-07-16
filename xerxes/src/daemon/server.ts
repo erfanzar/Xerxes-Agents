@@ -733,11 +733,21 @@ export class DaemonServer {
     }
     if (method === "session.open") {
       const key = requestedSessionKey(params, "default");
-      connection.activeSessionKey = key;
+      const activeSession = this.runtime.sessionStatus(
+        connection.activeSessionKey,
+      );
+      const cwd = resolveProjectDirectory(
+        optionalString(params.project_dir) ||
+          optionalString(activeSession?.metadata.project_root) ||
+          activeSession?.cwd ||
+          process.cwd(),
+      );
       const session = await this.runtime.openSession(
         key,
         optionalString(params.agent_id),
+        { cwd },
       );
+      connection.activeSessionKey = key;
       return { ok: true, session: sessionPayload(session) };
     }
     if (method === "session.active_list") {
@@ -748,7 +758,31 @@ export class DaemonServer {
     }
     if (method === "session.list") {
       const limit = integerValue(params.limit);
-      const sessions = await this.runtime.listSavedSessions(limit);
+      const kind = savedSessionKind(params.kind);
+      if (params.kind !== undefined && kind === undefined) {
+        return {
+          ok: false,
+          error: "session kind must be main, subagent, or all",
+        };
+      }
+      const globalScope = optionalString(params.scope)?.toLowerCase() === "global";
+      const projectScoped = globalScope
+        ? false
+        : booleanValue(params.project_scoped, true);
+      const activeSession = this.runtime.sessionStatus(
+        connection.activeSessionKey,
+      );
+      const activeProject = optionalString(activeSession?.metadata.project_root) || activeSession?.cwd;
+      const projectDirectory = projectScoped
+        ? optionalString(params.project_dir) || activeProject || process.cwd()
+        : undefined;
+      const sessions = await this.runtime.listSavedSessions(limit, {
+        ...(typeof params.include_subagents === "boolean"
+          ? { includeSubagents: params.include_subagents }
+          : {}),
+        ...(kind ? { kind } : {}),
+        ...(projectDirectory ? { projectDirectory } : {}),
+      });
       return { ok: true, sessions: sessions.map(savedSessionPayload) };
     }
     if (method === "session.status") {
@@ -802,7 +836,18 @@ export class DaemonServer {
       );
     }
     if (method === "session.most_recent") {
-      const mostRecent = (await this.runtime.listSavedSessions(1))[0];
+      const activeSession = this.runtime.sessionStatus(connection.activeSessionKey);
+      const projectDirectory =
+        optionalString(params.project_dir) ||
+        optionalString(activeSession?.metadata.project_root) ||
+        activeSession?.cwd ||
+        process.cwd();
+      const mostRecent = (
+        await this.runtime.listSavedSessions(1, {
+          kind: "main",
+          projectDirectory,
+        })
+      )[0];
       return {
         ok: true,
         session: mostRecent ? savedSessionPayload(mostRecent) : null,
@@ -3996,9 +4041,13 @@ function sessionPayload(session: DaemonSession): JsonRpcPayload {
   const contextTokens = sessionContextTokens(session, model);
   const contextLimit = getContextLimit(model);
   const calls = exactSessionApiCalls(session);
+  const hierarchy = sessionHierarchyPayload(session.metadata);
+  const title = optionalString(session.metadata.title);
   return {
     id: session.id,
     key: session.sessionKey,
+    ...hierarchy,
+    ...(title ? { title } : {}),
     agent_id: session.agentId,
     workspace: session.workspace,
     cwd: session.cwd,
@@ -4023,6 +4072,27 @@ function sessionPayload(session: DaemonSession): JsonRpcPayload {
     usage_complete: session.usageComplete ?? session.turnCount === 0,
     cancel_requested: session.cancelRequested,
     status: session.status,
+  };
+}
+
+function sessionHierarchyPayload(
+  metadata: Readonly<Record<string, unknown>>,
+): JsonRpcPayload {
+  const parentSessionId = optionalString(metadata.parent_session_id);
+  const subagentId = optionalString(metadata.subagent_id);
+  const declaredKind = optionalString(metadata.session_kind)?.toLowerCase();
+  const kind =
+    declaredKind === "subagent" || subagentId
+      ? "subagent"
+      : "main";
+  const rootSessionId =
+    optionalString(metadata.root_session_id) || parentSessionId;
+  return {
+    kind,
+    session_kind: kind,
+    ...(parentSessionId ? { parent_session_id: parentSessionId } : {}),
+    ...(rootSessionId ? { root_session_id: rootSessionId } : {}),
+    ...(subagentId ? { subagent_id: subagentId } : {}),
   };
 }
 
@@ -4069,14 +4139,37 @@ function savedSessionPayload(session: SavedDaemonSession): JsonRpcPayload {
     id: session.id,
     session_id: session.id,
     key: session.key,
+    kind: session.kind,
+    session_kind: session.kind,
+    resumable: session.resumable,
     title: session.title,
     agent_id: session.agentId,
+    ...(session.model ? { model: session.model } : {}),
+    ...(session.parentSessionId
+      ? { parent_session_id: session.parentSessionId }
+      : {}),
+    ...(session.rootSessionId
+      ? { root_session_id: session.rootSessionId }
+      : {}),
+    ...(session.status ? { status: session.status } : {}),
+    ...(session.subagentId ? { subagent_id: session.subagentId } : {}),
     updated_at: session.updatedAt,
     turn_count: session.turnCount,
     messages: session.messageCount,
     message_count: session.messageCount,
     path: session.path,
   };
+}
+
+function savedSessionKind(
+  value: unknown,
+): "all" | "main" | "subagent" | undefined {
+  const normalized = optionalString(value)?.toLowerCase();
+  return normalized === "all" ||
+    normalized === "main" ||
+    normalized === "subagent"
+    ? normalized
+    : undefined;
 }
 
 function cronJobPayload(job: CronJob): JsonRpcPayload {

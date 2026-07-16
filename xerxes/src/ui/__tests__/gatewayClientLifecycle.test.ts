@@ -7,7 +7,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { GatewayClient } from '../gatewayClient.js'
+import { GatewayClient, resolveProjectDir } from '../gatewayClient.js'
 import type { SessionInfo } from '../types.js'
 
 interface SessionCreateResult {
@@ -87,7 +87,7 @@ describe('GatewayClient session lifecycle', () => {
         }
       }
       if (method === 'session.list') {
-        expect(params).toEqual({ limit: 200 })
+        expect(params).toEqual({ include_subagents: true, kind: 'all' })
         return {
           ok: true,
           sessions: [
@@ -97,6 +97,19 @@ describe('GatewayClient session lifecycle', () => {
               session_id: 'old1',
               title: 'saved work',
               updated_at: '2026-06-27T10:00:00+00:00'
+            },
+            {
+              agent_id: 'researcher',
+              kind: 'subagent',
+              messages: 7,
+              model: 'provider/research-model',
+              parent_session_id: 'old1',
+              root_session_id: 'old1',
+              session_id: 'agent1',
+              status: 'completed',
+              subagent_id: 'subagent_policy',
+              title: 'Policy review',
+              updated_at: '2026-06-27T10:05:00+00:00'
             }
           ]
         }
@@ -105,14 +118,29 @@ describe('GatewayClient session lifecycle', () => {
     }
 
     const active = await client.request('session.active_list', { current_session_id: 'live1' })
-    const saved = await client.request('session.list', { limit: 200 })
+    const saved = await client.request('session.list', { include_subagents: true, kind: 'all' })
 
     expect(calls).toEqual(['session.active_list', 'session.list'])
     expect(active).toMatchObject({
       sessions: [{ id: 'live1', message_count: 3, status: 'working', title: 'live work' }]
     })
     expect(saved).toMatchObject({
-      sessions: [{ id: 'old1', message_count: 2, source: 'saved', title: 'saved work' }]
+      sessions: [
+        { id: 'old1', message_count: 2, source: 'saved', title: 'saved work' },
+        {
+          agent_id: 'researcher',
+          id: 'agent1',
+          kind: 'subagent',
+          message_count: 7,
+          model: 'provider/research-model',
+          parent_session_id: 'old1',
+          root_session_id: 'old1',
+          source: 'saved',
+          status: 'completed',
+          subagent_id: 'subagent_policy',
+          title: 'Policy review'
+        }
+      ]
     })
   })
 
@@ -249,7 +277,7 @@ describe('GatewayClient session lifecycle', () => {
       { method: 'session.compress', params: { session_key: 'live-1' } },
       { method: 'session.save', params: { session_key: 'live-1' } },
       { method: 'session.undo', params: { session_key: 'live-1' } },
-      { method: 'session.most_recent', params: {} }
+      { method: 'session.most_recent', params: { project_dir: resolveProjectDir(process.cwd()) } }
     ])
   })
 

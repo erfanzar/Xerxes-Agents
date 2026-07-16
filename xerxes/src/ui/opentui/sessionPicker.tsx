@@ -28,6 +28,8 @@ const MAX_PANEL_WIDTH = 104
 
 export type SessionPickerActions = Pick<AppLayoutActions, 'activateLiveSession' | 'newLiveSession' | 'resumeById'>
 
+type SessionView = 'agents' | 'chats'
+
 export interface SessionPickerProps {
   actions: SessionPickerActions
   currentSessionId?: null | string
@@ -37,8 +39,8 @@ export interface SessionPickerProps {
 
 type SessionRow =
   | { id: 'new'; kind: 'new' }
-  | { id: string; item: SessionActiveItem; kind: 'live' }
-  | { id: string; item: SessionListItem; kind: 'saved' }
+  | { id: string; item: SessionActiveItem; kind: 'live'; parentTitle?: string }
+  | { id: string; item: SessionListItem; kind: 'saved'; parentTitle?: string }
 
 const STATUS_GLYPH: Record<LiveSessionStatus, string> = {
   idle: '✓',
@@ -55,6 +57,80 @@ const consume = (event: KeyEvent) => {
 const shortId = (id: string) => (id.length > 10 ? `${id.slice(0, 9)}…` : id)
 
 const shortModel = (model = '') => model.replace(/^.*\//, '') || 'default'
+
+const compact = (value: string, max: number) =>
+  value.length > max ? `${value.slice(0, Math.max(1, max - 1)).trimEnd()}…` : value
+
+const isAgentSession = (item: SessionActiveItem | SessionListItem) => {
+  const kind = item.kind?.trim().toLowerCase()
+
+  return kind === 'subagent' || Boolean(item.subagent_id?.trim())
+}
+
+const isResumableAgentHistory = (item: SessionListItem) => {
+  const status = item.status?.trim().toLowerCase()
+
+  return item.resumable !== false && status !== 'running' && status !== 'working' && status !== 'starting'
+}
+
+const linkedParentId = (item: SessionActiveItem | SessionListItem) =>
+  item.parent_session_id?.trim() || item.root_session_id?.trim() || ''
+
+const itemTitle = (item: SessionActiveItem | SessionListItem) => item.title || item.preview || '(untitled)'
+
+const agentStatusColor = (status: string, t: Theme) => {
+  const normalized = status.toLowerCase()
+
+  if (normalized === 'completed' || normalized === 'idle') return t.color.ok
+  if (normalized === 'running' || normalized === 'working' || normalized === 'starting') return t.color.accent
+  if (normalized === 'failed' || normalized === 'error') return t.color.error
+  if (normalized === 'cancelled' || normalized === 'interrupted' || normalized === 'timeout') return t.color.warn
+
+  return t.color.muted
+}
+
+const agentStatusGlyph = (status: string) => {
+  const normalized = status.toLowerCase()
+
+  if (normalized === 'completed' || normalized === 'idle') return '✓'
+  if (normalized === 'running' || normalized === 'working' || normalized === 'starting') return '◆'
+  if (normalized === 'failed' || normalized === 'error') return '×'
+  if (normalized === 'cancelled' || normalized === 'interrupted' || normalized === 'timeout') return '!'
+
+  return '·'
+}
+
+const agentRowLabel = ({
+  age,
+  maxWidth,
+  messages,
+  parent,
+  profile,
+  status,
+  title
+}: {
+  age: string
+  maxWidth: number
+  messages: number
+  parent: string
+  profile: string
+  status: string
+  title: string
+}) => {
+  const full = `↳ ${status} · ${title} · ${profile} · ${messages} msgs${age ? ` · ${age}` : ''} · ← ${compact(parent, 22)}`
+
+  if (full.length <= maxWidth) return full
+
+  const narrow = (rowTitle: string) =>
+    `↳ ${agentStatusGlyph(status)} ${rowTitle} · ${compact(profile, 8)} · ${messages}msg${age ? ` · ${age}` : ''} ← ${compact(parent, 8)}`
+  const candidate = narrow(title)
+
+  if (candidate.length <= maxWidth) return candidate
+
+  const titleWidth = Math.max(6, title.length - (candidate.length - maxWidth))
+
+  return compact(narrow(compact(title, titleWidth)), maxWidth)
+}
 
 const relativeAge = (timestamp?: number) => {
   if (!timestamp) {
@@ -154,23 +230,44 @@ function InfoRow({ children, color }: { children: ReactNode; color: string }) {
   )
 }
 
-function SessionListRow({ index, row, selected, t }: { index: number; row: SessionRow; selected: boolean; t: Theme }) {
+function SessionListRow({
+  index,
+  maxLabelWidth,
+  row,
+  selected,
+  t
+}: {
+  index: number
+  maxLabelWidth: number
+  row: SessionRow
+  selected: boolean
+  t: Theme
+}) {
   let label: string
   let color = t.color.muted
 
   if (row.kind === 'new') {
     label = '+  new session'
     color = t.color.label
+  } else if (isAgentSession(row.item)) {
+    const title = itemTitle(row.item)
+    const profile = row.item.agent_id?.trim() || shortModel(row.item.model)
+    const status = row.item.status?.trim() || (row.kind === 'live' ? 'idle' : 'saved')
+    const age = relativeAge(row.kind === 'live' ? row.item.last_active ?? row.item.started_at : row.item.started_at)
+    const messages = row.item.message_count ?? 0
+    const parent = row.parentTitle || shortId(linkedParentId(row.item)) || 'main chat'
+    label = agentRowLabel({ age, maxWidth: maxLabelWidth, messages, parent, profile, status, title })
+    color = agentStatusColor(status, t)
   } else if (row.kind === 'live') {
     const current = Boolean(row.item.current)
-    const title = row.item.title || row.item.preview || '(untitled)'
+    const title = itemTitle(row.item)
     const age = relativeAge(row.item.last_active ?? row.item.started_at)
     const identity = current ? 'current' : shortId(row.item.id)
     const ageSuffix = age ? ` · ${age}` : ''
     label = `${STATUS_GLYPH[row.item.status] ?? '·'}  ${identity} · ${row.item.status} · ${shortModel(row.item.model)}${ageSuffix} · ${title}`
     color = current ? t.color.warn : row.item.status === 'working' ? t.color.ok : t.color.text
   } else {
-    const title = row.item.title || row.item.preview || '(untitled)'
+    const title = itemTitle(row.item)
     const age = relativeAge(row.item.started_at)
     const ageSuffix = age ? ` · ${age}` : ''
     label = `↻  ${shortId(row.item.id)}${ageSuffix} · ${row.item.message_count} msgs · ${title}`
@@ -205,6 +302,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState(0)
+  const [view, setView] = useState<SessionView>('chats')
 
   const close = useCallback(() => {
     patchOverlayState({ sessions: false })
@@ -221,14 +319,17 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
       gw.request<SessionActiveListResponse>('session.active_list', {
         current_session_id: effectiveSessionId
       }),
-      gw.request<SessionListResponse>('session.list', { limit: 200 })
+      // The daemon already reads every transcript to build summaries. Fetch
+      // both kinds in one pass so large swarms do not double filesystem work
+      // or disappear behind an arbitrary child-history cap.
+      gw.request<SessionListResponse>('session.list', { kind: 'all', limit: 0 })
     ]).then(results => {
       if (!mounted) {
         return
       }
 
       const liveResult = results[0]
-      const savedResult = results[1]
+      const historyResult = results[1]
       const errors: string[] = []
       let nextActive: SessionActiveItem[] = []
       let nextSaved: SessionListItem[] = []
@@ -245,8 +346,8 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         errors.push(rpcErrorMessage(liveResult.reason))
       }
 
-      if (savedResult.status === 'fulfilled') {
-        const parsed = asRpcResult<SessionListResponse>(savedResult.value)
+      if (historyResult.status === 'fulfilled') {
+        const parsed = asRpcResult<SessionListResponse>(historyResult.value)
 
         if (parsed) {
           nextSaved = parsed.sessions ?? []
@@ -254,21 +355,33 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
           errors.push('invalid response: session.list')
         }
       } else {
-        errors.push(rpcErrorMessage(savedResult.reason))
+        errors.push(rpcErrorMessage(historyResult.reason))
       }
 
       const liveIds = new Set(nextActive.map(session => session.id))
-      nextSaved = nextSaved.filter(session => !liveIds.has(session.id))
+      const savedIds = new Set<string>()
+      nextSaved = nextSaved.filter(session => {
+        if (liveIds.has(session.id) || savedIds.has(session.id)) return false
+        savedIds.add(session.id)
+
+        return true
+      })
 
       setActiveSessions(nextActive)
       setSavedSessions(nextSaved)
       setError(errors.join(' · '))
+      const current = nextActive.find(
+        session => Boolean(session.current) || (!!effectiveSessionId && session.id === effectiveSessionId)
+      ) ?? nextSaved.find(session => !!effectiveSessionId && session.id === effectiveSessionId)
+      const nextView: SessionView = current && isAgentSession(current) ? 'agents' : 'chats'
+      setView(nextView)
       setSelected(() => {
-        const currentIndex = nextActive.findIndex(
-          session => Boolean(session.current) || (!!effectiveSessionId && session.id === effectiveSessionId)
-        )
+        const visible = [...nextActive, ...nextSaved].filter(session => isAgentSession(session) === (nextView === 'agents'))
+        const currentIndex = visible.findIndex(session => (
+          Boolean('current' in session && session.current) || (!!effectiveSessionId && session.id === effectiveSessionId)
+        ))
 
-        return currentIndex >= 0 ? currentIndex + 1 : 0
+        return currentIndex >= 0 ? currentIndex + (nextView === 'chats' ? 1 : 0) : 0
       })
       setLoading(false)
     })
@@ -278,18 +391,55 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
     }
   }, [effectiveSessionId, gw])
 
-  const rows = useMemo<SessionRow[]>(
+  const titleById = useMemo(
+    () => new Map(
+      [...activeSessions, ...savedSessions]
+        .filter(item => item.id.trim())
+        .map(item => [item.id, itemTitle(item)] as const)
+    ),
+    [activeSessions, savedSessions]
+  )
+  const withParentTitle = useCallback(
+    <T extends SessionActiveItem | SessionListItem>(item: T) => {
+      const parentId = linkedParentId(item)
+
+      return parentId ? titleById.get(parentId) : undefined
+    },
+    [titleById]
+  )
+  const chatRows = useMemo<SessionRow[]>(
     () => [
       { id: 'new', kind: 'new' },
-      ...activeSessions.map(item => ({ id: item.id, item, kind: 'live' }) as const),
-      ...savedSessions.map(item => ({ id: item.id, item, kind: 'saved' }) as const)
+      ...activeSessions
+        .filter(item => !isAgentSession(item))
+        .map(item => ({ id: item.id, item, kind: 'live' }) as const),
+      ...savedSessions
+        .filter(item => !isAgentSession(item))
+        .map(item => ({ id: item.id, item, kind: 'saved' }) as const)
     ],
     [activeSessions, savedSessions]
   )
+  const agentRows = useMemo<SessionRow[]>(
+    () => [
+      ...activeSessions
+        .filter(isAgentSession)
+        .map(item => ({ id: item.id, item, kind: 'live', parentTitle: withParentTitle(item) }) as const),
+      ...savedSessions
+        .filter(isAgentSession)
+        .map(item => ({ id: item.id, item, kind: 'saved', parentTitle: withParentTitle(item) }) as const)
+    ],
+    [activeSessions, savedSessions, withParentTitle]
+  )
+  const rows = view === 'chats' ? chatRows : agentRows
 
   useEffect(() => {
     setSelected(index => Math.max(0, Math.min(index, rows.length - 1)))
   }, [rows.length])
+
+  const switchView = useCallback((next: SessionView) => {
+    setView(next)
+    setSelected(0)
+  }, [])
 
   const choose = useCallback(() => {
     const row = rows[selected]
@@ -298,13 +448,20 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
       return
     }
 
-    close()
+    if (row.kind === 'saved' && isAgentSession(row.item) && !isResumableAgentHistory(row.item)) {
+      setError('That agent is still running in its parent chat. Wait for it to finish before resuming its history.')
+
+      return
+    }
 
     if (row.kind === 'new') {
+      close()
       actions.newLiveSession()
     } else if (row.kind === 'live') {
+      close()
       actions.activateLiveSession(row.item.id)
     } else {
+      close()
       actions.resumeById(row.item.id)
     }
   }, [actions, close, rows, selected])
@@ -327,6 +484,27 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         return
       }
 
+      if (name === 'tab') {
+        consume(event)
+        switchView(view === 'chats' ? 'agents' : 'chats')
+
+        return
+      }
+
+      if (name === 'left') {
+        consume(event)
+        switchView('chats')
+
+        return
+      }
+
+      if (name === 'right') {
+        consume(event)
+        switchView('agents')
+
+        return
+      }
+
       if (name === 'up') {
         consume(event)
         setSelected(index => Math.max(0, index - 1))
@@ -336,7 +514,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
 
       if (name === 'down') {
         consume(event)
-        setSelected(index => Math.min(rows.length - 1, index + 1))
+        setSelected(index => Math.max(0, Math.min(rows.length - 1, index + 1)))
 
         return
       }
@@ -360,7 +538,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         choose()
       }
     },
-    [choose, close, loading, rows.length]
+    [choose, close, loading, rows.length, switchView, view]
   )
 
   useKeyboard(handleKey)
@@ -370,10 +548,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
     Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - 6), Math.max(1, width - 2))
   )
   const visible = Math.max(1, Math.min(MAX_VISIBLE, height - 10))
-  const sessionVisible = Math.max(0, visible - 1)
-  const listSelected = Math.max(0, selected - 1)
-  const sessionRows = rows.slice(1)
-  const { items: visibleSessionRows, offset } = windowItems(sessionRows, listSelected, sessionVisible)
+  const { items: visibleRows, offset } = windowItems(rows, selected, visible)
   const panelHeight = Math.min(height, visible + 7 + (error ? 1 : 0))
 
   if (loading) {
@@ -387,19 +562,22 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
   return (
     <ModalShell height={height} panelHeight={panelHeight} panelWidth={panelWidth} t={t} width={width}>
       <InfoRow color={t.color.muted}>
-        {activeSessions.length} live · {savedSessions.length} resumable
+        {view === 'chats'
+          ? `[Chats ${Math.max(0, chatRows.length - 1)}] · Agents ${agentRows.length}`
+          : `[Agents ${agentRows.length}] · Chats ${Math.max(0, chatRows.length - 1)}`}
+        {` · ${activeSessions.length} live`}
       </InfoRow>
       {error ? <InfoRow color={t.color.error}>error: {error}</InfoRow> : null}
       <InfoRow color={t.color.muted}>{offset > 0 ? `↑ ${offset} more` : ' '}</InfoRow>
 
-      <SessionListRow index={0} row={rows[0]!} selected={selected === 0} t={t} />
-      {visibleSessionRows.map((row, index) => {
-        const absoluteIndex = offset + index + 1
+      {visibleRows.map((row, index) => {
+        const absoluteIndex = offset + index
 
         return (
           <SessionListRow
             index={absoluteIndex}
             key={`${row.kind}:${row.id}`}
+            maxLabelWidth={Math.max(12, panelWidth - 10)}
             row={row}
             selected={selected === absoluteIndex}
             t={t}
@@ -407,16 +585,17 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         )
       })}
 
-      {Array.from({ length: Math.max(0, sessionVisible - visibleSessionRows.length) }, (_, index) => (
+      {!rows.length ? <InfoRow color={t.color.muted}>No agent histories yet.</InfoRow> : null}
+      {Array.from({ length: Math.max(0, visible - visibleRows.length - (rows.length ? 0 : 1)) }, (_, index) => (
         <InfoRow color={t.color.muted} key={`session-pad-${index}`}>
           {' '}
         </InfoRow>
       ))}
 
       <InfoRow color={t.color.muted}>
-        {offset + sessionVisible < sessionRows.length ? `↓ ${sessionRows.length - offset - sessionVisible} more` : ' '}
+        {offset + visible < rows.length ? `↓ ${rows.length - offset - visible} more` : ' '}
       </InfoRow>
-      <InfoRow color={t.color.muted}>↑/↓ select · Enter open · Esc/q close</InfoRow>
+      <InfoRow color={t.color.muted}>Tab/←/→ views · ↑/↓ select · Enter open · Esc/q close</InfoRow>
     </ModalShell>
   )
 }

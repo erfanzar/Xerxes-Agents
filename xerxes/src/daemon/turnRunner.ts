@@ -11,6 +11,7 @@ import {
   mergePersistedSubagentSnapshots,
   persistedSubagentSnapshotValues,
 } from '../agents/subagentPersistence.js'
+import { SUBAGENT_BLOCKED_TOOLS } from '../agents/subagentManager.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
 import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
@@ -102,7 +103,8 @@ export class AgentTurnRunner implements TurnRunner {
     const displayText = controls.displayText?.trim() || text
     const state = this.states.get(session.id) ?? stateFromSession(session)
     this.states.set(session.id, state)
-    state.metadata.project_root = session.cwd
+    const projectRoot = sessionProjectRoot(session)
+    state.metadata.project_root = projectRoot
     state.metadata.interaction_mode = session.interactionMode
     state.metadata.plan_mode = session.planMode
     delete state.metadata.pending_interaction_mode
@@ -120,8 +122,14 @@ export class AgentTurnRunner implements TurnRunner {
       )
     }
     const selectedTools = toolsForAgent(this.options.tools, agent)
-    const tools = toolsForAgent(selectedTools, modeAgent)
-    const permissionMode = permissionModeForInteraction(session.interactionMode, this.options.permissionMode)
+    const modeTools = toolsForAgent(selectedTools, modeAgent)
+    const resumedSubagent = session.metadata.session_kind === 'subagent'
+    if (resumedSubagent) state.metadata.status = 'running'
+    const tools = resumedSubagent ? toolsForResumedSubagent(modeTools, session.metadata) : modeTools
+    const configuredPermissionMode = permissionModeForInteraction(session.interactionMode, this.options.permissionMode)
+    const permissionMode = resumedSubagent
+      ? permissionModeForResumedSubagent(configuredPermissionMode, session.metadata)
+      : configuredPermissionMode
     state.metadata.permission_mode = permissionMode
     const promptAgent = modeAgent ?? agent
     const bootstrapPrompt = await this.bootstrapSystemPrompt(
@@ -131,7 +139,7 @@ export class AgentTurnRunner implements TurnRunner {
       promptAgent?.name ?? session.agentId,
     )
     const memory = this.options.agentMemory ? await this.options.agentMemory(session) : undefined
-    await captureUserWorkflowMemory(displayText, memory, { projectRoot: session.cwd })
+    await captureUserWorkflowMemory(displayText, memory, { projectRoot })
     const memoryPrompt = memory ? await memory.toPromptSection() : ''
     const selfMemory = this.options.agentSelfMemory ? await this.options.agentSelfMemory(session) : undefined
     const selfMemoryPrompt = selfMemory ? await selfMemory.systemPromptAddendum() : ''
@@ -172,6 +180,7 @@ export class AgentTurnRunner implements TurnRunner {
     }
     this.options.auditEmitter?.emitTurnStart({ ...auditContext, prompt: displayText })
     let auditTurnEnded = false
+    let resumedSubagentOutcome: 'cancelled' | 'completed' | 'error' = 'completed'
     const subagentCohort = this.options.subagentCoordinator?.begin(session.id)
     try {
       const turnEvents = withActiveSession(session, runTurn({
@@ -219,6 +228,7 @@ export class AgentTurnRunner implements TurnRunner {
         yield daemonEventFromStream(event, state, session)
       }
     } catch (error) {
+      if (resumedSubagent) resumedSubagentOutcome = signal.aborted ? 'cancelled' : 'error'
       this.options.auditEmitter?.emitError({
         ...auditContext,
         errorType: error instanceof Error ? error.name : 'Error',
@@ -227,6 +237,9 @@ export class AgentTurnRunner implements TurnRunner {
       })
       throw error
     } finally {
+      if (resumedSubagent) {
+        state.metadata.status = signal.aborted ? 'cancelled' : resumedSubagentOutcome
+      }
       subagentCohort?.close()
       if (!auditTurnEnded) {
         this.options.auditEmitter?.emitTurnEnd({ ...auditContext, content: latestAssistantContent(state) })
@@ -540,6 +553,66 @@ function permissionModeForInteraction(mode: string, configured: PermissionMode |
     : configured ?? DEFAULT_PERMISSION_MODE
 }
 
+/**
+ * A child transcript remains a delegated agent when opened directly from the
+ * history picker. Resuming it must not silently add orchestration/mode tools
+ * or widen the policy ceiling it originally ran under.
+ */
+function toolsForResumedSubagent(
+  tools: readonly ToolDefinition[] | undefined,
+  metadata: Readonly<Record<string, unknown>>,
+): readonly ToolDefinition[] | undefined {
+  if (tools === undefined) return undefined
+  const whitelist = metadataStringSet(metadata.tools_whitelist)
+  const allowed = metadataStringSet(metadata.tools_allowed)
+  const excluded = metadataStringSet(metadata.tools_excluded)
+  const delegatedSurface = Array.isArray(metadata.toolsets)
+    ? metadataStringSet(metadata.toolsets)
+    : undefined
+  return tools.filter(tool => {
+    const name = tool.function.name
+    if (SUBAGENT_BLOCKED_TOOLS.has(name) || excluded.has(name)) return false
+    if (delegatedSurface && !delegatedSurface.has(name)) return false
+    if (whitelist.size && !whitelist.has(name)) return false
+    return !allowed.size || allowed.has(name)
+  })
+}
+
+function permissionModeForResumedSubagent(
+  configured: PermissionMode,
+  metadata: Readonly<Record<string, unknown>>,
+): PermissionMode {
+  const stored = permissionModeValue(metadata.delegated_permission_mode)
+    ?? permissionModeValue(metadata.permission_mode)
+  if (stored === undefined) return configured
+  return permissionModeExceeds(stored, configured) ? configured : stored
+}
+
+function permissionModeValue(value: unknown): PermissionMode | undefined {
+  return value === 'accept-all' || value === 'auto' || value === 'manual' || value === 'plan'
+    ? value
+    : undefined
+}
+
+/** Match the effective delegated-policy ordering used by the native host. */
+function permissionModeExceeds(candidate: PermissionMode, ceiling: PermissionMode): boolean {
+  if (candidate === ceiling || ceiling === 'accept-all') return false
+  if (ceiling === 'manual') return candidate !== 'manual'
+  if (ceiling === 'plan') return candidate === 'auto' || candidate === 'accept-all'
+  return candidate === 'accept-all'
+}
+
+function metadataStringSet(value: unknown): ReadonlySet<string> {
+  return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [])
+}
+
+function sessionProjectRoot(session: DaemonSession): string {
+  const persisted = session.metadata.project_root
+  return session.metadata.session_kind === 'subagent' && typeof persisted === 'string' && persisted.trim()
+    ? persisted
+    : session.cwd
+}
+
 function stateFromSession(session: DaemonSession): AgentState {
   const state = createAgentState(session.messages.flatMap(messageToChatMessage))
   state.apiCallsComplete = session.apiCallsComplete ?? session.turnCount === 0
@@ -589,6 +662,9 @@ function messageToChatMessage(message: DaemonSession['messages'][number]): ChatM
       role: 'assistant',
       content,
       ...(typeof message.thinking === 'string' ? { thinking: message.thinking } : {}),
+      ...(typeof message.thinking_signature === 'string'
+        ? { thinking_signature: message.thinking_signature }
+        : {}),
       ...(Array.isArray(message.tool_calls) ? { tool_calls: message.tool_calls as readonly ToolCall[] } : {}),
     }]
   }

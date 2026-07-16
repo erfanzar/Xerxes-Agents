@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
 import {
@@ -14,9 +17,18 @@ import {
 } from '../src/daemon/subagentCoordinator.js'
 import { DaemonSubagentEventBus } from '../src/daemon/subagentEvents.js'
 import { createNativeSubagentHost } from '../src/daemon/subagentHost.js'
+import {
+  type SubagentConversationContext,
+  SubagentConversationPersistence,
+} from '../src/daemon/subagentConversations.js'
 import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession } from '../src/daemon/runtime.js'
+import {
+  DaemonTranscriptStore,
+  INTERRUPTED_TOOL_RESULT,
+} from '../src/session/daemonTranscript.js'
 import { AgentTurnRunner, formatSubagentResults } from '../src/daemon/turnRunner.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { messagesToAnthropic } from '../src/llms/anthropic.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { AGENT_MEMORY_WRITE_DEFINITION } from '../src/tools/agentMemoryTools.js'
 import { registerClaudeAgentTools } from '../src/tools/claudeTools/agentOps.js'
@@ -383,6 +395,7 @@ test('session metadata preserves every handle omitted from a bounded provider re
     closed: false,
     createdAt: '2026-07-16T00:00:00.000Z',
     id: `manifest-${index}`,
+    ...(index === 19 ? { historySessionId: '0123456789abcdef0123456789abcdef' } : {}),
     lastInput: `inspect area ${index}`,
     name: `manifest-${index}`,
     promptProfile: 'researcher',
@@ -417,6 +430,7 @@ test('session metadata preserves every handle omitted from a bounded provider re
 
   expect(recovered).toHaveLength(20)
   expect(recovered.find(snapshot => snapshot.id === 'manifest-19')).toMatchObject({
+    historySessionId: '0123456789abcdef0123456789abcdef',
     id: 'manifest-19',
     lastInput: 'inspect area 19',
   })
@@ -1940,7 +1954,461 @@ test('agent turn runner multiplexes a child event between parent tool start and 
   expect(delegatedPermissionMode).toBe('accept-all')
 })
 
+class PersistedHistoryChildClient implements LlmClient {
+  readonly firstStarted = Promise.withResolvers<void>()
+  readonly releaseFirst = Promise.withResolvers<void>()
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    if (this.requests.length === 1) {
+      this.firstStarted.resolve()
+      await this.releaseFirst.promise
+    }
+    const latestUser = request.messages.findLast(message => message.role === 'user')?.content
+    yield {
+      content: `answer:${typeof latestUser === 'string' ? latestUser : '(missing)'}`,
+      usage: { inputTokens: 17, outputTokens: 5 },
+    }
+  }
+}
+
+test('persisted subagent state restores signed provider reasoning blocks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-signed-child-history-'))
+  const historySessionId = '0123456789abcdef0123456789abcdef'
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  try {
+    await transcripts.save({
+      agentId: 'coder',
+      cwd: process.cwd(),
+      extra: {},
+      format: 'bun-v2',
+      interactionMode: 'code',
+      key: historySessionId,
+      messages: [{
+        role: 'assistant',
+        content: 'prior child result',
+        thinking: 'provider reasoning',
+        thinking_signature: 'signed-reasoning-block',
+      }],
+      metadata: { session_kind: 'subagent' },
+      pendingResumeReplays: [],
+      planMode: false,
+      schemaVersion: undefined,
+      sessionId: historySessionId,
+      thinkingContent: ['provider reasoning'],
+      toolExecutions: [],
+      totalApiCalls: 1,
+      totalInputTokens: 8,
+      totalOutputTokens: 3,
+      turnCount: 1,
+      updatedAt: new Date().toISOString(),
+      usageComplete: true,
+      workspace: '',
+    })
+    const persistence = new SubagentConversationPersistence(transcripts)
+    const state = await persistence.stateFor({
+      agentId: 'coder',
+      cwd: process.cwd(),
+      handleId: 'subagent_signed',
+      historySessionId,
+      model: 'test-model',
+      permissionCeiling: 'plan',
+      permissionMode: 'plan',
+      profile: 'coder',
+      projectRoot: process.cwd(),
+      rules: [],
+      title: 'Signed child',
+      toolsAllowed: [],
+      toolsExcluded: [],
+      toolsWhitelist: [],
+      toolsets: [],
+    })
+
+    expect(state.messages[0]).toMatchObject({
+      thinking: 'provider reasoning',
+      thinking_signature: 'signed-reasoning-block',
+    })
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+test('subagent stream checkpoints persist partial output without mutating live turn state', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-partial-child-history-'))
+  const historySessionId = '1123456789abcdef0123456789abcdef'
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const context: SubagentConversationContext = {
+    agentId: 'coder',
+    cwd: process.cwd(),
+    handleId: 'subagent_partial',
+    historySessionId,
+    model: 'test-model',
+    permissionCeiling: 'plan',
+    permissionMode: 'plan',
+    profile: 'coder',
+    projectRoot: process.cwd(),
+    rules: [],
+    title: 'Partial child',
+    toolsAllowed: [],
+    toolsExcluded: [],
+    toolsWhitelist: [],
+    toolsets: [],
+  }
+  const persistence = new SubagentConversationPersistence(transcripts)
+  try {
+    const state = await persistence.stateFor(context)
+    state.messages.push({ role: 'user', content: 'start a long answer' })
+    state.turnCount = 1
+
+    await persistence.save(context, state, 'running', undefined, {
+      content: 'partial answer',
+      thinking: 'partial reasoning',
+    })
+
+    expect(state.messages).toEqual([{ role: 'user', content: 'start a long answer' }])
+    expect(state.thinkingContent).toEqual([])
+    const checkpoint = await transcripts.load(historySessionId, {
+      currentProjectDirectory: process.cwd(),
+    })
+    expect(checkpoint?.messages).toEqual([
+      { role: 'user', content: 'start a long answer' },
+      {
+        role: 'assistant',
+        content: 'partial answer',
+        thinking: 'partial reasoning',
+        checkpoint_partial: true,
+      },
+    ])
+    expect(checkpoint?.thinkingContent).toEqual(['partial reasoning'])
+
+    await persistence.save(context, state, 'running', undefined, {
+      content: '',
+      thinking: 'thinking when the process stopped',
+    })
+    const resumedState = await new SubagentConversationPersistence(transcripts).stateFor(context)
+    expect(resumedState.messages.at(-1)).toEqual({
+      role: 'assistant',
+      content: '[interrupted while reasoning]',
+      thinking: 'thinking when the process stopped',
+    })
+    expect(messagesToAnthropic(resumedState.messages).messages.at(-1)).toEqual({
+      role: 'assistant',
+      content: [{ type: 'text', text: '[interrupted while reasoning]' }],
+    })
+
+    await persistence.save(context, state, 'completed')
+    const completed = await transcripts.load(historySessionId, {
+      currentProjectDirectory: process.cwd(),
+    })
+    expect(completed?.messages).toEqual([{ role: 'user', content: 'start a long answer' }])
+    expect(completed?.thinkingContent).toEqual([])
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+class ToolCheckpointChildClient implements LlmClient {
+  private calls = 0
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.calls += 1
+    if (this.calls === 1) {
+      yield {
+        toolCalls: [{
+          id: 'checkpoint-call',
+          type: 'function',
+          function: { name: 'CheckpointTool', arguments: { path: 'README.md' } },
+        }],
+        usage: { inputTokens: 9, outputTokens: 2 },
+      }
+      return
+    }
+    yield {
+      content: 'completed after the checkpointed tool',
+      usage: { inputTokens: 11, outputTokens: 4 },
+    }
+  }
+}
+
+test('native subagents checkpoint committed tool calls before long-running tools finish', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-tool-checkpoint-history-'))
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const toolStarted = Promise.withResolvers<void>()
+  const releaseTool = Promise.withResolvers<void>()
+  const registry = new ToolRegistry()
+  const definition: ToolDefinition = {
+    type: 'function',
+    function: {
+      name: 'CheckpointTool',
+      description: 'Hold a child tool open while its history is inspected.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  }
+  registry.register(definition, async () => {
+    toolStarted.resolve()
+    await releaseTool.promise
+    return 'checkpoint tool finished'
+  })
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: new ToolCheckpointChildClient(),
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+
+  try {
+    const spawned = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'run the checkpoint tool',
+      promptProfile: 'coder',
+      sourceAgentId: 'feedface',
+      title: 'Tool checkpoint child',
+    })
+    await toolStarted.promise
+    const historySessionId = spawned.historySessionId
+    if (!historySessionId) throw new Error('expected a persisted child history id')
+    const running = await transcripts.load(historySessionId, {
+      currentProjectDirectory: process.cwd(),
+    })
+    expect(running?.metadata.status).toBe('running')
+    expect(running?.messages).toContainEqual({
+      role: 'assistant',
+      content: '',
+      tool_calls: [{
+        id: 'checkpoint-call',
+        type: 'function',
+        function: { name: 'CheckpointTool', arguments: { path: 'README.md' } },
+      }],
+    })
+    expect(running?.messages).toContainEqual({
+      role: 'tool',
+      tool_call_id: 'checkpoint-call',
+      content: INTERRUPTED_TOOL_RESULT,
+    })
+    expect(running?.pendingResumeReplays).toEqual([{
+      arguments: JSON.stringify({ path: 'README.md' }),
+      name: 'CheckpointTool',
+      tool_call_id: 'checkpoint-call',
+    }])
+
+    releaseTool.resolve()
+    const settled = await host.managerPort.wait([spawned.id], 5_000)
+    expect(settled.completed[0]?.status).toBe('completed')
+  } finally {
+    releaseTool.resolve()
+    await host.manager.shutdown()
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+test('native subagent conversations persist as resumable histories and retain queued follow-up context', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-subagent-history-'))
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const client = new PersistedHistoryChildClient()
+  const eventBus = new DaemonSubagentEventBus()
+  const childEvents: DaemonEvent[] = []
+  const releaseEvents = eventBus.subscribe('feedbeef', event => childEvents.push(event))
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+
+  try {
+    const spawned = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'inspect the first area',
+      promptProfile: 'coder',
+      sourceAgentId: 'feedbeef',
+      title: 'Durable child review',
+    })
+    expect(spawned.historySessionId).toMatch(/^[0-9a-f]{32}$/)
+    await client.firstStarted.promise
+
+    const queued = await host.managerPort.sendInput(spawned.id, {
+      message: 'now inspect the second area',
+    })
+    expect(queued.queueSize).toBe(1)
+    client.releaseFirst.resolve()
+
+    const settled = await host.managerPort.wait([spawned.id], 5_000)
+    expect(settled.pending).toHaveLength(0)
+    expect(settled.completed[0]).toMatchObject({
+      historySessionId: spawned.historySessionId,
+      status: 'completed',
+    })
+    expect(client.requests).toHaveLength(2)
+    expect(client.requests[1]?.messages
+      .filter(message => message.role !== 'system')
+      .map(message => [message.role, message.content])).toEqual([
+      ['user', 'inspect the first area'],
+      ['assistant', 'answer:inspect the first area'],
+      ['user', 'now inspect the second area'],
+    ])
+
+    const historySessionId = spawned.historySessionId
+    if (!historySessionId) throw new Error('expected a persisted child history id')
+    const transcript = await transcripts.load(historySessionId, {
+      currentProjectDirectory: process.cwd(),
+    })
+    expect(transcript).toMatchObject({
+      agentId: 'coder',
+      cwd: process.cwd(),
+      key: historySessionId,
+      sessionId: historySessionId,
+      totalApiCalls: 2,
+      totalInputTokens: 34,
+      totalOutputTokens: 10,
+      turnCount: 2,
+    })
+    expect(transcript?.messages
+      .filter(message => message.role !== 'system')
+      .map(message => [message.role, message.content])).toEqual([
+      ['user', 'inspect the first area'],
+      ['assistant', 'answer:inspect the first area'],
+      ['user', 'now inspect the second area'],
+      ['assistant', 'answer:now inspect the second area'],
+    ])
+    expect(transcript?.metadata).toMatchObject({
+      session_kind: 'subagent',
+      parent_session_id: 'feedbeef',
+      root_session_id: 'feedbeef',
+      subagent_id: spawned.id,
+      history_session_id: historySessionId,
+      status: 'completed',
+      model: 'test-model',
+      permission_mode: 'accept-all',
+      delegated_permission_mode: 'accept-all',
+      project_root: process.cwd(),
+      title: 'Durable child review',
+    })
+    expect(childEvents.length).toBeGreaterThan(0)
+    expect(childEvents.every(event => event.payload.history_session_id === historySessionId)).toBe(true)
+
+    const parentMetadata: Record<string, unknown> = {}
+    replacePersistedSubagentSnapshots(parentMetadata, settled.completed)
+    expect(persistedSubagentSnapshotValues(parentMetadata)[0]).toMatchObject({
+      history_session_id: historySessionId,
+    })
+  } finally {
+    client.releaseFirst.resolve()
+    releaseEvents()
+    await host.manager.shutdown()
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+class CancelledHistoryChildClient implements LlmClient {
+  readonly started = Promise.withResolvers<void>()
+
+  async *stream(_request: CompletionRequest, signal?: AbortSignal): AsyncGenerator<LlmDelta> {
+    this.started.resolve()
+    await new Promise<void>((_resolve, reject) => {
+      if (!signal) {
+        reject(new Error('expected a delegated cancellation signal'))
+        return
+      }
+      const cancel = (): void => reject(signal.reason ?? new Error('cancelled'))
+      if (signal.aborted) cancel()
+      else signal.addEventListener('abort', cancel, { once: true })
+    })
+    yield { content: 'unreachable' }
+  }
+}
+
+test('cancelled native subagent runs atomically retain their attempted conversation and terminal status', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-cancelled-history-'))
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const client = new CancelledHistoryChildClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+
+  try {
+    const spawned = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'inspect until cancelled',
+      promptProfile: 'coder',
+      sourceAgentId: 'decafbad',
+      title: 'Cancelled child review',
+    })
+    await client.started.promise
+    host.managerPort.close(spawned.id)
+    await host.manager.shutdown()
+
+    const historySessionId = spawned.historySessionId
+    if (!historySessionId) throw new Error('expected a persisted child history id')
+    const transcript = await transcripts.load(historySessionId, {
+      currentProjectDirectory: process.cwd(),
+    })
+    expect(transcript?.metadata).toMatchObject({
+      session_kind: 'subagent',
+      status: 'cancelled',
+      parent_session_id: 'decafbad',
+      subagent_id: spawned.id,
+    })
+    expect(transcript?.messages.some(message => (
+      message.role === 'user' && message.content === 'inspect until cancelled'
+    ))).toBe(true)
+  } finally {
+    await host.manager.shutdown()
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
 test('background agents keep the parent turn live and deliver one joined result continuation', async () => {
+  const sessionDirectory = await mkdtemp(join(tmpdir(), 'xerxes-joined-background-'))
   const alphaRelease = Promise.withResolvers<void>()
   const betaRelease = Promise.withResolvers<void>()
   const parentWaiting = Promise.withResolvers<void>()
@@ -2023,6 +2491,7 @@ test('background agents keep the parent turn live and deliver one joined result 
   const runtime = new InMemoryDaemonRuntime(runner, {
     currentProjectDirectory: process.cwd(),
     model: 'test-model',
+    sessionDirectory,
   })
   const events: DaemonEvent[] = []
 
@@ -2073,6 +2542,7 @@ test('background agents keep the parent turn live and deliver one joined result 
     alphaRelease.resolve()
     betaRelease.resolve()
     await host.manager.shutdown()
+    await rm(sessionDirectory, { force: true, recursive: true })
   }
 })
 
