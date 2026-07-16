@@ -121,6 +121,8 @@ describe('gatewayAdapter', () => {
       transcriptFromStoredMessages([
         { content: '<attached_files>hidden</attached_files>\n\nhi', role: 'user', text: 'hi' },
         { content: [{ text: 'hello' }, { content: 'again' }], role: 'assistant' },
+        { content: 'internal system prompt', role: 'system' },
+        { content: 'x'.repeat(700), role: 'tool' },
         { content: 'skip', role: 'bad' }
       ])
     ).toEqual([

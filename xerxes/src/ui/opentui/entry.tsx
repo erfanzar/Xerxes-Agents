@@ -20,6 +20,8 @@ import { DEFAULT_THEME, themeForMode } from '../theme.js'
 import {
   clearActiveRenderer,
   destroyActiveRenderer,
+  getActiveRenderer,
+  installRendererRecovery,
   setActiveRenderer
 } from './rendererSingleton.js'
 
@@ -71,6 +73,15 @@ const gw = new GatewayClient({
 const dumpNotice = (snap: MemorySnapshot, dump: HeapDumpResult | null) =>
   `xerxes-tui: ${snap.level} memory (${formatBytes(snap.heapUsed)}) — auto heap dump → ${dump?.heapPath ?? dump?.diagPath ?? '(failed)'}\n`
 
+const notifyMemoryDiagnostic = (message: string) => {
+  try {
+    getActiveRenderer()?.triggerNotification(message.trim(), 'Xerxes memory')
+  } catch {
+    // Diagnostics are already persisted in the lifecycle log/sidecar. Never
+    // fall back to a raw terminal write while OpenTUI owns the framebuffer.
+  }
+}
+
 setupGracefulExit({
   cleanups: [
     () => {
@@ -106,14 +117,18 @@ const stopMemoryMonitor = startMemoryMonitor({
     process.stderr.write('xerxes-tui: exiting to avoid OOM; restart to recover\n')
     process.exit(137)
   },
-  onHigh: (snap, dump) => process.stderr.write(dumpNotice(snap, dump)),
+  onHigh: (snap, dump) => {
+    const message = dumpNotice(snap, dump)
+
+    recordParentLifecycle(message.trim())
+    notifyMemoryDiagnostic(message)
+  },
   onWarn: snap => {
-    recordParentLifecycle(
-      `memory-warning fast heap growth heap=${formatBytes(snap.heapUsed)} rss=${formatBytes(snap.rss)}`
-    )
-    process.stderr.write(
-      `xerxes-tui: heap climbing fast (${formatBytes(snap.heapUsed)}) — a large tool output or long session may be straining memory\n`
-    )
+    const breadcrumb = `memory-warning fast heap growth heap=${formatBytes(snap.heapUsed)} rss=${formatBytes(snap.rss)}`
+    const message = `Xerxes heap is climbing fast (${formatBytes(snap.heapUsed)}); a large tool output or long session may be straining memory.`
+
+    recordParentLifecycle(breadcrumb)
+    notifyMemoryDiagnostic(message)
   }
 })
 
@@ -146,6 +161,11 @@ const renderer = await createCliRenderer({
 
 // Stash for imperative controller call sites.
 setActiveRenderer(renderer)
-renderer.once('destroy', () => clearActiveRenderer(renderer))
+const stopRendererRecovery = installRendererRecovery(renderer)
+
+renderer.once('destroy', () => {
+  stopRendererRecovery()
+  clearActiveRenderer(renderer)
+})
 
 createRoot(renderer).render(<AppOpenTui gw={gw} />)

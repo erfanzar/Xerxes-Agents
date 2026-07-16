@@ -1,5 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
+import { getActiveRenderer } from '../opentui/rendererSingleton.js'
+
 const ESC = '\x1b'
 const BEL = '\x07'
 const ST = `${ESC}\\`
@@ -95,4 +97,10 @@ export async function readOsc52Clipboard(querier: null | OscQuerier, timeoutMs =
   return response ? parseOsc52ClipboardData(response.data) : null
 }
 
-export const writeOsc52Clipboard = (s: string) => osc52Copy(s)
+export const writeOsc52Clipboard = (s: string): boolean => {
+  if (!s) {
+    return false
+  }
+
+  return getActiveRenderer()?.copyToClipboardOSC52(s) ?? false
+}

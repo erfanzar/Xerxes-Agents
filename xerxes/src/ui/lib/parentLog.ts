@@ -31,7 +31,6 @@ const enabled = !process.env.VITEST
 // or add noticeable blocking on the synchronous append. Mirrors the spirit of
 // GatewayClient's in-memory log-line cap.
 const MAX_BREADCRUMB = 4096
-let warned = false
 
 export function recordParentLifecycle(line: string): void {
   if (!enabled) {
@@ -52,9 +51,8 @@ export function recordParentLifecycle(line: string): void {
     mkdirSync(logDir, { recursive: true })
     appendFileSync(CRASH_LOG, `[tui-parent] ${new Date().toISOString()} ${capped}\n`)
   } catch {
-    if (!warned) {
-      warned = true
-      process.stderr.write('xerxes-tui: parent lifecycle log unavailable\n')
-    }
+    // Never write to the live terminal behind OpenTUI's retained framebuffer.
+    // A raw stderr write can interleave with a native frame and permanently
+    // desynchronize unchanged cells until a forced full repaint.
   }
 }

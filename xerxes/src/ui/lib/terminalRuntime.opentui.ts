@@ -9,7 +9,11 @@ import { useEffect } from 'react'
 import type { KeyEvent } from '@opentui/core'
 import { useKeyboard } from '@opentui/react'
 
-import { destroyActiveRenderer, getActiveRenderer } from '../opentui/rendererSingleton.js'
+import {
+  destroyActiveRenderer,
+  forceRendererRepaint,
+  getActiveRenderer
+} from '../opentui/rendererSingleton.js'
 
 // ── Pure utilities ───────────────────────────────────────────────────────
 // Both are native under Bun (this app only ever runs under Bun).
@@ -50,9 +54,7 @@ export const scrollFastPathStats = {
 // ── Renderer-backed imperative helpers ─────────────────────────────────────
 
 export function forceRedraw(_stdout?: NodeJS.WriteStream): boolean {
-  getActiveRenderer()?.requestRender()
-
-  return true
+  return forceRendererRepaint()
 }
 
 export function releaseTerminalCaches(_level?: 'all' | 'half') {
@@ -179,8 +181,8 @@ export function useTerminalFocus(): boolean {
 
 export function useTerminalTitle(title: string | null): void {
   useEffect(() => {
-    if (title && process.stdout.isTTY) {
-      process.stdout.write(`]0;${title}`)
+    if (title) {
+      getActiveRenderer()?.setTerminalTitle(title)
     }
   }, [title])
 }
