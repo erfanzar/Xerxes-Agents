@@ -12,6 +12,30 @@ import { resetTerminalModes } from '../lib/terminalModes.js'
 let active: CliRenderer | null = null
 let completedTeardown: ActiveRendererTeardownResult | null = null
 
+const DEFAULT_RECOVERY_HEARTBEAT_MS = 1_000
+const DEFAULT_WAKE_GAP_MS = 5_000
+
+interface ForceRepaintRenderer {
+  forceFullRepaintRequested: boolean
+  requestRender: () => void
+}
+
+interface RecoverySignalSource {
+  off: (event: 'SIGCONT', listener: () => void) => unknown
+  on: (event: 'SIGCONT', listener: () => void) => unknown
+}
+
+type RecoveryTimer = ReturnType<typeof setInterval>
+
+export interface RendererRecoveryOptions {
+  clearInterval?: (timer: RecoveryTimer) => void
+  heartbeatMs?: number
+  now?: () => number
+  setInterval?: (callback: () => void, milliseconds: number) => RecoveryTimer
+  signalSource?: RecoverySignalSource
+  wakeGapMs?: number
+}
+
 export interface ActiveRendererTeardownResult {
   destroyError: unknown | null
   hadRenderer: boolean
@@ -26,6 +50,87 @@ export function setActiveRenderer(renderer: CliRenderer): void {
 
 export function getActiveRenderer(): CliRenderer | null {
   return active
+}
+
+/**
+ * Invalidate OpenTUI's retained terminal buffer before scheduling a frame.
+ *
+ * `requestRender()` alone only emits changed cells. After a terminal loses
+ * its backing surface (system sleep, focus restoration, or an out-of-band
+ * terminal write), that retained buffer no longer describes what the user
+ * sees and an ordinary diff leaves large blank/stale bands behind. OpenTUI
+ * 0.4.x has the invalidation latch internally but does not expose a public
+ * full-repaint method, so keep this pinned-version bridge in one place.
+ */
+export function forceRendererRepaint(renderer: CliRenderer | null = active): boolean {
+  if (!renderer) {
+    return false
+  }
+
+  const repaintable = renderer as unknown as ForceRepaintRenderer
+
+  repaintable.forceFullRepaintRequested = true
+  repaintable.requestRender()
+
+  return true
+}
+
+/**
+ * Recover the physical terminal after focus/resize/job-control changes and
+ * after a sleeping laptop wakes without delivering any of those signals.
+ * The heartbeat never repaints during normal operation; it only notices a
+ * multi-second event-loop gap and invalidates the next frame once.
+ */
+export function installRendererRecovery(
+  renderer: CliRenderer,
+  options: RendererRecoveryOptions = {}
+): () => void {
+  const now = options.now ?? Date.now
+  const heartbeatMs = Math.max(250, Math.floor(options.heartbeatMs ?? DEFAULT_RECOVERY_HEARTBEAT_MS))
+  const wakeGapMs = Math.max(heartbeatMs * 2, Math.floor(options.wakeGapMs ?? DEFAULT_WAKE_GAP_MS))
+  const schedule = options.setInterval ?? setInterval
+  const cancel = options.clearInterval ?? clearInterval
+  const signalSource = options.signalSource ?? (process as unknown as RecoverySignalSource)
+  let lastHeartbeatAt = now()
+  let cleaned = false
+
+  const recover = () => {
+    lastHeartbeatAt = now()
+    forceRendererRepaint(renderer)
+  }
+  const heartbeat = () => {
+    const current = now()
+    const elapsed = current - lastHeartbeatAt
+
+    lastHeartbeatAt = current
+
+    if (elapsed >= wakeGapMs) {
+      forceRendererRepaint(renderer)
+    }
+  }
+  const timer = schedule(heartbeat, heartbeatMs)
+
+  timer.unref?.()
+  renderer.on('focus', recover)
+  renderer.on('resize', recover)
+  signalSource.on('SIGCONT', recover)
+
+  const cleanup = () => {
+    if (cleaned) {
+      return
+    }
+
+    cleaned = true
+    cancel(timer)
+    renderer.off('focus', recover)
+    renderer.off('resize', recover)
+    renderer.off('destroy', cleanup)
+    signalSource.off('SIGCONT', recover)
+  }
+
+  renderer.once('destroy', cleanup)
+
+  return cleanup
 }
 
 /**

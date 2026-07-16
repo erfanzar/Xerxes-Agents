@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { CliRenderer } from '@opentui/core'
 
-import { setActiveRenderer } from '../opentui/rendererSingleton.js'
-import { runWithTerminalSuspended, useApp } from './terminalRuntime.opentui.js'
+import { destroyActiveRenderer, setActiveRenderer } from '../opentui/rendererSingleton.js'
+import { forceRedraw, runWithTerminalSuspended, useApp } from './terminalRuntime.opentui.js'
 
 const renderer = () => ({
   requestRender: vi.fn(),
@@ -71,6 +71,24 @@ describe('runWithTerminalSuspended', () => {
     expect(healthy.suspend).toHaveBeenCalledTimes(1)
     expect(healthy.resume).toHaveBeenCalledTimes(1)
     expect(run).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('forceRedraw', () => {
+  it('requests a native full repaint instead of an incremental frame', () => {
+    const target = {
+      destroy: vi.fn(),
+      forceFullRepaintRequested: false,
+      requestRender: vi.fn()
+    }
+
+    setActiveRenderer(target as unknown as CliRenderer)
+
+    expect(forceRedraw()).toBe(true)
+    expect(target.forceFullRepaintRequested).toBe(true)
+    expect(target.requestRender).toHaveBeenCalledOnce()
+
+    destroyActiveRenderer(() => true)
   })
 })
 

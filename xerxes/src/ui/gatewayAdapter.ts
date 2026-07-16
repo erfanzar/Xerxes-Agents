@@ -111,7 +111,10 @@ export function transcriptFromStoredMessages(messages: unknown): GatewayTranscri
   for (const raw of messages) {
     const msg = asRecord(raw)
     const role = str(msg.role)
-    if (role !== 'assistant' && role !== 'system' && role !== 'tool' && role !== 'user') {
+    // Persisted system/tool rows are runtime state, not visible chat history.
+    // Restoring them bypasses the daemon's user/assistant-only replay contract;
+    // a full system prompt can also mount tens of thousands of hidden chars.
+    if (role !== 'assistant' && role !== 'user') {
       continue
     }
     const text = firstNonEmptyStr(msg.text, textFromContent(msg.content))

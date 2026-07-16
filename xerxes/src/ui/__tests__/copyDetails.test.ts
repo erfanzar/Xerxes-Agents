@@ -1,8 +1,11 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { inTmux, osc52Copy, osc52Sequence } from '../lib/osc52.js'
+import type { CliRenderer } from '@opentui/core'
+
+import { clearActiveRenderer, setActiveRenderer } from '../opentui/rendererSingleton.js'
+import { inTmux, osc52Copy, osc52Sequence, writeOsc52Clipboard } from '../lib/osc52.js'
 import { cycleDetails, filterTranscript, resolveDetails, showThinking } from '../lib/details.js'
 import type { TranscriptRow } from '../app/gatewayState.js'
 
@@ -23,6 +26,20 @@ describe('osc52', () => {
     out = ''
     expect(osc52Copy('', s => (out += s))).toBe(false)
     expect(out).toBe('')
+  })
+  it('routes live TUI clipboard writes through the native renderer', () => {
+    const copyToClipboardOSC52 = vi.fn(() => true)
+    const renderer = { copyToClipboardOSC52 } as unknown as CliRenderer
+
+    setActiveRenderer(renderer)
+
+    try {
+      expect(writeOsc52Clipboard('native')).toBe(true)
+      expect(copyToClipboardOSC52).toHaveBeenCalledWith('native')
+      expect(writeOsc52Clipboard('')).toBe(false)
+    } finally {
+      clearActiveRenderer(renderer)
+    }
   })
   it('detects tmux from env', () => {
     expect(inTmux({ TMUX: '/tmp/tmux-1/default,1,0' } as NodeJS.ProcessEnv)).toBe(true)
