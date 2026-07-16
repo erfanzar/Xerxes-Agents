@@ -32,7 +32,8 @@ import {
 } from './permissions.js'
 import { ThinkingParser, type ThinkingStreamParser } from './thinkingParser.js'
 
-export const DEFAULT_MAX_TOOL_TURNS = 50
+/** Distinct productive tool rounds are unbounded unless the caller opts into a budget. */
+export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
 export const DEFAULT_RETRY_DELAYS = [1_000, 2_000] as const
 
 export interface TurnRequest {
@@ -55,6 +56,8 @@ export interface TurnRequest {
 }
 
 export interface TurnDependencies {
+  /** Waits for explicitly backgrounded subagents before a text-only stop. */
+  readonly awaitAgentEvents?: (signal?: AbortSignal) => Promise<readonly string[]>
   readonly delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>
   /** Supplies passive sub-agent status lines at safe provider/tool boundaries. */
   readonly drainAgentEvents?: () => readonly string[]
@@ -112,14 +115,16 @@ export async function* runTurn(
   let objectiveGuardRetries = 0
   const objectiveToolExecutions: ObjectiveToolExecutionEvidence[] = []
   let toolCallsCount = 0
+  let forceToolFreeSummary = false
   let latestToolRoundText: string | undefined
+  let turnLimit = maxToolTurns
   const objectiveGuardLimit = objectiveGuardRetryLimit(
     request.objectiveGuardMaxRetries === undefined
       ? {}
       : { objective_guard_max_retries: request.objectiveGuardMaxRetries },
   )
 
-  for (let toolTurn = 0; toolTurn < maxToolTurns; toolTurn += 1) {
+  for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
     appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
     for (const steer of dependencies.drainSteer?.() ?? []) {
       const content = steer.trim()
@@ -144,7 +149,11 @@ export async function* runTurn(
       try {
         apiCallsCount += 1
         for await (const delta of dependencies.llm.stream(
-          completionRequest(request, state.messages),
+          completionRequest(
+            request,
+            state.messages,
+            forceToolFreeSummary ? [] : request.tools,
+          ),
           signal,
         )) {
           const parts = processDelta(delta, parser, textParts, thinkingParts)
@@ -224,7 +233,8 @@ export async function* runTurn(
     for (const visible of deduplication.events) yield visible
     const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
     const providerToolCalls = roundToolCalls
-    const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, request.tools)
+    const visibleTools = forceToolFreeSummary ? [] : request.tools
+    const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, visibleTools)
     roundToolCalls = exposed
     const assistant: ChatMessage = {
       role: 'assistant',
@@ -253,12 +263,21 @@ export async function* runTurn(
       if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
         break
       }
+      if (forceToolFreeSummary) {
+        break
+      }
       if (!roundToolCalls.length) {
         continue
       }
     }
 
     if (!roundToolCalls.length) {
+      const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+      if (signal?.aborted) break
+      if (appendAgentEventMessage(state, agentEvents)) {
+        if (toolTurn + 1 >= turnLimit) turnLimit += 1
+        continue
+      }
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const content = steer.trim()
         if (!content) continue
@@ -301,6 +320,7 @@ export async function* runTurn(
     }
 
     toolCallsCount += roundToolCalls.length
+    let criticalToolLoop: ToolLoopError | undefined
     for (let index = 0; index < roundToolCalls.length; index += 1) {
       const call = roundToolCalls[index]
       if (!call) {
@@ -319,7 +339,9 @@ export async function* runTurn(
         call.function.arguments,
       )
       if (loopEvent.severity === 'critical') {
-        const result = failedToolResult(call, new ToolLoopError(loopEvent))
+        const loopError = new ToolLoopError(loopEvent)
+        criticalToolLoop ??= loopError
+        const result = failedToolResult(call, loopError)
         appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
         continue
@@ -389,6 +411,26 @@ export async function* runTurn(
     }
     if (signal?.aborted) {
       break
+    }
+    let needsFinalization = false
+    if (criticalToolLoop) {
+      forceToolFreeSummary = true
+      needsFinalization = true
+      state.messages.push({
+        role: 'user',
+        content:
+          `[Tool loop stopped]\n${criticalToolLoop.message}. ` +
+          'Do not call more tools. Return the best concise final result supported by the work already completed.',
+      })
+    }
+    if (toolTurn + 1 >= turnLimit) {
+      const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+      if (signal?.aborted) break
+      if (appendAgentEventMessage(state, agentEvents)) {
+        forceToolFreeSummary = true
+        needsFinalization = true
+      }
+      if (needsFinalization) turnLimit += 1
     }
   }
 
@@ -507,8 +549,8 @@ function stripTextEventPrefix(
 function appendAgentEventMessage(
   state: AgentState,
   events: readonly string[] | undefined,
-): void {
-  if (!events?.length) return
+): boolean {
+  if (!events?.length) return false
   const lines: string[] = []
   for (const event of events) {
     const line = event.trim()
@@ -519,17 +561,20 @@ function appendAgentEventMessage(
       role: 'user',
       content: `[sub-agent events]\n${lines.join('\n')}`,
     })
+    return true
   }
+  return false
 }
 
 function completionRequest(
   request: TurnRequest,
   messages: readonly ChatMessage[],
+  tools: readonly ToolDefinition[] | undefined,
 ) {
   return {
     model: request.model,
     messages: [...messages],
-    ...(request.tools?.length ? { tools: request.tools } : {}),
+    ...(tools?.length ? { tools } : {}),
     ...(request.maxTokens !== undefined
       ? { maxTokens: request.maxTokens }
       : {}),

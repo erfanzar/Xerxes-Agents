@@ -7,7 +7,8 @@ export type LoopSeverity = 'critical' | 'ok' | 'warning'
 
 export interface LoopDetectionConfig {
   readonly enabled: boolean
-  readonly maxToolCallsPerTurn: number
+  /** Optional absolute ceiling. Xerxes leaves distinct tool calls unbounded by default. */
+  readonly maxToolCallsPerTurn?: number
   readonly pingPongCritical: number
   readonly pingPongWarning: number
   readonly sameCallCritical: number
@@ -29,7 +30,6 @@ interface CallRecord {
 
 export const DEFAULT_LOOP_DETECTION_CONFIG: LoopDetectionConfig = {
   enabled: true,
-  maxToolCallsPerTurn: 25,
   pingPongCritical: 6,
   pingPongWarning: 4,
   sameCallCritical: 5,
@@ -46,18 +46,22 @@ export class ToolLoopError extends Error {
   }
 }
 
-/** Per-turn tool loop detector with the same thresholds as the Python runtime. */
+/** Constant-space per-turn repetition detector with an optional caller-owned absolute ceiling. */
 export class LoopDetector {
+  private alternations = 0
   private readonly config: LoopDetectionConfig
-  private readonly history: CallRecord[] = []
+  private lastRecord: CallRecord | undefined
   private readonly listeners = new Set<(event: LoopEvent) => void>()
+  private readonly recentToolNames: string[] = []
+  private sameCallStreak = 0
+  private totalCalls = 0
 
   constructor(config: Partial<LoopDetectionConfig> = {}) {
     this.config = { ...DEFAULT_LOOP_DETECTION_CONFIG, ...config }
   }
 
   get callCount(): number {
-    return this.history.length
+    return this.totalCalls
   }
 
   addListener(listener: (event: LoopEvent) => void): () => void {
@@ -66,7 +70,11 @@ export class LoopDetector {
   }
 
   reset(): void {
-    this.history.length = 0
+    this.alternations = 0
+    this.lastRecord = undefined
+    this.recentToolNames.length = 0
+    this.sameCallStreak = 0
+    this.totalCalls = 0
   }
 
   recordCall(toolName: string, argumentsValue: JsonObject | string | undefined = undefined): LoopEvent {
@@ -75,15 +83,24 @@ export class LoopDetector {
     }
 
     const record: CallRecord = { toolName, argumentsKey: stableArguments(argumentsValue) }
-    this.history.push(record)
+    this.totalCalls += 1
+    this.sameCallStreak = isSameCall(this.lastRecord, record) ? this.sameCallStreak + 1 : 1
+    const previousToolName = this.recentToolNames.at(-1)
+    this.alternations = previousToolName !== undefined && previousToolName !== toolName
+      ? this.alternations + 1
+      : 0
+    this.recentToolNames.push(toolName)
+    if (this.recentToolNames.length > 4) this.recentToolNames.shift()
+    this.lastRecord = record
     let event: LoopEvent
-    if (this.history.length >= this.config.maxToolCallsPerTurn) {
+    const maxToolCalls = this.config.maxToolCallsPerTurn
+    if (maxToolCalls !== undefined && this.totalCalls > maxToolCalls) {
       event = {
         severity: 'critical',
         pattern: 'max_calls',
         toolName,
-        details: `Reached max tool calls per turn (${this.config.maxToolCallsPerTurn})`,
-        callCount: this.history.length,
+        details: `Reached max tool calls per turn (${maxToolCalls})`,
+        callCount: this.totalCalls,
       }
     } else {
       event = this.sameCall(record)
@@ -100,15 +117,7 @@ export class LoopDetector {
   }
 
   private sameCall(current: CallRecord): LoopEvent {
-    let count = 0
-    for (let index = this.history.length - 1; index >= 0; index -= 1) {
-      const record = this.history[index]
-      if (record?.toolName === current.toolName && record.argumentsKey === current.argumentsKey) {
-        count += 1
-      } else {
-        break
-      }
-    }
+    const count = this.sameCallStreak
     if (count >= this.config.sameCallCritical) {
       return { severity: 'critical', pattern: 'same_call', toolName: current.toolName, details: `Same tool+args called ${count} times consecutively`, callCount: count }
     }
@@ -119,22 +128,14 @@ export class LoopDetector {
   }
 
   private pingPong(): LoopEvent {
-    if (this.history.length < 4) {
+    if (this.totalCalls < 4) {
       return { severity: 'ok', pattern: 'none', toolName: '', details: '', callCount: 0 }
     }
-    const names = this.history.map(record => record.toolName)
-    if (new Set(names.slice(-4)).size > 2) {
+    if (new Set(this.recentToolNames).size > 2) {
       return { severity: 'ok', pattern: 'none', toolName: '', details: '', callCount: 0 }
     }
-    let alternations = 0
-    for (let index = names.length - 1; index > 0; index -= 1) {
-      if (names[index] !== names[index - 1]) {
-        alternations += 1
-      } else {
-        break
-      }
-    }
-    const toolName = names.at(-1) ?? ''
+    const alternations = this.alternations
+    const toolName = this.recentToolNames.at(-1) ?? ''
     if (alternations >= this.config.pingPongCritical) {
       return { severity: 'critical', pattern: 'pingpong', toolName, details: `Ping-pong pattern detected (${alternations} alternations)`, callCount: alternations }
     }
@@ -143,6 +144,10 @@ export class LoopDetector {
     }
     return { severity: 'ok', pattern: 'none', toolName, details: '', callCount: alternations }
   }
+}
+
+function isSameCall(previous: CallRecord | undefined, current: CallRecord): boolean {
+  return previous?.toolName === current.toolName && previous.argumentsKey === current.argumentsKey
 }
 
 function stableArguments(value: JsonObject | string | undefined): string {

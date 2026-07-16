@@ -40,7 +40,7 @@ export const CLAUDE_MCP_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   definition('MCPTool', 'Call one tool exposed by a connected Model Context Protocol server.', {
     server_name: stringSchema('Configured MCP server name.'),
     tool_name: stringSchema('Published MCP tool name.'),
-    arguments: { description: 'Tool arguments object or JSON string.', type: ['object', 'string'] },
+    arguments: { description: 'Tool arguments object.', type: 'object', additionalProperties: true },
   }, ['server_name', 'tool_name']),
   definition('ListMcpResourcesTool', 'List resources from one connected MCP server or all connected servers.', {
     server_name: stringSchema('Optional configured MCP server name.'),

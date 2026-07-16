@@ -111,6 +111,16 @@ test("native installer persists an idempotent PATH entry for common user shells"
     const zshrc = join(zDotDirectory, ".zshrc");
     const firstZshrc = await readFile(zshrc, "utf8");
     expect(markerCount(firstZshrc)).toBe(1);
+    const canonicalFirstZshBin = await realpath(firstZshBin);
+    const prioritized = await execute(
+      ["sh", "-c", '. "$ZSHRC"; printf "%s" "$PATH"'],
+      {
+        PATH: `/tmp/older-xerxes:${canonicalFirstZshBin}:/usr/bin:/bin`,
+        ZSHRC: zshrc,
+      },
+    );
+    expect(prioritized.exitCode, prioritized.stderr).toBe(0);
+    expect(prioritized.stdout.startsWith(`${canonicalFirstZshBin}:`)).toBeTrue();
 
     const repeatedZsh = await configureInstallerPath({
       HOME: zshHome,
@@ -372,6 +382,51 @@ test("native installer removes the retired Xerxes alias without changing other s
   } finally {
     await rm(temporaryHome, { force: true, recursive: true });
   }
+});
+
+test("native installer warns when an earlier build is still running", async () => {
+  const cliEntry = join(PROJECT_ROOT, "xerxes", "dist", "cli.js");
+  const uiEntry = join(PROJECT_ROOT, "xerxes", "dist", "ui", "entry.js");
+  const running = await execute(
+    [
+      "sh",
+      "-c",
+      '. "$INSTALLER_PATH"; warn_running_xerxes_processes "$SOURCE_ROOT"',
+    ],
+    {
+      INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+      SOURCE_ROOT: PROJECT_ROOT,
+      XERXES_INSTALLER_PROCESS_LIST: [
+        `101 bun ${cliEntry} daemon --project-dir /tmp/project`,
+        `102 bun ${uiEntry}`,
+        "103 bun /tmp/unrelated.js",
+      ].join("\n"),
+      XERXES_INSTALLER_SOURCE_ONLY: "1",
+    },
+  );
+
+  expect(running.exitCode, running.stderr).toBe(0);
+  expect(running.stdout).toBe("");
+  expect(running.stderr).toContain(
+    "2 running Xerxes process(es) still have the previous build loaded",
+  );
+  expect(running.stderr).toContain("leaves active sessions running");
+
+  const idle = await execute(
+    [
+      "sh",
+      "-c",
+      '. "$INSTALLER_PATH"; warn_running_xerxes_processes "$SOURCE_ROOT"',
+    ],
+    {
+      INSTALLER_PATH: join(PROJECT_ROOT, "scripts", "install.sh"),
+      SOURCE_ROOT: PROJECT_ROOT,
+      XERXES_INSTALLER_PROCESS_LIST: "103 bun /tmp/unrelated.js",
+      XERXES_INSTALLER_SOURCE_ONLY: "1",
+    },
+  );
+  expect(idle.exitCode, idle.stderr).toBe(0);
+  expect(idle.stderr).toBe("");
 });
 
 async function execute(

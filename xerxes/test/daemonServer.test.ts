@@ -36,6 +36,7 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       sessionDirectory: join(directory, "sessions"),
+      statusInventory: () => ({ activeSubagents: 2 }),
     }),
   });
   await server.start();
@@ -51,6 +52,7 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
     expect(status.result).toMatchObject({
       ok: true,
       runtime_ready: false,
+      active_subagents: 2,
       daemon_protocol: 35,
       runtime: "bun-typescript",
     });

@@ -4,7 +4,7 @@
 
 import type { KeyEvent, ScrollBoxRenderable } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
-import { type MutableRefObject, useEffect, useMemo, useRef, useState } from 'react'
+import { type MutableRefObject, memo, useMemo, useRef } from 'react'
 
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
 export { AGENT_SIDEBAR_BREAKPOINT, shouldShowAgentSidebar } from '../domain/agentPanelLayout.js'
@@ -165,8 +165,9 @@ function metricLine(item: SubagentProgress, now: number): string {
   return parts.join(' · ')
 }
 
-function AgentCard({ now, record, t }: { now: number; record: AgentPanelRecord; t: Theme }) {
+function AgentCardView({ record, t }: { record: AgentPanelRecord; t: Theme }) {
   const { item } = record
+  const now = Date.now()
   const status = statusPresentation(item.status, t)
   const role = item.agentType?.trim() || 'agent'
   const model = item.model?.trim()
@@ -229,6 +230,18 @@ function AgentCard({ now, record, t }: { now: number; record: AgentPanelRecord; 
   )
 }
 
+const AgentCard = memo(
+  AgentCardView,
+  (previous, next) =>
+    previous.t === next.t &&
+    previous.record.item === next.record.item &&
+    previous.record.archived === next.record.archived &&
+    previous.record.childCount === next.record.childCount &&
+    previous.record.creatorTitle === next.record.creatorTitle &&
+    previous.record.snapshotLabel === next.record.snapshotLabel &&
+    previous.record.title === next.record.title
+)
+
 function AgentPanelBody({
   history,
   liveAgents,
@@ -242,15 +255,6 @@ function AgentPanelBody({
   const activeCount = records.filter(
     record => record.item.status === 'running' || record.item.status === 'queued'
   ).length
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!activeCount) return
-    const timer = setInterval(() => setNow(Date.now()), 500)
-    timer.unref?.()
-
-    return () => clearInterval(timer)
-  }, [activeCount])
 
   return (
     <Box
@@ -279,12 +283,7 @@ function AgentPanelBody({
         <Box flexDirection="column" flexShrink={0}>
           {records.length ? (
             records.map(record => (
-              <AgentCard
-                key={`${record.archived ? 'past' : 'live'}:${record.item.id}`}
-                now={now}
-                record={record}
-                t={t}
-              />
+              <AgentCard key={`${record.archived ? 'past' : 'live'}:${record.item.id}`} record={record} t={t} />
             ))
           ) : (
             <Box alignItems="center" flexDirection="column" flexGrow={1} justifyContent="center" minHeight={5}>

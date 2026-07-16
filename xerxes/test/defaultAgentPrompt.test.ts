@@ -19,6 +19,8 @@ test('default agent prompt uses only current conditional tool names and stays bo
   expect(prompt).toContain('`TaskListTool`')
   expect(prompt).toContain('`TaskOutputTool`')
   expect(prompt).toContain('`TaskStopTool`')
+  expect(prompt).toContain('`SpawnAgents` accepts 1 to 1,000 agents')
+  expect(prompt).toContain('queued under runtime concurrency')
   expect(prompt).toContain('`SkillTool` is supplied')
 
   for (const staleName of ['Shell', 'TaskList', 'TaskOutput', 'TaskStop', 'StrReplaceFile']) {

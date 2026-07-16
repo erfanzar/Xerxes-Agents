@@ -17,6 +17,11 @@ import { type MemorySnapshot, startMemoryMonitor } from '../lib/memoryMonitor.js
 import { recordParentLifecycle } from '../lib/parentLog.js'
 import { resetTerminalModes } from '../lib/terminalModes.js'
 import { DEFAULT_THEME, themeForMode } from '../theme.js'
+import {
+  clearActiveRenderer,
+  destroyActiveRenderer,
+  setActiveRenderer
+} from './rendererSingleton.js'
 
 if (!process.stdin.isTTY) {
   console.log('xerxes-tui: no TTY')
@@ -49,7 +54,7 @@ function writeExitHint() {
 }
 
 process.on('exit', () => {
-  resetTerminalModes()
+  destroyActiveRenderer()
   writeExitHint()
 })
 
@@ -69,7 +74,7 @@ const dumpNotice = (snap: MemorySnapshot, dump: HeapDumpResult | null) =>
 setupGracefulExit({
   cleanups: [
     () => {
-      resetTerminalModes()
+      destroyActiveRenderer()
 
       return gw.kill('graceful-exit-cleanup')
     }
@@ -79,10 +84,11 @@ setupGracefulExit({
 
     recordParentLifecycle(`${scope}: ${message.split('\n')[0]?.slice(0, 400) ?? ''}`)
     process.stderr.write(`xerxes-tui lifecycle ${scope}: ${message.slice(0, 2000)}\n`)
+    destroyActiveRenderer()
   },
   onSignal: signal => {
     recordParentLifecycle(`graceful-exit received signal=${signal} → killing gateway`)
-    resetTerminalModes()
+    destroyActiveRenderer()
     process.stderr.write(`xerxes-tui lifecycle: received ${signal}\n`)
   }
 })
@@ -92,7 +98,7 @@ const stopMemoryMonitor = startMemoryMonitor({
     recordParentLifecycle(
       `memory-critical process.exit(137) heap=${formatBytes(snap.heapUsed)} rss=${formatBytes(snap.rss)} dump=${dump?.heapPath ?? 'failed'}`
     )
-    resetTerminalModes()
+    destroyActiveRenderer()
     process.stderr.write(
       `xerxes-tui lifecycle: memory critical exit heap=${formatBytes(snap.heapUsed)} rss=${formatBytes(snap.rss)}\n`
     )
@@ -115,7 +121,10 @@ if (process.env.XERXES_HEAPDUMP_ON_START === '1') {
   void performHeapDump('manual')
 }
 
-process.on('beforeExit', () => stopMemoryMonitor())
+process.on('beforeExit', () => {
+  stopMemoryMonitor()
+  destroyActiveRenderer()
+})
 
 // Sequential, not Promise.all — @opentui/react's module-init touches
 // @opentui/core state that must already be evaluated, and concurrent
@@ -124,11 +133,12 @@ const { createCliRenderer } = await import('@opentui/core')
 const { createRoot } = await import('@opentui/react')
 const { AppOpenTui } = await import('./app.js')
 
-const { setActiveRenderer } = await import('./rendererSingleton.js')
-
 const renderer = await createCliRenderer({
   backgroundColor: themeForMode(DEFAULT_THEME, 'code').color.statusBg,
   exitOnCtrlC: false,
+  // Xerxes owns SIGINT/SIGTERM/SIGHUP and sequences renderer teardown before
+  // gateway cleanup. A second OpenTUI signal handler can race that lifecycle.
+  exitSignals: [],
   // INLINE_MODE stays in the main screen so terminal scrollback is preserved.
   screenMode: INLINE_MODE ? 'main-screen' : 'alternate-screen',
   useKittyKeyboard: { alternateKeys: true, disambiguate: true }
@@ -136,5 +146,6 @@ const renderer = await createCliRenderer({
 
 // Stash for imperative controller call sites.
 setActiveRenderer(renderer)
+renderer.once('destroy', () => clearActiveRenderer(renderer))
 
 createRoot(renderer).render(<AppOpenTui gw={gw} />)

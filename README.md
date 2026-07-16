@@ -71,6 +71,12 @@ the same curl command to safely fast-forward and rebuild a managed install. It
 persists the launcher directory for zsh, bash, POSIX login shells, and fish;
 because a piped installer cannot change its parent shell, open a new terminal
 afterward.
+
+An installer update cannot replace code already loaded by a running TUI or
+daemon. If the installer reports an existing Xerxes process, finish or stop
+that session and launch `xerxes` again. The installer deliberately never kills
+active sessions.
+
 Set `XERXES_INSTALL_DIRECTORY` to choose the managed checkout location; the
 updater refuses dirty, unrelated, or diverged checkouts instead of overwriting
 them. To choose another launcher directory, pass the variable to the piped shell:

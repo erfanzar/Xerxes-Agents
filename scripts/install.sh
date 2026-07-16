@@ -158,9 +158,10 @@ write_path_block() {
         quoted_bin="$(fish_single_quote "$BIN_DIRECTORY")"
         cat >> "$destination" <<EOF
 # >>> xerxes PATH >>>
-if not contains -- $quoted_bin \$PATH
-    set -gx PATH $quoted_bin \$PATH
+if contains -- $quoted_bin \$PATH
+    set -e PATH[(contains -i -- $quoted_bin \$PATH)]
 end
+set -gx PATH $quoted_bin \$PATH
 # <<< xerxes PATH <<<
 EOF
         return 0
@@ -168,8 +169,8 @@ EOF
     quoted_bin="$(shell_single_quote "$BIN_DIRECTORY")"
     cat >> "$destination" <<EOF
 # >>> xerxes PATH >>>
-case ":\$PATH:" in
-    *":"$quoted_bin":"*) ;;
+case "\$PATH" in
+    $quoted_bin|$quoted_bin:*) ;;
     *) export PATH=$quoted_bin":\$PATH" ;;
 esac
 # <<< xerxes PATH <<<
@@ -277,6 +278,30 @@ remove_legacy_xerxes_aliases() {
     done
 }
 
+warn_running_xerxes_processes() {
+    source_root="$1"
+    if [ "${XERXES_INSTALLER_PROCESS_LIST+x}" = "x" ]; then
+        process_listing="$XERXES_INSTALLER_PROCESS_LIST"
+    elif command -v ps >/dev/null 2>&1; then
+        process_listing="$(ps -Ao pid=,args= 2>/dev/null || true)"
+    else
+        return 0
+    fi
+
+    cli_entry="$source_root/xerxes/dist/cli.js"
+    ui_entry="$source_root/xerxes/dist/ui/entry.js"
+    running_count="$(printf '%s\n' "$process_listing" | awk -v cli="$cli_entry" -v ui="$ui_entry" '
+        index($0, cli) || index($0, ui) { count += 1 }
+        END { print count + 0 }
+    ')"
+    [ "$running_count" -gt 0 ] || return 0
+
+    printf '%s\n' \
+        "! $running_count running Xerxes process(es) still have the previous build loaded." \
+        "! Exit open Xerxes TUI/daemon processes, then launch xerxes again to use this install." \
+        "! The installer leaves active sessions running so it cannot destroy in-progress work." >&2
+}
+
 main() {
     need_command bun
     prepare_bin_directory
@@ -296,6 +321,7 @@ main() {
     write_launcher "$source_root" xerxes
     write_launcher "$source_root" xerxes-acp acp
     persist_bin_path
+    warn_running_xerxes_processes "$source_root"
     "$BIN_DIRECTORY/xerxes" --help >/dev/null
     ok "Xerxes Bun runtime is ready; open a new terminal to invoke xerxes"
 }

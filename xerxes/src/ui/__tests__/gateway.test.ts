@@ -255,6 +255,7 @@ describe('source daemon build compatibility', () => {
 
   it('restarts only a mismatched default daemon with matching RPC, pid file, and process identity', () => {
     const local = {
+      activeSubagents: 0,
       activeTurns: false,
       actualBuildId: 'old',
       commandMatches: true,
@@ -268,9 +269,12 @@ describe('source daemon build compatibility', () => {
 
     expect(daemonBuildDecision(local)).toBe('restart')
     expect(daemonBuildDecision({ ...local, actualBuildId: 'new' })).toBe('current')
+    expect(daemonBuildDecision({ ...local, activeSubagents: undefined, actualBuildId: 'new' })).toBe('current')
     expect(daemonBuildDecision({ ...local, actualBuildId: 'new', daemonProtocol: 34 })).toBe('reject')
     expect(daemonBuildDecision({ ...local, explicitSocket: true })).toBe('reject')
     expect(daemonBuildDecision({ ...local, activeTurns: true })).toBe('reject')
+    expect(daemonBuildDecision({ ...local, activeSubagents: 1 })).toBe('reject')
+    expect(daemonBuildDecision({ ...local, activeSubagents: undefined })).toBe('reject')
     expect(daemonBuildDecision({ ...local, pidFilePid: 999 })).toBe('reject')
     expect(daemonBuildDecision({ ...local, commandMatches: false })).toBe('reject')
   })

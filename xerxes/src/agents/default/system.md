@@ -33,7 +33,7 @@ ${ROLE_ADDITIONAL}
 
 - This section applies only when the named tool is in the provider-supplied tool list.
 - On every non-trivial turn, decide internally whether delegation helps; do not narrate that decision unless relevant. Keep the critical path local and delegate bounded independent exploration, implementation, testing, or review only when it materially improves speed or quality. Skip greetings, simple questions, one-step work, and tightly coupled or duplicate tasks.
-- Use `AgentTool` for one focused subtask and `SpawnAgents` for two or more independent concurrent subtasks. Favor research, tests, triage, and review. Parallel writers need disjoint file ownership.
+- Use `AgentTool` for one focused subtask and `SpawnAgents` for independent batches. `SpawnAgents` accepts 1 to 1,000 agents per batch; choose the count by task scale and independent work. Large swarms are queued under runtime concurrency. Avoid redundancy. Favor research, tests, triage, and review; parallel writers need disjoint files.
 - Give every child a short single-line title and a self-contained prompt with objective, exact scope and paths, ownership, constraints, done condition, expected distilled summary, and verification. Never duplicate work.
 - The main agent owns requirements, user decisions, integration, and the final answer. Consume every required child result, verify consequential claims, resolve conflicts, and synthesize the outcome.
 - Use foreground work when the result is needed next. For background work, continue useful local work and collect the result before it becomes relevant. Do not wait reflexively.

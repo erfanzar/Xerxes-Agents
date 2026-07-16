@@ -305,6 +305,11 @@ export function buildBootstrapSystemPrompt(
       '- Use available agent tools for genuinely independent work and keep task boundaries clear.',
       '- Prefer separate research, implementation, and review paths when parallelism helps.',
     )
+    if (toolNames.has('SpawnAgents')) {
+      sections.push(
+        '- You may spawn 1 to 1,000 agents in one batch. Choose the count according to the scale and genuinely independent workload. Large swarms queue under bounded runtime concurrency; never add redundant agents just to increase the count.',
+      )
+    }
     if (subagents.length) {
       sections.push('', 'Available subagent types:')
       for (const subagent of subagents) {

@@ -61,6 +61,7 @@ import {
 import { resolveTuiEntry } from "./runtime/distribution.js";
 import { registerInteractionModeTool } from "./runtime/interactionModeTool.js";
 import { UPDATE_HELP, runUpdateCommand } from "./runtime/update.js";
+import { withTerminalWatchdog } from "./ui/lib/terminalModes.js";
 import {
   DEFAULT_EXPORT_FORMAT,
   EXPORT_FORMATS,
@@ -213,12 +214,10 @@ async function runDaemon(
   });
   const browserManager = new BrowserManager();
   const skillRegistry = new SkillRegistry();
-  const buildId =
-    process.env.XERXES_DAEMON_BUILD_ID?.trim() ||
-    (await daemonBuildIdForEntry(
-      import.meta.dir,
-      fileURLToPath(import.meta.url),
-    ));
+  const buildId = await daemonBuildIdForEntry(
+    import.meta.dir,
+    fileURLToPath(import.meta.url),
+  );
   const runtime = daemonRuntime(
     config,
     projectDirectory,
@@ -499,13 +498,12 @@ async function runTui(resumeSessionId = ""): Promise<void> {
     XERXES_CWD: projectDirectory,
     XERXES_PROJECT_DIR: projectDirectory,
   };
-  const buildId =
-    environment.XERXES_EXPECTED_DAEMON_BUILD_ID?.trim() ||
-    environment.XERXES_DAEMON_BUILD_ID?.trim() ||
-    (await daemonBuildIdForEntry(
-      import.meta.dir,
-      fileURLToPath(import.meta.url),
-    ));
+  // Build identity belongs to this executable. Never let a stale exported
+  // environment value make a newly installed TUI accept an older daemon.
+  const buildId = await daemonBuildIdForEntry(
+    import.meta.dir,
+    fileURLToPath(import.meta.url),
+  );
   if (buildId) {
     environment.XERXES_DAEMON_BUILD_ID = buildId;
     environment.XERXES_EXPECTED_DAEMON_BUILD_ID = buildId;
@@ -517,15 +515,23 @@ async function runTui(resumeSessionId = ""): Promise<void> {
   ) {
     environment.XERXES_TUI_BUN_DAEMON = fileURLToPath(import.meta.url);
   }
-  const child = Bun.spawn([process.execPath, entry], {
-    cwd: projectDirectory,
-    env: environment,
-    stderr: "inherit",
-    stdin: "inherit",
-    stdout: "inherit",
+  const exitCode = await withTerminalWatchdog(async () => {
+    const child = Bun.spawn([process.execPath, entry], {
+      cwd: projectDirectory,
+      env: environment,
+      stderr: "inherit",
+      stdin: "inherit",
+      stdout: "inherit",
+    });
+
+    return child.exited;
   });
-  const exitCode = await child.exited;
-  if (exitCode !== 0) process.exitCode = exitCode;
+  if (exitCode !== 0) {
+    console.error(
+      `Xerxes TUI exited unexpectedly (code ${exitCode}); terminal state was restored.`,
+    );
+    process.exitCode = exitCode;
+  }
 }
 
 function daemonRuntime(
@@ -670,7 +676,10 @@ function daemonRuntime(
     } else {
       subagentHost = createNativeSubagentHost(subagentOptions);
     }
-    registerClaudeAgentTools(tools, { manager: subagentHost.managerPort });
+    registerClaudeAgentTools(tools, {
+      backgroundAgents: subagentHost.turnCoordinator,
+      manager: subagentHost.managerPort,
+    });
     activeToolCount = tools.definitions().length;
     return new AgentTurnRunner({
       agentDefinitions,
@@ -692,6 +701,7 @@ function daemonRuntime(
         : {}),
       model: connection.model,
       permissionMode: connection.permissionMode,
+      subagentCoordinator: subagentHost.turnCoordinator,
       subagentEvents,
       ...(connection.temperature !== undefined
         ? { temperature: connection.temperature }
@@ -707,6 +717,12 @@ function daemonRuntime(
     currentProjectDirectory: workspaceRoot,
     runtimeSettings: initialSettings,
     statusInventory: () => ({
+      activeSubagents:
+        subagentHost?.manager
+          .listTasks()
+          .filter(
+            (task) => task.status === "pending" || task.status === "running",
+          ).length ?? 0,
       skills: host.skillRegistry?.all().length ?? 0,
       tools: activeToolCount,
     }),

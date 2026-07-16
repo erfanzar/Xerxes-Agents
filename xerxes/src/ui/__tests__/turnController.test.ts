@@ -5,6 +5,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getTurnState } from '../app/turnStore.js'
 import { turnController } from '../app/turnController.js'
 import { patchUiState } from '../app/uiStore.js'
+import {
+  clearSpawnHistory,
+  getSpawnHistory,
+  reconcileSpawnHistorySubagent
+} from '../app/spawnHistoryStore.js'
 import type { SubagentEventPayload } from '../gatewayTypes.js'
 import { toolTrailLabel } from '../lib/text.js'
 import type { Msg } from '../types.js'
@@ -44,6 +49,7 @@ const seedParallelSubagents = () => {
 describe('turnController', () => {
   afterEach(() => {
     turnController.fullReset()
+    clearSpawnHistory()
     vi.useRealTimers()
   })
 
@@ -255,8 +261,37 @@ describe('turnController', () => {
     expect(trail).toMatchObject({ kind: 'trail', role: 'system', text: '' })
     expect(trail?.subagents?.map(agent => agent.name)).toEqual(['runtime-audit', 'test-review'])
     expect(trail?.subagents?.map(agent => agent.id)).toEqual(['research-child', 'review-child'])
+    expect(trail?.subagents?.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
+    expect(getSpawnHistory()[0]?.subagents.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
     expect(finalMessages.at(-1)).toEqual({ role: 'assistant', text: 'Parallel work finished.' })
     expect(getTurnState().subagents).toEqual([])
+
+    reconcileSpawnHistorySubagent(
+      {
+        goal: 'run verification',
+        status: 'completed',
+        subagent_id: 'review-child',
+        summary: 'verification finished after the parent boundary',
+        task_index: 1
+      },
+      () => ({ status: 'completed', summary: 'verification finished after the parent boundary' })
+    )
+    expect(getSpawnHistory()[0]?.subagents[1]).toMatchObject({
+      id: 'review-child',
+      status: 'completed',
+      summary: 'verification finished after the parent boundary'
+    })
+  })
+
+  it('archives queued subagents as interrupted when the parent message completes', () => {
+    turnController.startMessage()
+    turnController.upsertSubagent(subagent('queued-child', 0, 'wait for a worker slot'), () => ({ status: 'queued' }))
+
+    const { finalMessages } = turnController.recordMessageComplete({ text: 'Parent finished.' })
+    const archived = finalMessages.find(message => message.subagents?.length)?.subagents?.[0]
+
+    expect(archived).toMatchObject({ id: 'queued-child', status: 'interrupted' })
+    expect(getSpawnHistory()[0]?.subagents[0]).toMatchObject({ id: 'queued-child', status: 'interrupted' })
   })
 
   it('persists every active subagent on interruption before clearing live state', () => {
@@ -276,6 +311,7 @@ describe('turnController', () => {
     expect(appended).toHaveLength(1)
     expect(appended[0]).toMatchObject({ role: 'assistant', text: '*[interrupted]*' })
     expect(appended[0]?.subagents?.map(agent => agent.id)).toEqual(['research-child', 'review-child'])
+    expect(appended[0]?.subagents?.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
     expect(sys).not.toHaveBeenCalled()
     expect(getTurnState().subagents).toEqual([])
   })
@@ -288,6 +324,7 @@ describe('turnController', () => {
 
     expect(trail).toMatchObject({ kind: 'trail', role: 'system', text: '' })
     expect(trail?.subagents?.map(agent => agent.id)).toEqual(['research-child', 'review-child'])
+    expect(trail?.subagents?.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
     expect(getTurnState().subagents).toEqual([])
   })
 

@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { persistedSubagentSnapshotValues } from '../src/agents/subagentPersistence.js'
 import { MCPClient } from '../src/mcp/client.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
 import { UserPromptManager } from '../src/operators/userPrompt.js'
@@ -15,6 +16,8 @@ import { JobStore } from '../src/cron/jobs.js'
 import {
   ClaudeAgentTools,
   CLAUDE_AGENT_TOOL_DEFINITIONS,
+  CLAUDE_MCP_TOOL_DEFINITIONS,
+  CLAUDE_WORKFLOW_TOOL_DEFINITIONS,
   MCPClientRegistry,
   NativeWorktreeManager,
   RemoteTriggerRegistry,
@@ -40,6 +43,14 @@ async function executeJson(registry: ToolRegistry, name: string, arguments_: Jso
   return JSON.parse(await registry.execute(toolCall(name, arguments_), { metadata: {} })) as unknown
 }
 
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return
+    await Bun.sleep(1)
+  }
+  throw new Error('Timed out waiting for deterministic test condition')
+}
+
 function agentSnapshot(
   id: string,
   status: SpawnedAgentSnapshot['status'] = 'running',
@@ -60,6 +71,26 @@ function agentSnapshot(
     updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
+
+test('Claude compatibility schemas use provider-portable scalar type keywords', () => {
+  const definitions = [
+    ...CLAUDE_AGENT_TOOL_DEFINITIONS,
+    ...CLAUDE_MCP_TOOL_DEFINITIONS,
+    ...CLAUDE_WORKFLOW_TOOL_DEFINITIONS,
+  ]
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item)
+      return
+    }
+    if (value === null || typeof value !== 'object') return
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'type') expect(typeof child).toBe('string')
+      visit(child)
+    }
+  }
+  for (const definition of definitions) visit(definition)
+})
 
 test('Claude agent tools map task lifecycle, outputs, and mailbox events to SpawnedAgentManager', async () => {
   const manager = new SpawnedAgentManager({
@@ -96,10 +127,10 @@ test('Claude agent tools map task lifecycle, outputs, and mailbox events to Spaw
   expect(messages.events.every(event => event.title.length > 0)).toBeTrue()
 
   const batch = await executeJson(registry, 'SpawnAgents', {
-    agents: JSON.stringify([
+    agents: [
       { name: 'one', prompt: 'first', title: 'First task' },
       { name: 'two', prompt: 'second', subagent_type: 'coder', title: 'Second task' },
-    ]),
+    ],
     wait: true,
     timeout: 1,
   }) as Array<{ status: string; last_output: string }>
@@ -188,10 +219,17 @@ test('agent creation schemas require concise titles for single and batch delegat
   const byName = new Map(CLAUDE_AGENT_TOOL_DEFINITIONS.map(tool => [tool.function.name, tool]))
   const required = (name: string) => byName.get(name)?.function.parameters.required as string[] | undefined
   const properties = byName.get('AgentTool')?.function.parameters.properties as Record<string, Record<string, unknown>>
+  const spawnProperties = byName.get('SpawnAgents')?.function.parameters.properties as Record<string, Record<string, unknown>>
+  const awaitProperties = byName.get('AwaitAgents')?.function.parameters.properties as Record<string, Record<string, unknown>>
 
   expect(required('AgentTool')).toContain('title')
   expect(required('TaskCreateTool')).toContain('title')
   expect(properties.title?.maxLength).toBe(48)
+  expect(spawnProperties.agents?.type).toBe('array')
+  expect(spawnProperties.agents?.minItems).toBe(1)
+  expect(spawnProperties.agents?.maxItems).toBe(1_000)
+  expect(awaitProperties.agent_ids?.type).toBe('array')
+  expect(awaitProperties.agent_ids?.items).toEqual({ type: 'string' })
 
   const registry = new ToolRegistry()
   const manager = new SpawnedAgentManager({ runner: async () => ({ content: 'done' }) })
@@ -203,13 +241,247 @@ test('agent creation schemas require concise titles for single and batch delegat
   await expect(registry.execute(toolCall('SpawnAgents', {
     agents: [{ prompt: 'missing batch title' }],
   }), { metadata: {} })).rejects.toThrow('title')
-  const oversized = Array.from({ length: 9 }, (_, index) => ({
+  const aboveLegacyLimit = Array.from({ length: 9 }, (_, index) => ({
     prompt: `task ${index}`,
     title: `Task ${index}`,
   }))
+  const accepted = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+    agents: aboveLegacyLimit,
+    wait: false,
+  }), { metadata: {} })) as Record<string, unknown>
+  expect(accepted).toMatchObject({ accepted_count: 9, omitted_count: 1, shown_count: 8 })
+  expect(manager.listHandles()).toHaveLength(9)
+
+  const oversized = Array.from({ length: 1_001 }, (_, index) => ({
+    prompt: `oversized task ${index}`,
+    title: `Oversized ${index}`,
+  }))
   await expect(registry.execute(toolCall('SpawnAgents', { agents: oversized }), { metadata: {} }))
-    .rejects.toThrow('at most 8 agents')
-  expect(manager.listHandles()).toEqual([])
+    .rejects.toThrow('at most 1000 agents')
+  expect(manager.listHandles()).toHaveLength(9)
+})
+
+test('SpawnAgents bounds concurrent spawn registration while preserving batch order', async () => {
+  const snapshots: SpawnedAgentSnapshot[] = []
+  let activeSpawns = 0
+  let peakSpawns = 0
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
+    listHandles: () => snapshots,
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async options => {
+      activeSpawns += 1
+      peakSpawns = Math.max(peakSpawns, activeSpawns)
+      await Bun.sleep(5)
+      const snapshot = agentSnapshot(options?.nickname ?? `agent-${snapshots.length}`)
+      snapshots.push(snapshot)
+      activeSpawns -= 1
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: snapshots }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const agents = Array.from({ length: 24 }, (_, index) => ({
+    name: `bounded-${index}`,
+    prompt: `task ${index}`,
+    title: `Bounded task ${index}`,
+  }))
+
+  const result = await tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} }) as {
+    agents: Array<{ name: string }>
+    omitted_count: number
+  }
+
+  expect(peakSpawns).toBe(8)
+  expect(result.agents.map(snapshot => snapshot.name)).toEqual(agents.slice(0, 8).map(agent => agent.name))
+  expect(result.omitted_count).toBe(16)
+})
+
+test('SpawnAgents accepts exactly 1000 registrations at the documented boundary', async () => {
+  let registered = 0
+  const snapshots: SpawnedAgentSnapshot[] = []
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
+    listHandles: () => snapshots,
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async options => {
+      registered += 1
+      const snapshot = agentSnapshot(options?.nickname ?? `boundary-${registered}`)
+      snapshots.push(snapshot)
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const agents = Array.from({ length: 1_000 }, (_, index) => ({
+    name: `boundary-${index}`,
+    prompt: `task ${index}`,
+    title: `Boundary task ${index}`,
+  }))
+  const metadata: Record<string, unknown> = {}
+
+  const result = await tools.execute('SpawnAgents', { agents, wait: false }, { metadata })
+
+  expect(registered).toBe(1_000)
+  expect(result).toMatchObject({
+    accepted_count: 1_000,
+    agent_count: 1_000,
+    shown_count: 8,
+    omitted_count: 992,
+  })
+  expect(JSON.stringify(result).length).toBeLessThan(5_000)
+  expect(persistedSubagentSnapshotValues(metadata)).toHaveLength(1_000)
+})
+
+test('TaskListTool pages compact rows and large AwaitAgents results stay bounded', async () => {
+  const snapshots = Array.from({ length: 120 }, (_, index) => ({
+    ...agentSnapshot(`paged-${index}`, 'completed', 'paged-session'),
+    lastOutput: `full output ${index} ${'x'.repeat(2_000)}`,
+  }))
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshots.find(snapshot => snapshot.id === id)!, closed: true, previousStatus: 'completed', status: 'closed' }),
+    listHandles: () => snapshots,
+    resume: id => snapshots.find(snapshot => snapshot.id === id)!,
+    sendInput: async id => snapshots.find(snapshot => snapshot.id === id)!,
+    spawn: async () => snapshots[0]!,
+    wait: async targets => ({
+      completed: targets.map(target => snapshots.find(snapshot => snapshot.id === target)!),
+      pending: [],
+    }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const context = { metadata: {}, sessionId: 'paged-session' }
+
+  const first = await tools.execute('TaskListTool', {}, context) as Array<Record<string, unknown>>
+  const third = await tools.execute('TaskListTool', { offset: 100, limit: 50 }, context) as Array<Record<string, unknown>>
+  const awaited = await tools.execute('AwaitAgents', {
+    agent_ids: snapshots.map(snapshot => snapshot.id),
+    timeout_seconds: 0,
+    wake_on: 'all',
+  }, context) as Record<string, unknown>
+
+  expect(first).toHaveLength(50)
+  expect(first[0]).toMatchObject({ id: 'paged-0', has_output: true, status: 'completed' })
+  expect(first[0]).not.toHaveProperty('last_output')
+  expect(third).toHaveLength(20)
+  expect(third[0]).toMatchObject({ id: 'paged-100' })
+  expect(awaited).toMatchObject({ agent_count: 120, shown_count: 8, omitted_count: 112 })
+  expect(JSON.stringify(awaited).length).toBeLessThan(5_000)
+})
+
+test('SpawnAgents abort stops claiming new registrations and closes in-flight successes', async () => {
+  const controller = new AbortController()
+  const release = Promise.withResolvers<void>()
+  const snapshots: SpawnedAgentSnapshot[] = []
+  const started: string[] = []
+  const closed: string[] = []
+  const manager: SpawnedAgentManagerPort = {
+    close: id => {
+      closed.push(id)
+      return { ...agentSnapshot(id, 'closed'), previousStatus: 'running' }
+    },
+    listHandles: () => snapshots,
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async options => {
+      const name = options?.nickname ?? `abort-${started.length}`
+      started.push(name)
+      await release.promise
+      const snapshot = agentSnapshot(name)
+      snapshots.push(snapshot)
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const agents = Array.from({ length: 200 }, (_, index) => ({
+    name: `abort-${index}`,
+    prompt: `task ${index}`,
+    title: `Abort task ${index}`,
+  }))
+
+  const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} }, controller.signal)
+  await waitUntil(() => started.length === 8)
+  controller.abort(new Error('stop registration'))
+  release.resolve()
+
+  await expect(pending).rejects.toThrow('stop registration')
+  expect(started).toHaveLength(8)
+  expect(closed.sort()).toEqual([...started].sort())
+})
+
+test('SpawnAgents first failure stops claiming new registrations and closes partial successes', async () => {
+  const fail = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const snapshots: SpawnedAgentSnapshot[] = []
+  const started: string[] = []
+  const closed: string[] = []
+  const manager: SpawnedAgentManagerPort = {
+    close: id => {
+      closed.push(id)
+      return { ...agentSnapshot(id, 'closed'), previousStatus: 'running' }
+    },
+    listHandles: () => snapshots,
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async options => {
+      const name = options?.nickname ?? `failure-${started.length}`
+      started.push(name)
+      if (name === 'failure-0') {
+        await fail.promise
+        throw new Error('registration failed')
+      }
+      await release.promise
+      const snapshot = agentSnapshot(name)
+      snapshots.push(snapshot)
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const agents = Array.from({ length: 200 }, (_, index) => ({
+    name: `failure-${index}`,
+    prompt: `task ${index}`,
+    title: `Failure task ${index}`,
+  }))
+
+  const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} })
+  await waitUntil(() => started.length === 8)
+  fail.resolve()
+  await Bun.sleep(0)
+  release.resolve()
+
+  await expect(pending).rejects.toThrow('registration failed')
+  expect(started).toHaveLength(8)
+  expect(closed.sort()).toEqual(started.filter(name => name !== 'failure-0').sort())
+})
+
+test('stale subagent targets receive non-retry guidance after runtime attachment is lost', async () => {
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
+    listHandles: () => [],
+    resume: id => agentSnapshot(id),
+    sendInput: async id => agentSnapshot(id ?? 'missing'),
+    spawn: async () => agentSnapshot('unused'),
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const context = { metadata: {}, sessionId: 'resumed-session' }
+
+  await expect(tools.execute('TaskGetTool', {
+    task_id: 'eyvan_persistence_hunter',
+  }, context)).rejects.toThrow(
+    'Validation error for task_id: managed subagent not found; TaskListTool returned no tasks attached to the current runtime',
+  )
+  await expect(tools.execute('AwaitAgents', {
+    agent_ids: ['eyvan_persistence_hunter', 'eyvan_core_hunter'],
+    timeout_seconds: 60,
+    wake_on: 'all',
+  }, context)).rejects.toThrow(
+    'Validation error for agent_ids: managed subagent not found; TaskListTool returned no tasks attached to the current runtime. Do not retry stale names or ids',
+  )
 })
 
 test('foreground agent waits stop promptly when the parent turn is cancelled', async () => {
@@ -285,9 +557,10 @@ test('foreground SpawnAgents cancellation closes only children spawned by that c
   expect(closed).toEqual(['batch-a', 'batch-b'])
 })
 
-test('explicit background agent calls survive an already-cancelled parent signal', async () => {
+test('background AgentTool can detach but an already-aborted SpawnAgents batch registers nothing', async () => {
   const snapshots: SpawnedAgentSnapshot[] = []
   const closed: string[] = []
+  const tracked: string[][] = []
   let waits = 0
   const manager: SpawnedAgentManagerPort = {
     close: id => {
@@ -307,7 +580,13 @@ test('explicit background agent calls survive an already-cancelled parent signal
       return { completed: [], pending: snapshots }
     },
   }
-  const tools = new ClaudeAgentTools({ manager })
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: () => undefined,
+      track: observed => tracked.push(observed.map(snapshot => snapshot.id)),
+    },
+    manager,
+  })
   const controller = new AbortController()
   controller.abort(new Error('parent already cancelled'))
 
@@ -317,19 +596,122 @@ test('explicit background agent calls survive an already-cancelled parent signal
     title: 'Continue independently',
     run_in_background: true,
   }, { metadata: {} }, controller.signal) as { id: string }
-  const batch = await tools.execute('SpawnAgents', {
+  await expect(tools.execute('SpawnAgents', {
     agents: [{ name: 'detached-two', prompt: 'also continue', title: 'Also continue' }],
     wait: false,
-  }, { metadata: {} }, controller.signal) as Array<{ id: string }>
+  }, { metadata: {} }, controller.signal)).rejects.toThrow('parent already cancelled')
 
   expect(single.id).toBe('detached-one')
-  expect(batch.map(item => item.id)).toEqual(['detached-two'])
   expect(waits).toBe(0)
   expect(closed).toEqual([])
+  expect(snapshots.map(snapshot => snapshot.id)).toEqual(['detached-one'])
+  expect(tracked).toEqual([['detached-one']])
+})
+
+test('AwaitAgents observes the exact tracked cohort even when every child already finished', async () => {
+  const owner = 'live-session'
+  let snapshot = agentSnapshot('fast-child', 'running', owner)
+  const tracked = new Set<string>()
+  const consumed: Array<{ id: string; status: string }> = []
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshot, id, closed: true, previousStatus: snapshot.status, status: 'closed' }),
+    listHandles: () => [snapshot],
+    resume: () => snapshot,
+    sendInput: async () => snapshot,
+    spawn: async options => {
+      snapshot = agentSnapshot(options?.nickname ?? 'fast-child', 'running', options?.sourceAgentId)
+      return snapshot
+    },
+    wait: async () => ({ completed: [], pending: [snapshot] }),
+  }
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: observed => {
+        for (const item of observed) {
+          consumed.push({ id: item.id, status: item.status })
+          tracked.delete(item.id)
+        }
+      },
+      track: observed => {
+        for (const item of observed) tracked.add(item.id)
+      },
+      trackedIds: sourceAgentId => sourceAgentId === owner ? [...tracked] : [],
+    },
+    manager,
+  })
+  const context = { metadata: {}, sessionId: owner }
+
+  await tools.execute('SpawnAgents', {
+    agents: [{ name: 'fast-child', prompt: 'finish quickly', title: 'Fast child' }],
+    wait: false,
+  }, context)
+  snapshot = { ...snapshot, lastOutput: 'finished before wait', status: 'completed' }
+
+  const started = performance.now()
+  const result = await tools.execute('AwaitAgents', {
+    timeout_seconds: 5,
+    wake_on: 'all',
+  }, context) as { agents: Array<{ id: string; status: string }>; wake_reason: string }
+
+  expect(performance.now() - started).toBeLessThan(100)
+  expect(result).toMatchObject({
+    wake_reason: 'agents_done',
+    agents: [{ id: 'fast-child', status: 'completed' }],
+  })
+  expect(consumed).toContainEqual({ id: 'fast-child', status: 'completed' })
+  expect(tracked.size).toBe(0)
+})
+
+test('ResetAgent replaces the tracked handle instead of retaining the closed task', async () => {
+  const owner = 'reset-session'
+  let snapshot = agentSnapshot('old-task', 'running', owner)
+  const tracked = new Set<string>()
+  const consumed: Array<{ id: string; status: string }> = []
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshot, id, closed: true, previousStatus: snapshot.status, status: 'closed' }),
+    listHandles: () => [snapshot],
+    resume: () => ({ ...snapshot, status: 'idle' }),
+    sendInput: async () => {
+      snapshot = agentSnapshot('new-task', 'running', owner)
+      return snapshot
+    },
+    spawn: async () => snapshot,
+    wait: async () => ({ completed: [], pending: [snapshot] }),
+  }
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: observed => {
+        for (const item of observed) {
+          consumed.push({ id: item.id, status: item.status })
+          tracked.delete(item.id)
+        }
+      },
+      track: observed => {
+        for (const item of observed) tracked.add(item.id)
+      },
+      trackedIds: sourceAgentId => sourceAgentId === owner ? [...tracked] : [],
+    },
+    manager,
+  })
+  const context = { metadata: {}, sessionId: owner }
+
+  await tools.execute('TaskCreateTool', {
+    name: 'old-task',
+    prompt: 'original task',
+    title: 'Original task',
+  }, context)
+  await tools.execute('ResetAgent', {
+    target: 'old-task',
+    new_prompt: 'replacement task',
+  }, context)
+
+  expect(consumed).toContainEqual({ id: 'old-task', status: 'closed' })
+  expect([...tracked]).toEqual(['new-task'])
 })
 
 test('SpawnAgents preserves request order across completed and pending partitions', async () => {
   const snapshots: SpawnedAgentSnapshot[] = []
+  const tracked: string[][] = []
   const manager: SpawnedAgentManagerPort = {
     close: id => ({ ...agentSnapshot(id, 'closed'), previousStatus: 'running' }),
     listHandles: () => snapshots,
@@ -340,9 +722,18 @@ test('SpawnAgents preserves request order across completed and pending partition
       snapshots.push(snapshot)
       return snapshot
     },
-    wait: async () => ({ completed: [snapshots[1]!], pending: [snapshots[0]!] }),
+    wait: async () => ({
+      completed: [{ ...snapshots[1]!, status: 'completed' }],
+      pending: [snapshots[0]!],
+    }),
   }
-  const tools = new ClaudeAgentTools({ manager })
+  const tools = new ClaudeAgentTools({
+    backgroundAgents: {
+      consume: () => undefined,
+      track: observed => tracked.push(observed.map(snapshot => snapshot.id)),
+    },
+    manager,
+  })
   const result = await tools.execute('SpawnAgents', {
     agents: [
       { name: 'first', prompt: 'slow task', title: 'Slow task' },
@@ -353,6 +744,7 @@ test('SpawnAgents preserves request order across completed and pending partition
   }, { metadata: {} }) as Array<{ name: string }>
 
   expect(result.map(entry => entry.name)).toEqual(['first', 'second'])
+  expect(tracked).toEqual([['first']])
 })
 
 test('SpawnAgents closes partial work when one parallel spawn fails', async () => {
@@ -444,7 +836,7 @@ test('Claude MCP tools call native MCP clients and enumerate resources', async (
   const registry = new ToolRegistry()
   registerClaudeMcpTools(registry, { clients })
 
-  const tool = await executeJson(registry, 'MCPTool', { server_name: 'demo', tool_name: 'answer', arguments: '{"q":1}' }) as {
+  const tool = await executeJson(registry, 'MCPTool', { server_name: 'demo', tool_name: 'answer', arguments: { q: 1 } }) as {
     content: Array<{ type: string; text: string }>
     structured_content: { answer: number }
   }

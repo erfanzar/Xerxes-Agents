@@ -7,7 +7,8 @@ import {
   clearSpawnHistory,
   getSpawnHistory,
   pushSnapshot,
-  reconcileSpawnHistorySubagent
+  reconcileSpawnHistorySubagent,
+  spawnHistoryForSession
 } from '../app/spawnHistoryStore.js'
 import type { Msg, SubagentProgress } from '../types.js'
 
@@ -81,7 +82,7 @@ describe('reconcileArchivedSubagent', () => {
   })
 
   it('reconciles the matching spawn-history row used by the agents overlay', () => {
-    pushSnapshot([archivedAgent], { sessionId: 'session-a', startedAt: 1 })
+    pushSnapshot([{ ...archivedAgent, status: 'interrupted' }], { sessionId: 'session-a', startedAt: 1 })
     reconcileSpawnHistorySubagent(
       { goal: 'inspect runtime', status: 'completed', subagent_id: 'child-1', task_index: 0 },
       () => ({ status: 'completed', summary: 'runtime verified' })
@@ -92,5 +93,17 @@ describe('reconcileArchivedSubagent', () => {
       status: 'completed',
       summary: 'runtime verified'
     })
+  })
+
+  it('returns only the active session history from the warm global cache', () => {
+    pushSnapshot([archivedAgent], { sessionId: 'session-a', startedAt: 1 })
+    pushSnapshot([{ ...archivedAgent, id: 'child-2' }], { sessionId: 'session-b', startedAt: 2 })
+
+    expect(spawnHistoryForSession(getSpawnHistory(), 'session-a').map(snapshot => snapshot.sessionId)).toEqual([
+      'session-a'
+    ])
+    expect(spawnHistoryForSession(getSpawnHistory(), 'session-b')[0]?.subagents[0]?.id).toBe('child-2')
+    expect(spawnHistoryForSession(getSpawnHistory(), null)).toEqual([])
+    expect(spawnHistoryForSession(getSpawnHistory(), '  ')).toEqual([])
   })
 })

@@ -155,7 +155,19 @@ export const SKILL_TOOL_DEFINITION: ToolDefinition = definition(
 
 export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   definition('TodoWriteTool', 'Replace the session-scoped structured todo list.', {
-    todos: { description: 'Array or JSON string of {content, status} todo objects.', type: ['array', 'string'] },
+    todos: {
+      description: 'Array of {content, status} todo objects.',
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['content'],
+        properties: {
+          content: { type: 'string' },
+          status: { type: 'string' },
+        },
+      },
+    },
   }, ['todos']),
   definition('AskUserQuestionTool', 'Ask the attached user-prompt manager a blocking clarification question.', {
     question: stringSchema('Question shown to the user.'),

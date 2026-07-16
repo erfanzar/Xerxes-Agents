@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ValidationError } from '../../core/errors.js'
+import { replacePersistedSubagentSnapshots } from '../../agents/subagentPersistence.js'
 import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
 import {
   MAX_AGENT_TITLE_LENGTH,
@@ -17,10 +18,14 @@ import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
 
 const DEFAULT_WAIT_SECONDS = 120
 const MAILBOX_EVENT_LIMIT = 1_000
-const MAX_PARALLEL_AGENTS = 8
+const MAX_SPAWN_AGENT_REQUESTS = 1_000
+const MAX_CONCURRENT_SPAWN_REQUESTS = 8
+const MAX_INLINE_BATCH_RECEIPT_AGENTS = 8
+const DEFAULT_TASK_LIST_PAGE_SIZE = 50
+const MAX_TASK_LIST_PAGE_SIZE = 50
 const POLL_INTERVAL_MS = 25
 
-const TERMINAL_STATUSES = new Set(['cancelled', 'closed', 'completed', 'error'])
+const TERMINAL_STATUSES = new Set(['cancelled', 'closed', 'completed', 'error', 'interrupted'])
 
 export interface ClaudeAgentSpec {
   readonly model?: string
@@ -148,6 +153,12 @@ export interface ClaudeAgentToolsOptions {
   readonly mailbox?: AgentEventMailbox
   readonly manager: SpawnedAgentManagerPort
   readonly now?: () => number
+  /** Associates explicitly detached work with the active parent turn. */
+  readonly backgroundAgents?: {
+    consume(snapshots: readonly SpawnedAgentSnapshot[]): void
+    track(snapshots: readonly SpawnedAgentSnapshot[]): void
+    trackedIds?(sourceAgentId: string): readonly string[]
+  }
 }
 
 export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
@@ -172,11 +183,12 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: stringSchema('Stable subagent name.'),
     subagent_type: stringSchema('Agent definition to run.'),
   }, ['prompt', 'title']),
-  definition('SpawnAgents', 'Spawn several subagents in parallel and optionally wait for all of them.', {
+  definition('SpawnAgents', 'Spawn up to 1,000 subagents as one queued batch and optionally wait for all of them.', {
     agents: {
-      description: 'Array or JSON string of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title.',
-      type: ['array', 'string'],
-      maxItems: MAX_PARALLEL_AGENTS,
+      description: 'JSON array of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title. Work beyond the runtime concurrency is queued.',
+      type: 'array',
+      minItems: 1,
+      maxItems: MAX_SPAWN_AGENT_REQUESTS,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -193,10 +205,13 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     wait: booleanSchema('Wait for all spawned agents.'),
     timeout: numberSchema('Maximum seconds to wait for the batch.'),
   }, ['agents']),
-  definition('TaskGetTool', 'Return the latest managed subagent status and visible output.', {
-    task_id: stringSchema('Subagent id or stable name.'),
+  definition('TaskGetTool', 'Return one currently attached subagent status. Use only an exact id or name returned by the current TaskListTool result.', {
+    task_id: stringSchema('Exact subagent id or stable name from the current TaskListTool result; do not retry stale targets.'),
   }, ['task_id']),
-  definition('TaskListTool', 'List managed subagent tasks.', {}),
+  definition('TaskListTool', 'List a compact page of subagent tasks attached to the current runtime. Use offset pagination while a full page is returned. If the first page returns [], stale names and ids are not queryable; do not retry them.', {
+    offset: { type: 'integer', minimum: 0, default: 0, description: 'Zero-based task offset.' },
+    limit: { type: 'integer', minimum: 1, maximum: MAX_TASK_LIST_PAGE_SIZE, default: DEFAULT_TASK_LIST_PAGE_SIZE, description: 'Maximum compact task rows to return.' },
+  }),
   definition('TaskOutputTool', 'Return the latest output of a managed subagent.', {
     task_id: stringSchema('Subagent id or stable name.'),
   }, ['task_id']),
@@ -207,10 +222,11 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     task_id: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Update message.'),
   }, ['task_id', 'message']),
-  definition('AwaitAgents', 'Wait for any or all managed subagents to reach a terminal state.', {
+  definition('AwaitAgents', 'Wait for any or all currently attached subagents. Omit agent_ids for the tracked cohort; explicit targets must come from the current TaskListTool result.', {
     agent_ids: {
-      description: 'Optional array or JSON string of subagent ids or names.',
-      type: ['array', 'string'],
+      description: 'Optional array of exact subagent ids or names returned by the current TaskListTool result. Do not retry stale targets.',
+      type: 'array',
+      items: { type: 'string' },
     },
     wake_on: { type: 'string', enum: ['any', 'all', 'none'], default: 'any' },
     timeout_seconds: numberSchema('Maximum seconds to wait.'),
@@ -264,22 +280,26 @@ export class ClaudeAgentTools {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    switch (name) {
-      case 'AgentTool': return this.agentTool(inputs, context, signal)
-      case 'SendMessageTool': return this.sendMessage(inputs, context)
-      case 'TaskCreateTool': return this.taskCreate(inputs, context)
-      case 'SpawnAgents': return this.spawnAgents(inputs, context, signal)
-      case 'TaskGetTool': return this.taskGet(requiredString(inputs, 'task_id'), context)
-      case 'TaskListTool': return this.taskList(context)
-      case 'TaskOutputTool': return this.taskOutput(requiredString(inputs, 'task_id'), context)
-      case 'TaskStopTool': return this.taskStop(requiredString(inputs, 'task_id'), context)
-      case 'TaskUpdateTool': return this.taskUpdate(inputs, context)
-      case 'AwaitAgents': return this.awaitAgents(inputs, context, signal)
-      case 'CheckAgentMessages': return this.checkMessages(inputs, context)
-      case 'PeekAgent': return this.taskGet(requiredString(inputs, 'target'), context)
-      case 'ResetAgent': return this.resetAgent(inputs, context)
-      case 'HandoffTool': return this.handoff(inputs, context, signal)
-      default: throw new ValidationError('tool', 'is not handled by ClaudeAgentTools', name)
+    try {
+      switch (name) {
+        case 'AgentTool': return await this.agentTool(inputs, context, signal)
+        case 'SendMessageTool': return await this.sendMessage(inputs, context)
+        case 'TaskCreateTool': return await this.taskCreate(inputs, context)
+        case 'SpawnAgents': return await this.spawnAgents(inputs, context, signal)
+        case 'TaskGetTool': return this.taskGet(requiredString(inputs, 'task_id'), context, 'task_id')
+        case 'TaskListTool': return this.taskList(inputs, context)
+        case 'TaskOutputTool': return this.taskOutput(requiredString(inputs, 'task_id'), context, 'task_id')
+        case 'TaskStopTool': return this.taskStop(requiredString(inputs, 'task_id'), context, 'task_id')
+        case 'TaskUpdateTool': return await this.taskUpdate(inputs, context)
+        case 'AwaitAgents': return await this.awaitAgents(inputs, context, signal)
+        case 'CheckAgentMessages': return this.checkMessages(inputs, context)
+        case 'PeekAgent': return this.taskGet(requiredString(inputs, 'target'), context)
+        case 'ResetAgent': return await this.resetAgent(inputs, context)
+        case 'HandoffTool': return await this.handoff(inputs, context, signal)
+        default: throw new ValidationError('tool', 'is not handled by ClaudeAgentTools', name)
+      }
+    } finally {
+      this.persistContext(context)
     }
   }
 
@@ -308,10 +328,15 @@ export class ClaudeAgentTools {
     }
     const snapshot = await this.spawnSpec(spec, context)
     const background = optionalBoolean(inputs, 'run_in_background', false)
-    if (background || !optionalBoolean(inputs, 'wait', true)) return agentSnapshotWire(snapshot)
+    if (background || !optionalBoolean(inputs, 'wait', true)) {
+      this.observeBackgroundState([snapshot])
+      return agentSnapshotWire(snapshot)
+    }
     try {
       const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
-      return agentSnapshotWire(settled[0] ?? snapshot)
+      const final = settled[0] ?? snapshot
+      this.observeBackgroundState([final])
+      return agentSnapshotWire(final)
     } catch (error) {
       if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
       throw error
@@ -335,25 +360,36 @@ export class ClaudeAgentTools {
       ...(name ? { name } : {}),
       ...(subagentType ? { subagentType } : {}),
     }
-    return agentSnapshotWire(await this.spawnSpec(spec, context))
+    const snapshot = await this.spawnSpec(spec, context)
+    this.observeBackgroundState([snapshot])
+    return agentSnapshotWire(snapshot)
   }
 
   private async spawnAgents(
     inputs: JsonObject,
     context: ToolExecutionContext,
     signal?: AbortSignal,
-  ): Promise<readonly Record<string, unknown>[]> {
+  ): Promise<readonly Record<string, unknown>[] | Record<string, unknown>> {
     const specs = parseAgentSpecs(inputs.agents)
     if (!specs.length) throw new ValidationError('agents', 'must contain at least one agent specification', inputs.agents)
-    if (specs.length > MAX_PARALLEL_AGENTS) {
-      throw new ValidationError('agents', `must contain at most ${MAX_PARALLEL_AGENTS} agents`, specs.length)
+    if (specs.length > MAX_SPAWN_AGENT_REQUESTS) {
+      throw new ValidationError('agents', `must contain at most ${MAX_SPAWN_AGENT_REQUESTS} agents`, specs.length)
     }
-    const results = await Promise.allSettled(specs.map(spec => this.spawnSpec(spec, context)))
+    const registration = await settleWithConcurrency(
+      specs,
+      MAX_CONCURRENT_SPAWN_REQUESTS,
+      spec => this.spawnSpec(spec, context),
+      signal,
+    )
+    const results = registration.results
     const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
     const snapshots = results
       .filter((result): result is PromiseFulfilledResult<SpawnedAgentSnapshot> => result.status === 'fulfilled')
       .map(result => result.value)
-    if (failures.length) {
+    const registrationFailure = (registration.stopped
+      ? registration.reason
+      : failures[0]?.reason) ?? new Error('Subagent spawn registration failed')
+    if (registration.stopped || failures.length) {
       const cleanupErrors: unknown[] = []
       for (const snapshot of snapshots) {
         try {
@@ -365,47 +401,75 @@ export class ClaudeAgentTools {
       this.capture()
       if (cleanupErrors.length) {
         throw new AggregateError(
-          [...failures.map(failure => failure.reason), ...cleanupErrors],
+          [registrationFailure, ...cleanupErrors],
           'Failed to spawn the complete subagent batch and clean up partial work',
         )
       }
-      throw failures[0]?.reason
+      throw registrationFailure
     }
-    if (!optionalBoolean(inputs, 'wait', true)) return snapshots.map(agentSnapshotWire)
+    // Persist the complete manifest before a foreground wait so a daemon crash
+    // cannot reduce a large bounded receipt to only its inline preview rows.
+    this.persistContext(context)
+    if (!optionalBoolean(inputs, 'wait', true)) {
+      this.observeSpawnBatchState(snapshots)
+      return spawnBatchWire(snapshots)
+    }
     const ids = snapshots.map(snapshot => snapshot.id)
     try {
       const settled = await this.waitFor(ids, timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
-      return settled.map(agentSnapshotWire)
+      this.observeSpawnBatchState(settled)
+      return spawnBatchWire(settled)
     } catch (error) {
       if (signal?.aborted) this.closeAfterAbort(ids, error)
       throw error
     }
   }
 
-  private taskGet(target: string, context: ToolExecutionContext): Record<string, unknown> {
+  private taskGet(
+    target: string,
+    context: ToolExecutionContext,
+    inputField = 'target',
+  ): Record<string, unknown> {
     this.capture()
-    return agentSnapshotWire(this.requireSnapshot(target, context))
+    const snapshot = this.requireSnapshot(target, context, inputField)
+    if (isTerminal(snapshot)) this.options.backgroundAgents?.consume([snapshot])
+    return agentSnapshotWire(snapshot)
   }
 
-  private taskList(context: ToolExecutionContext): readonly Record<string, unknown>[] {
+  private taskList(inputs: JsonObject, context: ToolExecutionContext): readonly Record<string, unknown>[] {
     this.capture()
-    return this.ownedHandles(context).map(agentSnapshotWire)
+    const snapshots = this.ownedHandles(context)
+    const offset = nonnegativeInteger(inputs, 'offset', 0)
+    const limit = nonnegativeInteger(inputs, 'limit', DEFAULT_TASK_LIST_PAGE_SIZE)
+    if (limit < 1 || limit > MAX_TASK_LIST_PAGE_SIZE) {
+      throw new ValidationError('limit', `must be between 1 and ${MAX_TASK_LIST_PAGE_SIZE}`, limit)
+    }
+    const page = snapshots.slice(offset, offset + limit)
+    return page.map(compactAgentSnapshotWire)
   }
 
-  private taskOutput(target: string, context: ToolExecutionContext): string {
-    const snapshot = this.requireSnapshot(target, context)
-    if (snapshot.lastOutput !== undefined) return snapshot.lastOutput
+  private taskOutput(target: string, context: ToolExecutionContext, inputField = 'target'): string {
+    const snapshot = this.requireSnapshot(target, context, inputField)
+    if (snapshot.lastOutput !== undefined) {
+      this.options.backgroundAgents?.consume([snapshot])
+      return snapshot.lastOutput
+    }
     return `No output for task '${target}' (may still be running).`
   }
 
-  private taskStop(target: string, context: ToolExecutionContext): Record<string, unknown> {
-    const snapshot = this.options.manager.close(this.resolveId(target, context))
+  private taskStop(
+    target: string,
+    context: ToolExecutionContext,
+    inputField = 'target',
+  ): Record<string, unknown> {
+    const snapshot = this.options.manager.close(this.resolveId(target, context, inputField))
     this.capture()
+    this.options.backgroundAgents?.consume([snapshot])
     return agentSnapshotWire(snapshot)
   }
 
   private async taskUpdate(inputs: JsonObject, context: ToolExecutionContext): Promise<Record<string, unknown>> {
-    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'task_id'), context), {
+    const snapshot = await this.options.manager.sendInput(this.resolveId(requiredString(inputs, 'task_id'), context, 'task_id'), {
       message: requiredString(inputs, 'message'),
     })
     this.capture()
@@ -418,26 +482,42 @@ export class ClaudeAgentTools {
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const requested = parseAgentIds(inputs.agent_ids)
+    const owned = this.ownedHandles(context)
+    const ownedById = new Map(owned.map(snapshot => [snapshot.id, snapshot]))
+    const tracked = this.options.backgroundAgents
+      ?.trackedIds?.(contextOwnerId(context))
+      .filter(id => ownedById.has(id)) ?? []
     const targets = requested.length
-      ? requested.map(target => this.resolveId(target, context))
-      : this.ownedHandles(context).filter(snapshot => !isTerminal(snapshot)).map(snapshot => snapshot.id)
+      ? requested.map(target => this.resolveId(target, context, 'agent_ids'))
+      : tracked.length
+        ? tracked
+        : owned.filter(snapshot => !isTerminal(snapshot)).map(snapshot => snapshot.id)
     const wakeOn = normalizeWakeOn(optionalString(inputs, 'wake_on'))
     const timeout = timeoutMilliseconds(inputs, 'timeout_seconds', 30)
     const started = this.now()
     let wakeReason: 'agents_done' | 'cancelled' | 'timeout' = 'timeout'
+    if (!targets.length) {
+      return this.observedAwaitResult(
+        wakeOn === 'none' ? 'timeout' : 'agents_done',
+        wakeOn,
+        started,
+        [],
+        tracked,
+      )
+    }
     while (true) {
       this.capture()
-      const snapshots = targets.map(target => this.requireSnapshot(target, context))
+      const snapshots = targets.map(target => this.requireSnapshot(target, context, 'agent_ids'))
       if (signal?.aborted) {
         wakeReason = 'cancelled'
-        return awaitResult(wakeReason, wakeOn, started, this.now(), snapshots)
+        return this.observedAwaitResult(wakeReason, wakeOn, started, snapshots, tracked)
       }
       if (agentsSatisfied(snapshots, wakeOn)) {
         wakeReason = 'agents_done'
-        return awaitResult(wakeReason, wakeOn, started, this.now(), snapshots)
+        return this.observedAwaitResult(wakeReason, wakeOn, started, snapshots, tracked)
       }
       const elapsed = this.now() - started
-      if (elapsed >= timeout) return awaitResult(wakeReason, wakeOn, started, this.now(), snapshots)
+      if (elapsed >= timeout) return this.observedAwaitResult(wakeReason, wakeOn, started, snapshots, tracked)
       await sleep(Math.min(POLL_INTERVAL_MS, timeout - elapsed))
     }
   }
@@ -456,11 +536,53 @@ export class ClaudeAgentTools {
     const current = this.requireSnapshot(target, context)
     const replacement = optionalString(inputs, 'new_prompt')?.trim() || current.lastInput
     if (!replacement) throw new ValidationError('new_prompt', 'is required when the agent has no prior input')
-    this.options.manager.close(current.id)
+    const closed = this.options.manager.close(current.id)
+    this.options.backgroundAgents?.consume([closed])
     this.options.manager.resume(current.id)
     const snapshot = await this.options.manager.sendInput(current.id, { message: replacement, interrupt: true })
     this.capture()
+    this.observeBackgroundState([snapshot])
     return { reset_target: target, new_task: agentSnapshotWire(snapshot) }
+  }
+
+  private observedAwaitResult(
+    wakeReason: 'agents_done' | 'cancelled' | 'timeout',
+    wakeOn: 'all' | 'any' | 'none',
+    started: number,
+    snapshots: readonly SpawnedAgentSnapshot[],
+    trackedIds: readonly string[],
+  ): Record<string, unknown> {
+    // Large await receipts contain only compact status rows, so they have not
+    // delivered terminal outputs and must not consume those results from the
+    // exact parent-turn cohort. Already-tracked work remains available for the
+    // coordinator's single bounded result continuation.
+    if (snapshots.length <= MAX_INLINE_BATCH_RECEIPT_AGENTS) {
+      this.observeBackgroundState(snapshots)
+    } else {
+      const tracked = new Set(trackedIds)
+      const retained = snapshots.filter(snapshot => tracked.has(snapshot.id))
+      if (retained.length) this.options.backgroundAgents?.track(retained)
+    }
+    return awaitResult(wakeReason, wakeOn, started, this.now(), snapshots)
+  }
+
+  private observeSpawnBatchState(snapshots: readonly SpawnedAgentSnapshot[]): void {
+    if (snapshots.length > MAX_INLINE_BATCH_RECEIPT_AGENTS) {
+      // The compact batch receipt deliberately omits every output body. Track
+      // the complete exact batch, including agents that finished during the
+      // foreground wait, so the turn coordinator delivers their bounded
+      // results once before the parent can finish.
+      this.options.backgroundAgents?.track(snapshots)
+      return
+    }
+    this.observeBackgroundState(snapshots)
+  }
+
+  private observeBackgroundState(snapshots: readonly SpawnedAgentSnapshot[]): void {
+    const terminal = snapshots.filter(isTerminal)
+    const pending = snapshots.filter(snapshot => !isTerminal(snapshot))
+    if (terminal.length) this.options.backgroundAgents?.consume(terminal)
+    if (pending.length) this.options.backgroundAgents?.track(pending)
   }
 
   private async handoff(
@@ -481,6 +603,7 @@ export class ClaudeAgentTools {
     try {
       const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
       const final = settled[0] ?? snapshot
+      this.observeBackgroundState([final])
       return final.lastOutput ?? agentSnapshotWire(final)
     } catch (error) {
       if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
@@ -543,18 +666,42 @@ export class ClaudeAgentTools {
     }
   }
 
-  private requireSnapshot(target: string, context: ToolExecutionContext): SpawnedAgentSnapshot {
-    const id = this.resolveId(target, context)
+  private requireSnapshot(
+    target: string,
+    context: ToolExecutionContext,
+    inputField = 'target',
+  ): SpawnedAgentSnapshot {
+    const id = this.resolveId(target, context, inputField)
     const snapshot = this.ownedHandles(context).find(candidate => candidate.id === id)
-    if (snapshot === undefined) throw new ValidationError('target', 'managed subagent not found', target)
+    if (snapshot === undefined) this.throwMissingTarget(target, context, inputField)
     return snapshot
   }
 
-  private resolveId(target: string, context: ToolExecutionContext): string {
+  private resolveId(target: string, context: ToolExecutionContext, inputField = 'target'): string {
     const normalized = target.trim()
     const snapshot = this.ownedHandles(context).find(candidate => candidate.id === normalized || candidate.name === normalized)
-    if (snapshot === undefined) throw new ValidationError('target', 'managed subagent not found', target)
+    if (snapshot === undefined) this.throwMissingTarget(target, context, inputField)
     return snapshot.id
+  }
+
+  private throwMissingTarget(target: string, context: ToolExecutionContext, inputField: string): never {
+    const available = this.ownedHandles(context)
+    if (!available.length) {
+      throw new ValidationError(
+        inputField,
+        'managed subagent not found; TaskListTool returned no tasks attached to the current runtime. Do not retry stale names or ids; respawn the required work if no persisted result is available',
+        target,
+      )
+    }
+    const targets = available
+      .slice(0, 20)
+      .map(snapshot => snapshot.id === snapshot.name ? snapshot.id : `${snapshot.name} (${snapshot.id})`)
+      .join(', ')
+    throw new ValidationError(
+      inputField,
+      `managed subagent not found; use an exact target from TaskListTool. Available targets: ${targets}`,
+      target,
+    )
   }
 
   private ownedHandles(context: ToolExecutionContext): SpawnedAgentSnapshot[] {
@@ -564,6 +711,10 @@ export class ClaudeAgentTools {
 
   private capture(): void {
     this.mailbox.capture(this.options.manager.listHandles())
+  }
+
+  private persistContext(context: ToolExecutionContext): void {
+    replacePersistedSubagentSnapshots(context.metadata, this.ownedHandles(context))
   }
 }
 
@@ -699,6 +850,49 @@ function parseArrayValue(value: JsonValue | undefined, name: string): JsonValue[
   throw new ValidationError(name, 'must be an array or a JSON-encoded array', value)
 }
 
+async function settleWithConcurrency<Input, Output>(
+  inputs: readonly Input[],
+  maxConcurrent: number,
+  worker: (input: Input, index: number) => Promise<Output>,
+  signal?: AbortSignal,
+): Promise<
+  | { readonly reason: unknown; readonly results: PromiseSettledResult<Output>[]; readonly stopped: true }
+  | { readonly results: PromiseSettledResult<Output>[]; readonly stopped: false }
+> {
+  const settled: Array<{ readonly index: number; readonly result: PromiseSettledResult<Output> }> = []
+  let nextIndex = 0
+  let stop: { readonly reason: unknown } | undefined = signal?.aborted
+    ? { reason: signal.reason ?? new Error('Subagent spawn cancelled') }
+    : undefined
+  const stopWith = (reason: unknown): void => {
+    stop ??= { reason }
+  }
+  const run = async (): Promise<void> => {
+    while (true) {
+      if (signal?.aborted) stopWith(signal.reason ?? new Error('Subagent spawn cancelled'))
+      if (stop !== undefined) return
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= inputs.length) return
+      const input = inputs[index] as Input
+      try {
+        settled.push({ index, result: { status: 'fulfilled', value: await worker(input, index) } })
+      } catch (reason) {
+        settled.push({ index, result: { status: 'rejected', reason } })
+        stopWith(reason)
+        return
+      }
+    }
+  }
+  const workers = Math.min(inputs.length, maxConcurrent)
+  await Promise.all(Array.from({ length: workers }, () => run()))
+  if (signal?.aborted) stopWith(signal.reason ?? new Error('Subagent spawn cancelled'))
+  const results = settled.sort((left, right) => left.index - right.index).map(entry => entry.result)
+  return stop === undefined
+    ? { results, stopped: false }
+    : { reason: stop.reason, results, stopped: true }
+}
+
 function timeoutMilliseconds(inputs: JsonObject, name: string, defaultSeconds: number): number {
   const value = inputs[name]
   const seconds = value === undefined ? defaultSeconds : value
@@ -758,12 +952,64 @@ function awaitResult(
   ended: number,
   snapshots: readonly SpawnedAgentSnapshot[],
 ): Record<string, unknown> {
+  const compact = snapshots.length > MAX_INLINE_BATCH_RECEIPT_AGENTS
   return {
     wake_reason: wakeReason,
     wake_on: wakeOn,
     elapsed_seconds: Number(((ended - started) / 1_000).toFixed(3)),
-    agents: snapshots.map(agentSnapshotWire),
+    agents: compact
+      ? snapshots.slice(0, MAX_INLINE_BATCH_RECEIPT_AGENTS).map(compactAgentSnapshotWire)
+      : snapshots.map(agentSnapshotWire),
+    ...(compact ? batchSummaryFields(snapshots) : {}),
   }
+}
+
+function spawnBatchWire(
+  snapshots: readonly SpawnedAgentSnapshot[],
+): readonly Record<string, unknown>[] | Record<string, unknown> {
+  if (snapshots.length <= MAX_INLINE_BATCH_RECEIPT_AGENTS) return snapshots.map(agentSnapshotWire)
+  return {
+    accepted_count: snapshots.length,
+    agents: snapshots.slice(0, MAX_INLINE_BATCH_RECEIPT_AGENTS).map(compactAgentSnapshotWire),
+    ...batchSummaryFields(snapshots),
+    management_hint: 'AwaitAgents without agent_ids waits for the tracked cohort. Use paged TaskListTool plus TaskGetTool or TaskOutputTool for individual details.',
+  }
+}
+
+function batchSummaryFields(snapshots: readonly SpawnedAgentSnapshot[]): Record<string, unknown> {
+  return {
+    agent_count: snapshots.length,
+    shown_count: Math.min(snapshots.length, MAX_INLINE_BATCH_RECEIPT_AGENTS),
+    omitted_count: Math.max(0, snapshots.length - MAX_INLINE_BATCH_RECEIPT_AGENTS),
+    status_counts: statusCounts(snapshots),
+  }
+}
+
+function statusCounts(snapshots: readonly SpawnedAgentSnapshot[]): Record<string, number> {
+  const counts: Record<string, number> = {}
+  for (const snapshot of snapshots) counts[snapshot.status] = (counts[snapshot.status] ?? 0) + 1
+  return counts
+}
+
+function compactAgentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {
+  const tokenCount = [snapshot.inputTokens, snapshot.outputTokens, snapshot.reasoningTokens]
+    .filter((value): value is number => value !== undefined)
+    .reduce((total, value) => total + value, 0)
+  return {
+    id: snapshot.id,
+    name: snapshot.name,
+    title: snapshot.title,
+    status: snapshot.status,
+    ...(snapshot.toolCalls === undefined ? {} : { tool_count: snapshot.toolCalls }),
+    ...(snapshot.apiCalls === undefined ? {} : { api_calls: snapshot.apiCalls }),
+    ...(tokenCount ? { token_count: tokenCount } : {}),
+    has_output: snapshot.lastOutput !== undefined,
+    ...(snapshot.error ? { error: boundedWireText(snapshot.error, 240) } : {}),
+  }
+}
+
+function boundedWireText(value: string, limit: number): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
 }
 
 function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {

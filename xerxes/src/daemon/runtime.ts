@@ -159,8 +159,9 @@ export interface InMemoryDaemonRuntimeOptions {
   readonly onSessionModeChange?: (sessionId: string, mode: string) => void;
   /** Release resources captured by the host that constructed this runtime. */
   readonly shutdown?: () => Promise<void> | void;
-  /** Live tool/skill counts owned by the embedding daemon host. */
+  /** Live inventory owned by the embedding daemon host. */
   readonly statusInventory?: () => {
+    readonly activeSubagents?: number;
     readonly skills?: number;
     readonly tools?: number;
   };
@@ -447,6 +448,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
       ),
       tools: inventoryCount(inventory.tools),
       skills: inventoryCount(inventory.skills),
+      ...(inventory.activeSubagents === undefined
+        ? {}
+        : { active_subagents: inventoryCount(inventory.activeSubagents) }),
       reasoning_effort:
         stringValue(this.runtimeSettings.reasoning_effort) || "off",
       pid: process.pid,
