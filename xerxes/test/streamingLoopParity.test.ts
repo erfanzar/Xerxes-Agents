@@ -169,6 +169,36 @@ test('streaming loop waits for detached subagents and resumes the same parent tu
   ])
 })
 
+test('streaming loop persists joined subagent results before honoring a simultaneous parent cancellation', async () => {
+  const controller = new AbortController()
+  const state = createAgentState()
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    state,
+    userMessage: 'run a cancellable parallel review',
+  }, {
+    awaitAgentEvents: async () => {
+      controller.abort(new Error('user interrupted after the child completed'))
+      return ['[agent result title="Review" status=completed]\nfinished evidence\n[/agent result]']
+    },
+    llm: {
+      async *stream(): AsyncGenerator<LlmDelta> {
+        yield { content: 'The review is running.' }
+      },
+    },
+  }, controller.signal))
+
+  expect(state.messages).toContainEqual({
+    role: 'user',
+    content:
+      '[sub-agent events]\n' +
+      '[agent result title="Review" status=completed]\nfinished evidence\n[/agent result]',
+  })
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'The review is running.',
+  ])
+})
+
 test('streaming loop joins detached subagents before a final tool-turn boundary can end the parent', async () => {
   const requests: CompletionRequest[] = []
   let waits = 0

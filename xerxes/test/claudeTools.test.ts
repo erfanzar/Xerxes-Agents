@@ -228,8 +228,12 @@ test('agent creation schemas require concise titles for single and batch delegat
   expect(spawnProperties.agents?.type).toBe('array')
   expect(spawnProperties.agents?.minItems).toBe(1)
   expect(spawnProperties.agents?.maxItems).toBe(1_000)
+  expect(properties.run_in_background?.default).toBe(false)
+  expect(properties.wait?.default).toBe(true)
+  expect(spawnProperties.wait?.default).toBe(true)
   expect(awaitProperties.agent_ids?.type).toBe('array')
   expect(awaitProperties.agent_ids?.items).toEqual({ type: 'string' })
+  expect(awaitProperties.wake_on?.default).toBe('all')
 
   const registry = new ToolRegistry()
   const manager = new SpawnedAgentManager({ runner: async () => ({ content: 'done' }) })
@@ -369,6 +373,28 @@ test('TaskListTool pages compact rows and large AwaitAgents results stay bounded
   expect(third[0]).toMatchObject({ id: 'paged-100' })
   expect(awaited).toMatchObject({ agent_count: 120, shown_count: 8, omitted_count: 112 })
   expect(JSON.stringify(awaited).length).toBeLessThan(5_000)
+})
+
+test('AwaitAgents defaults to the complete tracked cohort rather than the first finisher', async () => {
+  const snapshots = [
+    agentSnapshot('first', 'completed', 'await-default-session'),
+    agentSnapshot('second', 'running', 'await-default-session'),
+  ]
+  const manager: SpawnedAgentManagerPort = {
+    close: id => ({ ...snapshots.find(snapshot => snapshot.id === id)!, closed: true, previousStatus: 'running', status: 'closed' }),
+    listHandles: () => snapshots,
+    resume: id => snapshots.find(snapshot => snapshot.id === id)!,
+    sendInput: async id => snapshots.find(snapshot => snapshot.id === id)!,
+    spawn: async () => snapshots[0]!,
+    wait: async () => ({ completed: [], pending: [] }),
+  }
+  const tools = new ClaudeAgentTools({ manager })
+  const result = await tools.execute('AwaitAgents', {
+    agent_ids: snapshots.map(snapshot => snapshot.id),
+    timeout_seconds: 0,
+  }, { metadata: {}, sessionId: 'await-default-session' }) as Record<string, unknown>
+
+  expect(result).toMatchObject({ wake_on: 'all', wake_reason: 'timeout' })
 })
 
 test('SpawnAgents abort stops claiming new registrations and closes in-flight successes', async () => {
