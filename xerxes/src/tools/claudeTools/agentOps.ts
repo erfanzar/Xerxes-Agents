@@ -169,8 +169,8 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     isolation: stringSchema('Requested isolation mode. Native worktree isolation is not yet available here.'),
     name: stringSchema('Stable subagent name.'),
     model: stringSchema('Optional model override.'),
-    run_in_background: booleanSchema('Return immediately while the subagent keeps working.'),
-    wait: booleanSchema('Wait for the subagent to finish.'),
+    run_in_background: booleanSchema('Return immediately while the subagent keeps working.', false),
+    wait: booleanSchema('Wait for the subagent to finish.', true),
     timeout: numberSchema('Maximum seconds to wait.'),
   }, ['prompt', 'title']),
   definition('SendMessageTool', 'Queue a follow-up message for a managed subagent.', {
@@ -202,7 +202,7 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
       },
     },
-    wait: booleanSchema('Wait for all spawned agents.'),
+    wait: booleanSchema('Default true. Wait for all spawned agents. If false, the parent runtime still joins required results before the turn ends.', true),
     timeout: numberSchema('Maximum seconds to wait for the batch.'),
   }, ['agents']),
   definition('TaskGetTool', 'Return one currently attached subagent status. Use only an exact id or name returned by the current TaskListTool result.', {
@@ -222,21 +222,21 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     task_id: stringSchema('Subagent id or stable name.'),
     message: stringSchema('Update message.'),
   }, ['task_id', 'message']),
-  definition('AwaitAgents', 'Wait for any or all currently attached subagents. Omit agent_ids for the tracked cohort; explicit targets must come from the current TaskListTool result.', {
+  definition('AwaitAgents', 'Wait for any or all currently attached subagents. Omit agent_ids for the tracked cohort; the default waits for all. Explicit targets must come from the current TaskListTool result.', {
     agent_ids: {
       description: 'Optional array of exact subagent ids or names returned by the current TaskListTool result. Do not retry stale targets.',
       type: 'array',
       items: { type: 'string' },
     },
-    wake_on: { type: 'string', enum: ['any', 'all', 'none'], default: 'any' },
+    wake_on: { type: 'string', enum: ['any', 'all', 'none'], default: 'all' },
     timeout_seconds: numberSchema('Maximum seconds to wait.'),
   }),
   definition('CheckAgentMessages', 'Drain or inspect lifecycle events from managed subagents.', {
     since_seq: { type: 'integer', minimum: 0, default: 0 },
     peek: booleanSchema('Do not advance the mailbox cursor.'),
   }),
-  definition('PeekAgent', 'Return the current snapshot of one managed subagent.', {
-    target: stringSchema('Subagent id or stable name.'),
+  definition('PeekAgent', 'Return one current managed-subagent snapshot. Use an exact id or name from the current TaskListTool result and do not retry stale targets.', {
+    target: stringSchema('Exact subagent id or stable name from the current TaskListTool result; do not retry stale targets.'),
   }, ['target']),
   definition('ResetAgent', 'Cancel then restart a managed subagent with a replacement task.', {
     target: stringSchema('Subagent id or stable name.'),
@@ -742,8 +742,12 @@ function titleSchema(description: string): Record<string, unknown> {
   return { type: 'string', description, minLength: 1, maxLength: MAX_AGENT_TITLE_LENGTH }
 }
 
-function booleanSchema(description: string): Record<string, unknown> {
-  return { type: 'boolean', description }
+function booleanSchema(description: string, defaultValue?: boolean): Record<string, unknown> {
+  return {
+    type: 'boolean',
+    description,
+    ...(defaultValue === undefined ? {} : { default: defaultValue }),
+  }
 }
 
 function numberSchema(description: string): Record<string, unknown> {
@@ -931,7 +935,7 @@ function nonnegativeInteger(inputs: JsonObject, name: string, defaultValue: numb
 }
 
 function normalizeWakeOn(value: string | undefined): 'all' | 'any' | 'none' {
-  const normalized = value?.trim().toLowerCase() || 'any'
+  const normalized = value?.trim().toLowerCase() || 'all'
   if (normalized === 'all' || normalized === 'any' || normalized === 'none') return normalized
   throw new ValidationError('wake_on', 'must be any, all, or none', value)
 }

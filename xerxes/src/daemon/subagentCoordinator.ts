@@ -62,6 +62,7 @@ export interface SubagentTurnCoordinator {
 
 export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
   private readonly active = new Map<string, ActiveCohort>()
+  private readonly delivered = new Set<string>()
 
   constructor(
     private readonly manager: Pick<SubAgentManager, 'waitFor'>,
@@ -83,11 +84,25 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
 
     const previous = this.active.get(normalized)
     if (previous) previous.closed = true
+    const snapshots = this.listSnapshots()
+    const visibleIds = new Set(snapshots.map(snapshot => snapshot.id))
+    for (const id of this.delivered) {
+      if (!visibleIds.has(id)) this.delivered.delete(id)
+    }
     const cohort: ActiveCohort = {
       deadline: this.waitTimeoutMs === undefined
         ? undefined
         : this.now() + Math.max(0, this.waitTimeoutMs),
-      ids: new Set(),
+      // A parent can be interrupted or its daemon can restart while children
+      // continue or leave recovered terminal snapshots behind. Reattach every
+      // undelivered handle owned by the session so the next turn receives the
+      // results automatically instead of requiring TaskList/Peek prompting.
+      ids: new Set(snapshots
+        .filter(snapshot => (
+          snapshot.sourceAgentId?.trim() === normalized
+          && !this.delivered.has(snapshot.id)
+        ))
+        .map(snapshot => snapshot.id)),
       sourceId: normalized,
       closed: false,
     }
@@ -104,6 +119,7 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       if (!sourceId) continue
       const cohort = this.active.get(sourceId)
       if (!cohort || cohort.closed) continue
+      if (this.delivered.has(snapshot.id)) continue
       cohort.ids.add(snapshot.id)
     }
   }
@@ -111,6 +127,7 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
   consume(snapshots: readonly SpawnedAgentSnapshot[]): void {
     for (const snapshot of snapshots) {
       if (!TERMINAL_STATUSES.has(snapshot.status)) continue
+      this.delivered.add(snapshot.id)
       const sourceId = snapshot.sourceAgentId?.trim()
       if (!sourceId) continue
       this.active.get(sourceId)?.ids.delete(snapshot.id)
@@ -152,6 +169,9 @@ export class NativeSubagentTurnCoordinator implements SubagentTurnCoordinator {
       const snapshot = byId.get(id)
       return snapshot === undefined ? [] : [snapshot]
     })
+    for (const snapshot of results) {
+      if (TERMINAL_STATUSES.has(snapshot.status)) this.delivered.add(snapshot.id)
+    }
     cohort.ids.clear()
     // An explicitly bounded wait includes unfinished snapshots so callers
     // opting into a deadline can explain partial progress.

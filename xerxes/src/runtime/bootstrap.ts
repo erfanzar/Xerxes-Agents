@@ -304,6 +304,7 @@ export function buildBootstrapSystemPrompt(
       '# Multi-Agent Orchestration',
       '- Use available agent tools for genuinely independent work and keep task boundaries clear.',
       '- Prefer separate research, implementation, and review paths when parallelism helps.',
+      '- Track spawned work without waiting for a user reminder. Do not final-answer while required agents are queued or running; await all required results, then verify and synthesize them in the current turn.',
     )
     if (toolNames.has('SpawnAgents')) {
       sections.push(

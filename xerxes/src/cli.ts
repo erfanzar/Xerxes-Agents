@@ -34,7 +34,7 @@ import { InMemoryDaemonRuntime } from "./daemon/runtime.js";
 import { daemonBuildIdForEntry } from "./daemon/sourceBuild.js";
 import { DaemonSubagentEventBus } from "./daemon/subagentEvents.js";
 import { createNativeSubagentHost } from "./daemon/subagentHost.js";
-import { AgentTurnRunner } from "./daemon/turnRunner.js";
+import { AgentTurnRunner, formatSubagentResults } from "./daemon/turnRunner.js";
 import {
   defaultSkillDiscoveryDirectories,
   SkillRegistry,
@@ -857,7 +857,10 @@ async function acpServer(
     tools: tools.definitions(),
     ...(connection.topP === undefined ? {} : { topP: connection.topP }),
   });
-  registerClaudeAgentTools(tools, { manager: subagentHost.managerPort });
+  registerClaudeAgentTools(tools, {
+    backgroundAgents: subagentHost.turnCoordinator,
+    manager: subagentHost.managerPort,
+  });
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
     cwd: workspaceRoot,
@@ -880,6 +883,7 @@ async function acpServer(
       ? { maxTokens: connection.maxTokens }
       : {}),
     defaultPermissionMode,
+    subagentCoordinator: subagentHost.turnCoordinator,
     ...(connection.temperature !== undefined
       ? { temperature: connection.temperature }
       : {}),
@@ -974,7 +978,10 @@ async function runOneShot(prompt: string): Promise<void> {
     tools: tools.definitions(),
     ...(connection.topP === undefined ? {} : { topP: connection.topP }),
   });
-  registerClaudeAgentTools(tools, { manager: subagentHost.managerPort });
+  registerClaudeAgentTools(tools, {
+    backgroundAgents: subagentHost.turnCoordinator,
+    manager: subagentHost.managerPort,
+  });
   const selectedTools = agentToolDefinitions(tools.definitions(), agent);
   const boot = await bootstrap({
     cwd: workspaceRoot,
@@ -989,15 +996,18 @@ async function runOneShot(prompt: string): Promise<void> {
     await agentMemory.toPromptSection(),
     await selfMemory.systemPromptAddendum(),
   );
+  const sessionId = `oneshot-${crypto.randomUUID()}`;
+  const state = createAgentState();
+  const subagentCohort = subagentHost.turnCoordinator.begin(sessionId);
   let wroteText = false;
   try {
     for await (const event of runTurn(
       {
         model,
-        state: createAgentState(),
+        state,
         userMessage: prompt,
         permissionMode: "accept-all",
-        sessionId: `oneshot-${crypto.randomUUID()}`,
+        sessionId,
         ...(agent?.name ? { agentId: agent.name } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
         ...(connection.maxTokens !== undefined
@@ -1010,6 +1020,8 @@ async function runOneShot(prompt: string): Promise<void> {
         ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
       },
       {
+        awaitAgentEvents: async (signal) =>
+          formatSubagentResults(await subagentCohort.waitForResults(signal)),
         llm,
         toolExecutor: tools,
       },
@@ -1022,6 +1034,7 @@ async function runOneShot(prompt: string): Promise<void> {
       }
     }
   } finally {
+    subagentCohort.close();
     await subagentHost.manager.shutdown();
   }
   if (wroteText) process.stdout.write("\n");

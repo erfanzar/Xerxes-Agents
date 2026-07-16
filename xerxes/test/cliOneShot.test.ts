@@ -80,7 +80,7 @@ test('one-shot CLI exposes native subagents and their catalog to the main model'
         && (message as { role?: unknown }).role === 'system'
         && typeof (message as { content?: unknown }).content === 'string'
     ))
-    expect(system?.content).toContain('On every non-trivial turn, decide internally whether delegation helps')
+    expect(system?.content).toContain('On non-trivial turns, delegate only independent work that materially helps')
     expect(system?.content).toContain('Available subagent types:')
     expect(system?.content).toContain('- reviewer: Independent read-only code review')
     expect(system?.content).toContain('demo-skill: Demonstrate live skill discovery.')
@@ -89,6 +89,121 @@ test('one-shot CLI exposes native subagents and their catalog to the main model'
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('one-shot CLI waits for detached subagents and synthesizes their delivered output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-oneshot-join-'))
+  const home = join(root, 'home')
+  const project = join(root, 'project')
+  const requests: Array<Record<string, unknown>> = []
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as Record<string, unknown>
+      requests.push(body)
+      const messages = Array.isArray(body.messages) ? body.messages : []
+      const context = JSON.stringify(messages)
+      const userMessages = messages.flatMap(message => (
+        typeof message === 'object'
+        && message !== null
+        && (message as { role?: unknown }).role === 'user'
+        && typeof (message as { content?: unknown }).content === 'string'
+          ? [(message as { content: string }).content]
+          : []
+      ))
+      if (context.includes('[sub-agent events]')) {
+        return completionResponse('Integrated CHILD_OK.')
+      }
+      if (userMessages.includes('Inspect independently and return CHILD_OK.')) {
+        return completionResponse('Child independently found CHILD_OK.')
+      }
+      if (messages.some(message => (
+        typeof message === 'object'
+        && message !== null
+        && (message as { role?: unknown }).role === 'tool'
+        && (message as { name?: unknown }).name === 'SpawnAgents'
+      ))) {
+        return sseResponse([{
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 0 },
+        }])
+      }
+      return sseResponse([{
+        choices: [{
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'spawn-review',
+              function: {
+                name: 'SpawnAgents',
+                arguments: JSON.stringify({
+                  agents: [{
+                    name: 'review-one',
+                    prompt: 'Inspect independently and return CHILD_OK.',
+                    subagent_type: 'reviewer',
+                    title: 'Independent review',
+                  }],
+                  wait: false,
+                }),
+              },
+            }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }])
+    },
+  })
+
+  try {
+    await Promise.all([
+      mkdir(join(home, 'daemon'), { recursive: true }),
+      mkdir(project, { recursive: true }),
+    ])
+    await writeFile(
+      join(home, 'daemon', 'config.json'),
+      JSON.stringify({
+        project_directory: project,
+        runtime: {
+          model: 'gpt-4o',
+          provider: 'openai',
+          base_url: `${server.url}v1`,
+          api_key: 'test-key',
+          permission_mode: 'accept-all',
+        },
+      }),
+      'utf8',
+    )
+
+    const child = Bun.spawn([process.execPath, CLI, 'delegate an independent review'], {
+      cwd: project,
+      env: { ...process.env, XERXES_HOME: home },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+
+    expect(exitCode).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout).toBe('Integrated CHILD_OK.\n')
+    expect(requests.some(request => JSON.stringify(request).includes('[sub-agent events]'))).toBeTrue()
+    expect(requests.some(request => JSON.stringify(request).includes('Child independently found CHILD_OK.'))).toBeTrue()
+  } finally {
+    server.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+function completionResponse(content: string): Response {
+  return sseResponse([{
+    choices: [{ delta: { content }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  }])
+}
 
 function sseResponse(events: readonly Record<string, unknown>[]): Response {
   const body = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'

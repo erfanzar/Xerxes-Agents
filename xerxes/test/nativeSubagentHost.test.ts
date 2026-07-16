@@ -145,6 +145,52 @@ test('default subagent cohort joining has no wall-clock deadline', async () => {
   expect(observedTimeout).toBeUndefined()
 })
 
+test('the next parent turn rejoins an interrupted child and delivers its result exactly once', async () => {
+  const sourceId = 'interrupted-parent'
+  let snapshot: SpawnedAgentSnapshot = {
+    agentId: 'researcher',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: 'child-finishing-between-turns',
+    lastInput: 'finish the delegated review',
+    name: 'between-turns-reviewer',
+    promptProfile: 'researcher',
+    queueSize: 0,
+    sourceAgentId: sourceId,
+    status: 'running',
+    title: 'Between-turns review',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+  let waitCalls = 0
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> {
+      waitCalls += 1
+      return predicate()
+    },
+  }, () => [snapshot])
+
+  const interruptedTurn = coordinator.begin(sourceId)
+  expect(coordinator.trackedIds(sourceId)).toEqual([snapshot.id])
+  interruptedTurn.close()
+
+  snapshot = {
+    ...snapshot,
+    lastOutput: 'The delegated review is complete.',
+    status: 'completed',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const resumedTurn = coordinator.begin(sourceId)
+  expect(coordinator.trackedIds(sourceId)).toEqual([snapshot.id])
+  expect(await resumedTurn.waitForResults()).toEqual([snapshot])
+  resumedTurn.close()
+
+  const followingTurn = coordinator.begin(sourceId)
+  expect(coordinator.trackedIds(sourceId)).toEqual([])
+  expect(await followingTurn.waitForResults()).toEqual([])
+  expect(waitCalls).toBe(1)
+  followingTurn.close()
+})
+
 test('resumed transcript recovery and cohort tracking have no 8-agent cap', async () => {
   const sourceId = 'recovered-session'
   const archived = Array.from({ length: 1_000 }, (_, index) => ({
@@ -673,6 +719,17 @@ test('a restarted daemon exposes transcript agents as honest terminal snapshots 
       // Restoring happens before the provider request for this resumed turn.
     }
 
+    expect(client.requests).toHaveLength(2)
+    const joinedContext = client.requests[1]?.messages
+      .filter(message => message.role === 'user')
+      .map(message => String(message.content))
+      .join('\n') ?? ''
+    expect(joinedContext).toContain('[sub-agent events]')
+    expect(joinedContext).toContain('Persistence hunt')
+    expect(joinedContext).toContain('daemon process ended')
+    expect(joinedContext).toContain('API hunt')
+    expect(joinedContext).toContain('Found a reproducible middleware failure.')
+
     const systemPrompt = client.requests[0]?.messages
       .filter(message => message.role === 'system')
       .map(message => String(message.content))
@@ -704,6 +761,11 @@ test('a restarted daemon exposes transcript agents as honest terminal snapshots 
       last_output: 'Found a reproducible middleware failure.',
       status: 'completed',
     })
+
+    for await (const _event of runner.run(resumed, 'continue again', new AbortController().signal)) {
+      // Recovered results were already delivered and must not trigger another continuation.
+    }
+    expect(client.requests).toHaveLength(3)
 
     const peeked = JSON.parse(await registry.execute(
       toolCall('PeekAgent', { target: 'persistence-hunter' }),

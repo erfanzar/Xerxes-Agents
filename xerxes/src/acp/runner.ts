@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { errorMessage, type ToolExecutor } from '../executors/toolRegistry.js'
+import { mergePersistedSubagentSnapshots } from '../agents/subagentPersistence.js'
+import type { SubagentTurnCoordinator } from '../daemon/subagentCoordinator.js'
+import { formatSubagentResults } from '../daemon/turnRunner.js'
 import type { LlmClient } from '../llms/client.js'
 import { createAgentState, type AgentState, type PermissionRequest, type StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
@@ -21,6 +24,8 @@ export interface AcpAgentRunnerOptions {
   readonly modelListProvider?: () => readonly AcpModelInfo[]
   readonly policy?: ToolPolicy
   readonly systemPrompt?: string
+  /** Joins detached child work back into the ACP prompt that created it. */
+  readonly subagentCoordinator?: SubagentTurnCoordinator
   readonly temperature?: number
   readonly toolExecutor?: ToolExecutor
   readonly tools?: readonly ToolDefinition[]
@@ -130,6 +135,7 @@ export class AcpAgentRunner {
     const permissionMode = permissionModeFor(session, this.options.defaultPermissionMode ?? 'accept-all')
     state.metadata.permission_mode = permissionMode
     const summary: Record<string, unknown> = { ok: true, cancelled: false }
+    const subagentCohort = this.options.subagentCoordinator?.begin(session.sessionId)
 
     try {
       const permissionBroker: PermissionBroker = {
@@ -148,6 +154,13 @@ export class AcpAgentRunner {
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
         permissionMode,
       }, {
+        ...(subagentCohort ? {
+          awaitAgentEvents: async signal => {
+            const snapshots = await subagentCohort.waitForResults(signal)
+            mergePersistedSubagentSnapshots(state.metadata, snapshots)
+            return formatSubagentResults(snapshots)
+          },
+        } : {}),
         llm: this.options.llm,
         permissionBroker,
         ...(this.options.policy ? { policy: this.options.policy } : {}),
@@ -166,6 +179,7 @@ export class AcpAgentRunner {
         cancelled: session.cancelled || controller.signal.aborted,
       }
     } finally {
+      subagentCohort?.close()
       this.activePrompts.delete(session.sessionId)
       this.resolveQuestionsForSession(session.sessionId, '')
     }

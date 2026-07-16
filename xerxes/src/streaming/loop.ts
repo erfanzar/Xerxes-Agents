@@ -273,8 +273,13 @@ export async function* runTurn(
 
     if (!roundToolCalls.length) {
       const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+      const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
+      // A coordinator can acknowledge returned snapshots before cancellation
+      // becomes observable here. Persist the delivered results first so an
+      // interrupted parent either synthesizes them now or receives them from
+      // its durable history on the next turn.
       if (signal?.aborted) break
-      if (appendAgentEventMessage(state, agentEvents)) {
+      if (appendedAgentEvents) {
         if (toolTurn + 1 >= turnLimit) turnLimit += 1
         continue
       }
@@ -425,8 +430,9 @@ export async function* runTurn(
     }
     if (toolTurn + 1 >= turnLimit) {
       const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+      const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
       if (signal?.aborted) break
-      if (appendAgentEventMessage(state, agentEvents)) {
+      if (appendedAgentEvents) {
         forceToolFreeSummary = true
         needsFinalization = true
       }

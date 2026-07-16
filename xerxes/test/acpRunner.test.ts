@@ -5,8 +5,10 @@ import { expect, test } from 'bun:test'
 
 import { AcpAgentRunner } from '../src/acp/runner.js'
 import { AcpServer } from '../src/acp/server.js'
+import type { SubagentTurnCoordinator } from '../src/daemon/subagentCoordinator.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import type { SpawnedAgentSnapshot } from '../src/operators/subagents.js'
 import type { ToolDefinition } from '../src/types/toolCalls.js'
 
 class TextClient implements LlmClient {
@@ -29,6 +31,48 @@ class WriteThenTextClient implements LlmClient {
       }],
       usage: { inputTokens: 4, outputTokens: 1 },
     }
+  }
+}
+
+class JoinedAgentClient implements LlmClient {
+  readonly requests: CompletionRequest[] = []
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    this.requests.push(request)
+    const context = request.messages.map(message => String(message.content)).join('\n')
+    yield context.includes('[sub-agent events]')
+      ? { content: 'Integrated delegated evidence.', usage: { inputTokens: 2, outputTokens: 2 } }
+      : { content: 'Parent draft.', usage: { inputTokens: 1, outputTokens: 1 } }
+  }
+}
+
+class RecordingSubagentCoordinator implements SubagentTurnCoordinator {
+  beginCalls: string[] = []
+  closeCalls = 0
+  waitCalls = 0
+
+  begin(sourceId: string) {
+    this.beginCalls.push(sourceId)
+    let delivered = false
+    return {
+      close: () => {
+        this.closeCalls += 1
+      },
+      waitForResults: async () => {
+        this.waitCalls += 1
+        if (delivered) return []
+        delivered = true
+        return [completedAgent(sourceId)]
+      },
+    }
+  }
+
+  consume(_snapshots: readonly SpawnedAgentSnapshot[]): void {}
+
+  track(_snapshots: readonly SpawnedAgentSnapshot[]): void {}
+
+  trackedIds(_sourceId: string): readonly string[] {
+    return []
   }
 }
 
@@ -78,6 +122,45 @@ test('ACP agent runner gives a session model override precedence over its fallba
 
   expect(client.requests).toHaveLength(1)
   expect(client.requests[0]?.model).toBe('session-model')
+})
+
+test('ACP agent runner automatically joins detached subagents and asks the model to synthesize them', async () => {
+  const client = new JoinedAgentClient()
+  const coordinator = new RecordingSubagentCoordinator()
+  const runner = new AcpAgentRunner({
+    llm: client,
+    model: 'gpt-4o',
+    subagentCoordinator: coordinator,
+  })
+  const server = new AcpServer({ runner })
+  const sessionId = String(server.openSession('/workspace').session_id)
+  const session = server.sessions.get(sessionId)
+  if (!session) {
+    throw new Error('expected ACP session')
+  }
+  const events: Record<string, unknown>[] = []
+
+  const result = await runner.runPrompt({
+    session,
+    text: 'delegate this work',
+    emit: event => { events.push(event) },
+  })
+
+  expect(result).toMatchObject({ ok: true, cancelled: false, input_tokens: 3, output_tokens: 3 })
+  expect(coordinator.beginCalls).toEqual([sessionId])
+  expect(coordinator.waitCalls).toBe(2)
+  expect(coordinator.closeCalls).toBe(1)
+  expect(client.requests).toHaveLength(2)
+  expect(client.requests[1]?.messages).toEqual(expect.arrayContaining([
+    expect.objectContaining({ role: 'user', content: expect.stringContaining('[sub-agent events]') }),
+  ]))
+  expect(client.requests[1]?.messages).toEqual(expect.arrayContaining([
+    expect.objectContaining({ role: 'user', content: expect.stringContaining('Independent review evidence') }),
+  ]))
+  expect(events.filter(event => event.kind === 'text_delta').map(event => event.text)).toEqual([
+    'Parent draft.',
+    'Integrated delegated evidence.',
+  ])
 })
 
 test('ACP agent runner waits for editor approval and feeds the decision back into tool execution', async () => {
@@ -240,5 +323,22 @@ class RecordingModelClient implements LlmClient {
   async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
     this.requests.push(request)
     yield { content: 'Model selected.', usage: { inputTokens: 1, outputTokens: 1 } }
+  }
+}
+
+function completedAgent(sourceAgentId: string): SpawnedAgentSnapshot {
+  return {
+    agentId: 'reviewer',
+    closed: false,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    id: 'subagent-review',
+    lastOutput: 'Independent review evidence',
+    name: 'review-one',
+    promptProfile: 'reviewer',
+    queueSize: 0,
+    sourceAgentId,
+    status: 'completed',
+    title: 'Independent review',
+    updatedAt: '2026-01-01T00:00:01.000Z',
   }
 }
