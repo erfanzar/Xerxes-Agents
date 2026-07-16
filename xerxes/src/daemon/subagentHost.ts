@@ -25,6 +25,10 @@ import { runTurn } from '../streaming/loop.js'
 import type { PermissionBroker, PermissionMode } from '../streaming/permissions.js'
 import type { ToolDefinition } from '../types/toolCalls.js'
 import type { DaemonEvent } from './runtime.js'
+import {
+  NativeSubagentTurnCoordinator,
+  type SubagentTurnCoordinator,
+} from './subagentCoordinator.js'
 import { DaemonSubagentEventBus } from './subagentEvents.js'
 
 export interface NativeSubagentHostOptions {
@@ -44,6 +48,7 @@ export interface NativeSubagentHostOptions {
 export interface NativeSubagentHost {
   readonly manager: SubAgentManager
   readonly managerPort: SpawnedAgentManagerPort
+  readonly turnCoordinator: SubagentTurnCoordinator
   /** Cancel and invalidate every child owned by this host. */
   invalidateAll(): number
   /** Cancel and invalidate every child owned by one parent session. */
@@ -76,10 +81,19 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
       )
     },
   })
-  const managerPort = new RichSubagentManagerPort(manager, options, activeGeneration)
+  const liveManagerPort = new RichSubagentManagerPort(manager, options, activeGeneration)
+  const managerPort = new RecoverableSubagentManagerPort(liveManagerPort)
+  const turnCoordinator = new NativeSubagentTurnCoordinator(
+    manager,
+    () => managerPort.listHandles(),
+    undefined,
+    undefined,
+    snapshots => managerPort.restoreSnapshots(snapshots),
+  )
   return {
     manager,
     managerPort,
+    turnCoordinator,
     invalidateAll: () => managerPort.invalidateAll(),
     cancelSource: sourceAgentId => managerPort.invalidateSource(sourceAgentId),
     reconfigure(nextOptions) {
@@ -391,6 +405,172 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       updatedAt,
     })
   }
+}
+
+const RECOVERED_TERMINAL_STATUSES = new Set<SpawnedAgentStatus>([
+  'cancelled',
+  'closed',
+  'completed',
+  'error',
+  'interrupted',
+])
+
+const DAEMON_RESTART_INTERRUPTION = 'Subagent execution was interrupted because its daemon process ended. The last known metadata and output were recovered from the parent transcript; use ResetAgent to rerun it.'
+
+/**
+ * Keeps honest, inspectable tombstones for tasks recorded in a resumed parent
+ * transcript. A native child cannot survive its Bun process, but losing its
+ * handle entirely makes TaskList/Await retry stale ids forever.
+ */
+class RecoverableSubagentManagerPort implements SpawnedAgentManagerPort {
+  private readonly recovered = new Map<string, SpawnedAgentSnapshot>()
+  private readonly pendingRestart = new Set<string>()
+  private readonly tombstones = new Set<string>()
+
+  constructor(private readonly live: RichSubagentManagerPort) {}
+
+  reconfigure(options: NativeSubagentHostOptions, generation: number): void {
+    this.live.reconfigure(options, generation)
+  }
+
+  restoreSnapshots(snapshots: readonly SpawnedAgentSnapshot[]): number {
+    const liveIds = new Set(this.live.listHandles().map(snapshot => snapshot.id))
+    let restored = 0
+    for (const snapshot of snapshots) {
+      if (liveIds.has(snapshot.id) || this.recovered.has(snapshot.id) || this.tombstones.has(snapshot.id)) continue
+      this.recovered.set(snapshot.id, recoveredTombstone(snapshot))
+      restored += 1
+    }
+    return restored
+  }
+
+  listHandles(): SpawnedAgentSnapshot[] {
+    const live = this.live.listHandles()
+    const liveIds = new Set(live.map(snapshot => snapshot.id))
+    return [...live, ...[...this.recovered.values()].filter(snapshot => !liveIds.has(snapshot.id))]
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+  }
+
+  async spawn(options: SpawnAgentOptions = {}): Promise<SpawnedAgentSnapshot> {
+    return this.live.spawn(options)
+  }
+
+  async sendInput(
+    handleId: string | undefined,
+    options: SendAgentInputOptions,
+  ): Promise<SpawnedAgentSnapshot> {
+    const recovered = this.findRecovered(handleId)
+    if (!recovered) return this.live.sendInput(handleId, options)
+    if (!this.pendingRestart.delete(recovered.id)) {
+      throw new ValidationError(
+        'handle_id',
+        'belongs to a task interrupted by a daemon restart; call ResetAgent to rerun it',
+        recovered.id,
+      )
+    }
+    const input = (options.message ?? options.taskDescription)?.trim()
+    if (!input) throw new ValidationError('message', 'spawned agent input is required', input)
+    const replacement = await this.live.spawn({
+      agent: {
+        id: recovered.agentId,
+        ...(recovered.model ? { model: recovered.model } : {}),
+        name: recovered.promptProfile,
+      },
+      message: input,
+      nickname: recovered.name,
+      ...(recovered.creatorAgentId ? { creatorAgentId: recovered.creatorAgentId } : {}),
+      ...(recovered.parentAgentId ? { parentAgentId: recovered.parentAgentId } : {}),
+      promptProfile: recovered.promptProfile,
+      ...(recovered.sourceAgentId ? { sourceAgentId: recovered.sourceAgentId } : {}),
+      title: recovered.title,
+    })
+    this.recovered.delete(recovered.id)
+    this.tombstones.add(recovered.id)
+    return replacement
+  }
+
+  async wait(targets: readonly string[], timeoutMs = 30_000): Promise<{
+    readonly completed: readonly SpawnedAgentSnapshot[]
+    readonly pending: readonly SpawnedAgentSnapshot[]
+  }> {
+    const liveIds = new Set(this.live.listHandles().map(snapshot => snapshot.id))
+    const active: string[] = []
+    const archived: SpawnedAgentSnapshot[] = []
+    for (const target of targets) {
+      if (liveIds.has(target)) {
+        active.push(target)
+        continue
+      }
+      const recovered = this.findRecovered(target)
+      if (!recovered) throw new ValidationError('handle_id', 'spawned agent not found', target)
+      archived.push(recovered)
+    }
+    const liveResult = active.length
+      ? await this.live.wait(active, timeoutMs)
+      : { completed: [], pending: [] }
+    return Object.freeze({
+      completed: Object.freeze([...liveResult.completed, ...archived]),
+      pending: Object.freeze([...liveResult.pending]),
+    })
+  }
+
+  resume(handleId: string): SpawnedAgentSnapshot {
+    const recovered = this.findRecovered(handleId)
+    if (!recovered) return this.live.resume(handleId)
+    this.pendingRestart.add(recovered.id)
+    return Object.freeze({ ...recovered, closed: false, status: 'idle' })
+  }
+
+  close(handleId: string): SpawnedAgentSnapshot & { readonly previousStatus: SpawnedAgentStatus } {
+    const recovered = this.findRecovered(handleId)
+    if (!recovered) return this.live.close(handleId)
+    const closed = Object.freeze({
+      ...recovered,
+      closed: true,
+      status: 'closed' as const,
+      updatedAt: new Date().toISOString(),
+    })
+    this.recovered.set(recovered.id, closed)
+    this.pendingRestart.delete(recovered.id)
+    return Object.freeze({ ...closed, previousStatus: recovered.status })
+  }
+
+  invalidateAll(): number {
+    const cancelled = this.live.invalidateAll()
+    for (const snapshot of this.recovered.values()) this.close(snapshot.id)
+    return cancelled
+  }
+
+  invalidateSource(sourceAgentId: string): number {
+    const cancelled = this.live.invalidateSource(sourceAgentId)
+    for (const snapshot of this.recovered.values()) {
+      if (snapshot.sourceAgentId === sourceAgentId) this.close(snapshot.id)
+    }
+    return cancelled
+  }
+
+  invalidateHandlesExceeding(nextMode: PermissionMode): number {
+    return this.live.invalidateHandlesExceeding(nextMode)
+  }
+
+  private findRecovered(idOrName: string | undefined): SpawnedAgentSnapshot | undefined {
+    const target = idOrName?.trim()
+    if (!target) return undefined
+    return this.recovered.get(target)
+      ?? [...this.recovered.values()].find(snapshot => snapshot.name === target)
+  }
+}
+
+function recoveredTombstone(snapshot: SpawnedAgentSnapshot): SpawnedAgentSnapshot {
+  if (RECOVERED_TERMINAL_STATUSES.has(snapshot.status)) return snapshot
+  return Object.freeze({
+    ...snapshot,
+    closed: false,
+    error: DAEMON_RESTART_INTERRUPTION,
+    queueSize: 0,
+    status: 'interrupted',
+    updatedAt: new Date().toISOString(),
+  })
 }
 
 async function runNativeSubagent(

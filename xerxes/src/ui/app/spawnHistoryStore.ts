@@ -32,6 +32,16 @@ export const $spawnDiff = atom<null | SpawnDiffPair>(null)
 export const getSpawnHistory = () => $spawnHistory.get()
 export const getSpawnDiff = () => $spawnDiff.get()
 
+/** Keep the global warm cache from leaking one session's agent rows into another. */
+export const spawnHistoryForSession = (
+  history: readonly SpawnSnapshot[],
+  sessionId: null | string
+): SpawnSnapshot[] => {
+  const normalized = sessionId?.trim()
+
+  return normalized ? history.filter(snapshot => snapshot.sessionId === normalized) : []
+}
+
 export const clearSpawnHistory = () => $spawnHistory.set([])
 export const clearDiffPair = () => $spawnDiff.set(null)
 export const setDiffPair = (pair: SpawnDiffPair) => $spawnDiff.set(pair)

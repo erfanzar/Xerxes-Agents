@@ -48,6 +48,20 @@ const diffSegmentBody = (msg: Msg): null | string => {
 
 const hasDetails = (msg: Msg): boolean => Boolean(msg.thinking?.trim() || msg.tools?.length || msg.subagents?.length)
 
+/**
+ * A parent turn boundary is terminal for its live progress surface. Any child
+ * that did not publish a terminal event must therefore be archived honestly
+ * as interrupted, never left behind as a permanently "live" history row.
+ * A later subagent.complete event can still reconcile this row to completed.
+ */
+const archiveSubagentAtTurnBoundary = (agent: SubagentProgress): SubagentProgress => ({
+  ...agent,
+  notes: [...agent.notes],
+  status: agent.status === 'queued' || agent.status === 'running' ? 'interrupted' : agent.status,
+  thinking: [...agent.thinking],
+  tools: [...agent.tools]
+})
+
 const isTodoStatus = (status: unknown): status is TodoItem['status'] =>
   status === 'pending' || status === 'in_progress' || status === 'completed' || status === 'cancelled'
 
@@ -340,12 +354,7 @@ class TurnController {
     const segments = this.segmentMessages
     const partial = this.bufRef.trimStart()
     const tools = this.pendingSegmentTools
-    const subagents = getTurnState().subagents.map(agent => ({
-      ...agent,
-      notes: [...agent.notes],
-      thinking: [...agent.thinking],
-      tools: [...agent.tools]
-    }))
+    const subagents = getTurnState().subagents.map(archiveSubagentAtTurnBoundary)
 
     if (subagents.length) {
       pushSnapshot(subagents, { sessionId: sid, startedAt: null })
@@ -603,12 +612,7 @@ class TurnController {
     // progress area.
     this.closeReasoningSegment()
     this.flushStreamingSegment()
-    const subagents = getTurnState().subagents.map(agent => ({
-      ...agent,
-      notes: [...agent.notes],
-      thinking: [...agent.thinking],
-      tools: [...agent.tools]
-    }))
+    const subagents = getTurnState().subagents.map(archiveSubagentAtTurnBoundary)
     const preserved = subagents.length
       ? [...this.segmentMessages, { kind: 'trail' as const, role: 'system' as const, subagents, text: '' }]
       : this.segmentMessages
@@ -681,12 +685,7 @@ class TurnController {
       this.reasoningSegmentIndex !== null || segments.some(msg => Boolean(msg.thinking?.trim()))
 
     const finalThinking = hasReasoningSegment ? '' : savedReasoning.trim()
-    const finishedSubagents = getTurnState().subagents.map(agent => ({
-      ...agent,
-      notes: [...agent.notes],
-      thinking: [...agent.thinking],
-      tools: [...agent.tools]
-    }))
+    const finishedSubagents = getTurnState().subagents.map(archiveSubagentAtTurnBoundary)
 
     const finalDetails: Msg = {
       kind: 'trail',

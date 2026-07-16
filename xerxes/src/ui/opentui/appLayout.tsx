@@ -15,7 +15,7 @@ import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '.
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $uiState, $uiTheme } from '../app/uiStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
-import { $spawnHistory } from '../app/spawnHistoryStore.js'
+import { $spawnHistory, spawnHistoryForSession } from '../app/spawnHistoryStore.js'
 import {
   DERAFSH_ANIMATION_FRAME_COUNT,
   DERAFSH_ANIMATION_FRAME_MS,
@@ -103,23 +103,13 @@ function StreamingAssistant() {
   )
 }
 
-const WAITING_FRAMES = ['◇', '◈', '◆', '◈'] as const
-
 function WaitingLine() {
   const t = useStore($uiTheme)
-  const [frame, setFrame] = useState(0)
-
-  useEffect(() => {
-    const timer = setInterval(() => setFrame(current => (current + 1) % WAITING_FRAMES.length), 180)
-    timer.unref?.()
-
-    return () => clearInterval(timer)
-  }, [])
 
   return (
     <Box flexShrink={0} marginTop={1} paddingLeft={3}>
       <Text color={t.color.muted}>
-        <Span color={t.color.accent}>{WAITING_FRAMES[frame]} </Span>
+        <Span color={t.color.accent}>◇ </Span>
         Planning next moves
       </Text>
     </Box>
@@ -737,31 +727,8 @@ function PromptZone({ actions }: Pick<AppLayoutProps, 'actions'>) {
 
 // ── Composer ───────────────────────────────────────────────────────────────
 
-const PROMPT_LOADING_FRAMES = [
-  { active: 0, forward: true },
-  { active: 1, forward: true },
-  { active: 2, forward: true },
-  { active: 2, forward: false },
-  { active: 1, forward: false },
-  { active: 0, forward: false }
-] as const
-
 function PromptModeLabel({ busy, label }: { busy: boolean; label: string }) {
   const t = useStore($uiTheme)
-  const [frame, setFrame] = useState(0)
-
-  useEffect(() => {
-    if (!busy) {
-      setFrame(0)
-
-      return
-    }
-
-    const timer = setInterval(() => setFrame(current => (current + 1) % PROMPT_LOADING_FRAMES.length), 120)
-    timer.unref?.()
-
-    return () => clearInterval(timer)
-  }, [busy])
 
   if (!busy) {
     return (
@@ -771,20 +738,9 @@ function PromptModeLabel({ busy, label }: { busy: boolean; label: string }) {
     )
   }
 
-  const step = PROMPT_LOADING_FRAMES[frame] ?? PROMPT_LOADING_FRAMES[0]
-
   return (
-    <Text>
-      {[0, 1, 2].map(index => {
-        const distance = step.forward ? step.active - index : index - step.active
-        const active = distance >= 0 && distance < 2
-
-        return (
-          <Span color={distance === 0 ? t.color.accent : t.color.border} key={index}>
-            {active ? '■' : '⬝'}
-          </Span>
-        )
-      })}
+    <Text bold color={t.color.accent}>
+      ◆
     </Text>
   )
 }
@@ -1403,7 +1359,11 @@ export function AppLayout({
         state.subagents.length
     )
   )
-  const spawnHistory = useStore($spawnHistory)
+  const allSpawnHistory = useStore($spawnHistory)
+  const spawnHistory = useMemo(
+    () => spawnHistoryForSession(allSpawnHistory, ui.sid),
+    [allSpawnHistory, ui.sid]
+  )
   const { height, width } = useTerminalDimensions()
   const scrollboxRef = useCallback(
     (scrollbox: ScrollBoxRenderable | null) => {

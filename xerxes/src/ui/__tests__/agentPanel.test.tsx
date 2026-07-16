@@ -3,7 +3,7 @@
 /** @jsxImportSource @opentui/react */
 
 import { testRender } from '@opentui/react/test-utils'
-import { act } from 'react'
+import { act, Profiler } from 'react'
 import { describe, expect, it } from 'vitest'
 
 import type { SpawnSnapshot } from '../app/spawnHistoryStore.js'
@@ -131,6 +131,50 @@ describe('OpenTUI agent panel', () => {
       expect(frame).toContain('full-width workspace')
       expect(frame).not.toContain('Agents')
       expect(frame).not.toContain('No agents yet')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('reports an archived interrupted row as done rather than live', async () => {
+    const setup = await testRender(
+      <box height="100%" width="100%">
+        <AgentPanel history={[snapshot([agent({ status: 'interrupted' })])]} liveAgents={[]} t={DEFAULT_THEME} />
+      </box>,
+      { height: 12, width: 72 }
+    )
+
+    try {
+      await setup.flush()
+      const frame = setup.captureCharFrame()
+
+      expect(frame).toContain('1 done')
+      expect(frame).not.toContain('1 live')
+      expect(frame).toContain('interrupted')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('does not schedule periodic commits while live-agent props stay stable', async () => {
+    let commits = 0
+    const liveAgents = [agent({ status: 'running' })]
+    const setup = await testRender(
+      <Profiler id="stable-agent-panel" onRender={() => commits++}>
+        <AgentPanel history={[]} liveAgents={liveAgents} t={DEFAULT_THEME} />
+      </Profiler>,
+      { height: 18, width: 72 }
+    )
+
+    try {
+      await setup.flush()
+      const initialCommits = commits
+
+      await Bun.sleep(650)
+      await setup.flush()
+
+      expect(initialCommits).toBeGreaterThan(0)
+      expect(commits).toBe(initialCommits)
     } finally {
       act(() => setup.renderer.destroy())
     }

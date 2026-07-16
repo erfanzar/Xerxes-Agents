@@ -5,6 +5,7 @@ import { expect, test } from 'bun:test'
 
 import type { ToolExecutor } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
+import { LoopDetector } from '../src/runtime/loopDetector.js'
 import { PolicyEngine, ToolPolicy } from '../src/security/policy.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import { runTurn } from '../src/streaming/loop.js'
@@ -19,11 +20,11 @@ const READ_FILE: ToolDefinition = {
   },
 }
 
-function readFileCall(id: string): ToolCall {
+function readFileCall(id: string, path = 'README.md'): ToolCall {
   return {
     id,
     type: 'function',
-    function: { name: 'ReadFile', arguments: { path: 'README.md' } },
+    function: { name: 'ReadFile', arguments: { path } },
   }
 }
 
@@ -132,29 +133,243 @@ test('streaming loop injects passive sub-agent events through the explicit nativ
   })
 })
 
-test('configured tool-turn limits can exceed the default without a hidden fifty-turn ceiling', async () => {
+test('streaming loop waits for detached subagents and resumes the same parent turn with their results', async () => {
+  const requests: CompletionRequest[] = []
+  let waits = 0
+  const state = createAgentState()
+
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    state,
+    userMessage: 'run the parallel review',
+  }, {
+    awaitAgentEvents: async () => waits++ === 0
+      ? ['[agent result title="Review" status=completed]\nreview findings\n[/agent result]']
+      : [],
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        yield { content: requests.length === 1 ? 'The review is running.' : 'Integrated review findings.' }
+      },
+    },
+  }))
+
+  expect(requests).toHaveLength(2)
+  expect(requests[1]?.messages).toContainEqual({
+    role: 'user',
+    content:
+      '[sub-agent events]\n' +
+      '[agent result title="Review" status=completed]\nreview findings\n[/agent result]',
+  })
+  expect(state.turnCount).toBe(1)
+  expect(state.messages.filter(message => message.role === 'user')).toHaveLength(2)
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'The review is running.',
+    'Integrated review findings.',
+  ])
+})
+
+test('streaming loop joins detached subagents before a final tool-turn boundary can end the parent', async () => {
+  const requests: CompletionRequest[] = []
+  let waits = 0
+  const state = createAgentState()
+
+  const events = await collect(runTurn({
+    maxToolTurns: 1,
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state,
+    tools: [READ_FILE],
+    userMessage: 'delegate at the turn boundary',
+  }, {
+    awaitAgentEvents: async () => waits++ === 0
+      ? ['[agent result title="Boundary child" status=completed]\nchild report\n[/agent result]']
+      : [],
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        if (requests.length === 1) {
+          yield { toolCalls: [readFileCall('spawn-at-boundary')] }
+          return
+        }
+        yield { content: 'Integrated boundary child report.' }
+      },
+    },
+    toolExecutor: successfulExecutor,
+  }))
+
+  expect(waits).toBe(2)
+  expect(requests).toHaveLength(2)
+  expect(requests[1]?.tools).toBeUndefined()
+  expect(requests[1]?.messages).toContainEqual({
+    role: 'user',
+    content:
+      '[sub-agent events]\n' +
+      '[agent result title="Boundary child" status=completed]\nchild report\n[/agent result]',
+  })
+  expect(events.filter(event => event.type === 'text').map(event => event.text)).toEqual([
+    'Integrated boundary child report.',
+  ])
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done' })
+})
+
+test('default streaming loop executes more than twenty-five distinct tool calls', async () => {
+  const requests: CompletionRequest[] = []
+  const executed: string[] = []
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state: createAgentState(),
+    tools: [READ_FILE],
+    userMessage: 'read every distinct file needed',
+  }, {
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        if (requests.length <= 30) {
+          yield { toolCalls: [readFileCall(`default-${requests.length}`, `file-${requests.length}.ts`)] }
+          return
+        }
+        yield { content: 'Completed thirty distinct reads.' }
+      },
+    },
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executed.push(call.id)
+        return 'tool result'
+      },
+    },
+  }))
+
+  expect(requests).toHaveLength(31)
+  expect(executed).toEqual(Array.from({ length: 30 }, (_, index) => `default-${index + 1}`))
+  expect(events.filter(event => event.type === 'tool_start')).toHaveLength(30)
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(30)
+  expect(events).toContainEqual({ type: 'text', text: 'Completed thirty distinct reads.' })
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', toolCallsCount: 30 })
+})
+
+test('default tool turns can exceed fifty without a hidden round ceiling', async () => {
   class RepeatingToolClient implements LlmClient {
     calls = 0
 
     async *stream(): AsyncGenerator<LlmDelta> {
       this.calls += 1
-      yield { toolCalls: [readFileCall(`call-${this.calls}`)] }
+      if (this.calls <= 52) {
+        yield { toolCalls: [readFileCall(`call-${this.calls}`, `file-${this.calls}.ts`)] }
+        return
+      }
+      yield { content: 'Finished after fifty-two productive tool rounds.' }
     }
   }
 
   const client = new RepeatingToolClient()
+  const executed: string[] = []
   const events = await collect(runTurn({
-    maxToolTurns: 52,
     model: 'gpt-4o',
     permissionMode: 'accept-all',
     state: createAgentState(),
     tools: [READ_FILE],
     userMessage: 'continue reading',
-  }, { llm: client, toolExecutor: successfulExecutor }))
+  }, {
+    llm: client,
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executed.push(call.id)
+        return 'tool result'
+      },
+    },
+  }))
 
-  expect(client.calls).toBe(52)
+  expect(client.calls).toBe(53)
+  expect(executed).toEqual(Array.from({ length: 52 }, (_, index) => `call-${index + 1}`))
+  expect(events.filter(event => event.type === 'tool_start')).toHaveLength(52)
   expect(events.filter(event => event.type === 'tool_end')).toHaveLength(52)
+  expect(events).toContainEqual({ type: 'text', text: 'Finished after fifty-two productive tool rounds.' })
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', toolCallsCount: 52 })
+})
+
+test('retained same-call protection stops repeated work and forces a tool-free summary', async () => {
+  const requests: CompletionRequest[] = []
+  const executed: string[] = []
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state: createAgentState(),
+    tools: [READ_FILE],
+    userMessage: 'do not repeat the same work forever',
+  }, {
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        if (requests.length <= 5) {
+          yield { toolCalls: [readFileCall(`repeat-${requests.length}`)] }
+          return
+        }
+        yield { content: 'Summarized after stopping the repeated call.' }
+      },
+    },
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executed.push(call.id)
+        return 'same evidence'
+      },
+    },
+  }))
+
+  expect(executed).toEqual(['repeat-1', 'repeat-2', 'repeat-3', 'repeat-4'])
+  expect(requests).toHaveLength(6)
+  expect(requests[5]?.tools).toBeUndefined()
+  expect(requests[5]?.messages).toContainEqual(expect.objectContaining({
+    role: 'user',
+    content: expect.stringContaining('Tool loop detected (same_call)'),
+  }))
+  expect(events.filter(event => event.type === 'tool_start')).toHaveLength(4)
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(5)
+  expect(events).toContainEqual({ type: 'text', text: 'Summarized after stopping the repeated call.' })
+  expect(events.at(-1)).toMatchObject({ type: 'turn_done', toolCallsCount: 5 })
+})
+
+test('tool-call budget exhaustion allows the configured maximum then forces one tool-free summary', async () => {
+  const requests: CompletionRequest[] = []
+  const executed: string[] = []
+  const events = await collect(runTurn({
+    model: 'gpt-4o',
+    permissionMode: 'accept-all',
+    state: createAgentState(),
+    tools: [READ_FILE],
+    userMessage: 'inspect without looping forever',
+  }, {
+    llm: {
+      async *stream(request): AsyncGenerator<LlmDelta> {
+        requests.push(request)
+        if (requests.length < 3) {
+          yield { toolCalls: [readFileCall(`budget-${requests.length}`)] }
+          return
+        }
+        yield { content: 'Final summary from completed work.' }
+      },
+    },
+    loopDetector: new LoopDetector({ maxToolCallsPerTurn: 1 }),
+    toolExecutor: {
+      async execute(call): Promise<string> {
+        executed.push(call.id)
+        return 'evidence'
+      },
+    },
+  }))
+
+  expect(executed).toEqual(['budget-1'])
+  expect(requests).toHaveLength(3)
+  expect(requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+  expect(requests[1]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
+  expect(requests[2]?.tools).toBeUndefined()
+  expect(requests[2]?.messages).toContainEqual(expect.objectContaining({
+    role: 'user',
+    content: expect.stringContaining('[Tool loop stopped]'),
+  }))
+  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(2)
+  expect(events).toContainEqual({ type: 'text', text: 'Final summary from completed work.' })
 })
 
 test('streaming loop keeps the full tool result, timing, and cache usage in its native state', async () => {

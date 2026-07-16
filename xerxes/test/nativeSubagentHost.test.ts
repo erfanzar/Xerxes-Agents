@@ -4,14 +4,23 @@
 import { expect, test } from 'bun:test'
 
 import { BUILTIN_AGENTS, type AgentDefinition } from '../src/agents/definitions.js'
+import {
+  persistedSubagentSnapshotValues,
+  replacePersistedSubagentSnapshots,
+} from '../src/agents/subagentPersistence.js'
+import {
+  NativeSubagentTurnCoordinator,
+  recoverSubagentSnapshots,
+} from '../src/daemon/subagentCoordinator.js'
 import { DaemonSubagentEventBus } from '../src/daemon/subagentEvents.js'
 import { createNativeSubagentHost } from '../src/daemon/subagentHost.js'
-import type { DaemonEvent, DaemonSession } from '../src/daemon/runtime.js'
-import { AgentTurnRunner } from '../src/daemon/turnRunner.js'
+import { InMemoryDaemonRuntime, type DaemonEvent, type DaemonSession } from '../src/daemon/runtime.js'
+import { AgentTurnRunner, formatSubagentResults } from '../src/daemon/turnRunner.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { AGENT_MEMORY_WRITE_DEFINITION } from '../src/tools/agentMemoryTools.js'
 import { registerClaudeAgentTools } from '../src/tools/claudeTools/agentOps.js'
+import type { SpawnedAgentManagerPort, SpawnedAgentSnapshot } from '../src/operators/subagents.js'
 import type { JsonObject, ToolCall, ToolDefinition } from '../src/types/toolCalls.js'
 
 function toolCall(name: string, arguments_: JsonObject): ToolCall {
@@ -75,6 +84,419 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
     await Bun.sleep(2)
   }
 }
+
+test('subagent turn coordinator bounds a hung cohort and reports its pending snapshot', async () => {
+  const snapshot: SpawnedAgentSnapshot = {
+    agentId: 'coder',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: 'hung-child',
+    lastInput: 'inspect forever',
+    name: 'hung-child',
+    promptProfile: 'coder',
+    queueSize: 0,
+    sourceAgentId: 'parent-session',
+    status: 'running',
+    title: 'Hung child',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+  let observedTimeout: number | undefined
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate, options): Promise<boolean> {
+      observedTimeout = options?.timeoutMs
+      return predicate()
+    },
+  }, () => [snapshot], 25, () => 1_000)
+  const cohort = coordinator.begin('parent-session')
+  coordinator.track([snapshot])
+
+  expect(coordinator.trackedIds('parent-session')).toEqual(['hung-child'])
+  expect(await cohort.waitForResults()).toEqual([snapshot])
+  expect(observedTimeout).toBe(25)
+  expect(coordinator.trackedIds('parent-session')).toEqual([])
+})
+
+test('default subagent cohort joining has no wall-clock deadline', async () => {
+  let snapshot: SpawnedAgentSnapshot = {
+    agentId: 'coder',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: 'long-child',
+    name: 'long-child',
+    promptProfile: 'coder',
+    queueSize: 0,
+    sourceAgentId: 'parent-session',
+    status: 'running',
+    title: 'Long child',
+    updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+  let observedTimeout: number | undefined = -1
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate, options): Promise<boolean> {
+      observedTimeout = options?.timeoutMs
+      snapshot = { ...snapshot, lastOutput: 'eventually finished', status: 'completed' }
+      return predicate()
+    },
+  }, () => [snapshot])
+  const cohort = coordinator.begin('parent-session')
+  coordinator.track([snapshot])
+
+  expect(await cohort.waitForResults()).toEqual([snapshot])
+  expect(observedTimeout).toBeUndefined()
+})
+
+test('resumed transcript recovery and cohort tracking have no 8-agent cap', async () => {
+  const sourceId = 'recovered-session'
+  const archived = Array.from({ length: 1_000 }, (_, index) => ({
+    agent_id: 'researcher',
+    closed: false,
+    created_at: `2026-07-16T00:00:${String(index % 60).padStart(2, '0')}.000Z`,
+    id: `archived-${index}`,
+    last_input: `inspect area ${index}`,
+    name: `agent-${index}`,
+    prompt_profile: 'researcher',
+    queue_size: 0,
+    source_agent_id: sourceId,
+    status: 'running',
+    title: `Area ${index}`,
+    updated_at: '2026-07-16T00:01:00.000Z',
+  }))
+
+  const recovered = recoverSubagentSnapshots([{
+    role: 'tool',
+    name: 'SpawnAgents',
+    content: JSON.stringify(archived),
+  }], sourceId)
+
+  expect(recovered).toHaveLength(1_000)
+  expect(recovered.find(snapshot => snapshot.id === 'archived-0')).toMatchObject({ status: 'running' })
+  expect(recovered.find(snapshot => snapshot.id === 'archived-999')).toMatchObject({ status: 'running' })
+
+  const settled = recovered.map(snapshot => ({
+    ...snapshot,
+    lastOutput: `finished ${snapshot.id}`,
+    status: 'completed' as const,
+  }))
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> {
+      return predicate()
+    },
+  }, () => settled)
+  const cohort = coordinator.begin(sourceId)
+  coordinator.track(recovered)
+  expect(coordinator.trackedIds(sourceId)).toHaveLength(1_000)
+  expect(await cohort.waitForResults()).toHaveLength(1_000)
+})
+
+test('joined subagent results stay inside one hard context budget for large cohorts', () => {
+  const longOutput = 'evidence '.repeat(4_000)
+  const snapshots = Array.from({ length: 1_000 }, (_, index): SpawnedAgentSnapshot => ({
+    agentId: 'researcher',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: `large-agent-${index}`,
+    lastOutput: longOutput,
+    name: `large-agent-${index}`,
+    promptProfile: 'researcher',
+    queueSize: 0,
+    sourceAgentId: 'large-parent',
+    status: 'completed',
+    title: `Large review ${index}`,
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }))
+
+  const thirtyThree = formatSubagentResults(snapshots.slice(0, 33))
+  const thousand = formatSubagentResults(snapshots)
+
+  expect(thirtyThree.join('\n').length).toBeLessThanOrEqual(64_000)
+  expect(thirtyThree).toHaveLength(33)
+  expect(thirtyThree.at(-1)).toContain('large-agent-32')
+  expect(thousand.join('\n').length).toBeLessThanOrEqual(64_000)
+  expect(thousand).toHaveLength(65)
+  expect(thousand.at(-1)).toContain('omitted count=936')
+  expect(thousand.at(-1)).toContain('paged TaskListTool')
+})
+
+test('compact foreground batches and awaits retain one bounded coordinator delivery without duplicating small batches', async () => {
+  const sourceId = 'compact-delivery-parent'
+  let generated = 0
+  let snapshots: SpawnedAgentSnapshot[] = []
+  const snapshotById = (id: string): SpawnedAgentSnapshot => {
+    const snapshot = snapshots.find(candidate => candidate.id === id)
+    if (!snapshot) throw new Error(`missing fixture snapshot ${id}`)
+    return snapshot
+  }
+  const manager: SpawnedAgentManagerPort = {
+    close: id => {
+      const current = snapshotById(id)
+      const closed: SpawnedAgentSnapshot = { ...current, closed: true, status: 'closed' }
+      snapshots = snapshots.map(snapshot => snapshot.id === id ? closed : snapshot)
+      return { ...closed, previousStatus: current.status }
+    },
+    listHandles: () => [...snapshots],
+    resume: id => snapshotById(id),
+    sendInput: async id => snapshotById(id ?? ''),
+    spawn: async options => {
+      const id = options?.nickname?.trim() || `compact-${generated++}`
+      const created: SpawnedAgentSnapshot = {
+        agentId: options?.agent?.id ?? 'researcher',
+        closed: false,
+        createdAt: '2026-07-16T00:00:00.000Z',
+        id,
+        lastInput: options?.message ?? '',
+        name: id,
+        promptProfile: options?.promptProfile ?? 'researcher',
+        queueSize: 0,
+        ...(options?.sourceAgentId === undefined ? {} : { sourceAgentId: options.sourceAgentId }),
+        status: 'running',
+        title: options?.title ?? id,
+        updatedAt: '2026-07-16T00:00:00.000Z',
+      }
+      snapshots.push(created)
+      return created
+    },
+    wait: async targets => {
+      const targetSet = new Set(targets)
+      snapshots = snapshots.map(snapshot => targetSet.has(snapshot.id)
+        ? {
+          ...snapshot,
+          lastOutput: `result from ${snapshot.id}: ${'evidence '.repeat(2_000)}`,
+          status: 'completed' as const,
+          updatedAt: '2026-07-16T00:01:00.000Z',
+        }
+        : snapshot)
+      return {
+        completed: targets.map(snapshotById),
+        pending: [],
+      }
+    },
+  }
+  const coordinator = new NativeSubagentTurnCoordinator({
+    async waitFor(predicate): Promise<boolean> {
+      return predicate()
+    },
+  }, () => manager.listHandles())
+  const registry = new ToolRegistry()
+  registerClaudeAgentTools(registry, { backgroundAgents: coordinator, manager })
+  const context = { agentId: 'default', metadata: {}, sessionId: sourceId }
+
+  const largeCohort = coordinator.begin(sourceId)
+  const largeReceipt = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+    agents: Array.from({ length: 9 }, (_, index) => ({
+      name: `large-${index}`,
+      prompt: `inspect area ${index}`,
+      title: `Large review ${index}`,
+    })),
+    wait: true,
+  }), context)) as Record<string, unknown>
+  expect(largeReceipt).toMatchObject({ accepted_count: 9, omitted_count: 1, shown_count: 8 })
+  expect(coordinator.trackedIds(sourceId)).toHaveLength(9)
+
+  await registry.execute(toolCall('TaskListTool', {}), context)
+  const compactAwait = JSON.parse(await registry.execute(toolCall('AwaitAgents', {
+    timeout_seconds: 0,
+    wake_on: 'all',
+  }), context)) as Record<string, unknown>
+  expect(compactAwait).toMatchObject({ agent_count: 9, omitted_count: 1, shown_count: 8 })
+  expect(coordinator.trackedIds(sourceId)).toHaveLength(9)
+
+  const joined = await largeCohort.waitForResults()
+  const joinedPayload = formatSubagentResults(joined)
+  expect(joined).toHaveLength(9)
+  expect(joinedPayload.join('\n').length).toBeLessThanOrEqual(64_000)
+  expect(joinedPayload.join('\n')).toContain('result from large-8')
+  expect(await largeCohort.waitForResults()).toEqual([])
+  expect(coordinator.trackedIds(sourceId)).toEqual([])
+
+  const staleAwait = JSON.parse(await registry.execute(toolCall('AwaitAgents', {
+    timeout_seconds: 0,
+    wake_on: 'all',
+  }), context)) as { agents: unknown[] }
+  expect(staleAwait.agents).toEqual([])
+  expect(coordinator.trackedIds(sourceId)).toEqual([])
+
+  const smallCohort = coordinator.begin(sourceId)
+  const smallReceipt = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+    agents: Array.from({ length: 8 }, (_, index) => ({
+      name: `small-${index}`,
+      prompt: `inspect small area ${index}`,
+      title: `Small review ${index}`,
+    })),
+    wait: true,
+  }), context)) as Array<Record<string, unknown>>
+  expect(smallReceipt).toHaveLength(8)
+  expect(smallReceipt.every(snapshot => typeof snapshot.last_output === 'string')).toBeTrue()
+  expect(coordinator.trackedIds(sourceId)).toEqual([])
+  expect(await smallCohort.waitForResults()).toEqual([])
+})
+
+test('session metadata preserves every handle omitted from a bounded provider receipt', () => {
+  const sourceId = 'manifest-parent'
+  const snapshots = Array.from({ length: 20 }, (_, index): SpawnedAgentSnapshot => ({
+    agentId: 'researcher',
+    closed: false,
+    createdAt: '2026-07-16T00:00:00.000Z',
+    id: `manifest-${index}`,
+    lastInput: `inspect area ${index}`,
+    name: `manifest-${index}`,
+    promptProfile: 'researcher',
+    queueSize: 0,
+    sourceAgentId: sourceId,
+    status: 'running',
+    title: `Manifest ${index}`,
+    updatedAt: '2026-07-16T00:00:01.000Z',
+  }))
+  const metadata: Record<string, unknown> = {}
+  replacePersistedSubagentSnapshots(metadata, snapshots)
+  const boundedReceipt = [{
+    role: 'tool',
+    name: 'SpawnAgents',
+    content: JSON.stringify({
+      accepted_count: 20,
+      agents: snapshots.slice(0, 8).map(snapshot => ({
+        id: snapshot.id,
+        name: snapshot.name,
+        title: snapshot.title,
+        status: snapshot.status,
+      })),
+      omitted_count: 12,
+    }),
+  }]
+
+  const recovered = recoverSubagentSnapshots(
+    boundedReceipt,
+    sourceId,
+    persistedSubagentSnapshotValues(metadata),
+  )
+
+  expect(recovered).toHaveLength(20)
+  expect(recovered.find(snapshot => snapshot.id === 'manifest-19')).toMatchObject({
+    id: 'manifest-19',
+    lastInput: 'inspect area 19',
+  })
+})
+
+test('transcript recovery replaces reset targets by id or stable name and preserves later stops', () => {
+  const sourceId = 'reset-recovery-session'
+  const snapshot = (id: string, name: string, status: string) => ({
+    agent_id: 'researcher',
+    closed: status === 'closed',
+    created_at: '2026-07-16T00:00:00.000Z',
+    id,
+    last_input: `inspect ${name}`,
+    name,
+    prompt_profile: 'researcher',
+    queue_size: 0,
+    source_agent_id: sourceId,
+    status,
+    title: `${name} title`,
+    updated_at: '2026-07-16T00:01:00.000Z',
+  })
+  const replacementByName = snapshot('replacement-by-name', 'stable-name', 'running')
+  const replacementById = snapshot('replacement-by-id', 'second-stable-name', 'running')
+  const messages = [
+    {
+      role: 'tool',
+      name: 'SpawnAgents',
+      content: JSON.stringify([
+        snapshot('old-by-name', 'stable-name', 'running'),
+        snapshot('old-by-id', 'second-stable-name', 'running'),
+      ]),
+    },
+    {
+      role: 'tool',
+      name: 'ResetAgent',
+      content: JSON.stringify({ reset_target: 'stable-name', new_task: replacementByName }),
+    },
+    {
+      role: 'tool',
+      name: 'ResetAgent',
+      content: JSON.stringify({ reset_target: 'old-by-id', new_task: replacementById }),
+    },
+    {
+      role: 'tool',
+      name: 'TaskStopTool',
+      content: JSON.stringify({ ...replacementById, closed: true, status: 'closed' }),
+    },
+  ]
+
+  const recovered = recoverSubagentSnapshots(messages, sourceId)
+
+  expect(recovered.map(item => item.id).sort()).toEqual(['replacement-by-id', 'replacement-by-name'])
+  expect(recovered.find(item => item.id === 'replacement-by-name')).toMatchObject({ status: 'running' })
+  expect(recovered.find(item => item.id === 'replacement-by-id')).toMatchObject({ closed: true, status: 'closed' })
+})
+
+test('resumed transcript recovery keeps the newest handle for a reused stable name', () => {
+  const sourceId = 'two-wave-recovery-session'
+  const archived = (
+    id: string,
+    name: string,
+    status: 'completed' | 'running',
+    createdAt: string,
+    updatedAt: string,
+  ) => ({
+    agent_id: 'researcher',
+    closed: false,
+    created_at: createdAt,
+    id,
+    last_output: status === 'completed' ? `finished ${id}` : null,
+    name,
+    prompt_profile: 'researcher',
+    queue_size: 0,
+    source_agent_id: sourceId,
+    status,
+    title: `${name} title`,
+    updated_at: updatedAt,
+  })
+  const messages = [
+    {
+      role: 'tool',
+      name: 'SpawnAgents',
+      content: JSON.stringify([
+        archived(
+          'old-persistence-id',
+          'eyvan-persistence-hunter',
+          'running',
+          '2026-07-16T01:00:00.000Z',
+          '2026-07-16T01:30:00.000Z',
+        ),
+        archived(
+          'unrelated-id',
+          'eyvan-runtime-hunter',
+          'completed',
+          '2026-07-16T01:00:00.000Z',
+          '2026-07-16T01:20:00.000Z',
+        ),
+      ]),
+    },
+    {
+      role: 'tool',
+      name: 'SpawnAgents',
+      content: JSON.stringify([
+        archived(
+          'new-persistence-id',
+          'eyvan-persistence-hunter',
+          'completed',
+          '2026-07-16T02:00:00.000Z',
+          '2026-07-16T02:10:00.000Z',
+        ),
+      ]),
+    },
+  ]
+
+  const recovered = recoverSubagentSnapshots(messages, sourceId)
+
+  expect(recovered.map(snapshot => snapshot.id)).toEqual([
+    'unrelated-id',
+    'new-persistence-id',
+  ])
+  expect(recovered.find(snapshot => snapshot.name === 'eyvan-persistence-hunter')).toMatchObject({
+    id: 'new-persistence-id',
+    lastOutput: 'finished new-persistence-id',
+    status: 'completed',
+  })
+})
 
 test('daemon subagent event bus isolates sessions and removes unsubscribed listeners', () => {
   const bus = new DaemonSubagentEventBus()
@@ -154,6 +576,174 @@ test('agent turn runner exposes registered delegation tools to the provider', as
     expect(names).toContain('SpawnAgents')
     expect(names).toContain('AwaitAgents')
     expect(names).toContain('SendMessageTool')
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
+test('a restarted daemon exposes transcript agents as honest terminal snapshots on the next turn', async () => {
+  const sourceId = '7dd01499b710'
+  const client = new ToolCapturingParentClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: BUILTIN_AGENTS,
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  registerClaudeAgentTools(registry, {
+    backgroundAgents: host.turnCoordinator,
+    manager: host.managerPort,
+  })
+  const runner = new AgentTurnRunner({
+    agentDefinitions: BUILTIN_AGENTS,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    subagentCoordinator: host.turnCoordinator,
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  const resumed = session(sourceId)
+  resumed.messages.push({
+    role: 'tool',
+    name: 'SpawnAgents',
+    tool_call_id: 'spawn-before-restart',
+    content: JSON.stringify([
+      {
+        agent_id: 'researcher',
+        closed: false,
+        created_at: '2026-07-16T01:42:47.302Z',
+        id: 'subagent-running',
+        last_input: 'inspect persistence',
+        name: 'persistence-hunter',
+        prompt_profile: 'researcher',
+        queue_size: 0,
+        source_agent_id: sourceId,
+        status: 'running',
+        summary: 'last observed reading repository code',
+        title: 'Persistence hunt',
+        updated_at: '2026-07-16T01:50:00.000Z',
+      },
+      {
+        agent_id: 'researcher',
+        closed: false,
+        created_at: '2026-07-16T01:42:47.303Z',
+        id: 'subagent-complete',
+        last_input: 'inspect API code',
+        last_output: 'Found a reproducible middleware failure.',
+        name: 'api-hunter',
+        prompt_profile: 'researcher',
+        queue_size: 0,
+        source_agent_id: sourceId,
+        status: 'completed',
+        title: 'API hunt',
+        updated_at: '2026-07-16T01:55:00.000Z',
+      },
+    ]),
+  })
+  resumed.messages.push({
+    role: 'tool',
+    name: 'TaskListTool',
+    tool_call_id: 'compact-list-before-restart',
+    content: JSON.stringify([
+      {
+        id: 'subagent-running',
+        name: 'persistence-hunter',
+        title: 'Persistence hunt',
+        status: 'running',
+        has_output: false,
+      },
+      {
+        id: 'subagent-complete',
+        name: 'api-hunter',
+        title: 'API hunt',
+        status: 'completed',
+        has_output: true,
+      },
+    ]),
+  })
+
+  try {
+    for await (const _event of runner.run(resumed, 'continue', new AbortController().signal)) {
+      // Restoring happens before the provider request for this resumed turn.
+    }
+
+    const systemPrompt = client.requests[0]?.messages
+      .filter(message => message.role === 'system')
+      .map(message => String(message.content))
+      .join('\n') ?? ''
+    expect(systemPrompt).toContain('2 delegated task handle(s) were recovered')
+    const context = { agentId: 'default', metadata: {}, sessionId: sourceId }
+    const listed = JSON.parse(await registry.execute(
+      toolCall('TaskListTool', {}),
+      context,
+    )) as Array<Record<string, unknown>>
+    expect(listed).toHaveLength(2)
+    expect(listed.find(snapshot => snapshot.id === 'subagent-running')).toMatchObject({
+      status: 'interrupted',
+    })
+    expect(String(listed.find(snapshot => snapshot.id === 'subagent-running')?.error)).toContain('daemon process ended')
+    const recoveredRunning = JSON.parse(await registry.execute(
+      toolCall('TaskGetTool', { task_id: 'subagent-running' }),
+      context,
+    )) as Record<string, unknown>
+    const recoveredComplete = JSON.parse(await registry.execute(
+      toolCall('TaskGetTool', { task_id: 'subagent-complete' }),
+      context,
+    )) as Record<string, unknown>
+    expect(recoveredRunning).toMatchObject({
+      summary: 'last observed reading repository code',
+      status: 'interrupted',
+    })
+    expect(recoveredComplete).toMatchObject({
+      last_output: 'Found a reproducible middleware failure.',
+      status: 'completed',
+    })
+
+    const peeked = JSON.parse(await registry.execute(
+      toolCall('PeekAgent', { target: 'persistence-hunter' }),
+      context,
+    )) as Record<string, unknown>
+    expect(peeked).toMatchObject({ id: 'subagent-running', status: 'interrupted' })
+
+    const awaited = JSON.parse(await registry.execute(toolCall('AwaitAgents', {
+      agent_ids: ['subagent-running', 'subagent-complete'],
+      timeout_seconds: 30,
+      wake_on: 'all',
+    }), context)) as { agents: Array<Record<string, unknown>>; wake_reason: string }
+    expect(awaited.wake_reason).toBe('agents_done')
+    expect(awaited.agents.map(snapshot => snapshot.status)).toEqual(['interrupted', 'completed'])
+
+    const reset = JSON.parse(await registry.execute(toolCall('ResetAgent', {
+      target: 'persistence-hunter',
+      new_prompt: 'restart the persistence inspection from the recovered context',
+    }), context)) as { new_task: Record<string, unknown>; reset_target: string }
+    expect(reset.reset_target).toBe('persistence-hunter')
+    expect(reset.new_task.id).not.toBe('subagent-running')
+    expect(reset.new_task).toMatchObject({
+      name: 'persistence-hunter',
+      source_agent_id: sourceId,
+    })
+    const restarted = JSON.parse(await registry.execute(toolCall('AwaitAgents', {
+      agent_ids: [String(reset.new_task.id)],
+      timeout_seconds: 5,
+      wake_on: 'all',
+    }), context)) as { agents: Array<Record<string, unknown>>; wake_reason: string }
+    expect(restarted).toMatchObject({
+      wake_reason: 'agents_done',
+      agents: [{ last_output: 'ready', status: 'completed' }],
+    })
+    const afterReset = JSON.parse(await registry.execute(
+      toolCall('TaskListTool', {}),
+      context,
+    )) as Array<Record<string, unknown>>
+    expect(afterReset.some(snapshot => snapshot.id === 'subagent-running')).toBe(false)
+    expect(afterReset.some(snapshot => snapshot.id === reset.new_task.id)).toBe(true)
   } finally {
     await host.manager.shutdown()
   }
@@ -315,6 +905,27 @@ class ConcurrentChildClient implements LlmClient {
         content: `finished:${text}`,
         usage: { inputTokens: 11, outputTokens: 7, reasoningTokens: 3 },
       }
+    } finally {
+      this.active -= 1
+    }
+  }
+}
+
+class BoundedSwarmChildClient implements LlmClient {
+  active = 0
+  calls = 0
+  maxActive = 0
+  readonly firstWaveStarted = Promise.withResolvers<void>()
+  readonly release = Promise.withResolvers<void>()
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.calls += 1
+    this.active += 1
+    this.maxActive = Math.max(this.maxActive, this.active)
+    if (this.calls === 8) this.firstWaveStarted.resolve()
+    try {
+      await this.release.promise
+      yield { content: 'bounded worker complete' }
     } finally {
       this.active -= 1
     }
@@ -913,6 +1524,125 @@ test('native SpawnAgents runs two real child turns concurrently and routes their
   }
 })
 
+test('native swarm execution queues work above eight without exceeding eight live model turns', async () => {
+  const client = new BoundedSwarmChildClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  registerClaudeAgentTools(registry, { manager: host.managerPort })
+
+  try {
+    const receipt = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+      agents: Array.from({ length: 24 }, (_, index) => ({
+        name: `bounded-${index}`,
+        prompt: `bounded task ${index}`,
+        subagent_type: 'coder',
+        title: `Bounded task ${index}`,
+      })),
+      wait: false,
+    }), { agentId: 'default', metadata: {}, sessionId: 'bounded-session' })) as Record<string, unknown>
+
+    await client.firstWaveStarted.promise
+    await Bun.sleep(10)
+    expect(client.calls).toBe(8)
+    expect(client.maxActive).toBe(8)
+    expect(receipt).toMatchObject({ accepted_count: 24, omitted_count: 16, shown_count: 8 })
+
+    client.release.resolve()
+    const ids = host.managerPort.listHandles().map(snapshot => snapshot.id)
+    const settled = await host.managerPort.wait(ids, 5_000)
+    expect(settled.pending).toHaveLength(0)
+    expect(settled.completed).toHaveLength(24)
+    expect(client.calls).toBe(24)
+    expect(client.maxActive).toBe(8)
+  } finally {
+    client.release.resolve()
+    await host.manager.shutdown()
+  }
+})
+
+class DistinctReadChildClient implements LlmClient {
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    const completedReads = request.messages.filter(message => message.role === 'tool').length
+    if (completedReads < 30) {
+      const next = completedReads + 1
+      yield { toolCalls: [toolCall('ReadFile', { file_path: `src/file-${next}.ts` })] }
+      return
+    }
+    yield { content: 'completed thirty distinct delegated reads' }
+  }
+}
+
+test('native subagents execute more than twenty-five distinct tool calls', async () => {
+  const registry = new ToolRegistry()
+  const executedPaths: string[] = []
+  const readFile: ToolDefinition = {
+    type: 'function',
+    function: {
+      description: 'Read one test file.',
+      name: 'ReadFile',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['file_path'],
+        properties: { file_path: { type: 'string' } },
+      },
+    },
+  }
+  registry.register(readFile, inputs => {
+    executedPaths.push(String(inputs.file_path))
+    return 'fixture body'
+  })
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: new DistinctReadChildClient(),
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  registerClaudeAgentTools(registry, { manager: host.managerPort })
+
+  try {
+    const response = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+      agents: [{
+        name: 'long-reader',
+        prompt: 'read thirty distinct files',
+        subagent_type: 'coder',
+        title: 'Read fixtures',
+      }],
+      timeout: 5,
+      wait: true,
+    }), { agentId: 'default', metadata: {}, sessionId: 'long-read-session' })) as Array<Record<string, unknown>>
+
+    expect(executedPaths).toEqual(Array.from({ length: 30 }, (_, index) => `src/file-${index + 1}.ts`))
+    expect(response).toHaveLength(1)
+    expect(response[0]).toMatchObject({
+      last_output: 'completed thirty distinct delegated reads',
+      status: 'completed',
+      tool_count: 30,
+    })
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
 class ProjectMemoryChildClient implements LlmClient {
   async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
     const results = request.messages.filter(message => message.role === 'tool')
@@ -1146,6 +1876,142 @@ test('agent turn runner multiplexes a child event between parent tool start and 
   })
   expect(events).toContainEqual({ type: 'text_part', payload: { text: 'parent finished' } })
   expect(delegatedPermissionMode).toBe('accept-all')
+})
+
+test('background agents keep the parent turn live and deliver one joined result continuation', async () => {
+  const alphaRelease = Promise.withResolvers<void>()
+  const betaRelease = Promise.withResolvers<void>()
+  const parentWaiting = Promise.withResolvers<void>()
+  const parentRequests: CompletionRequest[] = []
+  const definitions = new Map<string, AgentDefinition>([
+    ['default', creatorDefinition('researcher')],
+    ['researcher', agentDefinition('researcher')],
+  ])
+  const client: LlmClient = {
+    async *stream(request): AsyncGenerator<LlmDelta> {
+      const userText = request.messages
+        .filter(message => message.role === 'user')
+        .map(message => String(message.content))
+        .join('\n')
+      if (userText.includes('alpha child task')) {
+        await alphaRelease.promise
+        yield { content: 'alpha final report' }
+        return
+      }
+      if (userText.includes('beta child task')) {
+        await betaRelease.promise
+        yield { content: 'beta final report' }
+        return
+      }
+
+      parentRequests.push(request)
+      if (userText.includes('[sub-agent events]')) {
+        yield { content: 'Integrated alpha and beta reports.' }
+        return
+      }
+      if (request.messages.some(message => message.role === 'tool' && message.name === 'SpawnAgents')) {
+        parentWaiting.resolve()
+        yield { content: 'The delegated reviews are still running.' }
+        return
+      }
+      yield {
+        toolCalls: [{
+          id: 'spawn-background-batch',
+          type: 'function',
+          function: {
+            name: 'SpawnAgents',
+            arguments: {
+              agents: [
+                { name: 'alpha', prompt: 'alpha child task', subagent_type: 'researcher', title: 'Alpha review' },
+                { name: 'beta', prompt: 'beta child task', subagent_type: 'researcher', title: 'Beta review' },
+              ],
+              wait: false,
+            },
+          },
+        }],
+      }
+    },
+  }
+  const eventBus = new DaemonSubagentEventBus()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: [],
+  })
+  registerClaudeAgentTools(registry, {
+    backgroundAgents: host.turnCoordinator,
+    manager: host.managerPort,
+  })
+  const runner = new AgentTurnRunner({
+    agentDefinitions: definitions,
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    subagentCoordinator: host.turnCoordinator,
+    subagentEvents: eventBus,
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: process.cwd(),
+    model: 'test-model',
+  })
+  const events: DaemonEvent[] = []
+
+  try {
+    const turn = runtime.submitTurn('joined-background', 'run both reviews', event => events.push(event))
+    await parentWaiting.promise
+    await waitFor(() => parentRequests.length === 2)
+
+    expect(runtime.sessionStatus('joined-background')).toMatchObject({
+      activeTurnId: expect.any(String),
+      status: 'working',
+    })
+    expect(events.some(event => event.type === 'turn_end')).toBe(false)
+
+    alphaRelease.resolve()
+    await waitFor(() => events.some(event => (
+      event.type === 'subagent_event'
+      && event.payload.title === 'Alpha review'
+      && nestedEventType(event) === 'turn_end'
+    )))
+    expect(parentRequests).toHaveLength(2)
+    expect(events.some(event => event.type === 'turn_end')).toBe(false)
+
+    betaRelease.resolve()
+    await turn
+
+    expect(parentRequests).toHaveLength(3)
+    const joinedContext = parentRequests[2]?.messages
+      .filter(message => message.role === 'user')
+      .map(message => String(message.content))
+      .join('\n') ?? ''
+    expect(joinedContext).toContain('[sub-agent events]')
+    expect(joinedContext).toContain('Alpha review')
+    expect(joinedContext).toContain('alpha final report')
+    expect(joinedContext).toContain('Beta review')
+    expect(joinedContext).toContain('beta final report')
+    expect(events.filter(event => event.type === 'turn_end')).toHaveLength(1)
+    expect(events.filter(event => event.type === 'text_part').map(event => event.payload.text)).toEqual([
+      'The delegated reviews are still running.',
+      'Integrated alpha and beta reports.',
+    ])
+    expect(runtime.sessionStatus('joined-background')).toMatchObject({
+      activeTurnId: '',
+      status: 'idle',
+      turnCount: 1,
+    })
+  } finally {
+    alphaRelease.resolve()
+    betaRelease.resolve()
+    await host.manager.shutdown()
+  }
 })
 
 function nestedEventType(event: DaemonEvent): unknown {

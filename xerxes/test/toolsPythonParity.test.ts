@@ -8,9 +8,8 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 
 import { MarkdownAgentWorkspace } from '../src/channels/workspace.js'
-import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
-import { registerClaudeAgentTools } from '../src/tools/claudeTools/agentOps.js'
+import { ClaudeAgentTools } from '../src/tools/claudeTools/agentOps.js'
 import { readFile as codingReadFile } from '../src/tools/codingTools.js'
 import { readFile as standaloneReadFile } from '../src/tools/fileTools.js'
 import { WorkspacePathResolver } from '../src/tools/pathSafety.js'
@@ -22,11 +21,6 @@ import {
   workspaceRead,
   workspaceWrite,
 } from '../src/tools/workspaceTools.js'
-import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
-
-function call(name: string, arguments_: JsonObject): ToolCall {
-  return { id: crypto.randomUUID(), type: 'function', function: { name, arguments: arguments_ } }
-}
 
 async function inTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-tools-python-parity-'))
@@ -62,8 +56,7 @@ test('SpawnAgents accepts safe common JSON-adjacent agent payloads without evalu
   const manager = new SpawnedAgentManager({
     runner: async request => ({ content: `done:${request.input}` }),
   })
-  const registry = new ToolRegistry()
-  registerClaudeAgentTools(registry, { manager })
+  const tools = new ClaudeAgentTools({ manager })
 
   const payloads = [
     '```json\n[{"name":"fenced","prompt":"fenced task","title":"Fenced task"}]\n```',
@@ -72,14 +65,17 @@ test('SpawnAgents accepts safe common JSON-adjacent agent payloads without evalu
     "[{'name': 'single', 'prompt': 'single task', 'title': 'Single task'}]",
   ]
   for (const agents of payloads) {
-    const result = JSON.parse(
-      await registry.execute(call('SpawnAgents', { agents, timeout: 1, wait: true }), { metadata: {} }),
+    const result = await tools.execute(
+      'SpawnAgents',
+      { agents, timeout: 1, wait: true },
+      { metadata: {} },
     ) as Array<{ readonly last_output: string; readonly status: string }>
     expect(result).toHaveLength(1)
     expect(result[0]).toMatchObject({ status: 'completed', last_output: expect.stringContaining('task') })
   }
-  await expect(registry.execute(
-    call('SpawnAgents', { agents: 'this is not JSON', wait: false }),
+  await expect(tools.execute(
+    'SpawnAgents',
+    { agents: 'this is not JSON', wait: false },
     { metadata: {} },
   )).rejects.toThrow('agents')
   for (const handle of manager.listHandles()) manager.close(handle.id)

@@ -9,7 +9,7 @@ import { useEffect } from 'react'
 import type { KeyEvent } from '@opentui/core'
 import { useKeyboard } from '@opentui/react'
 
-import { getActiveRenderer } from '../opentui/rendererSingleton.js'
+import { destroyActiveRenderer, getActiveRenderer } from '../opentui/rendererSingleton.js'
 
 // ── Pure utilities ───────────────────────────────────────────────────────
 // Both are native under Bun (this app only ever runs under Bun).
@@ -140,7 +140,7 @@ export async function withTerminalSuspended(run: () => Promise<void>): Promise<v
 export function useApp(): { readonly exit: (error?: Error) => void } {
   return {
     exit: (error?: Error) => {
-      getActiveRenderer()?.destroy()
+      destroyActiveRenderer()
       process.exit(error ? 1 : 0)
     }
   }

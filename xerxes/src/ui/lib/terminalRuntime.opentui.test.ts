@@ -2,7 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 import { describe, expect, it, vi } from 'vitest'
 
-import { runWithTerminalSuspended } from './terminalRuntime.opentui.js'
+import type { CliRenderer } from '@opentui/core'
+
+import { setActiveRenderer } from '../opentui/rendererSingleton.js'
+import { runWithTerminalSuspended, useApp } from './terminalRuntime.opentui.js'
 
 const renderer = () => ({
   requestRender: vi.fn(),
@@ -68,5 +71,27 @@ describe('runWithTerminalSuspended', () => {
     expect(healthy.suspend).toHaveBeenCalledTimes(1)
     expect(healthy.resume).toHaveBeenCalledTimes(1)
     expect(run).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('OpenTUI app exit', () => {
+  it('tears down the active renderer before exiting the process', () => {
+    const events: string[] = []
+    const exit = vi.spyOn(process, 'exit').mockImplementation(code => {
+      events.push(`exit:${code}`)
+
+      return undefined as never
+    })
+
+    setActiveRenderer({
+      destroy: () => events.push('destroy')
+    } as unknown as CliRenderer)
+
+    try {
+      useApp().exit(new Error('fatal'))
+      expect(events).toEqual(['destroy', 'exit:1'])
+    } finally {
+      exit.mockRestore()
+    }
   })
 })

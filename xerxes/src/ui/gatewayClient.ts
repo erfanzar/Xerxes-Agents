@@ -94,6 +94,8 @@ export interface BunDaemonLaunch {
 export type DaemonBuildDecision = 'current' | 'reject' | 'restart'
 
 export interface DaemonBuildDecisionInput {
+  /** Undefined means the connected daemon cannot prove that no child work is active. */
+  readonly activeSubagents: number | undefined
   readonly activeTurns: boolean
   readonly actualBuildId: string
   readonly commandMatches: boolean
@@ -117,6 +119,8 @@ export function daemonBuildDecision(input: DaemonBuildDecisionInput): DaemonBuil
     input.daemonPid === undefined ||
     input.pidFilePid !== input.daemonPid ||
     !input.commandMatches ||
+    input.activeSubagents === undefined ||
+    input.activeSubagents > 0 ||
     input.activeTurns
   ) {
     return 'reject'
@@ -429,8 +433,8 @@ export class GatewayClient extends EventEmitter {
       DAEMON_IDENTITY_TIMEOUT_MS
     ).catch(() => null)
     const sessions = activity && Array.isArray(activity.sessions) ? activity.sessions : null
-    // An unverified inventory is treated as busy: source refresh must never
-    // risk interrupting another TUI's in-flight turn.
+    // Unverified parent or child activity is treated as busy: source refresh
+    // must never risk interrupting another TUI's in-flight work.
     const activeTurns =
       sessions === null ||
       sessions.some(row => {
@@ -438,6 +442,7 @@ export class GatewayClient extends EventEmitter {
         const session = row as RpcObject
         return Boolean(String(session.active_turn_id ?? '').trim()) || String(session.status ?? '') === 'working'
       })
+    const activeSubagents = nonNegativeInteger(status.active_subagents)
     const launch = bunDaemonLaunch(this.projectDir, socketPath, pidPath, {
       ...process.env,
       ...(this.bunBinary ? { XERXES_TUI_BUN: this.bunBinary } : {}),
@@ -445,6 +450,7 @@ export class GatewayClient extends EventEmitter {
     })
     const command = daemonPid === undefined ? '' : daemonProcessCommand(daemonPid)
     const decision = daemonBuildDecision({
+      activeSubagents,
       activeTurns,
       actualBuildId,
       commandMatches: daemonCommandMatches(command, launch),
@@ -463,8 +469,8 @@ export class GatewayClient extends EventEmitter {
     await this.detachSocketSilently()
     const mismatch = `Bun daemon build mismatch (running ${actualBuildId || 'unknown'}, expected ${expectedBuildId})`
     if (decision === 'reject' || daemonPid === undefined) {
-      const reason = activeTurns
-        ? 'Its active-session state is busy or could not be verified'
+      const reason = activeTurns || activeSubagents === undefined || activeSubagents > 0
+        ? 'Its active session or subagent state is busy or could not be verified'
         : 'The connected process is custom or could not be proven local'
       throw new Error(
         `${mismatch}. ${reason}, so Xerxes left it running; restart it explicitly when idle.`
@@ -1341,6 +1347,10 @@ export class GatewayClient extends EventEmitter {
 
 function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 function pidFromFile(path: string): number | undefined {

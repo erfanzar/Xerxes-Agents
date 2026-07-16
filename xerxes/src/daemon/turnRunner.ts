@@ -7,9 +7,14 @@ import { estimateContextTokens } from '../context/windowUsage.js'
 import { ValidationError } from '../core/errors.js'
 import type { ToolExecutor } from '../executors/toolRegistry.js'
 import type { AgentMemory } from '../memory/agentMemory.js'
+import {
+  mergePersistedSubagentSnapshots,
+  persistedSubagentSnapshotValues,
+} from '../agents/subagentPersistence.js'
 import type { AgentSelfMemory } from '../memory/agentSelfMemory.js'
 import { makeTurnIndexerHook } from '../memory/turnIndexer.js'
 import type { Memory } from '../memory/base.js'
+import type { SpawnedAgentSnapshot } from '../operators/subagents.js'
 import type { LlmClient } from '../llms/client.js'
 import { getContextLimit } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
@@ -27,6 +32,10 @@ import type { ChatMessage, MessageContent } from '../types/messages.js'
 import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
 import type { DaemonInteractionBoard, DaemonQuestion } from './interactions.js'
 import type { DaemonEvent, DaemonSession, TurnRunControls, TurnRunner } from './runtime.js'
+import {
+  recoverSubagentSnapshots,
+  type SubagentTurnCoordinator,
+} from './subagentCoordinator.js'
 import type { DaemonSubagentEventSource } from './subagentEvents.js'
 
 export interface AgentTurnRunnerOptions {
@@ -55,6 +64,8 @@ export interface AgentTurnRunnerOptions {
   readonly policy?: ToolPolicy
   /** Session-scoped delegated-turn events rendered alongside the parent turn. */
   readonly subagentEvents?: DaemonSubagentEventSource
+  /** Joins explicitly detached child work back into the creating parent turn. */
+  readonly subagentCoordinator?: SubagentTurnCoordinator
   readonly toolExecutor?: ToolExecutor
   readonly temperature?: number
   readonly tools?: readonly ToolDefinition[]
@@ -124,6 +135,15 @@ export class AgentTurnRunner implements TurnRunner {
     const memoryPrompt = memory ? await memory.toPromptSection() : ''
     const selfMemory = this.options.agentSelfMemory ? await this.options.agentSelfMemory(session) : undefined
     const selfMemoryPrompt = selfMemory ? await selfMemory.systemPromptAddendum() : ''
+    const recoveredSubagents = this.options.subagentCoordinator
+      ? recoverSubagentSnapshots(
+        session.messages,
+        session.id,
+        persistedSubagentSnapshotValues(session.metadata),
+      )
+      : []
+    const restoredSubagentCount = this.options.subagentCoordinator
+      ?.restore?.(session.id, recoveredSubagents) ?? 0
     const systemPrompt = [
       bootstrapPrompt,
       promptAgent?.systemPrompt,
@@ -131,6 +151,12 @@ export class AgentTurnRunner implements TurnRunner {
         session.interactionMode,
         tools?.some(tool => tool.function.name === 'SetInteractionModeTool') ?? false,
       ),
+      this.options.subagentCoordinator
+        ? 'Background subagents are joined before the parent turn ends. Integrate their delivered results in this turn; do not promise synthesis in a later turn.'
+        : '',
+      restoredSubagentCount
+        ? `${restoredSubagentCount} delegated task handle(s) were recovered from this resumed transcript after their daemon process ended. TaskListTool, TaskGetTool, PeekAgent, and AwaitAgents expose honest terminal snapshots: completed output is preserved, while work last seen active is marked interrupted and must be explicitly restarted with ResetAgent or respawned. Do not retry stale ids as if they were still running.`
+        : '',
       memoryPrompt,
       selfMemoryPrompt,
       systemPromptAddendum(session),
@@ -146,6 +172,7 @@ export class AgentTurnRunner implements TurnRunner {
     }
     this.options.auditEmitter?.emitTurnStart({ ...auditContext, prompt: displayText })
     let auditTurnEnded = false
+    const subagentCohort = this.options.subagentCoordinator?.begin(session.id)
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -161,6 +188,13 @@ export class AgentTurnRunner implements TurnRunner {
         ...(systemPrompt ? { systemPrompt } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
       }, {
+        ...(subagentCohort ? {
+          awaitAgentEvents: async signal => {
+            const snapshots = await subagentCohort.waitForResults(signal)
+            mergePersistedSubagentSnapshots(state.metadata, snapshots)
+            return formatSubagentResults(snapshots)
+          },
+        } : {}),
         ...(controls.drainSteer ? { drainSteer: controls.drainSteer } : {}),
         llm: this.options.llm,
         ...(permissionBroker ? { permissionBroker } : {}),
@@ -193,6 +227,7 @@ export class AgentTurnRunner implements TurnRunner {
       })
       throw error
     } finally {
+      subagentCohort?.close()
       if (!auditTurnEnded) {
         this.options.auditEmitter?.emitTurnEnd({ ...auditContext, content: latestAssistantContent(state) })
       }
@@ -234,6 +269,69 @@ export class AgentTurnRunner implements TurnRunner {
     this.bootstrapPrompts.set(key, prompt)
     return prompt
   }
+}
+
+const MAX_SUBAGENT_RESULT_CHARS = 64_000
+const MAX_SINGLE_SUBAGENT_RESULT_CHARS = 16_000
+const MAX_INLINE_SUBAGENT_RESULTS = 64
+
+export function formatSubagentResults(
+  snapshots: readonly SpawnedAgentSnapshot[],
+): readonly string[] {
+  if (!snapshots.length) return []
+  const visible = snapshots.slice(0, MAX_INLINE_SUBAGENT_RESULTS)
+  const omitted = snapshots.length - visible.length
+  const descriptors = visible.map(snapshot => {
+    const raw = snapshot.lastOutput?.trim() || snapshot.error?.trim() || '(no final output)'
+    const tokens = [snapshot.inputTokens, snapshot.outputTokens, snapshot.reasoningTokens]
+      .filter((value): value is number => value !== undefined)
+      .reduce((total, value) => total + value, 0)
+    const metrics = [
+      snapshot.toolCalls === undefined ? '' : `tools=${snapshot.toolCalls}`,
+      tokens ? `tokens=${tokens}` : '',
+    ].filter(Boolean).join(' ')
+    return {
+      footer: '[/agent result]',
+      header: `[agent result id=${JSON.stringify(boundedLabel(snapshot.id))} title=${JSON.stringify(boundedLabel(snapshot.title))} status=${snapshot.status}${metrics ? ` ${metrics}` : ''}]`,
+      raw,
+    }
+  })
+  const omission = omitted > 0
+    ? `[agent results omitted count=${omitted} total=${snapshots.length}] The full cohort remains available through paged TaskListTool plus TaskGetTool or TaskOutputTool.`
+    : ''
+  const eventCount = descriptors.length + (omission ? 1 : 0)
+  const fixedChars = descriptors.reduce(
+    (total, descriptor) => total + descriptor.header.length + descriptor.footer.length + 2,
+    0,
+  ) + omission.length + Math.max(0, eventCount - 1)
+  let outputBudget = Math.max(0, MAX_SUBAGENT_RESULT_CHARS - fixedChars)
+  const results: string[] = []
+  for (const [index, descriptor] of descriptors.entries()) {
+    const remainingAgents = descriptors.length - index
+    const fairShare = Math.floor(outputBudget / remainingAgents)
+    const output = boundedSubagentOutput(
+      descriptor.raw,
+      Math.min(MAX_SINGLE_SUBAGENT_RESULT_CHARS, fairShare),
+    )
+    outputBudget -= output.length
+    results.push([descriptor.header, output, descriptor.footer].join('\n'))
+  }
+  if (omission) results.push(omission)
+  return Object.freeze(results)
+}
+
+function boundedSubagentOutput(output: string, limit: number): string {
+  if (limit <= 0) return ''
+  if (output.length <= limit) return output
+  const marker = `\n… [subagent output truncated by ${output.length - limit} characters] …\n`
+  if (marker.length >= limit) return marker.slice(0, limit)
+  const available = Math.max(0, limit - marker.length)
+  const head = Math.ceil(available * 0.7)
+  return output.slice(0, head) + marker + output.slice(-(available - head))
+}
+
+function boundedLabel(value: string, limit = 128): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
 }
 
 type MultiplexedTurnEvent =

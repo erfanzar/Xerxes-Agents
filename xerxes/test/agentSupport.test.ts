@@ -133,6 +133,135 @@ test('subagent manager layers definitions, queues native runner input, reports t
   await manager.close()
 })
 
+test('subagent manager coalesces thinking bursts and flushes the latest bounded preview at lifecycle boundaries', async () => {
+  const manager = new SubAgentManager({
+    idFactory: () => 'thinking-task',
+    thinkingFlushIntervalMs: 10,
+    runner: async request => {
+      for (let index = 0; index < 80; index += 1) request.report.thinking(`first-${index}|`)
+      request.report.toolStart({ toolCallId: 'read-1', name: 'ReadFile', inputs: { file_path: 'src/a.ts' } })
+      for (let index = 0; index < 80; index += 1) request.report.thinking(`second-${index}|`)
+      request.report.toolEnd({
+        toolCallId: 'read-1',
+        name: 'ReadFile',
+        permitted: true,
+        result: 'ok',
+      })
+      for (let index = 0; index < 80; index += 1) request.report.thinking(`final-${index}|`)
+      return { content: 'finished' }
+    },
+  })
+
+  const task = await manager.spawn({ prompt: 'exercise thinking coalescing' })
+  await manager.wait(task.id, 1_000)
+  const events = manager.peekMailbox()
+  const thinking = events.filter(event => event.type === 'thinking')
+  const previews = thinking.map(event => String(event.data.preview ?? ''))
+
+  expect(thinking).toHaveLength(3)
+  expect(previews.every(preview => preview.length <= 400)).toBeTrue()
+  expect(previews).toEqual([
+    expect.stringContaining('first-79|'),
+    expect.stringContaining('second-79|'),
+    expect.stringContaining('final-79|'),
+  ])
+  expect(events.findIndex(event => event.type === 'thinking')).toBeLessThan(
+    events.findIndex(event => event.type === 'tool_start'),
+  )
+  expect(events.findLastIndex(event => event.type === 'thinking')).toBeLessThan(
+    events.findIndex(event => event.type === 'done'),
+  )
+  await manager.close()
+})
+
+test('subagent manager limits free-running thinking to one event per cadence and clears cancellation timers', async () => {
+  let releaseSecondBurst: (() => void) | undefined
+  const secondBurst = new Promise<void>(resolve => {
+    releaseSecondBurst = resolve
+  })
+  let started: (() => void) | undefined
+  const running = new Promise<void>(resolve => {
+    started = resolve
+  })
+  const ids = ['paced-task', 'cancelled-task']
+  const manager = new SubAgentManager({
+    idFactory: () => ids.shift() ?? crypto.randomUUID(),
+    thinkingFlushIntervalMs: 15,
+    runner: async request => {
+      if (request.task.id === 'cancelled-task') {
+        request.report.thinking('cancelled preview')
+        started?.()
+        await new Promise<void>((_resolve, reject) => {
+          request.cancelSignal.addEventListener('abort', () => reject(request.cancelSignal.reason), { once: true })
+        })
+      }
+      for (let index = 0; index < 100; index += 1) request.report.thinking(`a${index}|`)
+      await Bun.sleep(35)
+      for (let index = 0; index < 100; index += 1) request.report.thinking(`b${index}|`)
+      releaseSecondBurst?.()
+      await Bun.sleep(35)
+      return { content: 'paced' }
+    },
+  })
+
+  const paced = await manager.spawn({ prompt: 'pace live reasoning' })
+  await secondBurst
+  await manager.wait(paced.id, 1_000)
+  const pacedEvents = manager.peekMailbox().filter(event => event.taskId === paced.id && event.type === 'thinking')
+  expect(pacedEvents).toHaveLength(2)
+  expect(String(pacedEvents[0]?.data.preview)).toContain('a99|')
+  expect(String(pacedEvents[1]?.data.preview)).toContain('b99|')
+
+  const cancelled = await manager.spawn({ prompt: 'cancel live reasoning' })
+  await running
+  expect(manager.cancel(cancelled.id)).toBeTrue()
+  await Bun.sleep(40)
+  const cancelledEvents = manager.peekMailbox().filter(event => event.taskId === cancelled.id)
+  expect(cancelledEvents.filter(event => event.type === 'thinking')).toHaveLength(1)
+  expect(cancelledEvents.findIndex(event => event.type === 'thinking')).toBeLessThan(
+    cancelledEvents.findIndex(event => event.type === 'cancelled'),
+  )
+  await manager.close()
+})
+
+test('subagent manager flushes pending thinking before failure events', async () => {
+  const manager = new SubAgentManager({
+    idFactory: () => 'failed-task',
+    thinkingFlushIntervalMs: 1_000,
+    runner: request => {
+      request.report.thinking('last reasoning before failure')
+      throw new Error('runner failed')
+    },
+  })
+
+  const task = await manager.spawn({ prompt: 'fail after reasoning' })
+  await manager.wait(task.id, 1_000)
+  const types = manager.peekMailbox().filter(event => event.taskId === task.id).map(event => event.type)
+
+  expect(task.status).toBe('failed')
+  expect(types.indexOf('thinking')).toBeLessThan(types.indexOf('error'))
+  expect(types.indexOf('error')).toBeLessThan(types.indexOf('done'))
+  await manager.close()
+})
+
+test('subagent manager reports an empty final response as a failed task', async () => {
+  const manager = new SubAgentManager({
+    idFactory: () => 'empty-response-task',
+    runner: () => ({ content: '   \n\t' }),
+  })
+
+  const task = await manager.spawn({ prompt: 'return a useful result' })
+  await manager.wait(task.id, 1_000)
+
+  expect(task.status).toBe('failed')
+  expect(task.error).toBe('Subagent completed without a final response')
+  expect(task.result).toBe('Error: Subagent completed without a final response')
+  expect(manager.peekMailbox().filter(event => event.taskId === task.id).map(event => event.type)).toEqual(
+    expect.arrayContaining(['error', 'done']),
+  )
+  await manager.close()
+})
+
 test('subagent tool filtering prevents recursive delegation and parent-mode mutation', async () => {
   const calls: string[] = []
   const filtered = filterSubagentTools({

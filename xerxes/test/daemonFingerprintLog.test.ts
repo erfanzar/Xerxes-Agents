@@ -121,17 +121,25 @@ test('source checkout identity covers nested runtime files and skips built distr
 })
 
 test('runtime status reports live host tool and skill inventory', () => {
+  let activeSubagents = 3
   let tools = 17
   let skills = 4
   const runtime = new InMemoryDaemonRuntime(undefined, {
     model: 'gpt-4o',
-    statusInventory: () => ({ skills, tools }),
+    statusInventory: () => ({ activeSubagents, skills, tools }),
   })
 
-  expect(runtime.status()).toMatchObject({ skills: 4, tools: 17 })
+  expect(runtime.status()).toMatchObject({ active_subagents: 3, skills: 4, tools: 17 })
+  activeSubagents = -1
   tools = 21
   skills = -1
-  expect(runtime.status()).toMatchObject({ skills: 0, tools: 21 })
+  expect(runtime.status()).toMatchObject({ active_subagents: 0, skills: 0, tools: 21 })
+
+  const runtimeWithoutSubagentInventory = new InMemoryDaemonRuntime(undefined, {
+    model: 'gpt-4o',
+    statusInventory: () => ({ skills: 1, tools: 2 }),
+  })
+  expect(runtimeWithoutSubagentInventory.status()).not.toHaveProperty('active_subagents')
 })
 
 test('fingerprint does not invent source contents when the injected reader fails', async () => {

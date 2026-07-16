@@ -50,6 +50,8 @@ const WRITE_FILE_TOOLS = new Set([
 ])
 const FILE_PATH_KEYS = ['file_path', 'path', 'notebook_path'] as const
 const TERMINAL_STATUSES = new Set<SubAgentStatus>(['cancelled', 'completed', 'failed'])
+const DEFAULT_THINKING_FLUSH_INTERVAL_MS = 250
+const MAX_THINKING_PREVIEW_CHARS = 400
 
 export type SubAgentStatus = 'cancelled' | 'completed' | 'failed' | 'pending' | 'running'
 
@@ -298,6 +300,8 @@ export interface SubAgentManagerOptions {
   readonly onEvent?: (event: SubAgentEvent) => void
   readonly pathResolver?: (rawPath: string) => string | undefined
   readonly runner: SubagentTaskRunner
+  /** Maximum cadence for live reasoning previews from each agent. */
+  readonly thinkingFlushIntervalMs?: number
   readonly worktree?: SubagentWorktreePort
 }
 
@@ -355,6 +359,12 @@ interface TaskRuntime {
   monitor: Promise<void> | undefined
 }
 
+interface ThinkingBurst {
+  readonly timer: ReturnType<typeof setTimeout>
+  tail: string
+  truncated: boolean
+}
+
 /**
  * Agent-facing compatibility manager built on the native `SpawnedAgentManager`.
  *
@@ -378,6 +388,8 @@ export class SubAgentManager {
   private readonly runtimes = new Map<string, TaskRuntime>()
   private readonly tasksByName = new Map<string, string>()
   private readonly textBurst = new Map<string, string[]>()
+  private readonly thinkingBurst = new Map<string, ThinkingBurst>()
+  private readonly thinkingFlushIntervalMs: number
   private readonly waiters = new Set<() => void>()
   private readonly worktree: SubagentWorktreePort | undefined
   readonly tasks = new Map<string, SubAgentTask>()
@@ -392,6 +404,10 @@ export class SubAgentManager {
     this.idFactory = options.idFactory ?? (() => `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`)
     this.eventSink = options.onEvent ?? (() => undefined)
     this.pathResolver = options.pathResolver ?? (rawPath => rawPath)
+    this.thinkingFlushIntervalMs = positiveInteger(
+      options.thinkingFlushIntervalMs ?? DEFAULT_THINKING_FLUSH_INTERVAL_MS,
+      'thinkingFlushIntervalMs',
+    )
     this.worktree = options.worktree
     this.handleManager = new SpawnedAgentManager({
       idFactory: this.idFactory,
@@ -553,6 +569,7 @@ export class SubAgentManager {
   cancel(taskIdOrName: string): boolean {
     const task = this.resolveTask(taskIdOrName)
     if (task === undefined || TERMINAL_STATUSES.has(task.status)) return false
+    this.flushThinkingBurst(task)
     this.handleManager.close(task.id)
     task.status = 'cancelled'
     task.result ??= '[Sub-agent was cancelled.]'
@@ -718,8 +735,13 @@ export class SubAgentManager {
 
   /** Cancel active tasks and wait for their native task monitors to settle. */
   async shutdown(): Promise<void> {
+    this.flushAllThinkingBursts()
     this.cancelAll()
-    await Promise.all([...this.runtimes.values()].flatMap(runtime => runtime.monitor ? [runtime.monitor] : []))
+    try {
+      await Promise.all([...this.runtimes.values()].flatMap(runtime => runtime.monitor ? [runtime.monitor] : []))
+    } finally {
+      this.clearThinkingBurstTimers()
+    }
   }
 
   async close(): Promise<void> {
@@ -785,6 +807,7 @@ export class SubAgentManager {
       if (task.recentOutputText().length === chunksBefore) this.reportText(task, content)
       return content
     } catch (error) {
+      this.flushThinkingBurst(task)
       if (signal.aborted || task.status === 'cancelled') {
         task.status = 'cancelled'
         task.result ??= '[Sub-agent was cancelled.]'
@@ -796,6 +819,7 @@ export class SubAgentManager {
       }
       throw error
     } finally {
+      this.flushThinkingBurst(task)
       this.flushTextBurst(task)
       release()
     }
@@ -807,6 +831,7 @@ export class SubAgentManager {
       const snapshot = result.completed[0] ?? result.pending[0]
       if (snapshot !== undefined) this.synchronize(task, snapshot)
     }
+    this.flushThinkingBurst(task)
     this.flushTextBurst(task)
     this.postEvent(task, 'done', {
       status: task.status,
@@ -850,6 +875,7 @@ export class SubAgentManager {
   }
 
   private fail(task: SubAgentTask, error: string): void {
+    this.flushThinkingBurst(task)
     task.status = 'failed'
     task.error = error
     task.result = error
@@ -870,12 +896,20 @@ export class SubAgentManager {
   private reportThinking(task: SubAgentTask, text: string): void {
     if (!text) return
     task.lastActivityAt = this.now().valueOf()
-    this.postEvent(task, 'thinking', {
-      preview: text.length > 400 ? `…${text.slice(-400)}` : text,
-    })
+    const current = this.thinkingBurst.get(task.id)
+    if (current !== undefined) {
+      appendThinkingTail(current, text)
+      return
+    }
+    const timer = setTimeout(() => this.flushThinkingBurst(task), this.thinkingFlushIntervalMs)
+    timer.unref?.()
+    const burst: ThinkingBurst = { tail: '', truncated: false, timer }
+    appendThinkingTail(burst, text)
+    this.thinkingBurst.set(task.id, burst)
   }
 
   private reportToolStart(task: SubAgentTask, runtime: TaskRuntime, event: SubagentToolStart): void {
+    this.flushThinkingBurst(task)
     task.currentTool = event.name
     task.toolCallsCount += 1
     task.lastActivityAt = this.now().valueOf()
@@ -890,6 +924,7 @@ export class SubAgentManager {
   }
 
   private reportToolEnd(task: SubAgentTask, runtime: TaskRuntime, event: SubagentToolEnd): void {
+    this.flushThinkingBurst(task)
     task.currentTool = ''
     task.lastActivityAt = this.now().valueOf()
     const inputs = runtime.toolInputs.get(event.toolCallId) ?? {}
@@ -930,6 +965,28 @@ export class SubAgentManager {
       chars: text.length,
       preview: text.length > 400 ? `…${text.slice(-400)}` : text,
     })
+  }
+
+  private flushThinkingBurst(task: SubAgentTask): void {
+    const burst = this.thinkingBurst.get(task.id)
+    if (burst === undefined) return
+    clearTimeout(burst.timer)
+    this.thinkingBurst.delete(task.id)
+    this.postEvent(task, 'thinking', {
+      preview: burst.truncated ? `…${burst.tail}` : burst.tail,
+    })
+  }
+
+  private flushAllThinkingBursts(): void {
+    for (const taskId of [...this.thinkingBurst.keys()]) {
+      const task = this.tasks.get(taskId)
+      if (task !== undefined) this.flushThinkingBurst(task)
+    }
+  }
+
+  private clearThinkingBurstTimers(): void {
+    for (const burst of this.thinkingBurst.values()) clearTimeout(burst.timer)
+    this.thinkingBurst.clear()
   }
 
   private async cleanupWorktree(task: SubAgentTask): Promise<void> {
@@ -1086,7 +1143,18 @@ function effectiveSystemPrompt(base: string, definition: AgentDefinition | undef
 function outputText(output: SubagentTaskRunResult | string): string {
   const content = typeof output === 'string' ? output : output.content
   if (typeof content !== 'string') throw new TypeError('subagent runner must return a string or { content: string }')
+  if (!content.trim()) throw new Error('Subagent completed without a final response')
   return content
+}
+
+function appendThinkingTail(burst: ThinkingBurst, text: string): void {
+  const combined = `${burst.tail}${text}`
+  if (burst.truncated || combined.length > MAX_THINKING_PREVIEW_CHARS) {
+    burst.tail = combined.slice(-(MAX_THINKING_PREVIEW_CHARS - 1))
+    burst.truncated = true
+    return
+  }
+  burst.tail = combined
 }
 
 function previewToolInput(inputs: Readonly<Record<string, unknown>>): string {
