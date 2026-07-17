@@ -4,6 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import {
+  ConfigurationError,
   ContextCompressor,
   CostTracker,
   QueryEngine,
@@ -35,7 +36,7 @@ class UsageClient implements LlmClient {
 
 test('query engine applies an injected context compressor at its configured turn boundary', async () => {
   const engine = new QueryEngine({ llm: new ReplyClient() }, {
-    config: { compactAfterTurns: 2 },
+    config: { compactAfterTurns: 2, model: 'configured-test-model' },
     contextCompressor: new ContextCompressor({
       contextWindow: 1,
       threshold: 0.5,
@@ -52,6 +53,13 @@ test('query engine applies an injected context compressor at its configured turn
   expect(engine.state.messages).toHaveLength(3)
   expect(engine.state.messages[1]).toMatchObject({ role: 'user', content: expect.stringContaining('CONTEXT COMPACTION') })
   expect(engine.state.metadata.lastCompaction).toMatchObject({ strategy: 'first-pass', compressed_count: 2 })
+})
+
+test('query engine rejects execution without an explicitly configured model', () => {
+  expect(() => new QueryEngine({ llm: new ReplyClient() }))
+    .toThrow(ConfigurationError)
+  expect(() => new QueryEngine({ llm: new ReplyClient() }))
+    .toThrow('select a provider model or pass an explicit model')
 })
 
 test('query engine records each completed provider turn in its session cost ledger', async () => {

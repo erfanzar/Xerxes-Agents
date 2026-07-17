@@ -4,6 +4,7 @@
 import { ContextCompressor } from '../context/compressor.js'
 import { repairToolMessageSequence } from '../context/toolPairRepair.js'
 import type { ToolExecutor } from '../executors/toolRegistry.js'
+import { requireConfiguredModel } from '../llms/client.js'
 import type { StreamEvent } from '../streaming/events.js'
 import { createAgentState } from '../streaming/events.js'
 import { runTurn, type TurnDependencies } from '../streaming/loop.js'
@@ -38,7 +39,7 @@ export const DEFAULT_QUERY_ENGINE_CONFIG: QueryEngineConfig = {
   compactAfterTurns: 20,
   maxBudgetTokens: 500_000,
   maxTurns: 50,
-  model: 'gpt-4o',
+  model: '',
   permissionMode: DEFAULT_PERMISSION_MODE,
   thinking: false,
 }
@@ -65,7 +66,8 @@ export class QueryEngine {
       readonly tools?: readonly ToolDefinition[]
     } = {},
   ) {
-    this.config = { ...DEFAULT_QUERY_ENGINE_CONFIG, ...options.config }
+    const config = { ...DEFAULT_QUERY_ENGINE_CONFIG, ...options.config }
+    this.config = { ...config, model: requireConfiguredModel(config.model) }
     this.contextCompressor = options.contextCompressor
     this.dependencies = dependencies
     this.sessionId = options.sessionId ?? crypto.randomUUID()

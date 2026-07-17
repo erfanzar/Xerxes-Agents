@@ -6,14 +6,14 @@ import type { KeyEvent } from '@opentui/core'
 import { useKeyboard, useTerminalDimensions } from '@opentui/react'
 import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useGateway } from '../app/gatewayContext.js'
 import { patchOverlayState } from '../app/overlayStore.js'
 import { $uiSessionId, $uiTheme } from '../app/uiStore.js'
 import { providerDisplayNames } from '../domain/providers.js'
 import { TUI_SESSION_MODEL_FLAG } from '../domain/slash.js'
-import type { ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
+import type { ModelModelsResponse, ModelOptionProvider, ModelOptionsResponse } from '../gatewayTypes.js'
 import { fuzzyRank } from '../lib/fuzzy.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
@@ -27,6 +27,20 @@ type Stage = 'provider' | 'model'
 interface ProviderRow {
   name: string
   provider: ModelOptionProvider
+}
+
+interface ModelDiscovery {
+  error?: string
+  models: string[]
+  requestId: number
+  source?: string
+  status: 'error' | 'loading' | 'partial' | 'ready'
+  warning?: string
+}
+
+interface ModelRow {
+  custom: boolean
+  model: string
 }
 
 export interface ModelPickerProps {
@@ -47,6 +61,10 @@ const windowItems = <T,>(items: readonly T[], selected: number, visible: number)
 
   return { items: items.slice(offset, offset + visible), offset }
 }
+
+const uniqueModels = (values: readonly (null | string | undefined)[]) => [
+  ...new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))
+]
 
 function ModalShell({
   children,
@@ -129,14 +147,26 @@ export function ModelPicker({
 
   const [providers, setProviders] = useState<ModelOptionProvider[]>([])
   const [currentModel, setCurrentModel] = useState('')
-  const [error, setError] = useState('')
+  const [discoveryVersion, setDiscoveryVersion] = useState(0)
   const [filter, setFilter] = useState('')
-  const [loading, setLoading] = useState(true)
   const [modelIdx, setModelIdx] = useState(0)
   const [modelProviderSlug, setModelProviderSlug] = useState<null | string>(null)
+  const [optionsError, setOptionsError] = useState('')
+  const [optionsLoading, setOptionsLoading] = useState(true)
+  const [optionsRequest, setOptionsRequest] = useState(0)
   const [persistGlobal, setPersistGlobal] = useState(false)
   const [providerIdx, setProviderIdx] = useState(0)
   const [stage, setStage] = useState<Stage>('provider')
+  const discoveries = useRef(new Map<string, ModelDiscovery>())
+  const nextDiscoveryRequest = useRef(0)
+
+  useEffect(
+    () => () => {
+      nextDiscoveryRequest.current += 1
+      discoveries.current.clear()
+    },
+    []
+  )
 
   const close = useCallback(() => {
     patchOverlayState({ modelPicker: false })
@@ -154,8 +184,8 @@ export function ModelPicker({
   useEffect(() => {
     let active = true
 
-    setLoading(true)
-    setError('')
+    setOptionsLoading(true)
+    setOptionsError('')
 
     gw.request<ModelOptionsResponse>('model.options', effectiveSessionId ? { session_id: effectiveSessionId } : {})
       .then(raw => {
@@ -166,13 +196,15 @@ export function ModelPicker({
         const result = asRpcResult<ModelOptionsResponse>(raw)
 
         if (!result) {
-          setError('invalid response: model.options')
-          setLoading(false)
+          setOptionsError('invalid response: model.options')
+          setOptionsLoading(false)
 
           return
         }
 
         const next = result.providers ?? []
+        discoveries.current.clear()
+        setDiscoveryVersion(version => version + 1)
         setProviders(next)
         setCurrentModel(String(result.model ?? ''))
         setProviderIdx(
@@ -185,21 +217,74 @@ export function ModelPicker({
         setModelProviderSlug(null)
         setStage('provider')
         setFilter('')
-        setLoading(false)
+        setOptionsLoading(false)
       })
       .catch((reason: unknown) => {
         if (!active) {
           return
         }
 
-        setError(rpcErrorMessage(reason))
-        setLoading(false)
+        setOptionsError(rpcErrorMessage(reason))
+        setOptionsLoading(false)
       })
 
     return () => {
       active = false
     }
-  }, [effectiveSessionId, gw])
+  }, [effectiveSessionId, gw, optionsRequest])
+
+  const discoverModels = useCallback(
+    (selected: ModelOptionProvider, refresh = false) => {
+      const cached = discoveries.current.get(selected.slug)
+      if (!refresh && cached && (cached.status === 'loading' || cached.status === 'ready')) {
+        return
+      }
+
+      const requestId = ++nextDiscoveryRequest.current
+      discoveries.current.set(selected.slug, {
+        models: cached?.models ?? [],
+        requestId,
+        status: 'loading'
+      })
+      setDiscoveryVersion(version => version + 1)
+
+      void gw
+        .request<ModelModelsResponse>('model.models', {
+          profile_name: selected.slug
+        })
+        .then(raw => {
+          if (discoveries.current.get(selected.slug)?.requestId !== requestId) {
+            return
+          }
+          const result = asRpcResult<ModelModelsResponse>(raw)
+          if (!result) {
+            throw new Error('invalid response: model.models')
+          }
+          const warning = result.warning?.trim()
+          discoveries.current.set(selected.slug, {
+            models: uniqueModels(result.models ?? []),
+            requestId,
+            source: result.source,
+            status: warning ? 'partial' : 'ready',
+            ...(warning ? { warning } : {})
+          })
+          setDiscoveryVersion(version => version + 1)
+        })
+        .catch((reason: unknown) => {
+          if (discoveries.current.get(selected.slug)?.requestId !== requestId) {
+            return
+          }
+          discoveries.current.set(selected.slug, {
+            error: rpcErrorMessage(reason),
+            models: cached?.models ?? [],
+            requestId,
+            status: 'error'
+          })
+          setDiscoveryVersion(version => version + 1)
+        })
+    },
+    [gw]
+  )
 
   const providerNames = useMemo(() => providerDisplayNames(providers), [providers])
   const providerRows = useMemo<ProviderRow[]>(
@@ -219,7 +304,8 @@ export function ModelPicker({
     return fuzzyRank(
       providerRows,
       filter,
-      row => `${row.name} ${row.provider.slug} ${(row.provider.models ?? []).join(' ')}`
+      row =>
+        `${row.name} ${row.provider.slug} ${row.provider.provider_type ?? ''} ${row.provider.configured_model ?? ''}`
     ).map(result => result.item)
   }, [filter, providerRows, stage])
 
@@ -241,22 +327,42 @@ export function ModelPicker({
     return providerNames[index] ?? provider.name ?? provider.slug
   }, [provider, providerNames, providers])
 
-  const allModels = useMemo(() => provider?.models ?? [], [provider])
-  const models = useMemo(() => {
+  const discovery = useMemo(
+    () => (modelProviderSlug ? discoveries.current.get(modelProviderSlug) : undefined),
+    [discoveryVersion, modelProviderSlug]
+  )
+  const allModels = useMemo(
+    () =>
+      uniqueModels([
+        ...(provider?.is_current ? [currentModel] : []),
+        ...(discovery?.models ?? []),
+        provider?.configured_model
+      ]),
+    [currentModel, discovery, provider]
+  )
+  const filteredModels = useMemo(() => {
     if (stage !== 'model' || !filter.trim()) {
       return allModels
     }
 
     return fuzzyRank(allModels, filter, model => model).map(result => result.item)
   }, [allModels, filter, stage])
+  const modelRows = useMemo<ModelRow[]>(() => {
+    if (filteredModels.length > 0) {
+      return filteredModels.map(model => ({ custom: false, model }))
+    }
+    const custom = filter.trim()
+
+    return custom ? [{ custom: true, model: custom }] : []
+  }, [filter, filteredModels])
 
   useEffect(() => {
     setProviderIdx(index => Math.max(0, Math.min(index, Math.max(0, filteredProviderRows.length - 1))))
   }, [filteredProviderRows.length])
 
   useEffect(() => {
-    setModelIdx(index => Math.max(0, Math.min(index, Math.max(0, models.length - 1))))
-  }, [models.length])
+    setModelIdx(index => Math.max(0, Math.min(index, Math.max(0, modelRows.length - 1))))
+  }, [modelRows.length])
 
   const back = useCallback(() => {
     if (filter.trim()) {
@@ -289,12 +395,32 @@ export function ModelPicker({
       const sequence = event.sequence ?? ''
       const isEscape = name === 'escape'
       const isReturn = name === 'return' || name === 'enter' || name === 'kpenter'
-      const isQuit = (name === 'q' || sequence === 'q') && !filter
+      const isClose = event.ctrl && name === 'c'
+      const isRefresh = event.ctrl && name === 'r'
 
-      if (loading || error || providers.length === 0) {
-        if (isEscape || isQuit) {
+      if (isClose) {
+        consume(event)
+        close()
+
+        return
+      }
+
+      if (optionsLoading) {
+        if (isEscape) {
           consume(event)
           close()
+        }
+
+        return
+      }
+
+      if (optionsError || providers.length === 0) {
+        if (isEscape) {
+          consume(event)
+          close()
+        } else if (isRefresh) {
+          consume(event)
+          setOptionsRequest(request => request + 1)
         }
 
         return
@@ -307,9 +433,11 @@ export function ModelPicker({
         return
       }
 
-      if (isQuit) {
+      if (isRefresh && stage === 'model' && provider) {
         consume(event)
-        close()
+        if (discovery?.status !== 'loading') {
+          discoverModels(provider, true)
+        }
 
         return
       }
@@ -332,7 +460,7 @@ export function ModelPicker({
         if (stage === 'provider') {
           setProviderIdx(index => Math.min(Math.max(0, filteredProviderRows.length - 1), index + 1))
         } else {
-          setModelIdx(index => Math.min(Math.max(0, models.length - 1), index + 1))
+          setModelIdx(index => Math.min(Math.max(0, modelRows.length - 1), index + 1))
         }
 
         return
@@ -348,25 +476,18 @@ export function ModelPicker({
             return
           }
 
-          if (selected.authenticated === false) {
-            setError('Native provider credentials are managed through /provider; inline key entry is unavailable.')
-
-            return
-          }
-
           setModelProviderSlug(selected.slug)
           setModelIdx(0)
           setStage('model')
           setFilter('')
+          discoverModels(selected)
 
           return
         }
 
-        const model = models[modelIdx]
+        const model = event.ctrl && filter.trim() ? filter.trim() : modelRows[modelIdx]?.model
 
         if (!provider || !model) {
-          back()
-
           return
         }
 
@@ -427,12 +548,14 @@ export function ModelPicker({
       allowPersistGlobal,
       back,
       close,
-      error,
+      discoverModels,
+      discovery,
       filter,
       filteredProviderRows,
-      loading,
       modelIdx,
-      models,
+      modelRows,
+      optionsError,
+      optionsLoading,
       persistGlobal,
       provider,
       providerIdx,
@@ -451,23 +574,24 @@ export function ModelPicker({
   const visible = Math.max(1, Math.min(MAX_VISIBLE, height - 16))
   const panelHeight = Math.min(height, visible + 12)
 
-  if (loading) {
+  if (optionsLoading) {
     return (
       <ModalShell height={height} panelHeight={5} panelWidth={panelWidth} t={t} title="Select model" width={width}>
-        <InfoRow color={t.color.muted}>loading models…</InfoRow>
+        <InfoRow color={t.color.muted}>loading provider profiles…</InfoRow>
+        <InfoRow color={t.color.muted}>Esc close</InfoRow>
       </ModalShell>
     )
   }
 
-  if (error) {
+  if (optionsError) {
     return (
       <ModalShell height={height} panelHeight={7} panelWidth={panelWidth} t={t} title="Select model" width={width}>
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.color.error} flexShrink={0} wrapMode="word">
-            error: {error}
+            error: {optionsError}
           </text>
         </box>
-        <InfoRow color={t.color.muted}>Esc/q close</InfoRow>
+        <InfoRow color={t.color.muted}>Ctrl+R retry · Esc close</InfoRow>
       </ModalShell>
     )
   }
@@ -476,23 +600,32 @@ export function ModelPicker({
     return (
       <ModalShell height={height} panelHeight={6} panelWidth={panelWidth} t={t} title="Select model" width={width}>
         <InfoRow color={t.color.muted}>no providers available</InfoRow>
-        <InfoRow color={t.color.muted}>Esc/q close</InfoRow>
+        <InfoRow color={t.color.muted}>Ctrl+R retry · Esc close</InfoRow>
       </ModalShell>
     )
   }
 
   if (stage === 'provider') {
     const rows = filteredProviderRows.map(({ name, provider: item }) => {
-      const authMark = item.authenticated === false ? '○' : item.is_current ? '*' : '●'
-      const modelCount = item.total_models ?? item.models?.length ?? 0
+      const cached = discoveries.current.get(item.slug)
+      const mark = item.is_current ? '*' : '●'
       const suffix =
-        item.authenticated === false
-          ? item.auth_type === 'api_key'
-            ? '(no key)'
-            : '(needs setup)'
-          : `${modelCount} models`
+        cached?.status === 'ready'
+          ? `${cached.models.length} available`
+          : cached?.status === 'loading'
+            ? 'discovering…'
+            : cached?.status === 'partial'
+              ? `incomplete · ${cached.warning ?? 'retry available'}`
+              : cached?.status === 'error'
+                ? 'discovery failed'
+                : 'discover models'
 
-      return { id: item.slug, item, label: `${authMark} ${name} · ${suffix}` }
+      return {
+        discovery: cached,
+        id: item.slug,
+        item,
+        label: `${mark} ${name} · ${suffix}`
+      }
     })
     const { items, offset } = windowItems(rows, providerIdx, visible)
 
@@ -532,7 +665,15 @@ export function ModelPicker({
                 width="100%"
               >
                 <text
-                  fg={selected ? t.color.accent : row?.item.authenticated === false ? t.color.label : t.color.text}
+                  fg={
+                    selected
+                      ? t.color.accent
+                      : row?.discovery?.status === 'partial'
+                        ? t.color.warn
+                        : row?.discovery?.status === 'error'
+                          ? t.color.error
+                          : t.color.text
+                  }
                   flexShrink={0}
                   truncate
                   width="100%"
@@ -553,12 +694,24 @@ export function ModelPicker({
             ? `persist: ${persistGlobal ? 'global' : 'live runtime'} · ctrl+g toggle`
             : 'scope: live runtime'}
         </InfoRow>
-        <InfoRow color={t.color.muted}>↑/↓ select · Enter choose · Esc clear/back · q close</InfoRow>
+        <InfoRow color={t.color.muted}>↑/↓ select · Enter discover · Esc clear/back · Ctrl+C close</InfoRow>
       </ModalShell>
     )
   }
 
-  const { items, offset } = windowItems(models, modelIdx, visible)
+  const { items, offset } = windowItems(modelRows, modelIdx, visible)
+  const discoveryMessage =
+    discovery?.status === 'loading'
+      ? 'discovering models from this profile…'
+      : discovery?.status === 'error'
+        ? `discovery failed: ${discovery.error ?? 'unknown error'}`
+        : discovery?.status === 'partial'
+          ? `warning: ${discovery.warning}`
+          : discovery?.source
+            ? `source: ${discovery.source}`
+            : ' '
+  const discoveryColor =
+    discovery?.status === 'error' ? t.color.error : discovery?.warning ? t.color.warn : t.color.muted
 
   return (
     <ModalShell
@@ -573,11 +726,14 @@ export function ModelPicker({
       <InfoRow color={filter ? t.color.accent : t.color.muted}>
         {filter ? `filter: ${filter}▎` : 'type to filter · ↑/↓ select'}
       </InfoRow>
-      <InfoRow color={t.color.warn}>{provider?.warning ? `warning: ${provider.warning}` : ' '}</InfoRow>
+      <InfoRow color={provider?.warning ? t.color.warn : discoveryColor}>
+        {provider?.warning ? `warning: ${provider.warning}` : discoveryMessage}
+      </InfoRow>
       <InfoRow color={t.color.muted}>{offset > 0 ? `↑ ${offset} more` : ' '}</InfoRow>
 
       {Array.from({ length: visible }, (_, index) => {
-        const model = items[index]
+        const row = items[index]
+        const model = row?.model
         const absoluteIndex = offset + index
         const selected = absoluteIndex === modelIdx
 
@@ -593,11 +749,15 @@ export function ModelPicker({
           >
             <text fg={selected ? t.color.accent : t.color.text} flexShrink={0} truncate width="100%" wrapMode="none">
               {model
-                ? `${selected ? '›' : model === currentModel ? '*' : ' '} ${absoluteIndex + 1}. ${model}`
+                ? `${selected ? '›' : model === currentModel ? '*' : ' '} ${absoluteIndex + 1}. ${
+                    row.custom ? `Use "${model}"` : model
+                  }`
                 : index === 0 && items.length === 0
                   ? filter.trim()
-                    ? 'no models match filter'
-                    : 'no models listed for this provider'
+                    ? `Use Ctrl+Enter to select "${filter.trim()}"`
+                    : discovery?.status === 'loading'
+                      ? 'discovering models…'
+                      : 'no models discovered · type a full model ID'
                   : ' '}
             </text>
           </box>
@@ -605,7 +765,7 @@ export function ModelPicker({
       })}
 
       <InfoRow color={t.color.muted}>
-        {offset + visible < models.length ? `↓ ${models.length - offset - visible} more` : ' '}
+        {offset + visible < modelRows.length ? `↓ ${modelRows.length - offset - visible} more` : ' '}
       </InfoRow>
       <InfoRow color={t.color.muted}>
         {allowPersistGlobal
@@ -613,7 +773,13 @@ export function ModelPicker({
           : 'scope: live runtime'}
       </InfoRow>
       <InfoRow color={t.color.muted}>
-        {models.length ? '↑/↓ select · Enter switch · Esc clear/back · q close' : 'Esc back · q close'}
+        {discovery?.status === 'loading'
+          ? 'Enter fallback · type full ID · Esc back · Ctrl+C close'
+          : discovery?.status === 'error'
+            ? 'type full ID · Ctrl+R retry · Esc clear/back'
+            : discovery?.status === 'partial'
+              ? 'fallback available · Ctrl+R retry · Esc clear/back'
+              : 'Enter switch · Ctrl+Enter typed ID · Ctrl+R refresh · Esc clear/back'}
       </InfoRow>
     </ModalShell>
   )

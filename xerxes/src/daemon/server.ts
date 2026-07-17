@@ -60,10 +60,10 @@ import {
   type JsonRpcRequest,
 } from "../protocol/jsonRpc.js";
 import {
-  PROVIDERS,
   calcCost,
   getContextLimit,
 } from "../llms/providerRegistry.js";
+import { requireConfiguredModel } from "../llms/client.js";
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
 import { formatGitUpdateStatus, gitUpdateStatus } from "../runtime/update.js";
 import {
@@ -83,6 +83,11 @@ import { BrowserManager } from "../operators/browser.js";
 import { SnapshotManager, type SnapshotRecord } from "../session/snapshots.js";
 import { processAtMentions } from "./atMentions.js";
 import { DaemonInteractionBoard } from "./interactions.js";
+import {
+  discoverModelIds,
+  profileDiscoveryApiKey,
+  sanitizeModelDiscoveryError,
+} from "./modelDiscovery.js";
 import {
   ProviderProfileFlow,
   type ProviderFlowPrompt,
@@ -509,7 +514,18 @@ export class DaemonServer {
       },
     );
     this.profileStore = options.profileStore ?? new ProfileStore();
-    this.providerModelDiscovery = options.providerModelDiscovery;
+    this.providerModelDiscovery =
+      options.providerModelDiscovery ??
+      {
+        discover: (input) =>
+          discoverModelIds({
+            allowPrivateEndpoint: true,
+            apiKey: input.apiKey,
+            baseUrl: input.baseUrl,
+            provider: input.provider,
+            resolveProviderCredential: false,
+          }),
+      };
     this.mcpManager = options.mcpManager;
     this.memoryFactory =
       options.memoryFactory ??
@@ -791,7 +807,15 @@ export class DaemonServer {
       );
       return {
         ok: Boolean(session),
-        session: session ? sessionPayload(session) : null,
+        session: session
+          ? {
+              ...sessionPayload(session),
+              // This is intentionally an identity only. The picker can use it
+              // to select the exact stored profile without receiving the live
+              // endpoint or credential that proved the match.
+              profile_name: this.activeRuntimeProfileName(),
+            }
+          : null,
       };
     }
     if (method === "session.usage") {
@@ -944,6 +968,10 @@ export class DaemonServer {
       if (!text) {
         return { ok: false, error: "text is required" };
       }
+      const session = this.runtime.sessionStatus(key);
+      requireConfiguredModel(
+        session?.model || stringValue(this.runtime.status().model),
+      );
       const displayText =
         (typeof params.display_text === "string"
           ? params.display_text.trim()
@@ -1436,7 +1464,7 @@ export class DaemonServer {
       statusUpdatePayload(
         session,
         model,
-        getContextLimit(model || "gpt-4o"),
+        configuredContextLimit(model),
         this.channelStatusData(),
         stringValue(this.runtime.status().reasoning_effort) || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
@@ -1445,63 +1473,124 @@ export class DaemonServer {
   }
 
   private async fetchModels(params: JsonRpcPayload): Promise<JsonRpcPayload> {
-    const active = this.profileStore.active();
+    const profileName =
+      optionalString(params.profile_name) ??
+      optionalString(params.profile) ??
+      optionalString(params.name);
+    const baseUrl = optionalString(params.base_url);
     const requestedProvider = optionalString(params.provider);
-    const provider = requestedProvider ?? active?.provider ?? "";
-    const useActiveConnection =
-      requestedProvider === undefined || requestedProvider === active?.provider;
-    const baseUrl =
-      optionalString(params.base_url) ??
-      (useActiveConnection ? (active?.base_url ?? "") : "");
-    const apiKey =
-      optionalString(params.api_key) ??
-      (useActiveConnection ? (active?.api_key ?? "") : "");
-    const staticModels =
-      provider && provider in PROVIDERS
-        ? [...PROVIDERS[provider as keyof typeof PROVIDERS].models]
-        : [];
-    if (provider === "claude-code" || baseUrl.startsWith("claude-code://")) {
+    const hasExplicitConnection =
+      baseUrl !== undefined ||
+      params.api_key !== undefined ||
+      requestedProvider !== undefined;
+
+    if (hasExplicitConnection) {
+      return {
+        ok: false,
+        error:
+          "model discovery only accepts a stored profile name; save the provider profile first",
+        models: [],
+      };
+    }
+
+    const profile = profileName
+      ? this.profileStore.get(profileName)
+      : this.profileStore.active();
+    if (!profile) {
+      return {
+        ok: false,
+        error: profileName
+          ? `No provider profile named ${profileName}`
+          : "No active provider profile is configured",
+        models: [],
+      };
+    }
+    const fallbackModels = profile.model.trim() ? [profile.model.trim()] : [];
+    if (
+      profile.provider === "claude-code" ||
+      profile.base_url.startsWith("claude-code://")
+    ) {
       return {
         ok: true,
-        models: active?.model ? [active.model] : [],
+        models: fallbackModels,
+        profile: profile.name,
         source: "profile",
       };
     }
-    if (!baseUrl) {
-      return staticModels.length
-        ? { ok: true, models: staticModels, source: "registry" }
-        : {
-            ok: false,
-            error: "base_url or a known provider is required",
-            models: [],
-          };
-    }
+
+    const apiKey = profileDiscoveryApiKey(profile);
     try {
-      const endpoint = modelsEndpoint(baseUrl);
-      const response = await fetch(endpoint, {
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      const models = await discoverModelIds({
+        allowPrivateEndpoint: true,
+        apiKey,
+        baseUrl: profile.base_url,
+        provider: profile.provider,
       });
-      if (!response.ok) {
-        throw new Error(`model endpoint returned HTTP ${response.status}`);
-      }
-      const parsed: unknown = await response.json();
-      const models = modelsFromResponse(parsed);
-      if (models.length) {
-        return { ok: true, models, source: "remote" };
-      }
-      return staticModels.length
-        ? { ok: true, models: staticModels, source: "registry" }
-        : { ok: false, error: "provider returned no model ids", models: [] };
-    } catch (error) {
-      return staticModels.length
+      return models.length
         ? {
             ok: true,
-            models: staticModels,
-            source: "registry",
-            warning: errorMessage(error),
+            models,
+            profile: profile.name,
+            source: "remote",
           }
-        : { ok: false, error: errorMessage(error), models: [] };
+        : {
+            ok: true,
+            models: fallbackModels,
+            profile: profile.name,
+            source: "profile",
+            warning: "provider returned no model ids",
+          };
+    } catch (error) {
+      const warning = sanitizeModelDiscoveryError(error, {
+        apiKey,
+        baseUrl: profile.base_url,
+      });
+      return fallbackModels.length
+        ? {
+            ok: true,
+            models: fallbackModels,
+            profile: profile.name,
+            source: "profile",
+            warning,
+          }
+        : { ok: false, error: warning, models: [] };
     }
+  }
+
+  /**
+   * Map the live runtime connection back to the selected stored profile.
+   *
+   * Runtime configuration can override a profile's provider or endpoint. In
+   * that case returning the store's active name would make the TUI discover
+   * and switch through the wrong connection, so report an explicit null
+   * identity instead. No endpoint or credential leaves this method.
+   */
+  private activeRuntimeProfileName(): string | null {
+    const profile = this.profileStore.active();
+    if (!profile) {
+      return null;
+    }
+    const status = this.runtime.status();
+    const provider = optionalString(status.provider);
+    const baseUrl = optionalString(status.base_url);
+    if (!provider && !baseUrl) {
+      return null;
+    }
+    if (
+      provider &&
+      normalizeProviderIdentity(provider) !==
+        normalizeProviderIdentity(profile.provider)
+    ) {
+      return null;
+    }
+    if (
+      baseUrl &&
+      normalizeBaseUrlIdentity(baseUrl) !==
+        normalizeBaseUrlIdentity(profile.base_url)
+    ) {
+      return null;
+    }
+    return profile.name;
   }
 
   private async handleSlash(
@@ -1625,7 +1714,7 @@ export class DaemonServer {
           connection,
           formatSessionUsage(
             session,
-            getContextLimit(session.model || "gpt-4o"),
+            configuredContextLimit(session.model),
           ),
         );
         return { ok: true };
@@ -2667,9 +2756,15 @@ export class DaemonServer {
       }
       return { ok: false, error: "no active session" };
     }
+    const model = session.model || stringValue(this.runtime.status().model);
+    if (!model) {
+      const error = "model is not configured; select a provider model before compacting";
+      if (notify) this.emitSlash(connection, error, "warning");
+      return { ok: false, error };
+    }
     const compressor = new ContextCompressor({
-      contextWindow: getContextLimit(session.model || "gpt-4o"),
-      model: session.model || "gpt-4o",
+      contextWindow: getContextLimit(model),
+      model,
       summarizer: naiveSummarizer,
       threshold: 0.000_001,
     });
@@ -2711,17 +2806,21 @@ export class DaemonServer {
       return { ok: false, error: "no active session" };
     }
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = getContextLimit(model || "gpt-4o");
+    const contextLimit = configuredContextLimit(model);
     const used = estimateContextTokens(session.messages, {
-      model: model || "gpt-4o",
+      model,
     });
     const remaining = Math.max(0, contextLimit - used);
     const percent = contextLimit ? (used / contextLimit) * 100 : 0;
     this.emitSlash(
       connection,
       [
-        `Context window: ${contextLimit.toLocaleString()} tokens for \`${model || "(not configured)"}\``,
-        `Used: ${used.toLocaleString()} (${percent.toFixed(1)}%) · Remaining: ${remaining.toLocaleString()}`,
+        model
+          ? `Context window: ${contextLimit.toLocaleString()} tokens for \`${model}\``
+          : "Context window: unknown (model not configured)",
+        contextLimit
+          ? `Used: ${used.toLocaleString()} (${percent.toFixed(1)}%) · Remaining: ${remaining.toLocaleString()}`
+          : `Used: ${used.toLocaleString()} · Remaining: unknown`,
       ].join("\n"),
     );
     return {
@@ -3667,7 +3766,7 @@ export class DaemonServer {
       .all()
       .filter((skill) => skillMatchesPlatform(skill));
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = getContextLimit(model || "gpt-4o");
+    const contextLimit = configuredContextLimit(model);
     const initPayload: JsonRpcPayload = {
       session_id: session.id,
       model,
@@ -4037,9 +4136,9 @@ function requestedSessionKey(params: JsonRpcPayload, fallback: string): string {
 }
 
 function sessionPayload(session: DaemonSession): JsonRpcPayload {
-  const model = session.model || "gpt-4o";
+  const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
-  const contextLimit = getContextLimit(model);
+  const contextLimit = configuredContextLimit(model);
   const calls = exactSessionApiCalls(session);
   const hierarchy = sessionHierarchyPayload(session.metadata);
   const title = optionalString(session.metadata.title);
@@ -4097,9 +4196,9 @@ function sessionHierarchyPayload(
 }
 
 function sessionUsagePayload(session: DaemonSession): JsonRpcPayload {
-  const model = session.model || "gpt-4o";
+  const model = session.model;
   const contextUsed = sessionContextTokens(session, model);
-  const contextMax = getContextLimit(model);
+  const contextMax = configuredContextLimit(model);
   const calls = exactSessionApiCalls(session);
   const total = session.totalInputTokens + session.totalOutputTokens;
   return {
@@ -4207,7 +4306,7 @@ function initPayload(
     session_id: session.id,
     model,
     cwd: session.cwd,
-    context_limit: getContextLimit(model || "gpt-4o"),
+    context_limit: configuredContextLimit(model),
     agent_name: session.agentId,
     mode: session.interactionMode,
     plan_mode: session.planMode,
@@ -4260,6 +4359,11 @@ function sessionContextTokens(session: DaemonSession, model: string): number {
     })),
     { model },
   );
+}
+
+function configuredContextLimit(model: string): number {
+  const configured = model.trim();
+  return configured ? getContextLimit(configured) : 0;
 }
 
 function channelStatusPayload(status: ManagedChannelStatus): JsonRpcPayload {
@@ -4355,6 +4459,14 @@ function newConnectionKey(): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeProviderIdentity(value: string): string {
+  return value.trim().toLowerCase().replaceAll("_", "-");
+}
+
+function normalizeBaseUrlIdentity(value: string): string {
+  return value.trim().replace(/\/+$/u, "");
 }
 
 function stringValue(value: unknown): string {
@@ -4465,7 +4577,7 @@ function formatSessionUsage(
 ): string {
   const total = session.totalInputTokens + session.totalOutputTokens;
   const calls = exactSessionApiCalls(session);
-  const contextUsed = sessionContextTokens(session, session.model || "gpt-4o");
+  const contextUsed = sessionContextTokens(session, session.model);
   return [
     `Model: ${session.model || "(not configured)"}`,
     `Messages: ${session.messages.length}`,
@@ -4475,7 +4587,7 @@ function formatSessionUsage(
     `Total tokens: ${total}`,
     `API calls: ${calls === undefined ? "unknown (imported session)" : calls}`,
     `Context used: ${contextUsed}`,
-    `Context window: ${contextLimit}`,
+    `Context window: ${contextLimit || "unknown"}`,
   ].join("\n");
 }
 
@@ -4525,33 +4637,6 @@ function projectInitializationPrompt(
     "Inspect the repository before changing files. Produce project-specific agent context in `XERXES.md` and `.agents/` only when the current runtime exposes the needed file and sub-agent tools.",
     "Capture real build/test commands, architecture, conventions, and risks. Do not invent a generic template when tooling is unavailable; report the blocker instead.",
   ].join("\n");
-}
-
-function modelsEndpoint(baseUrl: string): string {
-  const url = new URL(baseUrl);
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}/models`.replace(
-    /^models$/,
-    "/models",
-  );
-  return url.toString();
-}
-
-function modelsFromResponse(value: unknown): string[] {
-  if (!isRecord(value)) return [];
-  const candidates = Array.isArray(value.data)
-    ? value.data
-    : Array.isArray(value.models)
-      ? value.models
-      : [];
-  return candidates.flatMap((candidate) => {
-    if (typeof candidate === "string") return [candidate];
-    if (!isRecord(candidate)) return [];
-    const id =
-      optionalString(candidate.id) ??
-      optionalString(candidate.name) ??
-      optionalString(candidate.model);
-    return id ? [id] : [];
-  });
 }
 
 function numberValue(value: unknown): number {

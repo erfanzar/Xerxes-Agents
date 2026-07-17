@@ -449,10 +449,12 @@ export interface ToolsConfigureResponse {
 export interface ModelOptionProvider {
   auth_type?: string
   authenticated?: boolean
+  configured_model?: string
   is_current?: boolean
   key_env?: string
   models?: string[]
   name: string
+  provider_type?: string
   slug: string
   total_models?: number
   warning?: string
@@ -462,6 +464,12 @@ export interface ModelOptionsResponse {
   model?: string
   provider?: string
   providers?: ModelOptionProvider[]
+}
+
+export interface ModelModelsResponse {
+  models?: string[]
+  source?: string
+  warning?: string
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────

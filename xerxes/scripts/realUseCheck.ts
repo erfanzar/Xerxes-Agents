@@ -21,7 +21,7 @@ import { ToolRegistry } from '../src/executors/toolRegistry.js'
 import { SlashPluginRegistry } from '../src/extensions/slashPlugins.js'
 import { LocalSkillSource } from '../src/extensions/skillSources/local.js'
 import { syncSkillManifest } from '../src/extensions/skillsSync.js'
-import { calcCost, listAllModels } from '../src/llms/providerRegistry.js'
+import { calcCost } from '../src/llms/providerRegistry.js'
 import { checkPackage, type OSVFetch } from '../src/mcp/osv.js'
 import { buildAuthorizeUrl, generatePkcePair, OAuthToken } from '../src/mcp/oauth.js'
 import { ReconnectPolicy, reconnectWithBackoff } from '../src/mcp/reconnect.js'
@@ -1135,8 +1135,6 @@ async function checkRuntimeRouting(): Promise<string> {
 }
 
 async function checkPricingInsights(): Promise<string> {
-  const providerCount = Object.keys(listAllModels()).length
-  require(providerCount > 0, 'provider registry did not expose any model catalogs')
   const directCost = calcCost('gpt-4o', 1_000_000, 500_000)
   require(directCost > 0, 'provider registry did not price gpt-4o')
 
@@ -1157,7 +1155,7 @@ async function checkPricingInsights(): Promise<string> {
   require(tracker.eventCount === 2 && insights.totalEvents === 2, 'cost ledger did not preserve both local events')
   require(insights.byModel['gpt-4o']?.events === 1, 'insights did not group the completion by model')
   require(insights.totalCacheReadTokens === 50, 'insights did not preserve prompt-cache tokens')
-  return `priced ${providerCount} provider catalog(s), recorded ${insights.totalEvents} ledger events, and aggregated cache usage`
+  return `priced a known model, recorded ${insights.totalEvents} ledger events, and aggregated cache usage`
 }
 
 async function checkInteractiveRuntime(): Promise<string> {

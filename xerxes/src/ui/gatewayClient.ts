@@ -749,7 +749,10 @@ export class GatewayClient extends EventEmitter {
         return this.browserManage(params) as Promise<T>
 
       case 'model.options':
-        return this.modelOptions() as Promise<T>
+        return this.modelOptions(params) as Promise<T>
+
+      case 'model.models':
+        return this.modelModels(params) as Promise<T>
 
       default:
         return this.rawRequest<T>(method, params)
@@ -1228,21 +1231,57 @@ export class GatewayClient extends EventEmitter {
     return { items, replace_from: method === 'complete.slash' ? 1 : undefined }
   }
 
-  private async modelOptions(): Promise<RpcObject> {
-    const raw = (await this.rawRequest('provider_list', {})) as RpcObject
+  private async modelOptions(params: Record<string, unknown>): Promise<RpcObject> {
+    const [raw, status] = (await Promise.all([
+      this.rawRequest('provider_list', {}),
+      this.rawRequest('session.status', { session_key: this.keyFor(params.session_id) })
+    ])) as [RpcObject, RpcObject]
     const profiles = Array.isArray(raw.profiles) ? raw.profiles : []
-    const active = profiles.find((profile: RpcObject) => Boolean(profile.active)) as RpcObject | undefined
+    const storedActive = profiles.find((profile: RpcObject) => Boolean(profile.active)) as RpcObject | undefined
+    const session = status.session && typeof status.session === 'object' ? (status.session as RpcObject) : undefined
+    const hasRuntimeProfileIdentity = Boolean(
+      session && Object.prototype.hasOwnProperty.call(session, 'profile_name')
+    )
+    const runtimeProfileName = String(session?.profile_name ?? '').trim()
+    const current = hasRuntimeProfileIdentity
+      ? (profiles.find(
+          (profile: RpcObject) =>
+            String(profile.name ?? profile.provider ?? '').trim() === runtimeProfileName
+        ) as RpcObject | undefined)
+      : storedActive
+    const currentName = String(current?.name ?? current?.provider ?? '').trim()
+    const liveModel = String(session?.model ?? '').trim()
 
     return {
-      model: String(active?.model ?? ''),
-      providers: profiles.map((profile: RpcObject) => ({
-        authenticated: true,
-        is_current: Boolean(profile.active),
-        models: [String(profile.model ?? '')].filter(Boolean),
-        name: String(profile.name ?? profile.provider ?? 'provider'),
-        slug: String(profile.name ?? profile.provider ?? 'provider'),
-        total_models: 1
-      }))
+      model: liveModel || String(current?.model ?? ''),
+      provider: currentName,
+      providers: profiles.map((profile: RpcObject) => {
+        const profileName = String(profile.name ?? profile.provider ?? 'provider')
+        return {
+          configured_model: String(profile.model ?? ''),
+          is_current: Boolean(currentName && profileName === currentName),
+          name: profileName,
+          provider_type: String(profile.provider ?? ''),
+          slug: profileName
+        }
+      })
+    }
+  }
+
+  private async modelModels(params: Record<string, unknown>): Promise<RpcObject> {
+    const profileName = String(params.profile_name ?? params.profile ?? '').trim()
+    if (!profileName) {
+      throw new Error('provider profile name is required')
+    }
+    const raw = await this.nativeSuccess('fetch_models', { profile_name: profileName })
+    const models = Array.isArray(raw.models)
+      ? [...new Set(raw.models.map(model => String(model).trim()).filter(Boolean))]
+      : []
+
+    return {
+      models,
+      ...(raw.source ? { source: String(raw.source) } : {}),
+      ...(raw.warning ? { warning: String(raw.warning) } : {})
     }
   }
 

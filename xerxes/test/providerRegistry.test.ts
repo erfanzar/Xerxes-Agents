@@ -7,7 +7,6 @@ import {
   calcCost,
   detectProvider,
   getContextLimit,
-  listAllModels,
   providerDefaultHeaders,
   providerModel,
   resolveProvider,
@@ -21,10 +20,9 @@ test('provider routing preserves explicit prefixes and Kimi Code overrides', () 
   expect(providerModel('openrouter/anthropic/claude-sonnet-4.5', 'openrouter')).toBe('anthropic/claude-sonnet-4.5')
 })
 
-test('costs, context windows, model catalog, and Kimi headers match registry behavior', () => {
+test('costs, context windows, and Kimi headers match registry behavior', () => {
   expect(calcCost('gpt-4o', 1_000_000, 1_000_000)).toBe(12.5)
   expect(getContextLimit('claude-opus-4-6')).toBe(1_000_000)
   expect(getContextLimit('moonshot-v1-8k')).toBe(8_192)
-  expect(listAllModels().lmstudio).toBeUndefined()
   expect(providerDefaultHeaders('kimi-code')).toMatchObject({ 'User-Agent': 'claude-code/1.0.0' })
 })

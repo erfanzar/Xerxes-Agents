@@ -76,6 +76,7 @@ test('OpenAI-compatible vision supports base64 images and direct Anthropic visio
   const openAi = new OpenAiCompatibleVisionPort({
     apiKey: 'vision-key',
     baseUrl: 'https://media.test/v1',
+    defaultModel: 'openai-vision-model',
     fetchImplementation: async (_input, init) => {
       openAiPayload = JSON.parse(String(init?.body)) as Record<string, unknown>
       return jsonResponse({ choices: [{ message: { content: 'A blue square.' } }] })
@@ -91,6 +92,7 @@ test('OpenAI-compatible vision supports base64 images and direct Anthropic visio
   const anthropic = new AnthropicVisionPort({
     apiKey: 'anthropic-key',
     baseUrl: 'https://api.anthropic.test',
+    defaultModel: 'anthropic-vision-model',
     fetchImplementation: async (_input, init) => {
       anthropicHeaders = new Headers(init?.headers)
       return jsonResponse({ content: [{ type: 'text', text: 'A tiny PNG.' }] })
@@ -142,6 +144,7 @@ test('registered media tool adapters only require JSON-safe payloads', async () 
   const ports = createOpenAiCompatibleMediaTools({
     apiKey: 'test-key',
     baseUrl: 'https://media.test/v1',
+    visionModel: 'configured-vision-model',
     fetchImplementation: async (input) => {
       const path = new URL(input.toString()).pathname
       if (path.endsWith('/images/generations')) return jsonResponse({ data: [{ b64_json: 'UE5H' }] })
@@ -165,6 +168,22 @@ test('registered media tool adapters only require JSON-safe payloads', async () 
   expect(vision.answer).toBe('a test image')
   expect(speech.audio_b64).toBe('CQg=')
   expect(transcript.text).toBe('test transcript')
+})
+
+test('vision ports never infer a provider model when neither the port nor request configures one', async () => {
+  let requested = false
+  const port = new OpenAiCompatibleVisionPort({
+    apiKey: 'vision-key',
+    baseUrl: 'https://media.test/v1',
+    fetchImplementation: async () => {
+      requested = true
+      return jsonResponse({ choices: [] })
+    },
+  })
+
+  await expect(port.analyze({ image: visionImageFromBase64('UE5H') }))
+    .rejects.toBeInstanceOf(ConfigurationError)
+  expect(requested).toBeFalse()
 })
 
 test('voice mode requires an injected recorder and coordinates it with a real transcription port', async () => {

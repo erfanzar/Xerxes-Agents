@@ -11,7 +11,7 @@ import type { AgentDefinition } from './agents/definitions.js'
 import type { AuditEmitter } from './audit/emitter.js'
 import { ConfigurationError } from './core/errors.js'
 import { ToolRegistry } from './executors/toolRegistry.js'
-import { createLlmClient, type LlmClient } from './llms/client.js'
+import { createLlmClient, requireConfiguredModel, type LlmClient } from './llms/client.js'
 import { ShortTermMemory, type Memory } from './memory/index.js'
 import { LoopDetector } from './runtime/loopDetector.js'
 import {
@@ -78,7 +78,6 @@ interface RegisteredAgent {
   readonly options: XerxesAgentOptions
 }
 
-const DEFAULT_MODEL = 'gpt-4o'
 const DEFAULT_MEMORY_MIN_CHARS = 32
 
 /**
@@ -107,8 +106,10 @@ export class Xerxes {
   private readonly policy: ToolPolicy | undefined
 
   constructor(options: XerxesOptions = {}) {
-    this.defaultModel = options.model ?? DEFAULT_MODEL
-    this.llm = options.llm ?? createLlmClient(this.defaultModel)
+    const suppliedAgents = options.agents ? [...options.agents] : []
+    this.defaultModel = optionalModel(options.model)
+    const clientModel = firstConfiguredModel(this.defaultModel, ...suppliedAgents.map(agent => agent.model))
+    this.llm = options.llm ?? createLlmClient(requireConfiguredModel(clientModel))
     this.toolRegistry = options.toolRegistry ?? new ToolRegistry()
     this.loopDetector = options.loopDetector ?? new LoopDetector()
     this.memory = options.memory ?? (options.enableMemory ? new ShortTermMemory({ capacity: 100 }) : undefined)
@@ -134,7 +135,6 @@ export class Xerxes {
     }
 
     registerDefaultSwitchTriggers(this.agentOrchestrator)
-    const suppliedAgents = options.agents ? [...options.agents] : []
     if (suppliedAgents.length) {
       for (const agent of suppliedAgents) this.registerAgent(agent)
     } else {
@@ -192,7 +192,12 @@ export class Xerxes {
   createQueryEngine(options: XerxesQueryOptions = {}): QueryEngine {
     const agentId = options.agentId ?? this.currentAgentId
     const agent = this.requireAgent(agentId).definition
-    const model = options.model ?? (agent.model || this.defaultModel)
+    const model = requireConfiguredModel(firstConfiguredModel(
+      options.model,
+      agent.model,
+      options.config?.model,
+      this.defaultModel,
+    ))
     const systemPrompt = options.systemPrompt ?? (agent.systemPrompt || this.defaultSystemPrompt)
     const permissionMode = options.permissionMode ?? options.config?.permissionMode ?? this.defaultPermissionMode
     const queryConfig: Partial<QueryEngineConfig> = {
@@ -410,4 +415,16 @@ function engineKey(agentId: string, sessionId: string | undefined): string {
 
 function failNoAgent(): never {
   throw new ConfigurationError('agent', 'no agent is registered')
+}
+
+function firstConfiguredModel(...values: readonly (string | undefined)[]): string | undefined {
+  for (const value of values) {
+    const configured = optionalModel(value)
+    if (configured) return configured
+  }
+  return undefined
+}
+
+function optionalModel(value: string | undefined): string {
+  return value?.trim() ?? ''
 }
