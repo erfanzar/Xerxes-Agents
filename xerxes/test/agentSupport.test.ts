@@ -1,7 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { AutoCompactAgent } from '../src/agents/autoCompactAgent.js'
 import { CompactionAgent } from '../src/agents/compactionAgent.js'
@@ -10,7 +13,7 @@ import {
   SubAgentManager,
   type SubagentTaskRunRequest,
 } from '../src/agents/subagentManager.js'
-import type { AgentDefinition } from '../src/agents/definitions.js'
+import { loadAgentDefinitions, type AgentDefinition } from '../src/agents/definitions.js'
 import { UserProfileStore } from '../src/memory/userProfile.js'
 import { ProfileAgent } from '../src/agents/profileAgent.js'
 
@@ -286,4 +289,115 @@ test('subagent tool filtering prevents recursive delegation and parent-mode muta
   )
   expect(await filtered.execute?.('SpawnAgents', {})).toBe("Error: tool 'SpawnAgents' is not allowed for this agent.")
   expect(calls).toEqual(['ReadFile'])
+})
+
+test('subagent manager enforces default and definition depth limits with explicit errors', async () => {
+  const depths: number[] = []
+  const manager = new SubAgentManager({
+    runner: request => {
+      depths.push(request.depth)
+      return { content: 'ok' }
+    },
+  })
+
+  const atDefaultLimit = await manager.spawn({ prompt: 'too deep', depth: 5 })
+  expect(atDefaultLimit.status).toBe('failed')
+  expect(atDefaultLimit.error).toBe('Max depth (5, from manager default) exceeded: cannot spawn at depth 5')
+
+  const shallow = await manager.spawn({ prompt: 'shallow child', depth: 4 })
+  await manager.wait(shallow.id, 1_000)
+  expect(shallow.status).toBe('completed')
+  // Child runs originating inside the task see the next depth level.
+  expect(depths).toEqual([5])
+
+  const strict: AgentDefinition = { ...definition, maxDepth: 1 }
+  const blocked = await manager.spawn({ prompt: 'blocked child', depth: 1, agentDefinition: strict })
+  expect(blocked.status).toBe('failed')
+  expect(blocked.error).toBe("Max depth (1, from agent definition 'researcher') exceeded: cannot spawn at depth 1")
+
+  const allowed = await manager.spawn({ prompt: 'allowed child', depth: 2, agentDefinition: definition })
+  await manager.wait(allowed.id, 1_000)
+  expect(allowed.status).toBe('completed')
+  await manager.close()
+})
+
+test('subagent manager enforces YAML max_depth loaded through the definition catalog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-subagent-depth-'))
+  try {
+    const projectAgents = join(root, '.xerxes', 'agents')
+    await mkdir(projectAgents, { recursive: true })
+    await writeFile(join(projectAgents, 'nested.yaml'), `version: 1
+agent:
+  name: nested
+  system_prompt: nested worker
+  max_depth: 2
+`, 'utf8')
+    const definitions = loadAgentDefinitions({
+      builtinDefinitions: new Map(),
+      cwd: root,
+      userDirectory: join(root, 'user'),
+      projectDirectory: projectAgents,
+    })
+    const nested = definitions.get('nested')
+    if (nested === undefined) throw new Error('nested definition missing')
+    expect(nested.maxDepth).toBe(2)
+
+    const manager = new SubAgentManager({ runner: () => ({ content: 'ok' }) })
+    const blocked = await manager.spawn({ prompt: 'too deep', depth: 2, agentDefinition: nested })
+    expect(blocked.status).toBe('failed')
+    expect(blocked.error).toBe("Max depth (2, from agent definition 'nested') exceeded: cannot spawn at depth 2")
+    const allowed = await manager.spawn({ prompt: 'shallow', depth: 1, agentDefinition: nested })
+    await manager.wait(allowed.id, 1_000)
+    expect(allowed.status).toBe('completed')
+    await manager.close()
+  } finally {
+    await rm(root, { force: true, recursive: true })
+  }
+})
+
+test('subagent manager contains event sink failures so healthy turns still complete', async () => {
+  const errors: unknown[][] = []
+  const spy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    errors.push(args)
+  })
+  try {
+    const manager = new SubAgentManager({
+      runner: async request => {
+        request.report.toolStart({ toolCallId: 't1', name: 'ReadFile', inputs: {} })
+        request.report.toolEnd({ toolCallId: 't1', name: 'ReadFile', permitted: true, result: 'ok' })
+        return { content: 'survived' }
+      },
+      onEvent: () => { throw new Error('sink exploded') },
+    })
+    const task = await manager.spawn({ prompt: 'resilient turn' })
+    await manager.wait(task.id, 1_000)
+
+    expect(task.status).toBe('completed')
+    expect(task.result).toBe('survived')
+    expect(errors.length).toBeGreaterThan(0)
+    expect(String(errors[0]?.[0])).toContain('sink exploded')
+    await manager.close()
+  } finally {
+    spy.mockRestore()
+  }
+})
+
+test('subagent manager drainMailbox drops only events at or below the drained cursor', async () => {
+  const manager = new SubAgentManager({ runner: () => ({ content: 'ok' }) })
+  const task = await manager.spawn({ prompt: 'mailbox' })
+  await manager.wait(task.id, 1_000)
+  const all = manager.peekMailbox()
+  expect(all.length).toBeGreaterThan(0)
+
+  // Draining returns newer events while retaining them for lower-cursor consumers.
+  const first = manager.drainMailbox(0)
+  expect(first.map(event => event.sequence)).toEqual(all.map(event => event.sequence))
+  expect(manager.peekMailbox(0)).toHaveLength(all.length)
+  const second = manager.drainMailbox(0)
+  expect(second.map(event => event.sequence)).toEqual(first.map(event => event.sequence))
+
+  // Advancing the cursor past the drained events finally drops them.
+  expect(manager.drainMailbox(manager.latestSequence())).toEqual([])
+  expect(manager.peekMailbox(0)).toHaveLength(0)
+  await manager.close()
 })

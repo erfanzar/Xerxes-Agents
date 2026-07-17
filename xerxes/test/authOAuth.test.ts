@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -133,6 +133,21 @@ test('credential storage encrypts tokens, writes restricted atomic files, and re
     await expect(storage.save('../outside', first)).rejects.toThrow('Credential provider')
     expect(await storage.remove('github')).toBeTrue()
     expect(await storage.remove('github')).toBeFalse()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+
+test('credential storage propagates real filesystem errors instead of masking them as logged-out', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-oauth-errors-'))
+  try {
+    const storage = new CredentialStorage(join(root, 'credentials'), { credentialKey: 'test-only-key' })
+    // A missing credential file is a genuine "not logged in".
+    expect(await storage.load('github')).toBeUndefined()
+    // A directory where the credential file belongs is a real error (EISDIR) and must surface.
+    await mkdir(join(root, 'credentials', 'github.json'), { recursive: true })
+    await expect(storage.load('github')).rejects.toMatchObject({ code: 'EISDIR' })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

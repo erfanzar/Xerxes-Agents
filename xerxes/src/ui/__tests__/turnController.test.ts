@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { getTurnState } from '../app/turnStore.js'
 import { turnController } from '../app/turnController.js'
-import { patchUiState } from '../app/uiStore.js'
+import { getUiState, patchUiState } from '../app/uiStore.js'
 import {
   clearSpawnHistory,
   getSpawnHistory,
@@ -12,7 +12,6 @@ import {
 } from '../app/spawnHistoryStore.js'
 import type { SubagentEventPayload } from '../gatewayTypes.js'
 import { toolTrailLabel } from '../lib/text.js'
-import type { Msg } from '../types.js'
 
 const subagent = (id: string, index: number, goal: string): SubagentEventPayload => ({
   agent_name: index === 0 ? 'runtime-audit' : 'test-review',
@@ -294,26 +293,82 @@ describe('turnController', () => {
     expect(getSpawnHistory()[0]?.subagents[0]).toMatchObject({ id: 'queued-child', status: 'interrupted' })
   })
 
-  it('persists every active subagent on interruption before clearing live state', () => {
+  it('persists every active subagent on a daemon-confirmed interruption before clearing live state', () => {
     seedParallelSubagents()
-    const appended: Msg[] = []
     const sys = vi.fn()
     const request = vi.fn().mockResolvedValue({ ok: true })
 
-    turnController.interruptTurn({
-      appendMessage: message => appended.push(message),
-      gw: { request },
-      sid: 'session-interrupt',
-      sys
-    })
+    turnController.interruptTurn({ gw: { request }, sid: 'session-interrupt', sys })
 
     expect(request).toHaveBeenCalledWith('session.interrupt', { session_id: 'session-interrupt' })
-    expect(appended).toHaveLength(1)
-    expect(appended[0]).toMatchObject({ role: 'assistant', text: '*[interrupted]*' })
-    expect(appended[0]?.subagents?.map(agent => agent.id)).toEqual(['research-child', 'review-child'])
-    expect(appended[0]?.subagents?.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
+    expect(getUiState().status).toBe('interrupting…')
+
+    // The [interrupted] archive is deferred until the daemon confirms the
+    // cancellation on its settle edge (a cancelled turn_end).
+    const { finalMessages, wasInterrupted } = turnController.recordMessageComplete({ interrupted: true })
+
+    expect(wasInterrupted).toBe(true)
+    expect(finalMessages).toHaveLength(1)
+    expect(finalMessages[0]).toMatchObject({ role: 'assistant', text: '*[interrupted]*' })
+    expect(finalMessages[0]?.subagents?.map(agent => agent.id)).toEqual(['research-child', 'review-child'])
+    expect(finalMessages[0]?.subagents?.map(agent => agent.status)).toEqual(['completed', 'interrupted'])
     expect(sys).not.toHaveBeenCalled()
     expect(getTurnState().subagents).toEqual([])
+  })
+
+  it('prefers the turn real ending when a natural completion races the interrupt request', () => {
+    turnController.startMessage()
+    turnController.recordMessageDelta({ text: 'The complete answer.' })
+    const sys = vi.fn()
+    const request = vi.fn().mockResolvedValue({ ok: true })
+
+    turnController.interruptTurn({ gw: { request }, sid: 'session-race', sys })
+
+    // turn_end was already in flight (not cancelled): the real final
+    // messages win over the pending interrupt request.
+    const { finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete({})
+
+    expect(wasInterrupted).toBe(false)
+    expect(finalText).toBe('The complete answer.')
+    expect(finalMessages).toEqual([{ role: 'assistant', text: 'The complete answer.' }])
+    expect(finalMessages.some(message => message.text.includes('[interrupted]'))).toBe(false)
+    expect(getUiState().busy).toBe(false)
+  })
+
+  it('treats the legacy [interrupted] marker as a daemon confirmation', () => {
+    turnController.startMessage()
+    turnController.recordMessageDelta({ text: 'Partial draft' })
+    const request = vi.fn().mockResolvedValue({ ok: true })
+
+    turnController.interruptTurn({ gw: { request }, sid: 'session-legacy', sys: vi.fn() })
+    const { finalMessages, wasInterrupted } = turnController.recordMessageComplete({ text: '[interrupted]' })
+
+    expect(wasInterrupted).toBe(true)
+    expect(finalMessages).toEqual([{ role: 'assistant', text: 'Partial draft\n\n*[interrupted]*' }])
+  })
+
+  it('reverts a failed interrupt request instead of showing a false interrupted', async () => {
+    turnController.startMessage()
+    const sys = vi.fn()
+    const request = vi.fn().mockRejectedValue(new Error('gateway socket closed'))
+
+    turnController.interruptTurn({ gw: { request }, sid: 'session-flaky', sys })
+    expect(getUiState().status).toBe('interrupting…')
+
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    // The daemon never confirmed: live recording re-arms, the failure is
+    // reported once, and no false "interrupted" lands anywhere.
+    expect(sys).toHaveBeenCalledWith('error: interrupt failed: gateway socket closed')
+    expect(getUiState().status).toBe('running…')
+    expect(getUiState().busy).toBe(true)
+
+    // The turn is still alive — its natural completion renders normally.
+    turnController.recordMessageDelta({ text: 'Still finished.' })
+    const { finalMessages, wasInterrupted } = turnController.recordMessageComplete({})
+
+    expect(wasInterrupted).toBe(false)
+    expect(finalMessages).toEqual([{ role: 'assistant', text: 'Still finished.' }])
   })
 
   it('returns every live subagent as transcript state when the turn errors', () => {

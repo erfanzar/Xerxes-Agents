@@ -331,7 +331,7 @@ export class SessionRecord {
 
 /** Return a deep record-level copy suitable for a session branch. */
 export function cloneSessionRecord(session: SessionRecord): SessionRecord {
-  return SessionRecord.fromRecord(session.toRecord())
+  return SessionRecord.fromRecord(deepCopyRecord(session.toRecord()))
 }
 
 const TOOL_CALL_FIELDS = new Set([
@@ -374,6 +374,24 @@ const SESSION_FIELDS = new Set([
 
 function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+function deepCopyRecord(record: SessionRecordData): SessionRecordData {
+  const copy: SessionRecordData = {}
+  for (const [key, value] of Object.entries(record)) copy[key] = deepCopyValue(value)
+  return copy
+}
+
+function deepCopyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(deepCopyValue)
+  if (isPlainRecord(value)) return deepCopyRecord(value)
+  return value
+}
+
+function isPlainRecord(value: unknown): value is SessionRecordData {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
 }
 
 function extraFields(data: SessionRecordData, fields: ReadonlySet<string>): Record<string, unknown> {

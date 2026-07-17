@@ -128,6 +128,87 @@ test('Responses API client supports a native non-streaming completion response',
   })
 })
 
+test('Responses API client translates tool history into native input items', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([
+        { type: 'response.completed', response: { status: 'completed' } },
+      ])
+    },
+  })
+  const events: LlmDelta[] = []
+  for await (const event of client.stream({
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: 'Be concise.' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Inspect this ' },
+          { type: 'image_url', image_url: { url: 'https://example.invalid/a.png', detail: 'high' } },
+        ],
+      },
+      {
+        role: 'assistant',
+        content: 'Reading it.',
+        tool_calls: [{
+          id: 'call-1',
+          type: 'function',
+          function: { name: 'ReadFile', arguments: { path: 'README.md' } },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call-1', content: '# Xerxes' },
+    ],
+  })) events.push(event)
+
+  expect(payload?.input).toEqual([
+    { role: 'system', content: 'Be concise.' },
+    {
+      role: 'user',
+      content: [
+        { type: 'input_text', text: 'Inspect this ' },
+        { type: 'input_image', image_url: 'https://example.invalid/a.png', detail: 'high' },
+      ],
+    },
+    { role: 'assistant', content: 'Reading it.' },
+    { type: 'function_call', call_id: 'call-1', name: 'ReadFile', arguments: '{"path":"README.md"}' },
+    { type: 'function_call_output', call_id: 'call-1', output: '# Xerxes' },
+  ])
+})
+
+test('Responses API client surfaces mid-stream provider failures as errors', async () => {
+  const client = new ResponsesApiClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://example.invalid/v1',
+    fetchImplementation: async () => sseResponse([
+      { type: 'response.output_text.delta', delta: 'partial' },
+      {
+        type: 'response.failed',
+        response: { status: 'failed', error: { code: 'server_error', message: 'Model exploded' } },
+      },
+    ]),
+  })
+
+  await expect(collect(client.stream({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('stream returned API error (server_error): Model exploded')
+})
+
+async function collect(stream: AsyncIterable<LlmDelta>): Promise<LlmDelta[]> {
+  const events: LlmDelta[] = []
+  for await (const event of stream) {
+    events.push(event)
+  }
+  return events
+}
+
 function sseResponse(events: readonly Record<string, unknown>[]): Response {
   const encoder = new TextEncoder()
   return new Response(new ReadableStream({

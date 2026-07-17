@@ -31,6 +31,9 @@ import {
   SKILLS_DIR as DEFAULT_SKILLS_DIR,
   SkillGuardPathError,
   approveSkill as approveGuardedSkill,
+  loadTrustedHashes,
+  quarantineSkill,
+  scanSkill,
   type SkillGuardPaths,
 } from "./skillsGuard.js";
 
@@ -259,7 +262,7 @@ export class SkillsHub {
     uri: string,
     options: { readonly force?: boolean } = {},
   ): Promise<string> {
-    const { identifier, sourceName } = parseInstallUri(uri);
+    const { identifier, sourceName } = parseInstallUri(uri, this.sources);
     const source = this.sources.get(sourceName);
     if (source === undefined) return `[Error] Unknown source: ${sourceName}`;
 
@@ -305,6 +308,19 @@ export class SkillsHub {
         bundle.content,
         "installed SKILL.md",
       );
+      const scan = await scanSkill(target, {
+        trustedHashes: await loadTrustedHashes(this.guardPaths),
+      });
+      if (!scan.isSafe) {
+        // Failing content is quarantined for operator review instead of activated.
+        await quarantineSkill(target, this.guardPaths);
+        await this.appendAudit(
+          directories,
+          "quarantine",
+          `${skillName} from ${sourceName}:${identifier}: ${scan.summary}`,
+        );
+        return `[Error] Skill '${skillName}' failed the security scan and was quarantined: ${scan.summary}`;
+      }
       const lock = await this.loadLock(directories);
       lock[skillName] = {
         source: sourceName,
@@ -1012,18 +1028,25 @@ function parseLock(raw: string): Record<string, StoredSkillEntry> {
   }
 }
 
-function parseInstallUri(uri: string): {
+function parseInstallUri(
+  uri: string,
+  sources: ReadonlyMap<string, SkillSource>,
+): {
   readonly identifier: string;
   readonly sourceName: string;
 } {
   if (typeof uri !== "string" || !uri.trim())
     throw new TypeError("skill URI must be a non-empty string");
   const separator = uri.indexOf(":");
-  if (separator < 0) return { sourceName: "local", identifier: uri };
-  return {
-    sourceName: uri.slice(0, separator),
-    identifier: uri.slice(separator + 1),
-  };
+  if (separator > 0) {
+    const candidate = uri.slice(0, separator);
+    // Only a registered source name is a scheme; anything else (for example a
+    // Windows drive prefix like 'C:') is part of a local path identifier.
+    if (sources.has(candidate)) {
+      return { sourceName: candidate, identifier: uri.slice(separator + 1) };
+    }
+  }
+  return { sourceName: "local", identifier: uri };
 }
 
 function normalizePath(path: string): string {

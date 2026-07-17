@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 import {
   ChannelManager,
+  ChannelRoutingError,
   ChannelTurnRouter,
   MarkdownAgentWorkspace,
   MessageDirection,
@@ -268,6 +269,76 @@ test('channel turn router streams editable previews and replaces the placeholder
   ])
   expect(channel.sent).toEqual([])
 })
+
+test('channel turn router finishes the preview placeholder and cancels its edit timer when a turn fails', async () => {
+  const channel = new PreviewRecordingChannel()
+  const runtime = new FailingRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const router = new ChannelTurnRouter({
+    channels: manager,
+    previewInterval: 50,
+    runtime,
+    typingInterval: 1,
+  })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+
+  await expect(channel.receive(createChannelMessage({
+    channel: 'telegram',
+    channelUserId: 'user-7',
+    direction: MessageDirection.INBOUND,
+    platformMessageId: 'incoming-1',
+    roomId: 'chat-7',
+    text: 'fail this turn',
+  }))).rejects.toThrow('turn exploded')
+
+  expect(channel.previews).toEqual([
+    { chatId: 'chat-7', kind: 'send', replyTo: 'incoming-1', text: '...' },
+    { chatId: 'chat-7', kind: 'edit', messageId: 'preview-1', text: '(turn failed)' },
+  ])
+  // The edit scheduled before the failure must never fire after the turn ended.
+  await Bun.sleep(100)
+  expect(channel.previews).toHaveLength(2)
+})
+
+test('channel turn router rejects identity-less messages instead of pooling them into one shared session', async () => {
+  const channel = new RecordingChannel()
+  const runtime = new RecordingRuntime()
+  const manager = new ChannelManager({ channels: [['telegram', channel]] })
+  const errors: unknown[] = []
+  const router = new ChannelTurnRouter({
+    channels: manager,
+    runtime,
+    onError: error => { errors.push(error) },
+  })
+  manager.setInboundHandler(message => router.handle(message))
+  await manager.enable('telegram')
+
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    direction: MessageDirection.INBOUND,
+    text: 'anonymous ping',
+  }))
+  await channel.receive(createChannelMessage({
+    channel: 'telegram',
+    direction: MessageDirection.INBOUND,
+    text: 'another anonymous ping',
+  }))
+
+  expect(runtime.submitted).toEqual([])
+  expect(runtime.opened).toEqual([])
+  expect(channel.sent).toEqual([])
+  expect(errors).toHaveLength(2)
+  expect(errors[0]).toBeInstanceOf(ChannelRoutingError)
+})
+
+class FailingRuntime extends RecordingRuntime {
+  override async submitTurn(sessionKey: string, text: string, emit: (event: DaemonEvent) => void): Promise<void> {
+    this.submitted.push({ key: sessionKey, prompt: text })
+    emit({ type: 'text_part', payload: { text: 'partial ' } })
+    throw new Error('turn exploded')
+  }
+}
 
 test('channel turn router journals safe daily notes and passes fresh workspace context as a system addendum', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-channel-journal-'))

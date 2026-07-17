@@ -1,8 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -47,7 +47,17 @@ Inspect the diff.`,
       dependencies: ["git"],
       subcommands: ["security"],
     });
-    expect(skillPromptSection(skill)).toContain("## Skill: review");
+    const prompt = skillPromptSection(skill);
+    expect(prompt).toContain("## Skill: review");
+    expect(prompt).toContain(
+      `Absolute installed SKILL.md manifest: ${JSON.stringify(join(skillDirectory, "SKILL.md"))}`,
+    );
+    expect(prompt).toContain(
+      `Absolute installed skill root: ${JSON.stringify(skillDirectory)}`,
+    );
+    expect(prompt).toContain(
+      `- ${JSON.stringify(join(skillDirectory, "references"))}`,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -137,6 +147,53 @@ test("skill prompt labels installed instructions as execution rather than author
 
   expect(skillPromptSection(skill)).toContain("already-installed operational skill");
   expect(skillPromptSection(skill)).toContain("Do not create, install, or rewrite a SKILL.md");
+});
+
+test("skill prompt resolves explicit resource references within the installed root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-prompt-paths-"));
+  const skillDirectory = join(root, "ascii-video");
+  const referencePath = join(skillDirectory, "references", "effects.md");
+  try {
+    await mkdir(join(skillDirectory, "references"), { recursive: true });
+    await writeFile(referencePath, "# Effects\n", "utf8");
+    const skill = parseSkillMarkdown(
+      "---\nname: ascii-video\n---\nRead `references/effects.md` before rendering.",
+      join(skillDirectory, "SKILL.md"),
+    );
+
+    const prompt = skillPromptSection(skill);
+    expect(prompt).toContain(
+      "Resolve every relative reference in the skill instructions against this installed skill root.",
+    );
+    expect(prompt).toContain(`- ${JSON.stringify(referencePath)}`);
+    expect(prompt).toContain("do not search for the skill elsewhere or reinstall it");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skill prompt excludes resource symlinks that escape the installed root", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-prompt-symlink-"));
+  const skillDirectory = join(root, "ascii-video");
+  const outsideDirectory = join(root, "outside");
+  const escapedReferencePath = join(outsideDirectory, "effects.md");
+  const linkedReferencePath = join(skillDirectory, "references", "effects.md");
+  try {
+    await mkdir(skillDirectory, { recursive: true });
+    await mkdir(outsideDirectory, { recursive: true });
+    await writeFile(escapedReferencePath, "# Escaped effects\n", "utf8");
+    await symlink(outsideDirectory, join(skillDirectory, "references"));
+    const skill = parseSkillMarkdown(
+      "---\nname: ascii-video\n---\nRead `references/effects.md` before rendering.",
+      join(skillDirectory, "SKILL.md"),
+    );
+
+    const prompt = skillPromptSection(skill);
+    expect(prompt).not.toContain(`- ${JSON.stringify(linkedReferencePath)}`);
+    expect(prompt).not.toContain(escapedReferencePath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("skill refresh retains host-registered skills", async () => {
@@ -249,6 +306,63 @@ test("bundled skill resolution skips a source directory without skill assets", a
     await writeFile(join(bundledSkillsDirectory, "SKILL.md"), "# Fixture\n", "utf8");
 
     expect(resolveBundledSkillsDirectory({ moduleDirectory })).toBe(join(root, "skills"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("discovery silently retains a higher-priority duplicate across refreshes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-shadow-"));
+  const project = join(root, "project");
+  const bundled = join(root, "bundled");
+  try {
+    await mkdir(join(project, "shared"), { recursive: true });
+    await mkdir(join(bundled, "shared"), { recursive: true });
+    await writeFile(
+      join(project, "shared", "SKILL.md"),
+      "---\nname: shared\n---\nProject override.",
+      "utf8",
+    );
+    await writeFile(
+      join(bundled, "shared", "SKILL.md"),
+      "---\nname: shared\n---\nBundled original.",
+      "utf8",
+    );
+
+    const warnings: string[] = [];
+    const spy = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+    try {
+      const registry = new SkillRegistry();
+      expect(await registry.discover(project, bundled)).toEqual(["shared"]);
+      expect(registry.get("shared")?.instructions).toBe("Project override.");
+      expect(await registry.refresh(project, bundled)).toEqual(["shared"]);
+      expect(registry.get("shared")?.instructions).toBe("Project override.");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(warnings).toEqual([]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skill discovery roots dedup symlinked directories by realpath", async () => {
+  const root = await mkdtemp(join(tmpdir(), "xerxes-skill-realpath-"));
+  try {
+    const cwd = join(root, "workspace");
+    const real = join(cwd, "skills");
+    await mkdir(real, { recursive: true });
+    const link = join(root, "skills-link");
+    await symlink(real, link);
+
+    const directories = defaultSkillDiscoveryDirectories({
+      cwd,
+      userSkillsDirectory: link,
+    });
+    expect(directories.filter(directory => directory === real)).toHaveLength(1);
+    expect(directories).not.toContain(link);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

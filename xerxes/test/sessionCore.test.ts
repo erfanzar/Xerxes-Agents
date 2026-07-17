@@ -2,16 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { Embedder } from '../src/memory/index.js'
 import {
   AgentTransitionRecord,
   FileSessionStore,
   InMemorySessionStore,
   ReplayView,
   SessionFTSIndex,
+  SessionIndex,
   SessionManager,
   SessionRecord,
   SessionSummarizer,
@@ -20,6 +23,7 @@ import {
   ToolCallRecord,
   TurnRecord,
   branchSession,
+  cloneSessionRecord,
   diffAgainstSnapshot,
   migrateSessionRecord,
   registerMigration,
@@ -155,6 +159,148 @@ test('file and in-memory session stores retain the shared SessionStore behavior'
   }
 })
 
+test('cloneSessionRecord deep-copies nested metadata, arguments, and results', () => {
+  const source = new SessionRecord({
+    sessionId: 'source',
+    metadata: { nested: { count: 1 } },
+    turns: [new TurnRecord({
+      turnId: 'turn-1',
+      prompt: 'deploy',
+      metadata: { tags: ['one'] },
+      toolCalls: [new ToolCallRecord({
+        callId: 'call-1',
+        toolName: 'exec_command',
+        arguments: { options: { flags: ['--force'] } },
+        result: { data: { ids: [1, 2] } },
+      })],
+    })],
+  })
+
+  const clone = cloneSessionRecord(source)
+  ;(clone.metadata.nested as { count: number }).count = 99
+  ;(clone.turns[0]!.metadata.tags as string[]).push('two')
+  ;(clone.turns[0]!.toolCalls[0]!.arguments.options as { flags: string[] }).flags.push('--dry-run')
+  ;(clone.turns[0]!.toolCalls[0]!.result as { data: { ids: number[] } }).data.ids.push(3)
+
+  expect((source.metadata.nested as { count: number }).count).toBe(1)
+  expect(source.turns[0]!.metadata.tags).toEqual(['one'])
+  expect((source.turns[0]!.toolCalls[0]!.arguments.options as { flags: string[] }).flags).toEqual(['--force'])
+  expect((source.turns[0]!.toolCalls[0]!.result as { data: { ids: number[] } }).data.ids).toEqual([1, 2])
+})
+
+test('SQLite store saves rows and turn index on one connection and indexes appended turns incrementally', () => {
+  let embeddings = 0
+  const embedder: Embedder = {
+    dimension: 4,
+    name: 'counting',
+    embed: () => {
+      embeddings += 1
+      return [1, 0, 0, 0]
+    },
+    embedBatch: texts => texts.map(() => [1, 0, 0, 0]),
+  }
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-incremental-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database, embedder })
+    const manager = new SessionManager(store)
+    const session = manager.startSession({ sessionId: 'incremental' })
+    manager.recordTurn(session.sessionId, turn('turn-1'))
+    expect(embeddings).toBe(1)
+    manager.recordTurn(session.sessionId, turn('turn-2', 'Second prompt'))
+    // Appending one turn embeds only that turn instead of re-embedding both.
+    expect(embeddings).toBe(2)
+    // Re-saving unchanged content indexes nothing new.
+    store.saveSession(manager.getSession('incremental')!)
+    expect(embeddings).toBe(2)
+    expect(store.search('Kubernetes').map(hit => hit.turnId)).toEqual(['turn-1'])
+
+    // The session row and its indexed turns commit together on one connection.
+    const raw = new Database(database, { readonly: true })
+    try {
+      const sessionRows = raw.query('SELECT COUNT(*) AS count FROM sessions').get() as { count: number }
+      const turnRows = raw.query('SELECT COUNT(*) AS count FROM session_turns WHERE session_id = ?').get('incremental') as { count: number }
+      expect(sessionRows.count).toBe(1)
+      expect(turnRows.count).toBe(2)
+    } finally {
+      raw.close()
+    }
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('SQLite store skips corrupt records in list, search, and rebuild paths', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-corrupt-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    store.saveSession(new SessionRecord({ sessionId: 'good', turns: [turn()] }))
+    const raw = new Database(database)
+    try {
+      raw.query(`
+        INSERT INTO sessions
+          (session_id, workspace_id, created_at, updated_at, agent_id, parent_session_id, schema_version, metadata, record)
+        VALUES ('corrupt', NULL, 'now', 'now', NULL, NULL, 1, '{}', 'this is not json')
+      `).run()
+    } finally {
+      raw.close()
+    }
+
+    expect(store.listSessionRecords().map(session => session.sessionId)).toEqual(['good'])
+    // Zero-hit indexed search falls back to scanning records; the corrupt row is skipped.
+    expect(store.search('no-such-term-anywhere')).toEqual([])
+    expect(store.search('Kubernetes').map(hit => hit.sessionId)).toEqual(['good'])
+    expect(store.rebuildSearchIndex()).toBe(1)
+    // Direct single-record loads still surface the corruption instead of hiding it.
+    expect(() => store!.loadSession('corrupt')).toThrow()
+    store.close()
+    store = undefined
+
+    const fileStore = new FileSessionStore(join(directory, 'files'))
+    fileStore.saveSession(new SessionRecord({ sessionId: 'fine', turns: [turn()] }))
+    writeFileSync(join(directory, 'files', 'broken.json'), 'not json', 'utf8')
+    expect(fileStore.listSessionRecords().map(session => session.sessionId)).toEqual(['fine'])
+    expect(fileStore.search('no-such-term-anywhere')).toEqual([])
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('session search escapes LIKE wildcards in fallback queries', () => {
+  const index = new SessionIndex({ dbPath: ':memory:' })
+  try {
+    index.indexSession(new SessionRecord({ sessionId: 'percent', turns: [turn('one', 'progress reached 100% today')] }))
+    index.indexSession(new SessionRecord({ sessionId: 'wildcard', turns: [turn('two', 'progress reached 100x today')] }))
+    // '%' must match literally instead of acting as a LIKE wildcard.
+    expect(index.search('100%').map(hit => hit.sessionId)).toEqual(['percent'])
+  } finally {
+    index.close()
+  }
+
+  const fts = new SessionFTSIndex(':memory:')
+  try {
+    if (!fts.ftsAvailable) return
+    fts.indexSession(new SessionRecord({ sessionId: 'percent', turns: [turn('one', 'deploy at 100% capacity')] }))
+    fts.indexSession(new SessionRecord({ sessionId: 'wildcard', turns: [turn('two', 'deploy at 100x capacity')] }))
+    expect(fts.search('100%').map(hit => hit.sessionId)).toEqual(['percent'])
+  } finally {
+    fts.close()
+  }
+})
+
+test('FTS search only falls back to LIKE on query syntax errors', () => {
+  const index = new SessionFTSIndex(':memory:')
+  index.indexSession(new SessionRecord({ sessionId: 'fts', turns: [turn()] }))
+  index.close()
+  // A closed database is a storage failure, not a syntax error: it must surface.
+  expect(() => index.search('Kubernetes')).toThrow()
+})
+
 test('standalone FTS index replaces stale session rows', () => {
   const index = new SessionFTSIndex(':memory:')
   try {
@@ -181,7 +327,7 @@ test('summaries derive actions and safely use the heuristic fallback', () => {
   expect(summary.agentIds).toEqual(['coder', 'reviewer'])
 })
 
-test('shadow git snapshots restore files and produce a textual diff', () => {
+test('shadow git snapshots restore files and produce a textual diff', async () => {
   if (!Bun.which('git')) return
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-snapshot-'))
   const workspace = join(directory, 'workspace')
@@ -190,15 +336,80 @@ test('shadow git snapshots restore files and produce a textual diff', () => {
     mkdirSync(workspace)
     writeFileSync(join(workspace, 'a.txt'), 'first version', 'utf8')
     const snapshots = new SnapshotManager(workspace, { shadowRoot: shadow })
-    const snapshot = snapshots.snapshot('first')
+    const snapshot = await snapshots.snapshot('first')
     writeFileSync(join(workspace, 'a.txt'), 'changed version', 'utf8')
-    const diff = diffAgainstSnapshot(snapshots, snapshot.id)
+    const diff = await diffAgainstSnapshot(snapshots, snapshot.id)
     expect(diff.fileCount).toBe(1)
     expect(diff.added).toBeGreaterThan(0)
-    snapshots.rollback(snapshot.id)
+    await snapshots.rollback(snapshot.id)
     expect(readFileSync(join(workspace, 'a.txt'), 'utf8')).toBe('first version')
     snapshots.reset()
     expect(snapshots.list()).toEqual([])
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('shadow git snapshots exclude secrets, stay private, and rollback removes post-snapshot files', async () => {
+  if (!Bun.which('git')) return
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-snapshot-secrets-'))
+  const workspace = join(directory, 'workspace')
+  const shadow = join(directory, 'shadow')
+  try {
+    mkdirSync(workspace)
+    writeFileSync(join(workspace, 'a.txt'), 'first version', 'utf8')
+    writeFileSync(join(workspace, '.env'), 'TOKEN=secret', 'utf8')
+    writeFileSync(join(workspace, 'id_rsa'), 'private-key', 'utf8')
+    writeFileSync(join(workspace, 'service.key'), 'key-material', 'utf8')
+    const snapshots = new SnapshotManager(workspace, { shadowRoot: shadow })
+    const snapshot = await snapshots.snapshot('base')
+
+    const tracked = await snapshots.runGit(['ls-files'])
+    expect(tracked).toContain('a.txt')
+    expect(tracked).not.toContain('.env')
+    expect(tracked).not.toContain('id_rsa')
+    expect(tracked).not.toContain('service.key')
+    expect(statSync(snapshots.shadowDirectory).mode & 0o777).toBe(0o700)
+
+    writeFileSync(join(workspace, 'a.txt'), 'changed version', 'utf8')
+    writeFileSync(join(workspace, 'created-later.txt'), 'new file', 'utf8')
+    await snapshots.rollback(snapshot.id)
+    expect(readFileSync(join(workspace, 'a.txt'), 'utf8')).toBe('first version')
+    // Full-tree restore removes files created after the snapshot...
+    expect(existsSync(join(workspace, 'created-later.txt'))).toBe(false)
+    // ...but never deletes excluded secret files.
+    expect(readFileSync(join(workspace, '.env'), 'utf8')).toBe('TOKEN=secret')
+    expect(existsSync(join(workspace, 'id_rsa'))).toBe(true)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('shadow git prune rewrites retained history and collects pruned commits', async () => {
+  if (!Bun.which('git')) return
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-snapshot-prune-'))
+  const workspace = join(directory, 'workspace')
+  const shadow = join(directory, 'shadow')
+  try {
+    mkdirSync(workspace)
+    const snapshots = new SnapshotManager(workspace, { shadowRoot: shadow })
+    writeFileSync(join(workspace, 'a.txt'), 'one', 'utf8')
+    const first = await snapshots.snapshot('first')
+    writeFileSync(join(workspace, 'a.txt'), 'two', 'utf8')
+    await snapshots.snapshot('second')
+    writeFileSync(join(workspace, 'a.txt'), 'three', 'utf8')
+    const third = await snapshots.snapshot('third')
+
+    expect(await snapshots.prune({ keep: 1 })).toBe(2)
+    const retained = snapshots.list()
+    expect(retained).toHaveLength(1)
+    expect(retained[0]?.id).toBe(third.id)
+    // Pruned commits are no longer reachable in the shadow repository.
+    await expect(snapshots.runGit(['cat-file', '-e', first.commitSha])).rejects.toThrow()
+    // The retained snapshot still rolls back to its full tree.
+    writeFileSync(join(workspace, 'a.txt'), 'dirty', 'utf8')
+    await snapshots.rollback(third.id)
+    expect(readFileSync(join(workspace, 'a.txt'), 'utf8')).toBe('three')
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

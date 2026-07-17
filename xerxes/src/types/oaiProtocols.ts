@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { CompletionRequest, TokenUsage } from '../llms/client.js'
+import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
 import {
   messageToOpenAi,
   type ChatMessage,
@@ -344,9 +345,9 @@ export function parseOpenAiChatCompletionRequest(value: unknown): OpenAiChatComp
     presence_penalty: finiteNumber(body.presence_penalty, 'presence_penalty', 0),
     frequency_penalty: finiteNumber(body.frequency_penalty, 'frequency_penalty', 0),
     repetition_penalty: finiteNumber(body.repetition_penalty, 'repetition_penalty', 1),
-    temperature: finiteNumber(body.temperature, 'temperature', 0.7),
+    temperature: finiteNumber(body.temperature, 'temperature', DEFAULT_TEMPERATURE),
     top_p: finiteNumber(body.top_p, 'top_p', 0.95),
-    top_k: integerInRange(body.top_k, 'top_k', 0, 0),
+    top_k: integerInRange(body.top_k, 'top_k', DEFAULT_TOP_K, 0),
     min_p: finiteNumber(body.min_p, 'min_p', 0),
     suppress_tokens: integerArray(body.suppress_tokens, 'suppress_tokens'),
     n: integerInRange(body.n, 'n', 1, 1),
@@ -378,9 +379,9 @@ export function parseOpenAiCompletionRequest(value: unknown): OpenAiCompletionRe
     presence_penalty: finiteNumber(body.presence_penalty, 'presence_penalty', 0),
     frequency_penalty: finiteNumber(body.frequency_penalty, 'frequency_penalty', 0),
     repetition_penalty: finiteNumber(body.repetition_penalty, 'repetition_penalty', 1),
-    temperature: finiteNumber(body.temperature, 'temperature', 0.7),
+    temperature: finiteNumber(body.temperature, 'temperature', DEFAULT_TEMPERATURE),
     top_p: finiteNumber(body.top_p, 'top_p', 0.95),
-    top_k: integerInRange(body.top_k, 'top_k', 0, 0),
+    top_k: integerInRange(body.top_k, 'top_k', DEFAULT_TOP_K, 0),
     min_p: finiteNumber(body.min_p, 'min_p', 0),
     suppress_tokens: integerArray(body.suppress_tokens, 'suppress_tokens'),
     n: integerInRange(body.n, 'n', 1, 1),
@@ -561,6 +562,7 @@ export function completionRequestFromOpenAi(
     messages: chatMessagesFromOpenAi(request.messages, options),
     maxTokens: request.max_tokens,
     temperature: request.temperature,
+    topK: request.top_k,
     topP: request.top_p,
     ...(request.stop === undefined ? {} : { stop: request.stop }),
     ...(tools === undefined ? {} : { tools }),

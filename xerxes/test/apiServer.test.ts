@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 
 import { CortexCompletionService, type CortexStreamEvent } from '../src/api-server/cortexCompletionService.js'
 import { OpenAiApiServer } from '../src/api-server/server.js'
@@ -220,7 +220,7 @@ test('invalid requests and unavailable models return OpenAI-shaped errors', asyn
 
   const missingModel = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
     method: 'POST',
-    body: JSON.stringify({ model: 'not-real', messages: [] }),
+    body: JSON.stringify({ model: 'not-real', messages: [{ role: 'user', content: 'Hi.' }] }),
   }))
   expect(missingModel.status).toBe(404)
   expect(await missingModel.json()).toMatchObject({
@@ -333,8 +333,10 @@ test('Cortex streaming models retain service-provided SSE metadata through the H
   const frames = parseSseFrames(await response.text()) as Array<Record<string, unknown>>
   expect(frames).toHaveLength(3)
   expect(frames[0]).toMatchObject({ id: 'chatcmpl-cortex-sse', metadata: { event: 'function_detection' } })
+  expect(frames[0]).not.toHaveProperty('usage')
   expect(frames[1]).toMatchObject({ choices: [{ delta: { content: 'Done.' } }] })
   expect(frames[2]).toMatchObject({ choices: [{ finish_reason: 'stop' }] })
+  expect(frames[2]).not.toHaveProperty('usage')
 })
 
 test('CORS is opt-in and configured origins receive browser preflight headers', async () => {
@@ -408,6 +410,11 @@ test('configured bearer authentication protects API routes while keeping health 
     headers: { Authorization: 'Bearer test-api-token' },
   }))
   expect(authorized.status).toBe(200)
+
+  const sameLengthWrongToken = await server.fetch(new Request('http://xerxes.test/v1/models', {
+    headers: { Authorization: 'Bearer test-api-tokeN' },
+  }))
+  expect(sameLengthWrongToken.status).toBe(401)
 })
 
 test('configured body limits reject oversized chat-completion payloads before invoking the LLM', async () => {
@@ -480,6 +487,267 @@ test('configured request rate limits are per caller and reset after their window
   expect(reset.status).toBe(200)
   expect(reset.headers.get('x-ratelimit-remaining')).toBe('1')
 })
+
+test('empty message lists are rejected with a 400 before any model lookup', async () => {
+  const server = new OpenAiApiServer({ llm: new RecordingClient([]), models: ['gpt-4o'] })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'gpt-4o', messages: [] }),
+  }))
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    error: {
+      message: 'messages must contain at least one message.',
+      type: 'invalid_request_error',
+      param: 'messages',
+      code: null,
+    },
+  })
+})
+
+test('frequency and presence penalties are forwarded to the LLM client', async () => {
+  const client = new RecordingClient([{ content: 'ok', finishReason: 'stop' }])
+  const server = new OpenAiApiServer({ llm: client, models: ['gpt-4o'] })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      frequency_penalty: 0.5,
+      presence_penalty: -0.25,
+    }),
+  }))
+  expect(response.status).toBe(200)
+  expect(client.requests[0]).toMatchObject({ frequencyPenalty: 0.5, presencePenalty: -0.25 })
+
+  const invalid = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      frequency_penalty: 'high',
+    }),
+  }))
+  expect(invalid.status).toBe(400)
+  expect(await invalid.json()).toMatchObject({
+    error: { type: 'invalid_request_error', param: 'frequency_penalty' },
+  })
+})
+
+test('provider finish reasons are normalized to the chat-completions enum', async () => {
+  const cases = [
+    ['completed', 'stop'],
+    ['end_turn', 'stop'],
+    ['stop_sequence', 'stop'],
+    ['incomplete', 'length'],
+    ['max_tokens', 'length'],
+    ['tool_use', 'tool_calls'],
+    ['safety', 'content_filter'],
+    ['recitation', 'content_filter'],
+    ['error', 'stop'],
+    ['other', 'stop'],
+  ] as const
+
+  for (const [providerReason, expected] of cases) {
+    const server = new OpenAiApiServer({
+      llm: new RecordingClient([{ content: 'x', finishReason: providerReason }]),
+      models: ['gpt-4o'],
+    })
+    const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'gpt-4o', messages: [{ role: 'user', content: 'Hi.' }] }),
+    }))
+    expect(response.status).toBe(200)
+    const body = await response.json() as { choices: [{ finish_reason: string }] }
+    expect(body.choices[0].finish_reason).toBe(expected)
+  }
+})
+
+test('streaming finish chunks normalize provider finish reasons', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([{ content: 'partial', finishReason: 'incomplete' }]),
+    models: ['gpt-4o'],
+    now: fixedNow,
+    responseId: () => 'chatcmpl-normalized',
+  })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      stream: true,
+    }),
+  }))
+  const frames = parseSseFrames(await response.text()) as Array<{ choices: [{ finish_reason: string | null }] }>
+  expect(frames[frames.length - 1]?.choices[0]?.finish_reason).toBe('length')
+})
+
+test('streaming omits usage the provider never reported, even when include_usage is set', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([{ content: 'done', finishReason: 'stop' }]),
+    models: ['gpt-4o'],
+    now: fixedNow,
+    responseId: () => 'chatcmpl-no-usage',
+  })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      stream: true,
+      stream_options: { include_usage: true },
+    }),
+  }))
+  const frames = parseSseFrames(await response.text()) as Array<Record<string, unknown>>
+  const final = frames[frames.length - 1]
+  expect(final).toMatchObject({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })
+  expect(final).not.toHaveProperty('usage')
+})
+
+test('stream_options.include_usage set to false suppresses provider-reported usage', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([{
+      content: 'done',
+      finishReason: 'stop',
+      usage: { inputTokens: 5, outputTokens: 1 },
+    }]),
+    models: ['gpt-4o'],
+    now: fixedNow,
+    responseId: () => 'chatcmpl-suppressed-usage',
+  })
+
+  const response = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Hi.' }],
+      stream: true,
+      stream_options: { include_usage: false },
+    }),
+  }))
+  const frames = parseSseFrames(await response.text()) as Array<Record<string, unknown>>
+  expect(frames[frames.length - 1]).not.toHaveProperty('usage')
+})
+
+test('request bodies default to a 16 MiB limit that can be disabled', async () => {
+  const client = new RecordingClient([{ content: 'ok', finishReason: 'stop' }])
+  const server = new OpenAiApiServer({ llm: client, models: ['gpt-4o'] })
+  const oversizedPayload = JSON.stringify({
+    model: 'gpt-4o',
+    messages: [{ role: 'user', content: 'x'.repeat(16 * 1024 * 1024) }],
+  })
+
+  const oversized = await server.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: oversizedPayload,
+  }))
+  expect(oversized.status).toBe(413)
+  expect(await oversized.json()).toMatchObject({ error: { code: 'request_too_large' } })
+  expect(client.requests).toHaveLength(0)
+
+  const unbounded = new OpenAiApiServer({ llm: client, models: ['gpt-4o'], maxRequestBodyBytes: 0 })
+  const accepted = await unbounded.fetch(new Request('http://xerxes.test/v1/chat/completions', {
+    method: 'POST',
+    body: oversizedPayload,
+  }))
+  expect(accepted.status).toBe(200)
+  expect(client.requests).toHaveLength(1)
+})
+
+test('a rate-limit key failure returns an OpenAI-shaped error instead of throwing', async () => {
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    rateLimit: { maxRequests: 1, key: () => '' },
+  })
+
+  const response = await server.fetch(new Request('http://xerxes.test/health'))
+  expect(response.status).toBe(500)
+  expect(await response.json()).toEqual({
+    error: { message: 'Internal server error.', type: 'api_error', param: null, code: null },
+  })
+})
+
+test('rate limiter evicts the idlest keys once the tracked-key bound is exceeded', async () => {
+  let currentTime = 1_000
+  const server = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    now: () => currentTime,
+    rateLimit: { maxRequests: 1, windowMs: 60_000 },
+  })
+  const request = () => new Request('http://xerxes.test/health')
+
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(200)
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(429)
+
+  for (let index = 0; index < 10_001; index += 1) {
+    currentTime += 1
+    expect((await server.fetch(request(), `203.0.113.${index}`)).status).toBe(200)
+  }
+
+  // The earliest key was evicted to keep the map bounded, so it is allowed again.
+  expect((await server.fetch(request(), '198.51.100.1')).status).toBe(200)
+})
+
+test('listen binds loopback without warnings and warns on unauthenticated public binds', async () => {
+  const warn = spyOn(console, 'warn').mockImplementation(() => {})
+  const api = new OpenAiApiServer({ llm: new RecordingClient([]), models: ['gpt-4o'] })
+  const authenticated = new OpenAiApiServer({
+    llm: new RecordingClient([]),
+    models: ['gpt-4o'],
+    auth: { token: 'secret-token' },
+  })
+  const loopback = api.listen({ port: 0 })
+  const authenticatedPublic = authenticated.listen({ hostname: '0.0.0.0', port: 0 })
+  const publicServer = api.listen({ hostname: '0.0.0.0', port: 0 })
+  try {
+    expect(loopback.hostname).toBe('127.0.0.1')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('without bearer authentication')
+  } finally {
+    loopback.stop(true)
+    authenticatedPublic.stop(true)
+    publicServer.stop(true)
+    warn.mockRestore()
+  }
+})
+
+test("slow completions survive idle gaps longer than Bun's default 10s timeout", async () => {
+  const delayedClient: LlmClient = {
+    async *stream() {
+      yield { content: 'start' }
+      await Bun.sleep(11_500)
+      yield { content: 'end', finishReason: 'stop' }
+    },
+  }
+  const api = new OpenAiApiServer({ llm: delayedClient, models: ['gpt-4o'] })
+  const server = api.listen({ port: 0 })
+  const completion = (stream: boolean) => fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: 'Take your time.' }],
+      stream,
+    }),
+  })
+  try {
+    const [streamed, buffered] = await Promise.all([completion(true), completion(false)])
+    expect(streamed.status).toBe(200)
+    const body = await streamed.text()
+    expect(body).toContain('"content":"end"')
+    expect(body).toContain('data: [DONE]')
+    expect(buffered.status).toBe(200)
+    expect(await buffered.json()).toMatchObject({ choices: [{ message: { content: 'startend' } }] })
+  } finally {
+    server.stop(true)
+  }
+}, 25_000)
 
 function parseSseFrames(body: string): unknown[] {
   return body

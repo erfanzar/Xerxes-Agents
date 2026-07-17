@@ -68,6 +68,7 @@ test('OpenAI chat requests normalize defaults, preserve extensions, and become p
     ],
     maxTokens: 64,
     temperature: 0.2,
+    topK: 64,
     topP: 0.8,
     stop: ['END'],
     tools: [{

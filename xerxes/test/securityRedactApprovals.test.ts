@@ -70,3 +70,30 @@ test('always approvals persist atomically in the Python-readable snake-case form
     rmSync(directory, { force: true, recursive: true })
   }
 })
+
+test('always approvals merge with the on-disk file so concurrent daemons cannot clobber each other', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-approvals-merge-'))
+  const path = join(directory, 'approvals.json')
+  try {
+    const first = new ApprovalStore({ persistencePath: path, now: () => new Date('2026-07-13T00:00:00.000Z') })
+    const second = new ApprovalStore({ persistencePath: path, now: () => new Date('2026-07-13T00:00:01.000Z') })
+    first.add({ toolName: 'WriteFile', scope: ApprovalScope.ALWAYS, granted: true })
+    // `second` loaded before `first` flushed; its flush must union, not overwrite.
+    second.add({ toolName: 'Bash', scope: ApprovalScope.ALWAYS, granted: false })
+
+    const persisted = JSON.parse(readFileSync(path, 'utf8')) as Array<{ tool_name: string }>
+    expect(persisted.map(record => record.tool_name).sort()).toEqual(['Bash', 'WriteFile'])
+    expect(statSync(path).mode & 0o777).toBe(0o600)
+
+    // Re-adding an identical decision stays deduplicated after the merge.
+    second.add({ toolName: 'Bash', scope: ApprovalScope.ALWAYS, granted: false })
+    const repersisted = JSON.parse(readFileSync(path, 'utf8')) as Array<{ tool_name: string }>
+    expect(repersisted.map(record => record.tool_name).sort()).toEqual(['Bash', 'WriteFile'])
+
+    const fresh = new ApprovalStore({ persistencePath: path })
+    expect(fresh.check('WriteFile', 'any')).toBeTrue()
+    expect(fresh.check('Bash', 'any')).toBeFalse()
+  } finally {
+    rmSync(directory, { force: true, recursive: true })
+  }
+})

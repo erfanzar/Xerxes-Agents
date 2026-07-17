@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -28,6 +28,7 @@ import {
 } from '../src/session/daemonTranscript.js'
 import { AgentTurnRunner, formatSubagentResults } from '../src/daemon/turnRunner.js'
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import { SkillRegistry } from '../src/extensions/skills.js'
 import { messagesToAnthropic } from '../src/llms/anthropic.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 import { AGENT_MEMORY_WRITE_DEFINITION } from '../src/tools/agentMemoryTools.js'
@@ -603,6 +604,116 @@ class ToolCapturingParentClient implements LlmClient {
     yield { content: 'ready' }
   }
 }
+
+test('native subagent turns inherit configured sampling controls', async () => {
+  const client = new ToolCapturingParentClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: BUILTIN_AGENTS,
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    temperature: 0.6,
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    topK: 64,
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'verify sampling propagation',
+      promptProfile: 'coder',
+      title: 'Sampling worker',
+    })
+    await host.managerPort.wait([task.id], 1_000)
+
+    expect(client.requests[0]).toMatchObject({ temperature: 0.6, topK: 64 })
+  } finally {
+    await host.manager.shutdown()
+  }
+})
+
+test('native subagent generations receive the discovered bounded skill catalog', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-subagent-skills-'))
+  const firstRoot = join(root, 'first')
+  const secondRoot = join(root, 'second')
+  const client = new ToolCapturingParentClient()
+  const tools = new ToolRegistry()
+  const firstSkills = new SkillRegistry()
+  const secondSkills = new SkillRegistry()
+  try {
+    await mkdir(join(firstRoot, 'visual-review'), { recursive: true })
+    await writeFile(
+      join(firstRoot, 'visual-review', 'SKILL.md'),
+      '---\nname: visual-review\ndescription: Inspect terminal rendering artifacts\n---\nReview the frame.\n',
+      'utf8',
+    )
+    await mkdir(join(secondRoot, 'runtime-audit'), { recursive: true })
+    await writeFile(
+      join(secondRoot, 'runtime-audit', 'SKILL.md'),
+      '---\nname: runtime-audit\ndescription: Audit native runtime boundaries\n---\nAudit the runtime.\n',
+      'utf8',
+    )
+    await firstSkills.refresh(firstRoot)
+    await secondSkills.refresh(secondRoot)
+
+    const baseOptions = {
+      agentDefinitions: BUILTIN_AGENTS,
+      cwd: root,
+      eventBus: new DaemonSubagentEventBus(),
+      llm: client,
+      model: 'test-model',
+      permissionMode: 'accept-all' as const,
+      toolExecutor: tools,
+      tools: tools.definitions(),
+    }
+    const host = createNativeSubagentHost({
+      ...baseOptions,
+      extraContext: firstSkills.markdownIndex(),
+    })
+
+    try {
+      const first = await host.managerPort.spawn({
+        message: 'inspect the initial catalog',
+        nickname: 'first-catalog-worker',
+        promptProfile: 'coder',
+        title: 'First catalog',
+      })
+      await host.managerPort.wait([first.id], 1_000)
+
+      host.reconfigure({
+        ...baseOptions,
+        extraContext: secondSkills.markdownIndex(),
+      })
+      const second = await host.managerPort.spawn({
+        message: 'inspect the refreshed catalog',
+        nickname: 'second-catalog-worker',
+        promptProfile: 'coder',
+        title: 'Second catalog',
+      })
+      await host.managerPort.wait([second.id], 1_000)
+
+      const firstSystemPrompt = client.requests[0]?.messages
+        .filter(message => message.role === 'system')
+        .map(message => String(message.content))
+        .join('\n') ?? ''
+      const secondSystemPrompt = client.requests[1]?.messages
+        .filter(message => message.role === 'system')
+        .map(message => String(message.content))
+        .join('\n') ?? ''
+      expect(firstSystemPrompt).toContain('visual-review: Inspect terminal rendering artifacts')
+      expect(firstSystemPrompt).not.toContain('runtime-audit')
+      expect(secondSystemPrompt).toContain('runtime-audit: Audit native runtime boundaries')
+      expect(secondSystemPrompt).not.toContain('visual-review')
+    } finally {
+      await host.manager.shutdown()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('agent turn runner exposes registered delegation tools to the provider', async () => {
   const client = new ToolCapturingParentClient()
@@ -2563,3 +2674,353 @@ function nestedEvent(event: DaemonEvent): Record<string, unknown> | undefined {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+class FailingSaveTranscriptStore extends DaemonTranscriptStore {
+  override async save(): Promise<void> {
+    throw new Error('transcript store unavailable')
+  }
+}
+
+class StreamCloseRecordingClient implements LlmClient {
+  readonly started = Promise.withResolvers<void>()
+  closed = false
+
+  async *stream(): AsyncGenerator<LlmDelta> {
+    this.started.resolve()
+    try {
+      yield { content: 'partial answer' }
+      yield { content: 'unreachable later chunk' }
+    } finally {
+      this.closed = true
+    }
+  }
+}
+
+test('a failing transcript save closes the in-flight provider stream instead of leaking it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-failing-child-history-'))
+  const transcripts = new FailingSaveTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const client = new StreamCloseRecordingClient()
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['coder', agentDefinition('coder')],
+      ['default', creatorDefinition('coder')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+    transcriptStore: transcripts,
+  })
+
+  try {
+    const spawned = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'stream until persistence fails',
+      promptProfile: 'coder',
+      sourceAgentId: 'failing-save-session',
+      title: 'Failing save child',
+    })
+    await client.started.promise
+    const settled = await host.managerPort.wait([spawned.id], 5_000)
+
+    expect(settled.pending).toHaveLength(0)
+    expect(settled.completed[0]?.status).toBe('error')
+    expect(settled.completed[0]?.error).toContain('could not be persisted')
+    expect(client.closed).toBe(true)
+  } finally {
+    await host.manager.shutdown()
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+test('subagent conversation states are evicted once a terminal status is persisted', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-evicted-child-history-'))
+  const historySessionId = 'eeeecccc00000000ddddffff00000000'
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  const context: SubagentConversationContext = {
+    agentId: 'coder',
+    cwd: process.cwd(),
+    handleId: 'subagent_evicted',
+    historySessionId,
+    model: 'test-model',
+    permissionCeiling: 'plan',
+    permissionMode: 'plan',
+    profile: 'coder',
+    projectRoot: process.cwd(),
+    rules: [],
+    title: 'Evicted child',
+    toolsAllowed: [],
+    toolsExcluded: [],
+    toolsWhitelist: [],
+    toolsets: [],
+  }
+  const persistence = new SubagentConversationPersistence(transcripts)
+  try {
+    const state = await persistence.stateFor(context)
+    state.messages.push({ role: 'user', content: 'keep this turn' })
+    state.turnCount = 1
+
+    await persistence.save(context, state, 'running')
+    expect(await persistence.stateFor(context)).toBe(state)
+
+    await persistence.save(context, state, 'completed')
+    const reloaded = await persistence.stateFor(context)
+    expect(reloaded).not.toBe(state)
+    expect(reloaded.messages).toEqual([{ role: 'user', content: 'keep this turn' }])
+    expect(reloaded.turnCount).toBe(1)
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+class DepthTrackingChildClient implements LlmClient {
+  readonly release = Promise.withResolvers<void>()
+  private readonly starts = new Map<string, ReturnType<typeof Promise.withResolvers<void>>>()
+
+  started(prompt: string): Promise<void> {
+    return this.resolvers(prompt).promise
+  }
+
+  private resolvers(prompt: string): ReturnType<typeof Promise.withResolvers<void>> {
+    let entry = this.starts.get(prompt)
+    if (!entry) {
+      entry = Promise.withResolvers<void>()
+      this.starts.set(prompt, entry)
+    }
+    return entry
+  }
+
+  async *stream(request: CompletionRequest): AsyncGenerator<LlmDelta> {
+    const prompt = request.messages.findLast(message => message.role === 'user')?.content
+    const text = typeof prompt === 'string' ? prompt : '(missing prompt)'
+    this.resolvers(text).resolve()
+    await this.release.promise
+    yield { content: `done:${text}` }
+  }
+}
+
+test('native runs thread child depth into nested spawns and reject spawns past the depth ceiling', async () => {
+  const client = new DepthTrackingChildClient()
+  const registry = new ToolRegistry()
+  const chain = (name: string, child: string): AgentDefinition => ({
+    ...agentDefinition(name),
+    subagents: Object.freeze({
+      [child]: Object.freeze({ path: `${child}.yaml`, description: `${child} child` }),
+    }),
+  })
+  const host = createNativeSubagentHost({
+    agentDefinitions: new Map([
+      ['default', chain('default', 'depth-a')],
+      ['depth-a', chain('depth-a', 'depth-b')],
+      ['depth-b', chain('depth-b', 'depth-c')],
+      ['depth-c', chain('depth-c', 'depth-a')],
+    ]),
+    cwd: process.cwd(),
+    eventBus: new DaemonSubagentEventBus(),
+    llm: client,
+    model: 'test-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const level0 = await host.managerPort.spawn({
+      creatorAgentId: 'default',
+      message: 'depth level 0',
+      promptProfile: 'depth-a',
+      sourceAgentId: 'depth-session',
+      title: 'Depth level 0',
+    })
+    await client.started('depth level 0')
+    const level1 = await host.managerPort.spawn({
+      creatorAgentId: 'depth-a',
+      message: 'depth level 1',
+      parentAgentId: 'depth-a',
+      promptProfile: 'depth-b',
+      title: 'Depth level 1',
+    })
+    await client.started('depth level 1')
+    const level2 = await host.managerPort.spawn({
+      creatorAgentId: 'depth-b',
+      message: 'depth level 2',
+      parentAgentId: 'depth-b',
+      promptProfile: 'depth-c',
+      title: 'Depth level 2',
+    })
+    await client.started('depth level 2')
+
+    // depth-c runs at depth 2, so its children land at depth 3, which reaches
+    // the fixture ceiling (agentDefinition sets maxDepth 3) and must fail.
+    const rejected = await host.managerPort.spawn({
+      creatorAgentId: 'depth-c',
+      message: 'depth level 3',
+      parentAgentId: 'depth-c',
+      promptProfile: 'depth-a',
+      title: 'Depth level 3',
+    })
+
+    const tasksById = new Map(host.manager.listTasks().map(task => [task.id, task]))
+    expect(tasksById.get(level0.id)?.depth).toBe(0)
+    expect(tasksById.get(level1.id)?.depth).toBe(1)
+    expect(tasksById.get(level2.id)?.depth).toBe(2)
+    expect(tasksById.get(rejected.id)?.depth).toBe(3)
+    expect(tasksById.get(rejected.id)?.status).toBe('failed')
+    expect(tasksById.get(rejected.id)?.error).toContain('Max depth')
+    expect(rejected.status).toBe('error')
+  } finally {
+    client.release.resolve()
+    await host.manager.shutdown()
+  }
+})
+
+test('persisted assistant tool calls drop malformed entries instead of casting them', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-malformed-tool-calls-'))
+  const historySessionId = 'aaaa0000bbbb1111cccc2222dddd3333'
+  const transcripts = new DaemonTranscriptStore({
+    currentProjectDirectory: process.cwd(),
+    directory: join(directory, 'sessions'),
+  })
+  try {
+    await transcripts.save({
+      agentId: 'coder',
+      cwd: process.cwd(),
+      extra: {},
+      format: 'bun-v2',
+      interactionMode: 'code',
+      key: historySessionId,
+      messages: [{
+        role: 'assistant',
+        content: 'assistant with tool calls',
+        tool_calls: [
+          { id: 'call-ok', type: 'function', function: { name: 'ReadFile', arguments: { file_path: 'src/a.ts' } } },
+          { id: 7, type: 'function', function: { name: 'BadId', arguments: {} } },
+          { id: 'missing-type', function: { name: 'BadType', arguments: {} } },
+          { id: 'missing-function', type: 'function' },
+          { id: 'missing-name', type: 'function', function: { arguments: {} } },
+          null,
+          'not-a-record',
+        ],
+      }],
+      metadata: { session_kind: 'subagent' },
+      pendingResumeReplays: [],
+      planMode: false,
+      schemaVersion: undefined,
+      sessionId: historySessionId,
+      thinkingContent: [],
+      toolExecutions: [],
+      totalApiCalls: 1,
+      totalInputTokens: 8,
+      totalOutputTokens: 3,
+      turnCount: 1,
+      updatedAt: new Date().toISOString(),
+      usageComplete: true,
+      workspace: '',
+    })
+    const persistence = new SubagentConversationPersistence(transcripts)
+    const state = await persistence.stateFor({
+      agentId: 'coder',
+      cwd: process.cwd(),
+      handleId: 'subagent_malformed',
+      historySessionId,
+      model: 'test-model',
+      permissionCeiling: 'plan',
+      permissionMode: 'plan',
+      profile: 'coder',
+      projectRoot: process.cwd(),
+      rules: [],
+      title: 'Malformed tool calls child',
+      toolsAllowed: [],
+      toolsExcluded: [],
+      toolsWhitelist: [],
+      toolsets: [],
+    })
+
+    expect(state.messages[0]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [{
+        id: 'call-ok',
+        type: 'function',
+        function: { name: 'ReadFile', arguments: { file_path: 'src/a.ts' } },
+      }],
+    })
+  } finally {
+    await rm(directory, { force: true, recursive: true })
+  }
+})
+
+test('a reset falls back to the current generation once its original generation is pruned', async () => {
+  const oldClient = new ReloadGenerationChildClient('pruned-old', true)
+  const midClient = new ReloadGenerationChildClient('pruned-mid', true)
+  const newClient = new ReloadGenerationChildClient('pruned-new')
+  const eventBus = new DaemonSubagentEventBus()
+  const definitions = new Map([['coder', agentDefinition('coder')]])
+  const registry = new ToolRegistry()
+  const host = createNativeSubagentHost({
+    agentDefinitions: definitions,
+    cwd: process.cwd(),
+    eventBus,
+    llm: oldClient,
+    model: 'old-model',
+    permissionMode: 'accept-all',
+    toolExecutor: registry,
+    tools: registry.definitions(),
+  })
+
+  try {
+    const task = await host.managerPort.spawn({
+      message: 'run on the prunable generation',
+      promptProfile: 'coder',
+      title: 'Pruned generation worker',
+    })
+    await oldClient.started.promise
+
+    host.reconfigure({
+      agentDefinitions: definitions,
+      cwd: process.cwd(),
+      eventBus,
+      llm: midClient,
+      model: 'mid-model',
+      permissionMode: 'accept-all',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+    oldClient.release()
+    await host.managerPort.wait([task.id], 1_000)
+
+    host.reconfigure({
+      agentDefinitions: definitions,
+      cwd: process.cwd(),
+      eventBus,
+      llm: newClient,
+      model: 'new-model',
+      permissionMode: 'accept-all',
+      toolExecutor: registry,
+      tools: registry.definitions(),
+    })
+
+    host.managerPort.resume(task.id)
+    const continuedTask = await host.managerPort.sendInput(task.id, {
+      message: 'follow up after pruning',
+    })
+    const continuedResult = await host.managerPort.wait([continuedTask.id], 1_000)
+    expect(continuedResult.completed[0]?.lastOutput).toBe('pruned-new:old-model:follow up after pruning')
+    expect(oldClient.models).toEqual(['old-model'])
+    expect(midClient.models).toEqual([])
+    expect(newClient.models).toEqual(['old-model'])
+  } finally {
+    oldClient.release()
+    midClient.release()
+    await host.manager.shutdown()
+  }
+})

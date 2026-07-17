@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
@@ -217,10 +218,18 @@ export class ProfileStore {
 
   private write(document: ProfilesDocument): void {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 })
-    writeFileSync(this.filePath, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-    // `mode` only applies when writeFileSync creates the file. Repair older
-    // profile stores that may have inherited a permissive process umask.
-    chmodSync(this.filePath, 0o600)
+    // Temp file plus same-directory rename so a profile store containing API
+    // keys is never left half-written.
+    const temporary = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(temporary, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+      renameSync(temporary, this.filePath)
+      // `mode` only applies when writeFileSync creates the file. Repair older
+      // profile stores that may have inherited a permissive process umask.
+      chmodSync(this.filePath, 0o600)
+    } finally {
+      rmSync(temporary, { force: true })
+    }
   }
 }
 

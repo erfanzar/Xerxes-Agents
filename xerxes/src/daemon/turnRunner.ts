@@ -70,6 +70,7 @@ export interface AgentTurnRunnerOptions {
   readonly toolExecutor?: ToolExecutor
   readonly temperature?: number
   readonly tools?: readonly ToolDefinition[]
+  readonly topK?: number
   readonly topP?: number
 }
 
@@ -101,7 +102,15 @@ export class AgentTurnRunner implements TurnRunner {
     controls: TurnRunControls = {},
   ): AsyncGenerator<DaemonEvent> {
     const displayText = controls.displayText?.trim() || text
-    const state = this.states.get(session.id) ?? stateFromSession(session)
+    // The session is the source of truth between turns: undo, retry, compact,
+    // and idle steers mutate session.messages directly, so cached state must
+    // re-adopt them instead of clobbering them at the next synchronization.
+    const previous = this.states.get(session.id)
+    const state = stateFromSession(session)
+    if (previous) {
+      state.totalCacheReadTokens = previous.totalCacheReadTokens
+      state.totalCacheCreationTokens = previous.totalCacheCreationTokens
+    }
     this.states.set(session.id, state)
     const projectRoot = sessionProjectRoot(session)
     state.metadata.project_root = projectRoot
@@ -193,6 +202,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
         permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
+        ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
@@ -258,6 +268,10 @@ export class AgentTurnRunner implements TurnRunner {
 
   stateFor(sessionId: string): AgentState | undefined {
     return this.states.get(sessionId)
+  }
+
+  dropSession(sessionId: string): void {
+    this.states.delete(sessionId)
   }
 
   private async bootstrapSystemPrompt(

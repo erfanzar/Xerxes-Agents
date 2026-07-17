@@ -10,6 +10,12 @@ const DEFAULT_POLLING_TIMEOUT = 30
 export interface TelegramPollingChannel {
   getUpdates(options?: TelegramUpdatesOptions): Promise<Readonly<Record<string, unknown>>>
   handleWebhook(headers: WebhookHeaders, body: Uint8Array): Promise<WebhookResponse>
+  /**
+   * Internal ingest for polled updates. Polling is authenticated by the bot
+   * token, so adapters use this to bypass webhook-only credentials such as
+   * Telegram's secret-token header. Falls back to handleWebhook when absent.
+   */
+  ingestPolledUpdate?(body: Uint8Array): Promise<WebhookResponse>
 }
 
 export interface TelegramPollingLoopOptions {
@@ -64,9 +70,13 @@ export class TelegramPollingLoop {
         for (const update of updates(response)) {
           if (this.abort.signal.aborted) return
           const updateId = integer(update.update_id)
+          const delivered = await ingestPolledUpdate(this.channel, update)
+          if (delivered.status >= 400) {
+            // The offset is advanced only after a successful delivery, so a
+            // failed update is acknowledged nowhere and Telegram redelivers it.
+            throw new Error(`Telegram update ${updateId ?? 'unknown'} delivery failed (${delivered.status})`)
+          }
           if (updateId !== undefined) offset = updateId + 1
-          const body = new TextEncoder().encode(JSON.stringify(update))
-          await this.channel.handleWebhook({}, body)
         }
       } catch (error) {
         if (this.abort.signal.aborted) return
@@ -91,6 +101,14 @@ function updates(response: Readonly<Record<string, unknown>>): readonly Record<s
   return Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => isRecord(item))
     : []
+}
+
+function ingestPolledUpdate(
+  channel: TelegramPollingChannel,
+  update: Record<string, unknown>,
+): Promise<WebhookResponse> {
+  const body = new TextEncoder().encode(JSON.stringify(update))
+  return channel.ingestPolledUpdate ? channel.ingestPolledUpdate(body) : channel.handleWebhook({}, body)
 }
 
 function integer(value: unknown): number | undefined {

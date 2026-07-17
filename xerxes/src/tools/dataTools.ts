@@ -14,6 +14,7 @@ import { WorkspacePathResolver } from './pathSafety.js'
 const DEFAULT_CSV_DELIMITER = ','
 const DEFAULT_TIMEZONE = 'UTC'
 const HASH_ALGORITHMS = ['md5', 'sha1', 'sha256', 'sha512'] as const
+const MAX_REGEX_SUBJECT_CHARACTERS = 1_000_000
 
 export const JSON_PROCESSOR_DEFINITION: ToolDefinition = {
   type: 'function',
@@ -283,12 +284,14 @@ export function processText(inputs: JsonObject): JsonObject {
 
   if (operation === 'clean') {
     const pattern = optionalString(inputs, 'pattern')
+    if (pattern !== undefined) requireRegexSubject(text)
     const cleaned = (pattern === undefined ? text : text.replace(regex(pattern, true), '')).replace(/\s+/gu, ' ').trim()
     return { cleaned_length: Array.from(cleaned).length, cleaned_text: cleaned, original_length: Array.from(text).length }
   }
 
   if (operation === 'extract') {
     const requestedPattern = requiredString(inputs, 'pattern')
+    requireRegexSubject(text)
     const source = namedPattern(requestedPattern) ?? requestedPattern
     const matches = [...text.matchAll(regex(source, caseSensitive))].map(match => match[0])
     return { count: matches.length, matches }
@@ -297,6 +300,7 @@ export function processText(inputs: JsonObject): JsonObject {
   if (operation === 'replace') {
     const pattern = requiredString(inputs, 'pattern')
     const replacement = optionalString(inputs, 'replacement') ?? ''
+    requireRegexSubject(text)
     const expression = regex(pattern, caseSensitive)
     const matches = [...text.matchAll(expression)].length
     return { replaced_text: text.replace(expression, replacement), replacements_made: matches }
@@ -304,6 +308,7 @@ export function processText(inputs: JsonObject): JsonObject {
 
   if (operation === 'split') {
     const pattern = optionalString(inputs, 'pattern')
+    if (pattern !== undefined) requireRegexSubject(text)
     const parts = pattern === undefined ? text.trim().split(/\s+/u).filter(Boolean) : text.split(regex(pattern, caseSensitive))
     return { count: parts.length, parts }
   }
@@ -597,6 +602,18 @@ function regex(source: string, caseSensitive: boolean): RegExp {
     return new RegExp(source, caseSensitive ? 'gu' : 'giu')
   } catch (error) {
     throw new ValidationError('pattern', 'must be a valid JavaScript regular expression: ' + errorMessage(error), source)
+  }
+}
+
+// A synchronous regex cannot be timed out; capping the subject size is the accepted
+// mitigation against catastrophic backtracking freezing the single-threaded daemon.
+function requireRegexSubject(text: string): void {
+  if (text.length > MAX_REGEX_SUBJECT_CHARACTERS) {
+    throw new ValidationError(
+      'text',
+      'is ' + text.length + ' characters, exceeding the ' + MAX_REGEX_SUBJECT_CHARACTERS
+        + '-character regular-expression subject limit',
+    )
   }
 }
 

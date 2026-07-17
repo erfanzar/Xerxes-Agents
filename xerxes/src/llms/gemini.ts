@@ -275,6 +275,7 @@ export class GeminiClient implements LlmClient {
     }
 
     const pendingToolCalls = new Map<string, ToolCall>()
+    const callIdOccurrences = new Map<string, number>()
     let emittedToolCalls = false
     for await (const data of internalSseData(response.body)) {
       if (data === '[DONE]') {
@@ -300,7 +301,8 @@ export class GeminiClient implements LlmClient {
       if (candidate !== undefined) {
         const parsed = parseGeminiCandidate(candidate)
         for (const call of parsed.toolCalls) {
-          pendingToolCalls.set(call.id, call)
+          const id = uniqueStreamCallId(call.id, callIdOccurrences)
+          pendingToolCalls.set(id, id === call.id ? call : { ...call, id })
         }
         if (parsed.content) {
           delta.content = parsed.content
@@ -453,6 +455,7 @@ function requestGenerationConfig(
 
   if (request.maxTokens !== undefined) generationConfig.maxOutputTokens = request.maxTokens
   if (request.temperature !== undefined) generationConfig.temperature = request.temperature
+  if (request.topK !== undefined) generationConfig.topK = request.topK
   if (request.topP !== undefined) generationConfig.topP = request.topP
   if (request.stop?.length) generationConfig.stopSequences = [...request.stop]
   return generationConfig
@@ -656,6 +659,16 @@ function parseGeminiCandidate(candidate: Record<string, unknown>): ParsedGeminiC
     ...(rawFinishReason ? { finishReason: normalizeFinishReason(rawFinishReason) } : {}),
     toolCalls,
   }
+}
+
+/**
+ * Keep repeated identical calls distinct in one stream: deterministic fallback
+ * ids would otherwise collapse duplicates into a single map entry.
+ */
+function uniqueStreamCallId(id: string, occurrences: Map<string, number>): string {
+  const seen = occurrences.get(id) ?? 0
+  occurrences.set(id, seen + 1)
+  return seen === 0 ? id : `${id}#${seen}`
 }
 
 function parseGeminiFunctionCall(value: unknown, index: number): ToolCall {

@@ -37,6 +37,9 @@ export class WorkspaceMemoryStore {
   async add(kind: WorkspaceMemoryKind, content: string): Promise<{ readonly content: string; readonly id: number; readonly ok: true } | Failure> {
     const cleaned = content.trim()
     if (!cleaned) return failure('content required')
+    // Entries are joined with '\n' by writeLines, so an embedded newline would
+    // turn one logical entry into several physical lines and corrupt id-based CRUD.
+    if (cleaned.includes('\n') || cleaned.includes('\r')) return failure('content must be a single line')
     return this.withLock(kind, async () => {
       const lines = await this.readLines(kind)
       lines.push(cleaned)
@@ -69,6 +72,7 @@ export class WorkspaceMemoryStore {
   ): Promise<{ readonly content: string; readonly id: number; readonly ok: true } | Failure> {
     const cleaned = content.trim()
     if (!cleaned) return failure('content required')
+    if (cleaned.includes('\n') || cleaned.includes('\r')) return failure('content must be a single line')
     return this.withLock(kind, async () => {
       const lines = await this.readLines(kind)
       if (!hasEntry(lines, entryId)) return failure('id ' + entryId + ' not found')

@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -57,6 +57,23 @@ test('profile store preserves active selection and filters sampling keys', async
   }
 })
 
+test('profile store writes atomically and leaves no temporary files behind', async () => {
+  const normalizedHome = await mkdtemp(join(tmpdir(), 'xerxes-profiles-atomic-'))
+  try {
+    const store = new ProfileStore(join(normalizedHome, 'profiles.json'))
+    store.save({ name: 'one', baseUrl: 'https://api.openai.com/v1', apiKey: 'sk-one', model: 'gpt-4o' })
+    store.save({ name: 'two', baseUrl: 'https://api.anthropic.com', apiKey: 'sk-two', model: 'claude' })
+
+    const document = JSON.parse(await readFile(store.filePath, 'utf8')) as { profiles: Record<string, { api_key: string }> }
+    expect(document.profiles.one?.api_key).toBe('sk-one')
+    expect(document.profiles.two?.api_key).toBe('sk-two')
+    expect((await readdir(normalizedHome)).filter(entry => entry.includes('.tmp'))).toEqual([])
+    expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
+  } finally {
+    await rm(normalizedHome, { recursive: true, force: true })
+  }
+})
+
 test('runtime connection prefers explicit daemon settings over a saved provider profile', () => {
   const connection = runtimeConnection({
     runtime: {
@@ -64,17 +81,49 @@ test('runtime connection prefers explicit daemon settings over a saved provider 
       api_key: 'daemon-key',
       max_tokens: 1234,
       temperature: 0.2,
+      top_p: 0.7,
       permission_mode: 'plan',
       responses_api: 'true',
     },
     control: {}, workspace: {}, channels: {}, projectDirectory: '/project', maxConcurrentTurns: 8,
   }, {
-    name: 'saved', base_url: 'https://api.openai.com/v1', api_key: 'profile-key', model: 'gpt-4.1', provider: 'openai', sampling: {},
+    name: 'saved', base_url: 'https://api.openai.com/v1', api_key: 'profile-key', model: 'gpt-4.1', provider: 'openai',
+    sampling: { temperature: 0.9, top_k: 77, max_tokens: 9_999, top_p: 0.95 },
   })
   expect(connection).toEqual({
     model: 'gpt-4o', apiKey: 'daemon-key', baseUrl: 'https://api.openai.com/v1', provider: 'openai',
-    maxTokens: 1234, temperature: 0.2, permissionMode: 'plan', responsesApi: true,
+    maxTokens: 1234, temperature: 0.2, topK: 77, topP: 0.7, permissionMode: 'plan', responsesApi: true,
   })
+})
+
+test('runtime connection restores every persisted profile sampling value', async () => {
+  const normalizedHome = await mkdtemp(join(tmpdir(), 'xerxes-profile-runtime-'))
+  try {
+    const store = new ProfileStore(join(normalizedHome, 'profiles.json'))
+    store.save({
+      name: 'persisted',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'profile-key',
+      model: 'anthropic/claude-sonnet-4.6',
+      sampling: { temperature: 0.45, top_k: 32, max_tokens: 8_192, top_p: 0.86 },
+    })
+
+    const connection = runtimeConnection({
+      runtime: {},
+      control: {}, workspace: {}, channels: {}, projectDirectory: '/project', maxConcurrentTurns: 8,
+    }, store.active())
+
+    expect(connection).toMatchObject({
+      model: 'anthropic/claude-sonnet-4.6',
+      provider: 'openrouter',
+      maxTokens: 8_192,
+      temperature: 0.45,
+      topK: 32,
+      topP: 0.86,
+    })
+  } finally {
+    await rm(normalizedHome, { recursive: true, force: true })
+  }
 })
 
 test('runtime connection defaults to YOLO while preserving explicit stricter modes', () => {
@@ -88,6 +137,7 @@ test('runtime connection defaults to YOLO while preserving explicit stricter mod
   }
 
   expect(runtimeConnection(base, undefined)?.permissionMode).toBe('accept-all')
+  expect(runtimeConnection(base, undefined)).toMatchObject({ temperature: 0.6, topK: 64 })
   expect(runtimeConnection({ ...base, runtime: { model: 'gpt-4o', permission_mode: 'manual' } }, undefined)?.permissionMode)
     .toBe('manual')
 })

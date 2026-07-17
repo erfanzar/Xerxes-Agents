@@ -168,7 +168,12 @@ export class ApprovalStore {
     if (!this.persistencePath) return
     const directory = dirname(this.persistencePath)
     const temporary = this.persistencePath + '.' + randomUUID() + '.tmp'
-    const durable = this.records.filter(record => record.scope === ApprovalScope.ALWAYS).map(record => record.toRecord())
+    // Re-read the current file and union it with the in-memory decisions so two
+    // daemons sharing one approvals file cannot clobber each other's ALWAYS grants.
+    const durable = unionRecords(
+      this.load(),
+      this.records.filter(record => record.scope === ApprovalScope.ALWAYS),
+    ).map(record => record.toRecord())
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     try {
       writeFileSync(temporary, JSON.stringify(durable, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
@@ -189,6 +194,19 @@ export class ApprovalStore {
 /** Produce an opaque stable hash for a tool-call argument payload. */
 export function approvalArgumentsHash(value: unknown): string {
   return createHash('sha256').update(stableJson(value), 'utf8').digest('hex')
+}
+
+/** Union two record lists, deduplicating decisions with identical persisted content. */
+function unionRecords(first: readonly ApprovalRecord[], second: readonly ApprovalRecord[]): ApprovalRecord[] {
+  const merged: ApprovalRecord[] = []
+  const seen = new Set<string>()
+  for (const record of [...first, ...second]) {
+    const key = stableJson(record.toRecord())
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(record)
+  }
+  return merged
 }
 
 function requiredText(value: string, name: string): string {

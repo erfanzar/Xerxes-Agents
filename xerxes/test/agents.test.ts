@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { loadAgentSpec } from '../src/agents/agentSpec.js'
+import { AgentSpecError } from '../src/core/errors.js'
 import {
   BUILTIN_AGENTS,
   listAgentDefinitionLoadErrors,
@@ -323,4 +324,28 @@ test('orchestrator routes capability and recovery triggers while recording switc
   })
   expect(orchestrator.shouldSwitchAgent({})).toBeUndefined()
   expect(errors).toEqual([AgentSwitchTrigger.CUSTOM])
+})
+
+test('agent specs reject mapping values for scalar fields and missing prompt files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-agent-spec-invalid-'))
+  try {
+    await writeFile(join(root, 'mapping.yaml'), `version: 1
+agent:
+  name:
+    nested: value
+  system_prompt: hello
+`, 'utf8')
+    expect(() => loadAgentSpec(join(root, 'mapping.yaml'))).toThrow(AgentSpecError)
+    expect(() => loadAgentSpec(join(root, 'mapping.yaml'))).toThrow('agent.name must be a scalar')
+
+    await writeFile(join(root, 'missing-prompt.yaml'), `version: 1
+agent:
+  name: missing-prompt
+  system_prompt_path: ./does-not-exist.md
+`, 'utf8')
+    expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow(AgentSpecError)
+    expect(() => loadAgentSpec(join(root, 'missing-prompt.yaml'))).toThrow('System prompt file not found')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

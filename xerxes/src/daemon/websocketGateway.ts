@@ -172,6 +172,9 @@ export class DaemonWebSocketGateway {
         headers: { Upgrade: 'websocket' },
       })
     }
+    if (!websocketOriginAllowed(request)) {
+      return new Response('Origin not allowed', { status: 403 })
+    }
     if (!websocketRequestAuthorized(request, this.authToken)) {
       return new Response(null, {
         status: 401,
@@ -273,6 +276,25 @@ export function websocketRequestAuthorized(request: Request, expectedToken?: str
   }
   const queryToken = new URL(request.url).searchParams.get('token')
   return queryToken !== null && tokensMatch(queryToken, expected)
+}
+
+/**
+ * Browsers always send an Origin header on WebSocket upgrades, so cross-origin
+ * browser pages cannot ride a user's loopback daemon. Non-browser clients
+ * (TUI, CLI, tests) send no Origin and stay accepted.
+ */
+export function websocketOriginAllowed(request: Request): boolean {
+  const origin = nonBlank(request.headers.get('origin') ?? undefined)
+  if (!origin) {
+    return true
+  }
+  let hostname: string
+  try {
+    hostname = new URL(origin).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
 }
 
 class GatewayConnection implements DaemonTransportConnection {

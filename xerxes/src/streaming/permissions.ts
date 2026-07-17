@@ -36,7 +36,9 @@ const SAFE_COMMANDS = [
   /^\s*(find|grep|rg|fd|ag|ack|tree)\b/,
   /^\s*(python|python3|node|ruby|go|cargo|rustc)\s+--version\b/,
   /^\s*(npm|yarn|pnpm|pip|pip3|cargo|go)\s+(list|show|info|search|outdated)\b/,
-  /^\s*(env|printenv|hostname|id|groups|locale|df|du|free|uptime|top\s+-l\s*1)\b/,
+  // env/printenv are deliberately absent: they dump the daemon's process environment,
+  // including provider API keys, so they must always prompt instead of auto-approving.
+  /^\s*(hostname|id|groups|locale|df|du|free|uptime|top\s+-l\s*1)\b/,
 ]
 
 const DANGEROUS_COMMANDS = [
@@ -44,20 +46,24 @@ const DANGEROUS_COMMANDS = [
   /\bgit\s+(push\s+--force|reset\s+--hard|clean\s+-[a-zA-Z]*f)\b/,
   /\bfind\b[^\n;&|]*\s-(?:delete|exec(?:dir)?|ok(?:dir)?)(?:\s|$)/,
   /\b(mkfs|dd\s+if=|format|fdisk|parted)\b/,
-  />\s*\S/,
   /\bsudo\b/,
   /\bcurl\b.*\|\s*(bash|sh|zsh)\b/,
   /\bos\.system\b/,
   /\bsubprocess\b/,
   /\beval\s*\(/,
   /\bexec\s*\(/,
+  /\bexecSync\s*\(/,
+  /\bspawnSync\s*\(/,
+  /\bchild_process\b/,
+  /\brequire\s*\(/,
+  /\bimport\s*\(/,
 ]
 
 const WRITING_TOOLS = new Set(['Write', 'WriteFile', 'Edit', 'FileEditTool', 'AppendFile'])
 
 const SAFE_DIRECT_COMMANDS = new Set([
   'ack', 'ag', 'cat', 'date', 'df', 'du', 'echo', 'fd', 'free', 'grep', 'groups', 'head', 'hostname', 'id', 'locale',
-  'ls', 'printenv', 'pwd', 'rg', 'tail', 'top', 'tree', 'type', 'uname', 'uptime', 'wc', 'which', 'whoami',
+  'ls', 'pwd', 'rg', 'tail', 'top', 'tree', 'type', 'uname', 'uptime', 'wc', 'which', 'whoami',
 ])
 
 interface DirectCommand {
@@ -72,14 +78,54 @@ type CommandInput =
 
 export function isSafeShellCommand(command: string): boolean {
   const normalized = command.trim()
+  // Fail closed on anything that can execute or redirect outside a plain read-only
+  // pipeline: command substitution, backticks, process substitution, redirection.
+  if (hasUnsafeShellSyntax(normalized)) {
+    return false
+  }
   const cdPrefix = normalized.match(/^cd(?:\s+(?:--\s+)?[^\n;&|`$()<>]+)?\s*&&\s*(.+)$/)
   if (cdPrefix?.[1]) {
     return isSafeShellCommand(cdPrefix[1])
   }
-  const segments = normalized.split(/&&|\|\||;|\|/).map(segment => segment.trim()).filter(Boolean)
+  // Newlines and single `&` are command separators too; a benign first line must
+  // never smuggle a payload past the segment checks.
+  const segments = normalized.split(/&&|\|\||[;\n&]|\|/).map(segment => segment.trim()).filter(Boolean)
   return segments.length > 0
     && segments.every(segment => !DANGEROUS_COMMANDS.some(pattern => pattern.test(segment)))
     && segments.every(segment => SAFE_COMMANDS.some(pattern => pattern.test(segment)))
+}
+
+/**
+ * Quote-aware scan for shell syntax that the segment allowlist cannot contain.
+ *
+ * Command substitution and backticks still execute inside double quotes, so only
+ * single quotes neutralize them; redirection and process substitution are inert
+ * inside either quote style. When in doubt the command prompts instead of running.
+ */
+function hasUnsafeShellSyntax(command: string): boolean {
+  let quote: 'single' | 'double' | undefined
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]
+    if (quote === 'single') {
+      if (char === '\'') quote = undefined
+      continue
+    }
+    if (char === '\\') {
+      index += 1
+      continue
+    }
+    if (quote === 'double') {
+      if (char === '"') quote = undefined
+      else if (char === '`' || (char === '$' && command[index + 1] === '(')) return true
+      continue
+    }
+    if (char === '\'') quote = 'single'
+    else if (char === '"') quote = 'double'
+    else if (char === '`' || char === '>') return true
+    else if (char === '$' && command[index + 1] === '(') return true
+    else if (char === '<' && command[index + 1] === '(') return true
+  }
+  return false
 }
 
 /**

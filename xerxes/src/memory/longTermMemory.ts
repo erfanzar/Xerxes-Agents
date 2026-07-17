@@ -166,9 +166,27 @@ export class LongTermMemory extends Memory {
 
   private hydrate(): void {
     for (const key of this.storage?.listKeys('ltm_') ?? []) {
-      const record = this.storage?.load(key)
+      if (!key.startsWith('ltm_')) continue
+      let record: unknown
+      try {
+        record = this.storage?.load(key)
+      } catch (error) {
+        console.warn(`Skipping corrupt long-term memory record ${key}:`, error)
+        continue
+      }
       if (isRecord(record)) this.append(MemoryItem.fromRecord(record))
     }
+  }
+
+  /**
+   * Read-only retrieval for summaries and boot hydration: returns the most
+   * important items without touching access state or re-persisting anything.
+   */
+  mostImportant(limit = 10): MemoryItem[] {
+    return this.items
+      .slice()
+      .sort((left, right) => importance(right) - importance(left) || right.timestamp.valueOf() - left.timestamp.valueOf())
+      .slice(0, Math.max(0, limit))
   }
 
   private mergeSimilar(threshold: number): void {

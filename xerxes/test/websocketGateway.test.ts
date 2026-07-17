@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
 import { DaemonInteractionBoard } from '../src/daemon/interactions.js'
 import { DaemonServer } from '../src/daemon/server.js'
-import { websocketRequestAuthorized } from '../src/daemon/websocketGateway.js'
+import { websocketOriginAllowed, websocketRequestAuthorized } from '../src/daemon/websocketGateway.js'
 import type { DaemonEvent, DaemonSession, TurnRunner } from '../src/daemon/runtime.js'
 import type { PermissionRequest } from '../src/streaming/events.js'
 
@@ -191,6 +191,58 @@ test('daemon WebSocket transport closes oversized requests', async () => {
   }
 })
 
+test('WebSocket origin policy accepts loopback and missing origins while rejecting foreign pages', () => {
+  const at = (origin?: string) => new Request('http://localhost/rpc', {
+    headers: origin === undefined ? {} : { Origin: origin },
+  })
+  expect(websocketOriginAllowed(at())).toBe(true)
+  expect(websocketOriginAllowed(at('http://localhost:3000'))).toBe(true)
+  expect(websocketOriginAllowed(at('https://localhost'))).toBe(true)
+  expect(websocketOriginAllowed(at('http://127.0.0.1:5173'))).toBe(true)
+  expect(websocketOriginAllowed(at('http://[::1]:8080'))).toBe(true)
+  expect(websocketOriginAllowed(at('https://evil.example'))).toBe(false)
+  expect(websocketOriginAllowed(at('http://localhost.evil.example'))).toBe(false)
+  expect(websocketOriginAllowed(at('not a url'))).toBe(false)
+})
+
+test('daemon WebSocket transport rejects cross-origin browser upgrades with 403', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-websocket-origin-'))
+  const daemon = new DaemonServer({
+    socketPath: join(directory, 'daemon.sock'),
+    websocket: { host: '127.0.0.1', path: '/rpc', port: 0 },
+  })
+  await daemon.start()
+  const endpoint = daemon.websocketUrl
+  if (!endpoint) {
+    throw new Error('WebSocket gateway did not start')
+  }
+  try {
+    const httpEndpoint = new URL(endpoint)
+    httpEndpoint.protocol = 'http:'
+    const rejected = await fetch(httpEndpoint, {
+      headers: {
+        Connection: 'upgrade',
+        Origin: 'https://evil.example',
+        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version': '13',
+        Upgrade: 'websocket',
+      },
+    })
+    expect(rejected.status).toBe(403)
+
+    const client = await WebSocketTestClient.connect(endpoint, { Origin: 'http://localhost:3000' })
+    try {
+      client.send({ jsonrpc: '2.0', id: 1, method: 'runtime.status', params: {} })
+      expect((await client.next(frame => frame.id === 1)).result).toMatchObject({ ok: true })
+    } finally {
+      client.close()
+    }
+  } finally {
+    await daemon.stop()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 interface Frame {
   readonly id?: number | string | null
   readonly method?: string
@@ -258,8 +310,13 @@ class WebSocketTestClient {
     })
   }
 
-  static async connect(url: URL): Promise<WebSocketTestClient> {
-    const socket = new WebSocket(url)
+  static async connect(url: URL, headers?: Record<string, string>): Promise<WebSocketTestClient> {
+    // Bun accepts an options bag here, while TypeScript selects the DOM
+    // constructor overload because this project also includes `lib.dom`.
+    const BunWebSocket = WebSocket as unknown as {
+      new (endpoint: string | URL, options?: Bun.WebSocketOptions): WebSocket
+    }
+    const socket = new BunWebSocket(url, headers ? { headers } : undefined)
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('WebSocket connection timed out')), 2_000)
       socket.addEventListener('open', () => {

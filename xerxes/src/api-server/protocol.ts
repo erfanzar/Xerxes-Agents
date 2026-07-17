@@ -15,6 +15,8 @@ import {
 
 export interface ParsedChatCompletionRequest {
   readonly completion: CompletionRequest
+  /** Caller preference from `stream_options.include_usage` for the final stream chunk. */
+  readonly includeUsage?: boolean
   /** Extension payload preserved for a model-specific backend to interpret. */
   readonly metadata?: unknown
   readonly stream: boolean
@@ -45,12 +47,18 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
   if (!Array.isArray(messagesValue)) {
     fail('messages must be an array.', 'messages')
   }
+  if (messagesValue.length === 0) {
+    fail('messages must contain at least one message.', 'messages')
+  }
   const messages = messagesValue.map((message, index) => parseMessage(message, index))
   const stream = optionalBoolean(body.stream, 'stream') ?? false
+  const includeUsage = parseStreamOptions(body.stream_options)
   validateChoiceCount(body.n)
 
   const options: {
+    frequencyPenalty?: number
     maxTokens?: number
+    presencePenalty?: number
     stop?: readonly string[]
     temperature?: number
     toolChoice?: ToolChoice
@@ -60,6 +68,14 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
   const maxTokens = optionalInteger(body.max_tokens, 'max_tokens', 1)
   if (maxTokens !== undefined) {
     options.maxTokens = maxTokens
+  }
+  const frequencyPenalty = optionalNumber(body.frequency_penalty, 'frequency_penalty')
+  if (frequencyPenalty !== undefined) {
+    options.frequencyPenalty = frequencyPenalty
+  }
+  const presencePenalty = optionalNumber(body.presence_penalty, 'presence_penalty')
+  if (presencePenalty !== undefined) {
+    options.presencePenalty = presencePenalty
   }
   const temperature = optionalNumber(body.temperature, 'temperature')
   if (temperature !== undefined) {
@@ -85,6 +101,7 @@ export function parseChatCompletionRequest(value: unknown): ParsedChatCompletion
   return {
     completion: { model, messages, ...options },
     stream,
+    ...(includeUsage === undefined ? {} : { includeUsage }),
     ...(body.metadata === undefined ? {} : { metadata: body.metadata }),
   }
 }
@@ -249,6 +266,14 @@ function parseToolChoice(value: unknown): ToolChoice | undefined {
     return 'any'
   }
   fail('tool_choice must be auto, none, or required.', 'tool_choice')
+}
+
+function parseStreamOptions(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  const options = record(value, 'stream_options')
+  return optionalBoolean(options.include_usage, 'stream_options.include_usage')
 }
 
 function parseStop(value: unknown): readonly string[] | undefined {

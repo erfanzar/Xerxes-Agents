@@ -87,7 +87,10 @@ export class ClaudeMcpTools {
     const serverName = requiredString(inputs, 'server_name')
     const toolName = requiredString(inputs, 'tool_name')
     const client = this.requireClient(serverName)
-    const result = await abortable(client.callTool(toolName, parseArguments(inputs.arguments)), signal)
+    const result = await abortable(
+      client.callTool(toolName, parseArguments(inputs.arguments), signal === undefined ? {} : { signal }),
+      signal,
+    )
     return {
       server_name: serverName,
       tool_name: toolName,

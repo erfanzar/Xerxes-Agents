@@ -231,6 +231,50 @@ describe('OpenTUI session picker histories', () => {
     }
   })
 
+  it('uses per-tab empty copy on the Chats and Agents tabs', async () => {
+    const { setup } = await picker({
+      activeResponse: { sessions: [] },
+      agentResponse: { sessions: [] },
+      chatResponse: { sessions: [] },
+      currentSessionId: 'no-such-session'
+    })
+
+    try {
+      // Chats counts as empty when only the '+ new session' row remains.
+      const chatsFrame = setup.captureCharFrame()
+      expect(chatsFrame).toContain('[Chats 0]')
+      expect(chatsFrame).toContain('No chats yet.')
+      expect(chatsFrame).not.toContain('No agent histories yet.')
+
+      act(() => setup.mockInput.pressArrow('right'))
+      await setup.flush()
+
+      const agentsFrame = setup.captureCharFrame()
+      expect(agentsFrame).toContain('[Agents 0]')
+      expect(agentsFrame).toContain('No agent histories yet.')
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
+  it('clamps the fixed chrome inside the modal on very short terminals', async () => {
+    const { setup } = await picker({ height: 7, width: 60 })
+
+    try {
+      const frame = setup.captureCharFrame()
+      expect(frame).toContain('Sessions')
+      expect(frame).toContain('[Chats 2]')
+
+      // The footer must land inside the clamped panel rather than overflowing
+      // past the modal's bottom edge.
+      const footerLine = frame.split('\n').findIndex(line => line.includes('Tab/'))
+      expect(footerLine).toBeGreaterThanOrEqual(0)
+      expect(footerLine).toBeLessThan(6)
+    } finally {
+      act(() => setup.renderer.destroy())
+    }
+  })
+
   it('does not resume a child transcript while its native agent still owns it', async () => {
     const running: SessionListResponse = {
       sessions: [{

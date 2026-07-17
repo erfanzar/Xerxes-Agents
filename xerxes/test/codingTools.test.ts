@@ -165,3 +165,70 @@ test('lower-case coding schemas register independently from the newer camel-case
     )).toContain('Successfully wrote')
   })
 })
+
+test('write_file defaults to no overwrite and skips the diff preview for oversized inputs but still writes', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    const original = Array.from({ length: 1_100 }, (_value, index) => 'old-line-' + index).join('\n') + '\n'
+    const modified = Array.from({ length: 1_100 }, (_value, index) => 'new-line-' + index).join('\n') + '\n'
+    await Bun.write(join(workspace, 'large.txt'), original)
+
+    await expect(writeFile({ content: modified, file_path: 'large.txt' }, paths)).rejects.toThrow('overwrite=true')
+    const written = await writeFile({ content: modified, file_path: 'large.txt', overwrite: true }, paths)
+    expect(written).toContain('Successfully wrote')
+    expect(written).toContain('diff skipped')
+    expect(written).not.toContain('@@')
+    expect(await Bun.file(join(workspace, 'large.txt')).text()).toBe(modified)
+
+    expect(() => createDiff({ modified, original })).toThrow('diff limit')
+  })
+})
+
+test('read_file rejects files beyond the byte cap with an actionable error', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await Bun.write(join(workspace, 'huge.txt'), 'x'.repeat(10_000_001))
+    await expect(readFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('read_file limit')
+  })
+})
+
+test('find_and_replace validates the regex before writing a backup and keeps $ sequences literal', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await Bun.write(join(workspace, 'target.txt'), 'alpha beta\n')
+    await expect(findAndReplace({
+      file_path: 'target.txt',
+      regex: true,
+      replace: 'x',
+      search: '([',
+    }, paths)).rejects.toThrow('valid JavaScript regular expression')
+    expect(await Bun.file(join(workspace, 'target.txt.bak')).exists()).toBeFalse()
+    expect(await Bun.file(join(workspace, 'target.txt')).text()).toBe('alpha beta\n')
+
+    const replaced = await findAndReplace({
+      backup: false,
+      file_path: 'target.txt',
+      regex: true,
+      replace: '[$&][$1]',
+      search: 'beta',
+    }, paths)
+    expect(replaced).toContain('Replaced 1')
+    expect(await Bun.file(join(workspace, 'target.txt')).text()).toBe('alpha [$&][$1]\n')
+  })
+})
+
+test('find_and_replace refuses regex mode beyond the subject-size cap but allows literal mode', async () => {
+  await inWorkspace(async (workspace, paths) => {
+    await Bun.write(join(workspace, 'subject.txt'), 'x'.repeat(1_000_001))
+    await expect(findAndReplace({
+      backup: false,
+      file_path: 'subject.txt',
+      regex: true,
+      replace: 'y',
+      search: 'x+',
+    }, paths)).rejects.toThrow('regex subject limit')
+    expect(await findAndReplace({
+      backup: false,
+      file_path: 'subject.txt',
+      replace: 'yyy',
+      search: 'xxx',
+    }, paths)).toContain('Replaced')
+  })
+})

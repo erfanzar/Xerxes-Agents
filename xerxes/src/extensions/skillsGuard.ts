@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, realpath, rename, rmdir, rm, unlink } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -198,8 +198,21 @@ export async function approveSkill(skillName: string, paths: SkillGuardPaths = {
   if (isWithin(destination, quarantined) || isWithin(quarantined, destination)) {
     throw new SkillGuardPathError(quarantined, 'quarantined skill must not overlap its active destination')
   }
-  await replaceChildSkillDirectory(skillsRoot, name, 'active skill directory')
-  await moveDirectory(quarantined, destination, 'approve skill')
+  // Set any active sibling aside first so a failed move can restore it instead of losing it.
+  const replaced = await existingChildDirectory(skillsRoot, name, 'active skill directory')
+  let backup: { readonly path: string; readonly restoreTo: string } | undefined
+  if (replaced !== undefined) {
+    const backupPath = await containedChildPath(skillsRoot, `.${name}.approve-${crypto.randomUUID()}.bak`, 'replaced skill backup')
+    await moveDirectory(replaced, backupPath, 'set aside active skill')
+    backup = { path: backupPath, restoreTo: replaced }
+  }
+  try {
+    await moveDirectory(quarantined, destination, 'approve skill')
+  } catch (error) {
+    if (backup !== undefined) await moveDirectory(backup.path, backup.restoreTo, 'restore active skill')
+    throw error
+  }
+  if (backup !== undefined) await removeDirectoryTree(skillsRoot, backup.path)
   return `Approved and activated skill '${name}'`
 }
 
@@ -471,8 +484,45 @@ async function writeDirectFile(root: string, name: string, content: string, labe
 async function moveDirectory(source: string, destination: string, label: string): Promise<void> {
   try {
     await rename(source, destination)
+    return
   } catch (error) {
-    throw pathError(source, `cannot ${label}`, error)
+    if (!isCrossDevice(error)) throw pathError(source, `cannot ${label}`, error)
+  }
+  // Rename cannot cross filesystem boundaries; fall back to a guarded copy, then remove the source.
+  await copyDirectoryTree(source, destination, label)
+  await removeDirectoryTree(dirname(source), source)
+}
+
+async function copyDirectoryTree(source: string, destination: string, label: string): Promise<void> {
+  let entries
+  try {
+    entries = await readdir(source, { withFileTypes: true })
+  } catch (error) {
+    throw pathError(source, `cannot list ${label} source`, error)
+  }
+  try {
+    await mkdir(destination, { recursive: true })
+  } catch (error) {
+    throw pathError(destination, `cannot create ${label} destination`, error)
+  }
+  for (const entry of entries) {
+    const childSource = join(source, entry.name)
+    const childDestination = join(destination, entry.name)
+    if (entry.isSymbolicLink()) {
+      throw new SkillGuardPathError(childSource, `${label} refuses symbolic links`)
+    }
+    if (entry.isDirectory()) {
+      await copyDirectoryTree(childSource, childDestination, label)
+      continue
+    }
+    if (!entry.isFile()) {
+      throw new SkillGuardPathError(childSource, `${label} refuses non-file entries`)
+    }
+    try {
+      await copyFile(childSource, childDestination)
+    } catch (error) {
+      throw pathError(childSource, `cannot copy ${label} file`, error)
+    }
   }
 }
 
@@ -594,7 +644,8 @@ function normalizeTrustedHashes(value: unknown): Record<string, string> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
   const normalized: Record<string, string> = {}
   for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry !== 'string') return {}
+    // Skip only the malformed entry; one bad record must not void the whole database.
+    if (typeof entry !== 'string') continue
     normalized[key] = entry
   }
   return normalized
@@ -632,4 +683,8 @@ function isMissing(error: unknown): boolean {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EEXIST'
+}
+
+function isCrossDevice(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'EXDEV'
 }

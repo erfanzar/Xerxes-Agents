@@ -52,6 +52,15 @@ test('ReadFile and read_file treat JSON null chunk arguments as omitted defaults
   })
 })
 
+test('ReadFile and read_file reject files beyond the byte cap with an actionable error', async () => {
+  await inTemporaryDirectory(async directory => {
+    const paths = new WorkspacePathResolver(directory)
+    await Bun.write(join(directory, 'huge.txt'), 'x'.repeat(10_000_001))
+    await expect(standaloneReadFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('ReadFile limit')
+    await expect(codingReadFile({ file_path: 'huge.txt' }, paths)).rejects.toThrow('read_file limit')
+  })
+})
+
 test('SpawnAgents accepts safe common JSON-adjacent agent payloads without evaluating text', async () => {
   const manager = new SpawnedAgentManager({
     runner: async request => ({ content: `done:${request.input}` }),

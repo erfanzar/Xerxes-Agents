@@ -15,6 +15,7 @@ import type { MemoryStorage } from './storage.js'
 const COMMON_ENTITY_WORDS = new Set(['The', 'This', 'That', 'These', 'Those'])
 const ENTITY_PHRASE_PATTERN = /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g
 const QUOTED_ENTITY_PATTERN = /"([^"]*)"/g
+const MAX_ENTITY_CONTEXTS = 20
 
 const RELATIONSHIP_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/(\w+)\s+is\s+(?:a|an|the)?\s*(\w+)\s+of\s+(\w+)/gi, 'relation_of'],
@@ -74,6 +75,7 @@ export class EntityMemory extends Memory {
 
   constructor(options: EntityMemoryOptions = {}) {
     super(options.storage, options.maxItems ?? 5_000, options.enableEmbeddings ?? false)
+    this.hydrate()
   }
 
   clear(): void {
@@ -83,7 +85,9 @@ export class EntityMemory extends Memory {
     clearRecord(this.relationships)
     clearRecord(this.entityMentions)
 
-    for (const key of this.storage?.listKeys('entity_') ?? []) this.storage?.delete(key)
+    if (!this.storage) return
+    for (const key of this.storage.listKeys('entity_')) this.storage.delete(key)
+    for (const key of this.storage.listKeys('_entity_')) this.storage.delete(key)
   }
 
   delete(memoryId?: string, _filters?: MemoryFilters): number {
@@ -91,9 +95,8 @@ export class EntityMemory extends Memory {
     const item = this.index.get(memoryId)
     if (!item) return 0
 
-    for (const entity of entityNames(item)) removeMention(this.entityMentions, entity, memoryId)
-    this.remove(item)
-    this.storage?.delete(entityStorageKey(memoryId))
+    this.evict(item)
+    this.persistSnapshots()
     return 1
   }
 
@@ -203,6 +206,13 @@ export class EntityMemory extends Memory {
       this.relationships[relation] = pairs
     }
 
+    if (this.maxItems !== undefined) {
+      while (this.items.length >= this.maxItems) {
+        const oldest = this.items[0]
+        if (!oldest) break
+        this.evict(oldest)
+      }
+    }
     this.append(item)
     this.persist(item)
     return item
@@ -252,9 +262,45 @@ export class EntityMemory extends Memory {
     return true
   }
 
+  private evict(item: MemoryItem): void {
+    for (const entity of entityNames(item)) removeMention(this.entityMentions, entity, item.memoryId)
+    this.remove(item)
+    this.storage?.delete(entityStorageKey(item.memoryId))
+  }
+
+  private hydrate(): void {
+    if (!this.storage) return
+    const records: MemoryItem[] = []
+    for (const key of this.storage.listKeys('entity_')) {
+      if (!key.startsWith('entity_')) continue
+      try {
+        const record = this.storage.load(key)
+        if (isRecord(record)) records.push(MemoryItem.fromRecord(record))
+      } catch (error) {
+        console.warn(`Skipping corrupt entity memory record ${key}:`, error)
+      }
+    }
+    records.sort((left, right) => left.timestamp.valueOf() - right.timestamp.valueOf())
+    const overflow = this.maxItems === undefined ? 0 : Math.max(0, records.length - this.maxItems)
+    for (const item of records.slice(overflow)) this.append(item)
+
+    try {
+      restoreEntities(this.storage.load('_entity_entities'), this.entities)
+      restoreRelationships(this.storage.load('_entity_relationships'), this.relationships)
+      restoreMentions(this.storage.load('_entity_mentions'), this.entityMentions)
+    } catch (error) {
+      console.warn('Skipping corrupt entity memory snapshots:', error)
+    }
+  }
+
   private persist(item: MemoryItem): void {
     if (!this.storage) return
     this.storage.save(entityStorageKey(item.memoryId), item.toRecord())
+    this.persistSnapshots()
+  }
+
+  private persistSnapshots(): void {
+    if (!this.storage) return
     this.storage.save('_entity_entities', this.entities)
     this.storage.save('_entity_relationships', this.relationships)
     this.storage.save('_entity_mentions', this.entityMentions)
@@ -266,6 +312,9 @@ export class EntityMemory extends Memory {
       existing.frequency += 1
       existing.lastSeen = item.timestamp
       existing.contexts.push(item.content.slice(0, 100))
+      if (existing.contexts.length > MAX_ENTITY_CONTEXTS) {
+        existing.contexts.splice(0, existing.contexts.length - MAX_ENTITY_CONTEXTS)
+      }
     } else {
       this.entities[entity] = {
         firstSeen: item.timestamp,
@@ -291,6 +340,51 @@ function entityNames(item: MemoryItem): string[] {
 
 function entityStorageKey(memoryId: string): string {
   return `entity_${memoryId}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function dateValue(value: unknown): Date | undefined {
+  if (value instanceof Date) return value
+  if (typeof value !== 'string' || !value) return undefined
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.valueOf()) ? undefined : parsed
+}
+
+function restoreEntities(value: unknown, target: Record<string, EntityRecord>): void {
+  if (!isRecord(value)) return
+  for (const [entity, record] of Object.entries(value)) {
+    if (!isRecord(record)) continue
+    target[entity] = {
+      contexts: Array.isArray(record.contexts)
+        ? record.contexts.filter((context): context is string => typeof context === 'string').slice(-MAX_ENTITY_CONTEXTS)
+        : [],
+      firstSeen: dateValue(record.firstSeen) ?? new Date(),
+      frequency: typeof record.frequency === 'number' && Number.isFinite(record.frequency) ? record.frequency : 1,
+      lastSeen: dateValue(record.lastSeen) ?? new Date(),
+    }
+  }
+}
+
+function restoreRelationships(value: unknown, target: Record<string, EntityRelationPair[]>): void {
+  if (!isRecord(value)) return
+  for (const [relation, pairs] of Object.entries(value)) {
+    if (!Array.isArray(pairs)) continue
+    target[relation] = pairs.flatMap(pair =>
+      Array.isArray(pair) && typeof pair[0] === 'string' && typeof pair[1] === 'string'
+        ? [[pair[0], pair[1]] as const]
+        : [])
+  }
+}
+
+function restoreMentions(value: unknown, target: Record<string, string[]>): void {
+  if (!isRecord(value)) return
+  for (const [entity, mentions] of Object.entries(value)) {
+    if (!Array.isArray(mentions)) continue
+    target[entity] = mentions.filter((mention): mention is string => typeof mention === 'string')
+  }
 }
 
 function removeMention(mentions: Record<string, string[]>, entity: string, memoryId: string): void {

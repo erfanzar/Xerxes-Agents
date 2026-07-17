@@ -1,13 +1,18 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
+import {
+  MAX_SKILL_INDEX_ENTRIES,
+  SkillRegistry,
+  parseSkillMarkdown,
+} from '../src/extensions/skills.js'
 import { persistedSubagentSnapshotValues } from '../src/agents/subagentPersistence.js'
 import { MCPClient } from '../src/mcp/client.js'
 import { SpawnedAgentManager } from '../src/operators/subagents.js'
@@ -28,6 +33,7 @@ import {
   registerClaudeMcpTools,
   registerClaudeRemoteTools,
   registerClaudeSearchTools,
+  registerClaudeSkillTool,
   registerClaudeWorkflowTools,
   type WorktreeManager,
 } from '../src/tools/claudeTools/index.js'
@@ -90,6 +96,45 @@ test('Claude compatibility schemas use provider-portable scalar type keywords', 
     }
   }
   for (const definition of definitions) visit(definition)
+})
+
+test('SkillTool searches beyond the prompt index, bounds listings, and preserves exact activation', async () => {
+  const skills = new SkillRegistry()
+  const targetIndex = MAX_SKILL_INDEX_ENTRIES + 1
+  for (let index = 0; index <= targetIndex; index += 1) {
+    const target = index === targetIndex
+    skills.register(parseSkillMarkdown(
+      `---\nname: skill-${index}\ndescription: ${target ? 'Rare needle workflow' : `Routine workflow ${index}`}\ntags: [${target ? 'rare' : 'common'}]\n---\n${target ? 'Run the hidden needle instructions.' : `Run workflow ${index}.`}`,
+      `/virtual/skill-${index}/SKILL.md`,
+    ))
+  }
+  const registry = new ToolRegistry()
+  const definition = registerClaudeSkillTool(registry, skills)
+
+  expect(definition.function.description).toContain('Discover installed skills')
+  expect(definition.function.parameters?.required).toBeUndefined()
+
+  const listing = await registry.execute(toolCall('SkillTool', {}), { metadata: {} })
+  expect(listing.match(/^  - /gmu)).toHaveLength(20)
+  expect(listing).toContain('more matching skills omitted')
+
+  const search = await registry.execute(toolCall('SkillTool', { query: 'needle', tags: ['rare'] }), {
+    metadata: {},
+  })
+  expect(search).toContain(`skill-${targetIndex}: Rare needle workflow`)
+  expect(search).not.toContain('Run the hidden needle instructions.')
+
+  const miss = await registry.execute(toolCall('SkillTool', { skill_name: 'needle' }), { metadata: {} })
+  expect(miss).toContain('No installed skill has that exact name.')
+  expect(miss).toContain(`skill-${targetIndex}: Rare needle workflow`)
+
+  const activated = await registry.execute(toolCall('SkillTool', {
+    skill_name: `skill-${targetIndex}`,
+    args: 'Apply it now.',
+  }), { metadata: {} })
+  expect(activated).toContain(`[Skill: skill-${targetIndex}]`)
+  expect(activated).toContain('Run the hidden needle instructions.')
+  expect(activated).toContain('User request: Apply it now.')
 })
 
 test('Claude agent tools map task lifecycle, outputs, and mailbox events to SpawnedAgentManager', async () => {
@@ -973,4 +1018,34 @@ test('compatibility gaps make unsupported legacy behavior explicit', () => {
   expect(gaps.some(gap => gap.includes('fuzzy-whitespace'))).toBeTrue()
   expect(NativeWorktreeManager).toBeDefined()
   expect(ClaudeAgentTools).toBeDefined()
+})
+
+test('NativeWorktreeManager sweeps worktrees this process created but never exited', async () => {
+  const git = async (cwd: string, arguments_: readonly string[]): Promise<void> => {
+    const child = Bun.spawn(['git', ...arguments_], { cwd, stdin: 'ignore', stderr: 'pipe', stdout: 'pipe' })
+    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+    if (code !== 0) throw new Error(stderr)
+  }
+  const repository = await mkdtemp(join(tmpdir(), 'xerxes-worktree-sweep-'))
+  try {
+    await git(repository, ['init'])
+    await git(repository, ['config', 'user.email', 'test@example.invalid'])
+    await git(repository, ['config', 'user.name', 'Xerxes Test'])
+    await Bun.write(join(repository, 'seed.txt'), 'seed\n')
+    await git(repository, ['add', 'seed.txt'])
+    await git(repository, ['commit', '-m', 'seed'])
+
+    const manager = new NativeWorktreeManager(repository)
+    const created = await manager.create('sweep-me')
+    expect((await stat(created.path)).isDirectory()).toBeTrue()
+
+    manager.sweepCreated()
+    await expect(stat(created.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(repository)).isDirectory()).toBeTrue()
+
+    // A second sweep is a no-op, and the exit-time sweep ignores already-removed paths.
+    manager.sweepCreated()
+  } finally {
+    await rm(repository, { force: true, recursive: true })
+  }
 })

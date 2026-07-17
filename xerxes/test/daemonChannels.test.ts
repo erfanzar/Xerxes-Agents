@@ -112,6 +112,51 @@ test('daemon channel webhook listener settings inherit control host and validate
   expect(options).toEqual({ host: '0.0.0.0', port: 11997 })
 })
 
+test('daemon channel webhook options warn when a public host binds signature-less channels', () => {
+  const warnings = captureWarnings(() => {
+    const config = testConfig('/workspace', {
+      relay: { type: 'generic_webhook', enabled: true, settings: {} },
+      signed_bot: { type: 'telegram', enabled: true, settings: { transport: 'webhook', webhook_secret_token: 's3cret' } },
+      polling_bot: { type: 'telegram', enabled: true, settings: { transport: 'polling' } },
+      off_duty: { type: 'slack', enabled: false, settings: {} },
+    })
+    const options = daemonChannelWebhookOptions({
+      ...config,
+      control: { websocket_host: '127.0.0.1', webhook_host: '0.0.0.0' },
+    })
+    expect(options.host).toBe('0.0.0.0')
+  })
+
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain('SECURITY WARNING')
+  expect(warnings[0]).toContain('relay')
+  expect(warnings[0]).not.toContain('signed_bot')
+  expect(warnings[0]).not.toContain('polling_bot')
+  expect(warnings[0]).not.toContain('off_duty')
+})
+
+test('daemon channel webhook options stay quiet for loopback binds', () => {
+  const warnings = captureWarnings(() => {
+    daemonChannelWebhookOptions(testConfig('/workspace', {
+      relay: { type: 'generic_webhook', enabled: true, settings: {} },
+    }))
+  })
+
+  expect(warnings).toEqual([])
+})
+
+function captureWarnings(run: () => void): string[] {
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')) }
+  try {
+    run()
+  } finally {
+    console.warn = original
+  }
+  return warnings
+}
+
 test('configured daemon channel settings can disable streamed editable previews', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-channel-preview-config-'))
   const adapter = new PreviewAdapter()

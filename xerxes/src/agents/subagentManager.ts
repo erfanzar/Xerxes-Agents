@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { AgentDefinition } from './definitions.js'
+import { ValidationError } from '../core/errors.js'
 import {
   MAX_AGENT_TITLE_LENGTH,
   normalizeAgentTitle,
@@ -434,6 +435,7 @@ export class SubAgentManager {
   /** Spawn one delegated task. The returned task is registered before execution begins. */
   async spawn(options: SpawnSubAgentOptions): Promise<SubAgentTask> {
     const depth = options.depth ?? 0
+    const depthLimit = effectiveMaxDepth(options.agentDefinition, this.maxDepth)
     const taskId = this.nextTaskId()
     const isolation = options.isolation?.trim() || options.agentDefinition?.isolation || ''
     const config = effectiveConfig(options.config ?? {}, options.agentDefinition)
@@ -459,8 +461,8 @@ export class SubAgentManager {
     this.tasks.set(task.id, task)
     if (options.name?.trim()) this.tasksByName.set(options.name.trim(), task.id)
 
-    if (depth >= this.maxDepth) {
-      this.fail(task, `Max depth (${this.maxDepth}) exceeded`)
+    if (depth >= depthLimit.limit) {
+      this.fail(task, `Max depth (${depthLimit.limit}, from ${depthLimit.source}) exceeded: cannot spawn at depth ${depth}`)
       return task
     }
 
@@ -560,7 +562,10 @@ export class SubAgentManager {
       this.synchronize(task, snapshot)
       this.postEvent(task, 'message', { messagePreview: message.slice(0, 200) })
       return true
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ValidationError)) {
+        console.error(`SubAgentManager failed to deliver input to task '${task.id}': ${errorMessage(error)}`)
+      }
       return false
     }
   }
@@ -660,14 +665,22 @@ export class SubAgentManager {
     this.mailbox.push(event)
     if (this.mailbox.length > 512) this.mailbox.shift()
     task.lastActivityAt = this.now().valueOf()
-    this.eventSink(event)
+    try {
+      this.eventSink(event)
+    } catch (error) {
+      // A host sink failure must never reject a monitor or fail a healthy turn.
+      console.error(`SubAgentManager event sink failed for '${type}' event on task '${task.id}': ${errorMessage(error)}`)
+    }
     this.notifyWaiters()
   }
 
-  /** Drain events newer than a caller cursor. */
+  /** Drain events newer than a caller cursor, dropping only events at or below that cursor. */
   drainMailbox(sinceSequence = 0): SubAgentEvent[] {
     const events = this.mailbox.filter(event => event.sequence > sinceSequence)
-    this.mailbox.length = 0
+    if (events.length !== this.mailbox.length) {
+      this.mailbox.length = 0
+      this.mailbox.push(...events)
+    }
     return events
   }
 
@@ -1083,6 +1096,18 @@ export function filterSubagentTools<T extends Record<string, unknown>>(
       return options.toolExecutor!(toolName, inputs)
     }
   return Object.freeze({ toolSchemas, execute })
+}
+
+/** Resolve the spawn depth ceiling: a definition's own maxDepth wins over the manager default. */
+function effectiveMaxDepth(
+  definition: AgentDefinition | undefined,
+  managerDefault: number,
+): { readonly limit: number; readonly source: string } {
+  const value: unknown = definition?.maxDepth
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return { limit: value, source: `agent definition '${definition?.name ?? 'unknown'}'` }
+  }
+  return { limit: managerDefault, source: 'manager default' }
 }
 
 function effectiveConfig(

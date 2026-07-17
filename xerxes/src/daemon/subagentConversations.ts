@@ -87,10 +87,18 @@ export function isSubagentConversationActive(historySessionId: string): boolean 
   return activeConversationOwners.has(historySessionId)
 }
 
+const TERMINAL_PERSISTED_STATUSES: ReadonlySet<PersistedSubagentStatus> = new Set([
+  'cancelled',
+  'completed',
+  'error',
+])
+
 /**
  * Owns complete child-agent state independently from the bounded task summary
  * stored on the parent. The daemon injects the same atomic transcript store it
  * uses for main sessions; tests remain ephemeral unless they inject one too.
+ * Live states are evicted once a terminal status is durable so the cache holds
+ * only in-flight conversations instead of every conversation forever.
  */
 export class SubagentConversationPersistence {
   private readonly states = new Map<string, Promise<AgentState>>()
@@ -122,6 +130,9 @@ export class SubagentConversationPersistence {
     const metadata = conversationMetadata(context, status, error)
     state.metadata = { ...state.metadata, ...metadata }
     await this.transcripts.save(transcriptFromState(context, state, metadata, checkpoint))
+    // A terminal status is durable now, so drop the live copy: any follow-up
+    // run reloads from the store instead of pinning the conversation in memory.
+    if (TERMINAL_PERSISTED_STATUSES.has(status)) this.states.delete(context.historySessionId)
   }
 
   private async loadState(context: SubagentConversationContext): Promise<AgentState> {
@@ -253,7 +264,7 @@ function rawMessageToChatMessage(message: RawMessage): ChatMessage[] {
       ...(typeof message.thinking_signature === 'string'
         ? { thinking_signature: message.thinking_signature }
         : {}),
-      ...(Array.isArray(message.tool_calls) ? { tool_calls: message.tool_calls as readonly ToolCall[] } : {}),
+      ...(Array.isArray(message.tool_calls) ? { tool_calls: message.tool_calls.filter(isToolCall) } : {}),
     }]
   }
   if (role === 'system' && isMessageContent(content)) return [{ role, content }]
@@ -278,6 +289,17 @@ function rawMessageToChatMessage(message: RawMessage): ChatMessage[] {
 
 function isMessageContent(value: unknown): value is MessageContent {
   return typeof value === 'string' || Array.isArray(value)
+}
+
+function isToolCall(value: unknown): value is ToolCall {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string' || record.type !== 'function') return false
+  const fn = record.function
+  return typeof fn === 'object'
+    && fn !== null
+    && !Array.isArray(fn)
+    && typeof (fn as Record<string, unknown>).name === 'string'
 }
 
 function isToolExecutionRecord(value: unknown): value is AgentState['toolExecutions'][number] {

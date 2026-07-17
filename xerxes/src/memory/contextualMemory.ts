@@ -77,7 +77,7 @@ export class ContextualMemory extends Memory {
       lines.push('\nRecent activity:')
       for (const item of recent) lines.push(`  - ${item.content.slice(0, 100)}`)
     }
-    const important = this.longTerm.search('', 20).filter(item => importance(item) >= 0.8).slice(0, 3)
+    const important = this.longTerm.mostImportant(20).filter(item => importance(item) >= 0.8).slice(0, 3)
     if (important.length > 0) {
       lines.push('\nImportant memories:')
       for (const item of important) lines.push(`  - ${item.content.slice(0, 100)}`)

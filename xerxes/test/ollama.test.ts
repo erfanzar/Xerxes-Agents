@@ -72,6 +72,7 @@ test('Ollama client posts direct chat NDJSON and normalizes content, tool, and f
     model: 'ollama/llama3.3',
     messages: [{ role: 'system', content: 'Be concise.' }, { role: 'user', content: 'Read the README.' }],
     temperature: 0.2,
+    topK: 64,
     topP: 0.7,
     maxTokens: 99,
     stop: ['<stop>'],
@@ -93,7 +94,7 @@ test('Ollama client posts direct chat NDJSON and normalizes content, tool, and f
       top_p: 0.7,
       num_predict: 99,
       stop: ['<stop>'],
-      top_k: 42,
+      top_k: 64,
     },
     tools: [READ_FILE],
   })
@@ -183,6 +184,28 @@ test('Ollama client rejects malformed NDJSON instead of silently losing a delta'
 
   await expect(collect(client.stream({ model: 'llama3.3', messages: [{ role: 'user', content: 'hello' }] })))
     .rejects.toThrow('invalid NDJSON JSON: {bad json}')
+})
+
+test('Ollama client cancels the response body when the consumer exits early', async () => {
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"message":{"role":"assistant","content":"Hello"}}\n'))
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  const client = new OllamaClient({
+    fetchImplementation: async () => new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
+  })
+
+  for await (const event of client.stream({ model: 'llama3.3', messages: [{ role: 'user', content: 'hello' }] })) {
+    void event
+    break
+  }
+
+  expect(cancelled).toBe(true)
 })
 
 async function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> {

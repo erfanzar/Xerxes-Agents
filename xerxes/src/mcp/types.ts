@@ -29,6 +29,8 @@ export type MCPFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise
 /** Optional runtime dependencies for one MCP client. */
 export interface MCPClientOptions {
   readonly fetch?: MCPFetch
+  /** Receives diagnostics for skipped malformed server output. Defaults to silent. */
+  readonly debug?: (message: string) => void
 }
 
 export interface MCPImplementation {

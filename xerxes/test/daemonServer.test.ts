@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -178,6 +178,111 @@ test("unconfigured daemon status is neutral and turn submission rejects model in
       turn_count: 0,
     });
   } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon context limits follow the active provider and live model metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-context-limit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    apiKey: "",
+    baseUrl: "https://api.kimi.com/coding/v1",
+    model: "k3",
+    name: "kimi-code",
+    provider: "kimi-code",
+  });
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    runtimeSettings: {
+      base_url: "https://api.kimi.com/coding/v1",
+      model: "k3",
+      provider: "kimi-code",
+    },
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ profileStore, runtime, socketPath });
+  const nativeFetch = globalThis.fetch;
+  let modelFetchCount = 0;
+  const modelFetch: FetchImplementation = async () => {
+    modelFetchCount += 1;
+    return new Response(
+      JSON.stringify({
+        data: [
+          modelFetchCount === 1
+            ? { id: "k3", context_length: 400_000 }
+            : { id: "k3" },
+        ],
+      }),
+    );
+  };
+  globalThis.fetch = modelFetch as typeof globalThis.fetch;
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "provider-context" },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toMatchObject({
+      context_limit: 262_144,
+      session: { context_limit: 262_144, max_context: 262_144 },
+    });
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "fetch_models",
+      params: { profile_name: "kimi-code" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject({
+      models: ["k3"],
+      ok: true,
+      source: "remote",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.status",
+      params: { session_key: "provider-context" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result?.session).toMatchObject({
+      context_limit: 400_000,
+      max_context: 400_000,
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "fetch_models",
+      params: { profile_name: "kimi-code" },
+    });
+    expect((await client.next((frame) => frame.id === 4)).result).toMatchObject({
+      models: ["k3"],
+      ok: true,
+      source: "remote",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "session.status",
+      params: { session_key: "provider-context" },
+    });
+    expect((await client.next((frame) => frame.id === 5)).result?.session).toMatchObject({
+      context_limit: 262_144,
+      max_context: 262_144,
+    });
+  } finally {
+    globalThis.fetch = nativeFetch;
     client.close();
     await server.stop();
     await rm(directory, { recursive: true, force: true });
@@ -2068,6 +2173,7 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
   const server = new DaemonServer({
     socketPath,
     channelManager,
+    profileStore: new ProfileStore(join(directory, "profiles.json")),
     runtime,
     agentDefinitionLoader: () => [
       {
@@ -2179,6 +2285,24 @@ test("daemon slash config, sampling, agents, and platforms use native backing st
       severity: "info",
       body: expect.stringContaining("top_k"),
     });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 51,
+      method: "slash",
+      params: { command: "/sampling reset" },
+    });
+    expect((await client.next((frame) => frame.id === 51)).result).toMatchObject({
+      ok: true,
+      sampling: { temperature: 0.6, top_k: 64 },
+    });
+    expect(rebuiltSettings.at(-1)).toMatchObject({
+      temperature: 0.6,
+      top_k: 64,
+    });
+    expect(
+      (await client.next(eventFrame("notification"))).params?.payload?.body,
+    ).toContain("temperature 0.6, top_k 64");
 
     client.send({
       jsonrpc: "2.0",
@@ -2873,5 +2997,336 @@ class SocketTestClient {
       return;
     }
     this.frames.push(frame);
+  }
+}
+
+test("disconnect cancels only the turn submitted by the disconnecting connection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-turn-owner-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "gate-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const owner = await SocketTestClient.connect(socketPath);
+  const bystander = await SocketTestClient.connect(socketPath);
+  try {
+    owner.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "shared-turn" },
+    });
+    await owner.next((frame) => frame.id === 1);
+    await owner.next(eventFrame("init_done"));
+    await owner.next(eventFrame("status_update"));
+    owner.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "shared-turn", text: "long shared work" },
+    });
+    await owner.next((frame) => frame.id === 2);
+    await owner.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    bystander.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.open",
+      params: { session_key: "shared-turn" },
+    });
+    await bystander.next((frame) => frame.id === 3);
+    // A duplicate submit on the shared key fails and must not transfer
+    // cancellation ownership away from the original submitter.
+    bystander.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "turn.submit",
+      params: { session_key: "shared-turn", text: "duplicate work" },
+    });
+    await bystander.next((frame) => frame.id === 4);
+    await bystander.next(
+      (frame) =>
+        frame.method === "event" &&
+        String(frame.params?.payload?.message ?? "").includes("already active"),
+    );
+    bystander.close();
+    // A different connection's disconnect must leave the live turn alone.
+    await Bun.sleep(100);
+    expect(runtime.sessionStatus("shared-turn")?.activeTurnId).not.toBe("");
+    expect(runtime.sessionStatus("shared-turn")?.cancelRequested).toBe(false);
+
+    owner.close();
+    await waitFor(
+      () => runtime.sessionStatus("shared-turn")?.activeTurnId === "",
+    );
+    expect(runtime.sessionStatus("shared-turn")?.cancelRequested).toBe(true);
+  } finally {
+    owner.close();
+    bystander.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon stop drains in-flight turns so their final state reaches disk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-stop-drain-"));
+  const socketPath = join(directory, "daemon.sock");
+  const sessionDirectory = join(directory, "sessions");
+  const runner = new AbortGateRunner();
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: "drain-model",
+    sessionDirectory,
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "drain-session" },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "drain-session", text: "persist my final state" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_begin"));
+    await waitFor(() => runner.runs === 1);
+
+    await server.stop();
+
+    const files = await readdir(sessionDirectory);
+    expect(files).toHaveLength(1);
+    const saved = JSON.parse(
+      await readFile(join(sessionDirectory, String(files[0])), "utf8"),
+    ) as { messages: Array<{ content?: unknown; role?: string }> };
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({ role: "user", content: "persist my final state" }),
+    );
+    expect(saved.messages).toContainEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("turn drained"),
+      }),
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon drops a Unix client whose buffered request exceeds the frame limit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-frame-limit-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    maxSocketFrameBytes: 1024,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  const previousError = console.error;
+  const errors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    const offender = connect({ path: socketPath });
+    await new Promise<void>((resolve, reject) => {
+      offender.once("connect", resolve);
+      offender.once("error", reject);
+    });
+    const closed = new Promise<boolean>((resolve) =>
+      offender.once("close", (hadError) => resolve(hadError)),
+    );
+    offender.write("x".repeat(2_000));
+    await closed;
+    expect(
+      errors.some((entry) =>
+        String(entry[0]).includes("exceeds the socket frame limit"),
+      ),
+    ).toBe(true);
+
+    const survivor = await SocketTestClient.connect(socketPath);
+    try {
+      survivor.send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "runtime.status",
+        params: {},
+      });
+      expect((await survivor.next((frame) => frame.id === 1)).result).toMatchObject({
+        ok: true,
+      });
+    } finally {
+      survivor.close();
+    }
+  } finally {
+    console.error = previousError;
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("session.list without an active session refuses to silently scope to the daemon cwd", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-list-scope-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session.list",
+      params: { kind: "main" },
+    });
+    expect((await client.next((frame) => frame.id === 1)).result).toEqual({
+      ok: false,
+      error:
+        "project-scoped session.list needs an active session or project_dir; pass scope \"global\" to list every project",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session.list",
+      params: { kind: "main", project_dir: directory },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toEqual({
+      ok: true,
+      sessions: [],
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.list",
+      params: { scope: "global" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toEqual({
+      ok: true,
+      sessions: [],
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resuming a saved session evicts its live session registered under another key", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-resume-evict-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "resume-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({
+    cronStoreFactory: () => new JobStore(join(directory, "cron", "jobs.json")),
+    runtime,
+    socketPath,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "picker-key" },
+    });
+    const initialized = await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    const initializedSession = initialized.result?.session as
+      | { id?: string }
+      | undefined;
+    const sessionId = initializedSession?.id ?? "";
+    expect(sessionId).not.toBe("");
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "picker-key", text: "remember this turn" },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("turn_end"));
+    expect(runtime.sessionStatus("picker-key")?.id).toBe(sessionId);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "slash",
+      params: { command: `/resume ${sessionId}` },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result).toMatchObject({
+      ok: true,
+      session: { id: sessionId },
+    });
+
+    expect(runtime.sessionStatus("picker-key")).toBeUndefined();
+    const live = runtime.listSessions().filter((session) => session.id === sessionId);
+    expect(live).toHaveLength(1);
+    expect(live[0]?.sessionKey).toBe(sessionId);
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+class AbortGateRunner implements TurnRunner {
+  runs = 0;
+
+  async *run(
+    _session: DaemonSession,
+    _text: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<DaemonEvent> {
+    this.runs += 1;
+    yield { type: "text_part", payload: { text: "started" } };
+    await new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    yield { type: "text_part", payload: { text: "turn drained" } };
   }
 }

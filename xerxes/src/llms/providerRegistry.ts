@@ -52,7 +52,7 @@ export const PROVIDERS = {
   'kimi-code': provider('kimi-code', 'openai', {
     apiKeyEnv: 'KIMI_CODE_API_KEY',
     baseUrl: 'https://api.kimi.com/coding/v1',
-    contextLimit: 256_000,
+    contextLimit: 262_144,
   }),
   qwen: provider('qwen', 'openai', {
     apiKeyEnv: 'DASHSCOPE_API_KEY',
@@ -86,7 +86,10 @@ export const PROVIDERS = {
   }),
   custom: provider('custom', 'openai', {
     apiKeyEnv: 'CUSTOM_API_KEY',
-    contextLimit: 128_000,
+    // A custom endpoint has no trustworthy static context ceiling. Its live
+    // `/models` metadata is authoritative; until discovery succeeds, report
+    // the limit as unknown instead of pretending it is OpenAI's default.
+    contextLimit: 0,
   }),
 } as const satisfies Record<string, ProviderConfig>
 
@@ -201,15 +204,15 @@ const MODEL_CONTEXT_LIMITS: Readonly<Record<string, number>> = {
   'moonshot-v1-8k': 8_192,
   'moonshot-v1-32k': 32_768,
   'moonshot-v1-128k': 128_000,
-  'kimi-latest': 256_000,
-  'kimi-for-coding': 256_000,
-  'kimi-k2.5': 256_000,
-  'kimi-k2.6': 256_000,
-  'kimi-k2.7': 256_000,
-  'kimi-k2.5-001': 256_000,
-  'kimi-k2.6-001': 256_000,
-  'kimi-k2.7-001': 256_000,
-  'kimi-k2.7-code': 256_000,
+  'kimi-latest': 262_144,
+  'kimi-for-coding': 262_144,
+  'kimi-k2.5': 262_144,
+  'kimi-k2.6': 262_144,
+  'kimi-k2.7': 262_144,
+  'kimi-k2.5-001': 262_144,
+  'kimi-k2.6-001': 262_144,
+  'kimi-k2.7-001': 262_144,
+  'kimi-k2.7-code': 262_144,
 }
 
 export function isProviderName(value: string): value is ProviderName {
@@ -246,11 +249,10 @@ export function providerModel(model: string, providerName: ProviderName): string
 export function resolveProvider(model: string, overrides: ProviderOverrides = {}): ProviderName {
   const configured = typeof overrides.provider === 'string' ? overrides.provider : overrides.provider_type
   if (typeof configured === 'string') {
-    const normalized = configured.toLowerCase()
+    const normalized = configured.toLowerCase().replaceAll('_', '-')
     const alias = PROVIDER_ALIASES[normalized]
-    if (alias === 'claude-code' || normalized === 'claude-code') {
-      return 'claude-code'
-    }
+    if (alias) return alias
+    if (isProviderName(normalized)) return normalized
   }
 
   const baseUrl = typeof overrides.base_url === 'string'

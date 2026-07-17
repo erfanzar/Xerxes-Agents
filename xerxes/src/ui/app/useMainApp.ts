@@ -550,8 +550,17 @@ export function useMainApp(gw: GatewayClient) {
     }
 
     let stopped = false
+    let inFlight = false
 
     const refresh = () => {
+      // Skip ticks while a previous request is still pending — on a slow or
+      // wedged gateway the 1.5s cadence would otherwise stack RPCs.
+      if (inFlight) {
+        return
+      }
+
+      inFlight = true
+
       gw.request<SessionActiveListResponse>('session.active_list', { current_session_id: getUiState().sid })
         .then(raw => {
           const result = asRpcResult<SessionActiveListResponse>(raw)
@@ -578,6 +587,9 @@ export function useMainApp(gw: GatewayClient) {
           }
         })
         .catch(() => {})
+        .finally(() => {
+          inFlight = false
+        })
     }
 
     refresh()
@@ -651,11 +663,14 @@ export function useMainApp(gw: GatewayClient) {
       rpc<ClarifyRespondResponse>('clarify.respond', { answer, request_id: clarify.requestId })
         .then(r => {
           if (!r || r.ok === false) {
-            // A failed provider-flow transition must return to the exact
-            // prior screen. Do not let an old response erase a new question
-            // that the daemon may have already emitted for another flow step.
-            if (clearClarifyOverlay(clarify.requestId)) {
-              sys(`error: ${r?.error || 'clarify response was rejected'}`)
+            // Keep the overlay on failure: the daemon is still blocked on
+            // this exact question, so dismissing the prompt would strand it
+            // (and leave flushAbandonedClarify nothing to record). Report
+            // exactly once — the rpc wrapper already printed transport-level
+            // failures (r === null); only a daemon-level rejection (ok:
+            // false) needs a message here.
+            if (r) {
+              sys(`error: ${r.error || 'clarify response was rejected'}`)
             }
 
             return
@@ -692,9 +707,10 @@ export function useMainApp(gw: GatewayClient) {
           }
         })
         .catch(error => {
-          if (clearClarifyOverlay(clarify.requestId)) {
-            sys(`error: ${rpcErrorMessage(error)}`)
-          }
+          // The rpc wrapper absorbs RPC failures (the r === null path above),
+          // so this only fires for a local callback exception. Keep the
+          // overlay here too — the daemon is still waiting on the answer.
+          sys(`error: ${rpcErrorMessage(error)}`)
         })
     },
     [appendMessage, overlay.clarify, rpc, sys]
@@ -823,15 +839,16 @@ export function useMainApp(gw: GatewayClient) {
   useEffect(() => {
     const handler = (ev: GatewayEvent) => onEventRef.current(ev)
 
-    const exitHandler = () => {
+    const closedHandler = () => {
       turnController.reset()
 
-      // A still-owned child dying while the TUI is alive is an *unexpected*
-      // death — a user /quit exits Node before this fires, and a replaced child
-      // is identity-skipped in GatewayClient. Rather than stranding a long
+      // GatewayClient emits 'gateway.closed' only for an *unexpected* socket
+      // death (crash / OOM / signal): the deliberate close()/kill() path sets
+      // `closed` first and stays silent, and a replaced stale daemon is
+      // identity-skipped via silentSockets. Rather than stranding a long
       // session (the user's complaint), respawn the gateway and resume the
-      // persisted session via the next gateway.ready, so a single crash / OOM /
-      // signal doesn't lose their work. planGatewayRecovery bounds the attempts
+      // persisted session via the next gateway.ready, so a single crash
+      // doesn't lose their work. planGatewayRecovery bounds the attempts
       // so a gateway that crash-loops on startup can't spawn-storm, and falls
       // back to recoverSidRef when sid was already cleared by a prior exit.
       const plan = planGatewayRecovery(getUiState().sid, recoverSidRef.current, recoveryAtRef.current, Date.now())
@@ -841,12 +858,12 @@ export function useMainApp(gw: GatewayClient) {
       // dead/respawning gateway. recoverSidRef carries the session forward, and
       // resumeById restores sid once the fresh gateway is ready.
       recoveryAtRef.current = plan.attempts
-      patchUiState({ busy: false, sid: null, status: 'gateway exited' })
+      patchUiState({ busy: false, sid: null, status: 'gateway connection lost' })
 
       if (plan.recover && plan.sid) {
         recoverSidRef.current = plan.sid
-        turnController.pushActivity('gateway exited · recovering session…', 'warn')
-        sys('gateway exited — recovering your session (any in-flight reply was lost)')
+        turnController.pushActivity('gateway connection lost · recovering session…', 'warn')
+        sys('gateway connection lost — recovering your session (any in-flight reply was lost)')
         void gw.start().catch((err: unknown) => {
           const message = formatBunDaemonStartupFailure(err)
           patchUiState({ status: `error: ${message}` })
@@ -857,12 +874,14 @@ export function useMainApp(gw: GatewayClient) {
       }
 
       recoverSidRef.current = null
-      turnController.pushActivity('gateway exited · /logs to inspect', 'error')
-      sys('error: gateway exited')
+      turnController.pushActivity('gateway connection lost · /logs to inspect', 'error')
+      sys('error: gateway connection lost')
     }
 
     gw.on('event', handler)
-    gw.on('exit', exitHandler)
+    // Recovery hangs off the socket-death event, not 'exit' — the client only
+    // emits 'exit' from its own deliberate kill(), which must never respawn.
+    gw.on('gateway.closed', closedHandler)
     gw.drain()
     void gw.start().catch((err: unknown) => {
       const message = formatBunDaemonStartupFailure(err)
@@ -873,7 +892,7 @@ export function useMainApp(gw: GatewayClient) {
     // entry.tsx's setupGracefulExit handles process cleanup on real exit.
     return () => {
       gw.off('event', handler)
-      gw.off('exit', exitHandler)
+      gw.off('gateway.closed', closedHandler)
     }
   }, [gw, sys])
 

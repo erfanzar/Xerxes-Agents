@@ -2,11 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
 
 import { xerxesHome } from '../daemon/paths.js'
+
+const GIT_COMMAND_TIMEOUT_MS = 30_000
+
+/** Paths the shadow repository never tracks or deletes: Xerxes state and common secret files. */
+const SHADOW_EXCLUDE_PATTERNS = [
+  '.xerxes/snapshots/**',
+  '.env*',
+  '*.pem',
+  '*.key',
+  '*credentials*',
+  'id_rsa*',
+] as const
+
 export interface SnapshotRecord {
   readonly commitSha: string
   readonly createdAt: string
@@ -18,6 +30,10 @@ export interface SnapshotRecord {
 /**
  * Creates git snapshots in a bare shadow repository without modifying the
  * workspace's own git metadata or history.
+ *
+ * Git commands run asynchronously with a bounded lifetime so snapshot work
+ * never blocks the daemon's event loop, and the shadow directory is created
+ * private (0o700) because it mirrors workspace contents.
  */
 export class SnapshotManager {
   readonly workspaceDirectory: string
@@ -50,13 +66,34 @@ export class SnapshotManager {
     })
   }
 
-  prune(options: SnapshotPruneOptions = {}): number {
+  async prune(options: SnapshotPruneOptions = {}): Promise<number> {
     const keep = options.keep ?? 100
     if (!Number.isInteger(keep) || keep < 0) throw new RangeError('keep must be a non-negative integer')
     const records = this.list()
     if (records.length <= keep) return 0
     const retained = keep === 0 ? [] : records.slice(-keep)
-    this.writeRecords(retained)
+    if (retained.length === 0) {
+      this.reset()
+      return records.length
+    }
+    // Re-anchor retained history on a fresh root commit so the pruned commits
+    // become unreachable and `git gc` can collect them; otherwise the bare
+    // repo would grow with every snapshot forever. Retained records keep their
+    // ids and labels while their rewritten commit SHAs are stored back.
+    const rewritten: SnapshotRecord[] = []
+    let parent: string | undefined
+    for (const record of retained) {
+      const tree = (await this.runGit(['rev-parse', `${record.commitSha}^{tree}`])).trim()
+      const args = ['commit-tree', tree, '-m', record.label || `snapshot-${record.createdAt}`]
+      if (parent) args.push('-p', parent)
+      parent = (await this.runGit(args)).trim()
+      rewritten.push({ ...record, commitSha: parent })
+    }
+    if (parent) await this.runGit(['update-ref', 'HEAD', parent])
+    // Bare repositories normally keep no reflogs; expiry is best-effort.
+    await this.runGit(['reflog', 'expire', '--expire=now', '--all']).catch(() => '')
+    await this.runGit(['gc', '--prune=now', '--quiet'])
+    this.writeRecords(rewritten)
     return records.length - retained.length
   }
 
@@ -64,19 +101,24 @@ export class SnapshotManager {
     rmSync(this.shadowDirectory, { recursive: true, force: true })
   }
 
-  rollback(ref: string): SnapshotRecord {
+  async rollback(ref: string): Promise<SnapshotRecord> {
     const record = this.get(ref)
     if (!record) throw new Error(`snapshot not found: ${ref}`)
-    this.runGit(['checkout', record.commitSha, '--', '.'])
+    // Full-tree restore: point the index at the snapshot tree, rewrite every
+    // tracked file, then delete files the snapshot does not track. Paths
+    // excluded in the shadow repo (secrets, Xerxes state) survive the clean.
+    await this.runGit(['read-tree', record.commitSha])
+    await this.runGit(['checkout-index', '-f', '-a'])
+    await this.runGit(['clean', '-fd'])
     return record
   }
 
-  snapshot(label = ''): SnapshotRecord {
-    this.ensureRepository()
-    this.runGit(['add', '-A'])
+  async snapshot(label = ''): Promise<SnapshotRecord> {
+    await this.ensureRepository()
+    await this.runGit(['add', '-A'])
     const message = label || `snapshot-${new Date().toISOString()}`
-    this.runGit(['commit', '--allow-empty', '-m', message])
-    const commitSha = this.runGit(['rev-parse', 'HEAD']).trim()
+    await this.runGit(['commit', '--allow-empty', '-m', message])
+    const commitSha = (await this.runGit(['rev-parse', 'HEAD'])).trim()
     const record: SnapshotRecord = {
       id: randomUUID().replaceAll('-', '').slice(0, 12),
       label,
@@ -89,8 +131,8 @@ export class SnapshotManager {
   }
 
   /** Run a command against the shadow repository for snapshot-diff consumers. */
-  runGit(args: readonly string[]): string {
-    const result = spawnSync('git', [...args], {
+  async runGit(args: readonly string[]): Promise<string> {
+    return runGitProcess(args, {
       cwd: this.workspaceDirectory,
       env: {
         ...process.env,
@@ -101,14 +143,7 @@ export class SnapshotManager {
         GIT_COMMITTER_NAME: 'xerxes-snapshot',
         GIT_COMMITTER_EMAIL: 'snapshots@xerxes',
       },
-      encoding: 'utf8',
     })
-    const stdout = typeof result.stdout === 'string' ? result.stdout : ''
-    const stderr = typeof result.stderr === 'string' ? result.stderr : ''
-    if (result.status !== 0) {
-      throw new Error(`git ${args.join(' ')} failed (exit ${result.status ?? 'unknown'}): ${stderr.trim()}`)
-    }
-    return stdout
   }
 
   private appendRecord(record: SnapshotRecord): void {
@@ -119,21 +154,29 @@ export class SnapshotManager {
     this.writeTextAtomically(this.recordsPath, content)
   }
 
-  private ensureRepository(): void {
+  private async ensureRepository(): Promise<void> {
     const gitDirectory = join(this.shadowDirectory, '.git')
-    if (existsSync(gitDirectory)) return
-    mkdirSync(this.shadowDirectory, { recursive: true })
-    const result = spawnSync('git', ['init', '--bare', '--quiet', '--initial-branch', 'main', gitDirectory], {
-      cwd: this.workspaceDirectory,
-      encoding: 'utf8',
-    })
-    if (result.status !== 0) {
-      const stderr = typeof result.stderr === 'string' ? result.stderr : ''
-      throw new Error(`snapshot repository initialization failed: ${stderr.trim()}`)
+    if (!existsSync(gitDirectory)) {
+      mkdirSync(this.shadowDirectory, { recursive: true, mode: 0o700 })
+      // Normalize permissions even when the directory already existed.
+      chmodSync(this.shadowDirectory, 0o700)
+      await runGitProcess(['init', '--bare', '--quiet', '--initial-branch', 'main', gitDirectory], {
+        cwd: this.workspaceDirectory,
+        env: { ...process.env },
+      })
     }
-    const infoDirectory = join(gitDirectory, 'info')
+    this.ensureExcludePatterns(join(gitDirectory, 'info'))
+  }
+
+  private ensureExcludePatterns(infoDirectory: string): void {
     mkdirSync(infoDirectory, { recursive: true })
-    writeFileSync(join(infoDirectory, 'exclude'), '.xerxes/snapshots/**\n', 'utf8')
+    const path = join(infoDirectory, 'exclude')
+    const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+    const present = new Set(existing.split(/\r?\n/))
+    const missing = SHADOW_EXCLUDE_PATTERNS.filter(pattern => !present.has(pattern))
+    if (missing.length === 0) return
+    const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n' : ''
+    writeFileSync(path, `${existing}${separator}${missing.join('\n')}\n`, 'utf8')
   }
 
   private writeRecords(records: readonly SnapshotRecord[]): void {
@@ -166,6 +209,38 @@ export interface SnapshotManagerOptions {
 
 export interface SnapshotPruneOptions {
   readonly keep?: number
+}
+
+/** Run one git invocation with a hard timeout, killing the process when it overruns. */
+async function runGitProcess(
+  args: readonly string[],
+  options: { readonly cwd: string; readonly env: Record<string, string | undefined> },
+): Promise<string> {
+  const child = Bun.spawn(['git', ...args], {
+    cwd: options.cwd,
+    env: options.env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    child.kill()
+  }, GIT_COMMAND_TIMEOUT_MS)
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    if (timedOut) throw new Error(`git ${args.join(' ')} timed out after ${GIT_COMMAND_TIMEOUT_MS}ms`)
+    if (exitCode !== 0) {
+      throw new Error(`git ${args.join(' ')} failed (exit ${exitCode}): ${stderr.trim()}`)
+    }
+    return stdout
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function workspaceHash(workspaceDirectory: string): string {

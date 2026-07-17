@@ -41,12 +41,19 @@ const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_STDERR_CHARS = 16_384
 
 interface PendingRequest {
+  readonly detach?: () => void
   readonly reject: (reason: unknown) => void
   readonly resolve: (value: MCPJsonRpcResult) => void
   readonly timeout: ReturnType<typeof setTimeout>
 }
 
 export type MCPNotificationHandler = (notification: MCPJsonRpcNotification) => void
+
+/** Options for one MCP tool invocation. */
+export interface MCPToolCallOptions {
+  /** Rejects the call and discards its pending request when aborted. */
+  readonly signal?: AbortSignal
+}
 
 /**
  * An MCP client that owns a stdio subprocess or an HTTP transport.
@@ -230,8 +237,8 @@ export class MCPClient {
   }
 
   /** Invoke one published MCP tool. */
-  async callTool(name: string, arguments_: JsonObject = {}): Promise<MCPToolCallResult> {
-    const result = await this.request('tools/call', { name, arguments: arguments_ })
+  async callTool(name: string, arguments_: JsonObject = {}, options: MCPToolCallOptions = {}): Promise<MCPToolCallResult> {
+    const result = await this.request('tools/call', { name, arguments: arguments_ }, false, options.signal)
     const content = result.content
     if (!Array.isArray(content)) {
       throw new MCPProtocolError('MCP tools/call response did not include a content array')
@@ -299,7 +306,12 @@ export class MCPClient {
     }
   }
 
-  private request(method: string, params: MCPJsonRpcResult, allowBeforeConnected = false): Promise<MCPJsonRpcResult> {
+  private request(
+    method: string,
+    params: MCPJsonRpcResult,
+    allowBeforeConnected = false,
+    signal?: AbortSignal,
+  ): Promise<MCPJsonRpcResult> {
     if ((!this.process && !this.httpTransport) || (!this.connected && !allowBeforeConnected)) {
       throw new MCPConnectionError(`Not connected to MCP server ${this.config.name}`)
     }
@@ -311,7 +323,16 @@ export class MCPClient {
       const timeout = setTimeout(() => {
         this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} timed out after ${this.timeoutMs}ms`))
       }, this.timeoutMs)
-      this.pending.set(id, { resolve, reject, timeout })
+      const detach = signal === undefined
+        ? undefined
+        : onAbort(signal, () => {
+          this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} was aborted`))
+        })
+      this.pending.set(id, { resolve, reject, timeout, ...(detach === undefined ? {} : { detach }) })
+      if (signal?.aborted) {
+        this.rejectPendingRequest(id, new MCPConnectionError(`MCP request ${method} was aborted`))
+        return
+      }
       void this.send(frame).then(
         () => {
           if (httpTransport?.expectsResponseInBody && this.pending.has(id)) {
@@ -415,7 +436,9 @@ export class MCPClient {
     try {
       value = JSON.parse(line) as unknown
     } catch {
-      this.rejectPending(new MCPProtocolError('MCP server emitted invalid JSON on stdout'))
+      // A subprocess may print non-JSON diagnostics on stdout; one bad line
+      // must not fail every request currently in flight.
+      this.debug(`skipping non-JSON stdout line from MCP server ${this.config.name}`)
       return
     }
     this.handleInboundValue(value)
@@ -423,28 +446,31 @@ export class MCPClient {
 
   private handleInboundValue(value: unknown): void {
     if (!isMCPRecord(value) || value.jsonrpc !== '2.0') {
-      this.rejectPending(new MCPProtocolError('MCP server emitted an invalid JSON-RPC frame'))
+      const id = isMCPRecord(value) && isMCPJsonRpcId(value.id) ? value.id : undefined
+      if (id !== undefined && this.pending.has(id)) {
+        this.rejectPendingRequest(id, new MCPProtocolError('MCP server emitted an invalid JSON-RPC frame'))
+        return
+      }
+      this.debug(`skipping invalid JSON-RPC frame from MCP server ${this.config.name}`)
       return
     }
 
     if (typeof value.method === 'string') {
       if (Object.hasOwn(value, 'id') && !isMCPJsonRpcId(value.id)) {
-        this.rejectPending(new MCPProtocolError('MCP server request has no valid request id'))
+        this.debug(`skipping MCP server request with an invalid request id from ${this.config.name}`)
         return
       }
       this.handleInboundRequestOrNotification(value)
       return
     }
     if (!isMCPJsonRpcId(value.id)) {
-      this.rejectPending(new MCPProtocolError('MCP server response has no valid request id'))
+      this.debug(`skipping MCP server response without a valid request id from ${this.config.name}`)
       return
     }
-    const pending = this.pending.get(value.id)
+    const pending = this.dropPendingRequest(value.id)
     if (!pending) {
       return
     }
-    this.pending.delete(value.id)
-    clearTimeout(pending.timeout)
     const hasError = Object.hasOwn(value, 'error')
     const hasResult = Object.hasOwn(value, 'result')
     if (hasError === hasResult) {
@@ -474,7 +500,12 @@ export class MCPClient {
         ? { jsonrpc: '2.0', method: String(value.method) }
         : { jsonrpc: '2.0', method: String(value.method), params }
       for (const handler of this.notificationHandlers) {
-        handler(notification)
+        try {
+          handler(notification)
+        } catch (error) {
+          // A throwing subscriber must not take down the transport read loop.
+          this.debug(`MCP notification handler for ${this.config.name} threw: ${errorMessage(error)}`)
+        }
       }
       return
     }
@@ -494,21 +525,32 @@ export class MCPClient {
   }
 
   private rejectPending(error: Error): void {
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id)
-      clearTimeout(pending.timeout)
-      pending.reject(error)
+    for (const id of [...this.pending.keys()]) {
+      this.dropPendingRequest(id)?.reject(error)
     }
   }
 
   private rejectPendingRequest(id: MCPJsonRpcId, error: Error): void {
+    this.dropPendingRequest(id)?.reject(error)
+  }
+
+  private dropPendingRequest(id: MCPJsonRpcId): PendingRequest | undefined {
     const pending = this.pending.get(id)
     if (!pending) {
-      return
+      return undefined
     }
     this.pending.delete(id)
     clearTimeout(pending.timeout)
-    pending.reject(error)
+    pending.detach?.()
+    return pending
+  }
+
+  private debug(message: string): void {
+    try {
+      this.options.debug?.(message)
+    } catch {
+      // Diagnostics must never alter transport behavior.
+    }
   }
 
   private handleHttpTransportClosed(error: Error): void {
@@ -668,6 +710,16 @@ function asMcpError(error: unknown): Error {
     return error
   }
   return asConnectionError(error)
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** Register a one-shot abort listener and return a detach callback. */
+function onAbort(signal: AbortSignal, abort: () => void): () => void {
+  signal.addEventListener('abort', abort, { once: true })
+  return () => signal.removeEventListener('abort', abort)
 }
 
 function sleep(milliseconds: number): Promise<void> {

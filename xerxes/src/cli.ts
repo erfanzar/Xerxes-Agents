@@ -310,7 +310,7 @@ function telegramDaemonConfig(
 
 function telegramPort(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
-  if (!/^\\d+$/.test(value))
+  if (!/^\d+$/.test(value))
     throw new Error("telegram --port must be an integer between 0 and 65535");
   const port = Number.parseInt(value, 10);
   if (port < 0 || port > 65_535)
@@ -585,6 +585,9 @@ function daemonRuntime(
           ...(initialConnection.temperature === undefined
             ? {}
             : { temperature: initialConnection.temperature }),
+          ...(initialConnection.topK === undefined
+            ? {}
+            : { top_k: initialConnection.topK }),
           ...(initialConnection.topP === undefined
             ? {}
             : { top_p: initialConnection.topP }),
@@ -621,7 +624,7 @@ function daemonRuntime(
         resolveSelfMemory: (context) =>
           getAgentSelfMemory(context.agentId ?? "default"),
       },
-      memoryTools: { resolveContext: memoryToolContext },
+      memoryTools: { resolveContext: memoryToolContext.resolve },
     });
     if (browserManager) {
       registerBrowserManagerTools(tools, browserManager);
@@ -665,6 +668,9 @@ function daemonRuntime(
       agentDefinitions,
       cwd: workspaceRoot,
       eventBus: subagentEvents,
+      ...(host.skillRegistry?.markdownIndex()
+        ? { extraContext: host.skillRegistry.markdownIndex() }
+        : {}),
       llm,
       ...(connection.maxTokens === undefined
         ? {}
@@ -674,6 +680,7 @@ function daemonRuntime(
       ...(connection.temperature === undefined
         ? {}
         : { temperature: connection.temperature }),
+      ...(connection.topK === undefined ? {} : { topK: connection.topK }),
       toolExecutor: tools,
       tools: tools.definitions(),
       ...(connection.topP === undefined ? {} : { topP: connection.topP }),
@@ -720,6 +727,7 @@ function daemonRuntime(
       ...(connection.temperature !== undefined
         ? { temperature: connection.temperature }
         : {}),
+      ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),
       toolExecutor: tools,
       ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
@@ -742,7 +750,10 @@ function daemonRuntime(
       tools: activeToolCount,
     }),
     shutdown: () => subagentHost?.manager.shutdown(),
-    onSessionEvict: sessionId => subagentHost?.cancelSource(sessionId),
+    onSessionEvict: sessionId => {
+      subagentHost?.cancelSource(sessionId);
+      memoryToolContext.prune(sessionId);
+    },
     onSessionModeChange: (sessionId, mode) => {
       if (mode === "plan" || mode === "researcher") {
         subagentHost?.cancelSource(sessionId);
@@ -841,7 +852,7 @@ async function acpServer(
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default"),
     },
-    memoryTools: { resolveContext: memoryToolContext },
+    memoryTools: { resolveContext: memoryToolContext.resolve },
   });
   registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
@@ -859,6 +870,7 @@ async function acpServer(
     agentDefinitions: definitions,
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
+    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
     llm,
     ...(connection.maxTokens === undefined
       ? {}
@@ -868,6 +880,7 @@ async function acpServer(
     ...(connection.temperature === undefined
       ? {}
       : { temperature: connection.temperature }),
+    ...(connection.topK === undefined ? {} : { topK: connection.topK }),
     toolExecutor: tools,
     tools: tools.definitions(),
     ...(connection.topP === undefined ? {} : { topP: connection.topP }),
@@ -902,6 +915,7 @@ async function acpServer(
     ...(connection.temperature !== undefined
       ? { temperature: connection.temperature }
       : {}),
+    ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
     tools: selectedTools,
     toolExecutor: tools,
     ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
@@ -963,7 +977,7 @@ async function runOneShot(prompt: string): Promise<void> {
       resolveSelfMemory: (context) =>
         getAgentSelfMemory(context.agentId ?? "default"),
     },
-    memoryTools: { resolveContext: memoryToolContext },
+    memoryTools: { resolveContext: memoryToolContext.resolve },
   });
   registerClaudeSkillTool(tools, skillRegistry);
   const definitions = loadAgentDefinitions({ cwd: workspaceRoot });
@@ -980,6 +994,7 @@ async function runOneShot(prompt: string): Promise<void> {
     agentDefinitions: definitions,
     cwd: workspaceRoot,
     eventBus: new DaemonSubagentEventBus(),
+    ...(skillRegistry.markdownIndex() ? { extraContext: skillRegistry.markdownIndex() } : {}),
     llm,
     ...(connection.maxTokens === undefined
       ? {}
@@ -989,6 +1004,7 @@ async function runOneShot(prompt: string): Promise<void> {
     ...(connection.temperature === undefined
       ? {}
       : { temperature: connection.temperature }),
+    ...(connection.topK === undefined ? {} : { topK: connection.topK }),
     toolExecutor: tools,
     tools: tools.definitions(),
     ...(connection.topP === undefined ? {} : { topP: connection.topP }),
@@ -1031,6 +1047,7 @@ async function runOneShot(prompt: string): Promise<void> {
         ...(connection.temperature !== undefined
           ? { temperature: connection.temperature }
           : {}),
+        ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
         tools: selectedTools,
         ...(connection.topP !== undefined ? { topP: connection.topP } : {}),
       },
@@ -1129,18 +1146,27 @@ function joinSystemPrompts(
   return prompt || undefined;
 }
 
-function memoryToolContextResolver(): (
-  context: ToolExecutionContext,
-) => MemoryToolContext {
+function memoryToolContextResolver(): {
+  readonly prune: (sessionId: string) => void;
+  readonly resolve: (context: ToolExecutionContext) => MemoryToolContext;
+} {
   const memories = new Map<string, ContextualMemory>();
-  return (context) => {
-    const agentId = context.agentId ?? "default";
-    const key = (context.sessionId ?? "sessionless") + ":" + agentId;
-    let memory = memories.get(key);
-    if (!memory) {
-      memory = new ContextualMemory();
-      memories.set(key, memory);
-    }
-    return { agentId, memory };
+  return {
+    prune(sessionId) {
+      const prefix = `${sessionId}:`;
+      for (const key of memories.keys()) {
+        if (key.startsWith(prefix)) memories.delete(key);
+      }
+    },
+    resolve(context) {
+      const agentId = context.agentId ?? "default";
+      const key = (context.sessionId ?? "sessionless") + ":" + agentId;
+      let memory = memories.get(key);
+      if (!memory) {
+        memory = new ContextualMemory();
+        memories.set(key, memory);
+      }
+      return { agentId, memory };
+    },
   };
 }

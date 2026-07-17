@@ -118,6 +118,7 @@ test('Gemini direct REST stream sends native settings and normalizes all shared 
     messages: [{ role: 'system', content: 'Be concise.' }, { role: 'user', content: 'Read the README.' }],
     maxTokens: 99,
     temperature: 0.2,
+    topK: 64,
     topP: 0.7,
     stop: ['<stop>'],
     tools: [READ_FILE],
@@ -133,7 +134,7 @@ test('Gemini direct REST stream sends native settings and normalizes all shared 
     contents: [{ role: 'user', parts: [{ text: 'Read the README.' }] }],
     generationConfig: {
       responseMimeType: 'application/json',
-      topK: 42,
+      topK: 64,
       maxOutputTokens: 99,
       temperature: 0.2,
       topP: 0.7,
@@ -244,6 +245,35 @@ test('Gemini conversion rejects tool replies with no resolvable function name', 
     { role: 'user', content: 'run a tool' },
     { role: 'tool', tool_call_id: 'unknown-call', content: 'result' },
   ])).toThrow('Gemini tool response unknown-call is missing its function name')
+})
+
+test('Gemini stream keeps duplicate identical function calls with distinct ids', async () => {
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async () => sseResponse([
+      {
+        candidates: [{
+          content: { parts: [{ functionCall: { name: 'ReadFile', args: { path: 'README.md' } } }] },
+        }],
+      },
+      {
+        candidates: [{
+          content: { parts: [{ functionCall: { name: 'ReadFile', args: { path: 'README.md' } } }] },
+          finishReason: 'STOP',
+        }],
+      },
+    ]),
+  })
+
+  const events = await collect(client.stream(simpleRequest()))
+  const toolCalls = (events as { toolCalls?: { id: string; function: { name: string } }[] }[])
+    .flatMap(event => event.toolCalls ?? [])
+
+  expect(toolCalls).toHaveLength(2)
+  expect(toolCalls[0]?.id).not.toBe(toolCalls[1]?.id)
+  expect(toolCalls[0]).toMatchObject({ type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } })
+  expect(toolCalls[1]).toMatchObject({ type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } })
 })
 
 function simpleRequest(): CompletionRequest {

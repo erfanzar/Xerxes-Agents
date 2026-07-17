@@ -59,7 +59,7 @@ export const ENVIRONMENT_MANAGER_DEFINITION: ToolDefinition = {
   type: 'function',
   function: {
     name: 'EnvironmentManager',
-    description: 'Inspect non-sensitive process environment settings. Sensitive values are always redacted.',
+    description: 'Inspect non-sensitive process environment settings. Sensitive keys are hidden like unset keys.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -119,13 +119,14 @@ export function inspectEnvironment(inputs: JsonObject): JsonObject {
 
   if (operation === 'get') {
     const key = requiredString(inputs, 'key')
-    const value = process.env[key]
-    const redacted = value !== undefined && !isInspectableEnvironmentKey(key)
+    // Non-inspectable (redaction-list) keys must look exactly like unset keys so the
+    // response cannot be used as an existence oracle for sensitive variables.
+    const value = isInspectableEnvironmentKey(key) ? process.env[key] : undefined
     return {
       exists: value !== undefined,
       key,
-      redacted,
-      value: value === undefined ? null : redacted ? '[REDACTED]' : value,
+      redacted: false,
+      value: value ?? null,
     }
   }
 

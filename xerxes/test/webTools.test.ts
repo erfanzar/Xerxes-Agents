@@ -20,7 +20,9 @@ import {
 } from '../src/tools/webTools.js'
 
 function client(fetcher: WebFetch): PublicWebClient {
-  return new PublicWebClient({ fetcher })
+  // Deterministic public DNS answers keep these tests offline; the literal-IP
+  // checks under test never consult the resolver.
+  return new PublicWebClient({ fetcher, urlSafety: { dnsLookup: async () => ['93.184.216.34'] } })
 }
 
 test('PublicWebClient blocks literal private targets and rechecks public redirects', async () => {
@@ -49,6 +51,42 @@ test('PublicWebClient blocks literal private targets and rechecks public redirec
     status: 302,
   }))
   await expect(unsafeRedirect.fetch('https://example.com/start')).rejects.toBeInstanceOf(ValidationError)
+})
+
+test('PublicWebClient blocks hosts resolving to private addresses, including on redirect hops', async () => {
+  let fetches = 0
+  const blocked = new PublicWebClient({
+    fetcher: async () => {
+      fetches += 1
+      return new Response('unexpected')
+    },
+    urlSafety: {
+      dnsLookup: async hostname => hostname === 'internal.example' ? ['192.168.1.10'] : ['93.184.216.34'],
+    },
+  })
+  await expect(blocked.fetch('https://internal.example/data')).rejects.toBeInstanceOf(ValidationError)
+  expect(fetches).toBe(0)
+
+  // A public start URL whose redirect target resolves privately is blocked on the hop.
+  const requested: string[] = []
+  const redirecting = new PublicWebClient({
+    fetcher: async url => {
+      requested.push(url)
+      return new Response(null, { headers: { location: 'https://internal.example/data' }, status: 302 })
+    },
+    urlSafety: {
+      dnsLookup: async hostname => hostname === 'internal.example' ? ['10.1.2.3'] : ['93.184.216.34'],
+    },
+  })
+  await expect(redirecting.fetch('https://example.com/start')).rejects.toBeInstanceOf(ValidationError)
+  expect(requested).toEqual(['https://example.com/start'])
+
+  // Public DNS answers proceed normally.
+  const open = new PublicWebClient({
+    fetcher: async () => new Response('ok', { status: 200 }),
+    urlSafety: { dnsLookup: async () => ['93.184.216.34'] },
+  })
+  await expect(open.fetch('https://example.com/start')).resolves.toMatchObject({ url: 'https://example.com/start' })
 })
 
 test('web scraper extracts static HTML without browser automation', async () => {

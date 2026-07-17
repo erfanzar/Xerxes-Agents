@@ -199,7 +199,10 @@ export function adaptDaemonEvent(type: string, payload: Record<string, unknown>)
       return [{ type: 'thinking.delta', payload: { text: str(payload.think) } }]
 
     case 'turn_end':
-      return [{ type: 'message.complete', payload: {} }]
+      // The native daemon flags a cancelled turn's final edge. Forward it so
+      // the UI can tell a daemon-confirmed interruption from a natural
+      // completion that merely raced the user's Esc keystroke.
+      return [{ type: 'message.complete', payload: { ...(bool(payload.cancelled) ? { interrupted: true } : {}) } }]
 
     case 'step_interrupted':
       return [{ type: 'message.complete', payload: { text: '[interrupted]' } }]

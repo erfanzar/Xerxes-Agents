@@ -1,13 +1,16 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 import { execFileSync } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import type { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { GatewayClient, resolveProjectDir } from '../gatewayClient.js'
+import type { SessionActiveListResponse } from '../gatewayTypes.js'
 import type { SessionInfo } from '../types.js'
 
 interface SessionCreateResult {
@@ -33,6 +36,26 @@ const initGitProject = () => {
   })
 
   return dir
+}
+
+/** Minimal Socket stand-in: an EventEmitter with the surface attachSocket/close touch. */
+const fakeSocket = () => {
+  const emitter = new EventEmitter()
+
+  return Object.assign(emitter, {
+    destroy: vi.fn(),
+    end: vi.fn(),
+    setEncoding: vi.fn(),
+    write: vi.fn((_frame: string, cb?: (error?: Error | null) => void) => {
+      cb?.(null)
+
+      return true
+    })
+  }) as unknown as Socket
+}
+
+const attachFakeSocket = (client: GatewayClient, socket: Socket) => {
+  ;(client as unknown as { attachSocket: (sock: Socket) => void }).attachSocket(socket)
 }
 
 describe('GatewayClient session lifecycle', () => {
@@ -543,5 +566,153 @@ describe('GatewayClient session lifecycle', () => {
       { role: 'assistant', text: 'The flow starts in auth.ts.' }
     ])
     expect(forwarded).toEqual([])
+  })
+
+  it('emits gateway.closed on an unexpected socket death but never from a deliberate kill', () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:closed-event' })
+    const closedEvents: unknown[] = []
+    const exitEvents: unknown[] = []
+
+    client.on('gateway.closed', event => closedEvents.push(event))
+    client.on('exit', event => exitEvents.push(event))
+
+    // Unexpected death: the daemon end of a live socket disappears.
+    const first = fakeSocket()
+    attachFakeSocket(client, first)
+    first.emit('close')
+
+    expect(closedEvents).toHaveLength(1)
+
+    // Deliberate shutdown: kill() marks the client closed first, so the same
+    // socket teardown must not look like a crash to recovery subscribers.
+    const second = fakeSocket()
+    attachFakeSocket(client, second)
+    client.kill('test')
+    second.emit('close')
+
+    expect(closedEvents).toHaveLength(1)
+    expect(exitEvents).toHaveLength(1)
+  })
+
+  it('rejects pending requests immediately on close instead of hanging until the RPC timeout', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:close-rejects' })
+    attachFakeSocket(client, fakeSocket())
+
+    const pending = client.request('session.title', {})
+    const pendingMap = client as unknown as { pending: Map<number, unknown> }
+
+    expect(pendingMap.pending.size).toBe(1)
+
+    client.close()
+
+    await expect(pending).rejects.toThrow('gateway closed')
+    expect(pendingMap.pending.size).toBe(0)
+  })
+
+  it('drops a partial frame buffered from a dead socket when attaching its replacement', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:buffer-reset' })
+    const protocolErrors: unknown[] = []
+
+    client.on('gateway.protocol_error', event => protocolErrors.push(event))
+
+    const first = fakeSocket()
+    attachFakeSocket(client, first)
+    first.emit('data', '{"jsonrpc":"2.0","id":1,"resu')
+
+    const second = fakeSocket()
+    attachFakeSocket(client, second)
+
+    const response = client.request('session.title', {})
+    second.emit('data', '{"jsonrpc":"2.0","id":1,"result":{"title":"clean"}}\n')
+
+    await expect(response).resolves.toEqual({ title: 'clean' })
+    expect(protocolErrors).toHaveLength(0)
+  })
+
+  it('commits the session key only after a successful initialize', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:key-commit' })
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = []
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+    let initializeCalls = 0
+
+    privateClient.rawRequest = async (method, params = {}) => {
+      calls.push({ method, params })
+
+      if (method === 'initialize') {
+        initializeCalls += 1
+
+        if (initializeCalls === 1) {
+          return { error: 'provider missing', ok: false }
+        }
+
+        return { ok: true, session: { id: `s${initializeCalls}` } }
+      }
+
+      return { ok: true }
+    }
+
+    // A failed initialize keeps the previous session key.
+    await expect(client.request('session.create', {})).rejects.toThrow('provider missing')
+    await client.request('session.title', {})
+    expect(calls.at(-1)).toEqual({ method: 'session.title', params: { session_key: 'test:key-commit' } })
+
+    // A successful initialize commits the freshly minted key.
+    await client.request('session.create', {})
+    const createdKey = String(calls.filter(call => call.method === 'initialize').at(-1)!.params.session_key)
+
+    expect(createdKey).not.toBe('test:key-commit')
+
+    await client.request('session.title', {})
+    expect(calls.at(-1)).toEqual({ method: 'session.title', params: { session_key: createdKey } })
+  })
+
+  it('omits fabricated timestamps from active session rows', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:active-timestamps' })
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async method => {
+      expect(method).toBe('session.active_list')
+
+      return { ok: true, sessions: [{ id: 'live1', key: 'test:active-timestamps', messages: 2, title: 'live work' }] }
+    }
+
+    const result = await client.request<SessionActiveListResponse>('session.active_list', {})
+
+    expect(result.sessions?.[0]).toMatchObject({ id: 'live1', message_count: 2, status: 'idle', title: 'live work' })
+    expect(result.sessions?.[0]).not.toHaveProperty('last_active')
+    expect(result.sessions?.[0]).not.toHaveProperty('started_at')
+  })
+
+  it('bounds the session key map like a simple LRU', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:key-lru' })
+    const titleKeys: string[] = []
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+      rememberSessionKey: (id: string, key: string) => void
+    }
+
+    privateClient.rawRequest = async (method, params = {}) => {
+      if (method === 'session.title') {
+        titleKeys.push(String(params.session_key))
+      }
+
+      return { ok: true }
+    }
+
+    for (let index = 0; index < 205; index += 1) {
+      privateClient.rememberSessionKey(`sid-${index}`, `key-${index}`)
+    }
+
+    // The map holds at most 200 entries: sid-0 … sid-4 are evicted, sid-5 on
+    // is retained, and the newest entry always resolves to its daemon key.
+    await client.request('session.title', { session_id: 'sid-4' })
+    await client.request('session.title', { session_id: 'sid-5' })
+    await client.request('session.title', { session_id: 'sid-204' })
+
+    expect(titleKeys).toEqual(['sid-4', 'key-5', 'key-204'])
   })
 })

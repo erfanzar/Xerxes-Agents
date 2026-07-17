@@ -151,3 +151,28 @@ test('MemoryStore rejects ambiguous storage and persistence configuration', () =
     storage: new SimpleStorage(),
   })).toThrow(MemoryStoreConfigurationError)
 })
+
+test('MemoryStore hydration restores entries without re-persisting them', () => {
+  class CountingStorage extends SimpleStorage {
+    saves = 0
+    override save(key: string, data: unknown): boolean {
+      this.saves += 1
+      return super.save(key, data)
+    }
+  }
+  const storage = new CountingStorage()
+  const seed = new MemoryStore({ storage })
+  seed.addMemory({
+    agentId: 'agent',
+    content: 'Durable boot entry',
+    importanceScore: 0.9,
+    memoryType: MemoryType.LONG_TERM,
+  })
+  expect(storage.saves).toBeGreaterThan(0)
+
+  storage.saves = 0
+  const restored = new MemoryStore({ storage })
+  expect(restored.retrieveMemories({ memoryType: MemoryType.LONG_TERM })).toHaveLength(1)
+  // Boot hydration must not trigger one re-persist (or re-embed) per restored entry.
+  expect(storage.saves).toBe(0)
+})

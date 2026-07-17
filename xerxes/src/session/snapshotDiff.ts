@@ -13,10 +13,10 @@ export interface SnapshotDiff {
 }
 
 /** Compare the current workspace with a snapshot without restoring it. */
-export function diffAgainstSnapshot(manager: SnapshotManager, ref: string): SnapshotDiff {
+export async function diffAgainstSnapshot(manager: SnapshotManager, ref: string): Promise<SnapshotDiff> {
   const snapshot = manager.get(ref)
   if (!snapshot) throw new Error(`snapshot not found: ${ref}`)
-  const diffText = manager.runGit(['diff', snapshot.commitSha, '--', '.'])
+  const diffText = await manager.runGit(['diff', snapshot.commitSha, '--', '.'])
   const summary = summarizeDiff(diffText)
   return { snapshot, diffText, ...summary }
 }

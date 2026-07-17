@@ -111,6 +111,8 @@ export interface SavedSessionListOptions {
 export interface TurnRunner {
   /** True when the runner synchronizes complete agent state onto the session. */
   readonly managesSessionState?: boolean;
+  /** Release cached per-session state when the daemon evicts the session. */
+  dropSession?(sessionId: string): void;
   run(
     session: DaemonSession,
     text: string,
@@ -263,8 +265,12 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!session) {
       return false;
     }
+    const controller = this.abortControllers.get(sessionKey);
+    if (!controller) {
+      return false;
+    }
     session.cancelRequested = true;
-    this.abortControllers.get(sessionKey)?.abort(new Error("Turn cancelled"));
+    controller.abort(new Error("Turn cancelled"));
     return true;
   }
 
@@ -284,10 +290,15 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   evictSession(sessionKey: string): void {
     const sessionId = this.sessions.get(sessionKey)?.id ?? sessionKey;
+    // Abort any in-flight turn so its orphaned controller cannot block a
+    // future submitTurn with "already active" or race the next saveSession.
+    this.abortControllers.get(sessionKey)?.abort(new Error("Session evicted"));
+    this.abortControllers.delete(sessionKey);
     this.options.interactions?.cancelSession(
       sessionId,
     );
     this.options.onSessionEvict?.(sessionId);
+    this.turnRunner.dropSession?.(sessionId);
     this.steerQueues.delete(sessionKey);
     this.directSubagentClaims.get(sessionKey)?.();
     this.directSubagentClaims.delete(sessionKey);
@@ -655,7 +666,11 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
           cancelled: controller.signal.aborted,
         },
       });
-      this.abortControllers.delete(sessionKey);
+      // An evicted session may already have a replacement turn registered;
+      // only release the controller this turn actually owns.
+      if (this.abortControllers.get(sessionKey) === controller) {
+        this.abortControllers.delete(sessionKey);
+      }
       releaseInteractions?.();
     }
   }

@@ -195,7 +195,8 @@ export interface CortexOpenAiStreamFrame {
   readonly metadata?: CortexOpenAiStreamMetadata
   readonly model: string
   readonly object: 'chat.completion.chunk'
-  readonly usage: CortexOpenAiUsage
+  /** Omitted unless the execution boundary reported real token counters. */
+  readonly usage?: CortexOpenAiUsage
 }
 
 export interface CortexCompletionServiceOptions {
@@ -289,7 +290,6 @@ export class CortexCompletionService {
         created,
         model,
         choices: [{ index: 0, delta, finish_reason: null }],
-        usage: zeroUsage(),
         ...(presentation.metadata === undefined ? {} : { metadata: presentation.metadata }),
       }
       yield sseFrame(frame)
@@ -303,7 +303,6 @@ export class CortexCompletionService {
       created,
       model,
       choices: [{ index: 0, delta: { content: '' }, finish_reason: 'stop' }],
-      usage: zeroUsage(),
     })
     yield 'data: [DONE]\n\n'
   }
@@ -489,10 +488,6 @@ function renderStreamValue(value: unknown): string {
 function whitespaceTokenCount(value: string): number {
   const normalized = value.trim()
   return normalized ? normalized.split(/\s+/).length : 0
-}
-
-function zeroUsage(): CortexOpenAiUsage {
-  return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

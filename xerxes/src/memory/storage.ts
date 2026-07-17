@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { Database } from 'bun:sqlite'
-import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { cosineSimilarity, getDefaultEmbedder, type Embedder } from './embedders.js'
@@ -66,6 +66,68 @@ export class SimpleStorage implements MemoryStorage {
   }
 }
 
+/**
+ * Tenant-scoped view over a shared backend. Every key is transparently
+ * prefixed, so per-user memory tiers over one backend only see, list, search,
+ * and delete their own records.
+ */
+export class NamespacedStorage implements MemoryStorage {
+  constructor(
+    readonly backend: MemoryStorage,
+    readonly prefix: string,
+  ) {}
+
+  clear(): number {
+    let removed = 0
+    for (const key of this.backend.listKeys(this.prefix)) {
+      if (key.startsWith(this.prefix) && this.backend.delete(key)) removed += 1
+    }
+    return removed
+  }
+
+  delete(key: string): boolean {
+    return this.backend.delete(this.scoped(key))
+  }
+
+  exists(key: string): boolean {
+    return this.backend.exists(this.scoped(key))
+  }
+
+  listKeys(pattern?: string): string[] {
+    const scoped = pattern === undefined ? this.prefix : this.scoped(pattern)
+    return this.backend
+      .listKeys(scoped)
+      .flatMap(key => key.startsWith(this.prefix) ? [key.slice(this.prefix.length)] : [])
+  }
+
+  load(key: string): unknown | undefined {
+    return this.backend.load(this.scoped(key))
+  }
+
+  save(key: string, data: unknown): boolean {
+    return this.backend.save(this.scoped(key), data)
+  }
+
+  semanticSearch(query: string, limit = 10, threshold = 0): SemanticSearchResult[] {
+    // Over-fetch because the backend ranks across every tenant before the
+    // namespace filter below narrows the results back to this one.
+    return this.backend
+      .semanticSearch(query, limit * 4, threshold)
+      .flatMap(result => result.key.startsWith(this.prefix)
+        ? [{ ...result, key: result.key.slice(this.prefix.length) }]
+        : [])
+      .slice(0, limit)
+  }
+
+  supportsSemanticSearch(): boolean {
+    return this.backend.supportsSemanticSearch()
+  }
+
+  private scoped(key: string): string {
+    return `${this.prefix}${key}`
+  }
+}
+
 /** JSON-file key/value backend whose hashed filenames prevent key-path traversal. */
 export class FileStorage implements MemoryStorage {
   private readonly indexFile: string
@@ -111,17 +173,25 @@ export class FileStorage implements MemoryStorage {
     if (!filename) return undefined
     const path = join(this.directory, filename)
     if (!existsSync(path)) return undefined
-    return JSON.parse(readFileSync(path, 'utf8')) as unknown
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as unknown
+    } catch (error) {
+      console.warn(`Skipping corrupt memory record ${key}:`, error)
+      return undefined
+    }
   }
 
   save(key: string, data: unknown): boolean {
     const path = this.pathForKey(key)
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
     try {
-      writeFileSync(path, JSON.stringify(data), 'utf8')
+      writeFileSync(temporary, JSON.stringify(data), 'utf8')
+      renameSync(temporary, path)
       this.index[key] = path.slice(this.directory.length + 1)
       this.writeIndex()
       return true
     } catch {
+      rmSync(temporary, { force: true })
       return false
     }
   }
@@ -152,7 +222,14 @@ export class FileStorage implements MemoryStorage {
   }
 
   private writeIndex(): void {
-    writeFileSync(this.indexFile, JSON.stringify(this.index), 'utf8')
+    const temporary = `${this.indexFile}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      writeFileSync(temporary, JSON.stringify(this.index), 'utf8')
+      renameSync(temporary, this.indexFile)
+    } catch (error) {
+      rmSync(temporary, { force: true })
+      throw error
+    }
   }
 }
 
@@ -312,7 +389,13 @@ export class RAGStorage implements MemoryStorage {
   private restoreEmbeddings(): void {
     for (const key of this.backend.listKeys(RAGStorage.embeddingKeyPrefix)) {
       if (!key.startsWith(RAGStorage.embeddingKeyPrefix)) continue
-      const vector = this.backend.load(key)
+      let vector: unknown
+      try {
+        vector = this.backend.load(key)
+      } catch (error) {
+        console.warn(`Skipping corrupt memory embedding ${key}:`, error)
+        continue
+      }
       if (!Array.isArray(vector) || !vector.every(value => typeof value === 'number')) continue
       this.embeddings.set(key.slice(RAGStorage.embeddingKeyPrefix.length), [...vector])
     }

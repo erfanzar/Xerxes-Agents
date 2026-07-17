@@ -414,14 +414,13 @@ export function ModelPicker({
         return
       }
 
-      if (optionsError || providers.length === 0) {
-        if (isEscape) {
-          consume(event)
-          close()
-        } else if (isRefresh) {
-          consume(event)
-          setOptionsRequest(request => request + 1)
-        }
+      // With no provider profiles (initial load failed or none configured)
+      // Ctrl+R retries model.options. Every other key keeps its normal
+      // meaning — the error stays inline and never becomes a modal takeover
+      // where Esc destroys the whole picker.
+      if (providers.length === 0 && isRefresh) {
+        consume(event)
+        setOptionsRequest(request => request + 1)
 
         return
       }
@@ -554,7 +553,6 @@ export function ModelPicker({
       filteredProviderRows,
       modelIdx,
       modelRows,
-      optionsError,
       optionsLoading,
       persistGlobal,
       provider,
@@ -572,7 +570,7 @@ export function ModelPicker({
     Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - 6), Math.max(1, width - 2))
   )
   const visible = Math.max(1, Math.min(MAX_VISIBLE, height - 16))
-  const panelHeight = Math.min(height, visible + 12)
+  const panelHeight = Math.min(height, visible + 12 + (optionsError ? 1 : 0))
 
   if (optionsLoading) {
     return (
@@ -583,28 +581,9 @@ export function ModelPicker({
     )
   }
 
-  if (optionsError) {
-    return (
-      <ModalShell height={height} panelHeight={7} panelWidth={panelWidth} t={t} title="Select model" width={width}>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.color.error} flexShrink={0} wrapMode="word">
-            error: {optionsError}
-          </text>
-        </box>
-        <InfoRow color={t.color.muted}>Ctrl+R retry · Esc close</InfoRow>
-      </ModalShell>
-    )
-  }
-
-  if (providers.length === 0) {
-    return (
-      <ModalShell height={height} panelHeight={6} panelWidth={panelWidth} t={t} title="Select model" width={width}>
-        <InfoRow color={t.color.muted}>no providers available</InfoRow>
-        <InfoRow color={t.color.muted}>Ctrl+R retry · Esc close</InfoRow>
-      </ModalShell>
-    )
-  }
-
+  // A failed model.options load (or a genuinely empty profile list) renders
+  // through the normal provider stage below: the error shows inline and the
+  // picker keeps its usual browsing keys instead of taking over the screen.
   if (stage === 'provider') {
     const rows = filteredProviderRows.map(({ name, provider: item }) => {
       const cached = discoveries.current.get(item.slug)
@@ -640,6 +619,7 @@ export function ModelPicker({
       >
         <InfoRow color={t.color.muted}>Full model IDs on the next step · Enter to continue</InfoRow>
         <InfoRow color={t.color.muted}>Current: {currentModel || '(unknown)'}</InfoRow>
+        {optionsError ? <InfoRow color={t.color.error}>error: {optionsError}</InfoRow> : null}
         <InfoRow color={filter ? t.color.accent : t.color.muted}>
           {filter ? `filter: ${filter}▎` : 'type to filter · ↑/↓ select'}
         </InfoRow>
@@ -694,7 +674,11 @@ export function ModelPicker({
             ? `persist: ${persistGlobal ? 'global' : 'live runtime'} · ctrl+g toggle`
             : 'scope: live runtime'}
         </InfoRow>
-        <InfoRow color={t.color.muted}>↑/↓ select · Enter discover · Esc clear/back · Ctrl+C close</InfoRow>
+        <InfoRow color={t.color.muted}>
+          {providers.length === 0
+            ? 'Ctrl+R retry · Esc close'
+            : '↑/↓ select · Enter discover · Esc clear/back · Ctrl+C close'}
+        </InfoRow>
       </ModalShell>
     )
   }

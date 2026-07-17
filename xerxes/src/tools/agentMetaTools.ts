@@ -436,18 +436,14 @@ export async function skillViewTool(inputs: JsonObject, options: AgentMetaToolsO
   const exact = await catalog.get(name)
   if (exact !== undefined) return skillViewRecord(exact)
 
-  const closest = (await catalog.all())
+  // A miss must never return another skill's full body; report not-found plus candidate names.
+  const candidates = (await catalog.all())
     .map(skill => ({ skill, score: lexicalSkillScore(skill, name) }))
     .filter(match => match.score > 0)
-    .sort((left, right) => right.score - left.score || left.skill.metadata.name.localeCompare(right.skill.metadata.name))[0]
-  if (closest === undefined) {
-    return { error: 'not_found', name }
-  }
-  return {
-    ...skillViewRecord(closest.skill),
-    _matched_query: name,
-    match_strategy: 'lexical',
-  }
+    .sort((left, right) => right.score - left.score || left.skill.metadata.name.localeCompare(right.skill.metadata.name))
+    .slice(0, 5)
+    .map(match => match.skill.metadata.name)
+  return { candidates, error: 'not_found', name }
 }
 
 export async function skillManageTool(inputs: JsonObject, options: AgentMetaToolsOptions = {}): Promise<JsonObject> {

@@ -59,7 +59,8 @@ test('LLM configuration honors explicit credentials and environment construction
     provider: LLMProvider.OPENAI,
     model: 'gpt-4',
     apiKey: 'explicit-key',
-    temperature: 0.7,
+    temperature: 0.6,
+    topK: 64,
     maxTokens: 2048,
   })
 

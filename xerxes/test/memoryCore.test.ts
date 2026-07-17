@@ -62,6 +62,42 @@ test('contextual memory routes important records and promotes frequently accesse
   expect(contextual.getContextSummary()).toContain('Current context:')
 })
 
+test('context summaries never touch or re-persist long-term items', () => {
+  class CountingStorage extends SimpleStorage {
+    saves = 0
+    override save(key: string, data: unknown): boolean {
+      this.saves += 1
+      return super.save(key, data)
+    }
+  }
+  const storage = new CountingStorage()
+  const contextual = new ContextualMemory({ longTerm: new LongTermMemory({ storage }) })
+  const item = contextual.save('critical production fact', {}, { importance: 0.95, toLongTerm: true })
+
+  storage.saves = 0
+  const summary = contextual.getContextSummary()
+  expect(summary).toContain('critical production fact')
+  expect(item.accessCount).toBe(0)
+  expect(storage.saves).toBe(0)
+})
+
+test('short-term memory rehydrates persisted records bounded by capacity', () => {
+  const storage = new SimpleStorage()
+  const first = new ShortTermMemory({ capacity: 2, storage })
+  first.save('one')
+  first.save('two')
+  first.save('three')
+
+  const restored = new ShortTermMemory({ capacity: 2, storage })
+  expect(restored.size).toBe(2)
+  expect(restored.getRecent(2).map(item => item.content)).toEqual(['two', 'three'])
+
+  // Corrupt records are skipped instead of breaking hydration.
+  storage.save('stm_broken', 'not a record')
+  const tolerant = new ShortTermMemory({ capacity: 5, storage })
+  expect(tolerant.size).toBeGreaterThanOrEqual(2)
+})
+
 test('Bun SQLite storage persists when explicitly enabled', () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-memory-'))
   const path = join(directory, 'memory.db')

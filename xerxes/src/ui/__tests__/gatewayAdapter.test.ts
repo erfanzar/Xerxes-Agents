@@ -50,6 +50,16 @@ describe('gatewayAdapter', () => {
     expect(String(payload.result_text)).toMatch(/…$/)
   })
 
+  it('forwards a cancelled turn_end as a daemon-confirmed interruption', () => {
+    expect(adaptDaemonEvent('turn_end', { cancelled: true, session_id: 's1' })).toEqual([
+      { payload: { interrupted: true }, type: 'message.complete' }
+    ])
+    expect(adaptDaemonEvent('turn_end', { cancelled: false, session_id: 's1' })).toEqual([
+      { payload: {}, type: 'message.complete' }
+    ])
+    expect(adaptDaemonEvent('turn_end', {})).toEqual([{ payload: {}, type: 'message.complete' }])
+  })
+
   it('marks denied and failed tool results without exposing successful payloads as errors', () => {
     const denied = adaptDaemonEvent('tool_result', {
       name: 'ExecCommand',

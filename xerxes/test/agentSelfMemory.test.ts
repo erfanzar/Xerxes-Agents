@@ -8,7 +8,12 @@ import { join } from 'node:path'
 import { expect, test } from 'bun:test'
 
 import { ToolRegistry } from '../src/executors/toolRegistry.js'
-import { AgentSelfMemory, listAgentSelfMemories } from '../src/memory/agentSelfMemory.js'
+import {
+  AgentSelfMemory,
+  clearAgentSelfMemoryCache,
+  getAgentSelfMemory,
+  listAgentSelfMemories,
+} from '../src/memory/agentSelfMemory.js'
 import { registerAgentMemoryTools } from '../src/tools/agentMemoryTools.js'
 import type { JsonObject, ToolCall } from '../src/types/toolCalls.js'
 
@@ -104,4 +109,41 @@ test('agent-memory learn and sync tools use the injected self-memory without req
     expect(await selfMemory.read('self_reflection')).toContain('Use the configured workspace resolver')
     expect(await selfMemory.read('project_context')).toContain('Runtime: Bun.')
   })
+})
+
+test('agent self-memory serializes concurrent patches and taste updates without lost updates', async () => {
+  await inTemporaryDirectory(async directory => {
+    const memory = new AgentSelfMemory({
+      agentId: 'concurrent',
+      directory: join(directory, 'memories', 'concurrent'),
+      projectRoot: directory,
+    })
+    await memory.ensure()
+
+    await Promise.all([
+      memory.patch('self_reflection', '## What Worked', '## What Worked\n- first patch'),
+      memory.patch('self_reflection', '## What Worked', '## What Worked\n- second patch'),
+      memory.updateUserTaste('prefers bun'),
+      memory.updateUserTaste('prefers terse output'),
+    ])
+
+    const reflection = await memory.read('self_reflection')
+    expect(reflection).toContain('- first patch')
+    expect(reflection).toContain('- second patch')
+    const taste = await memory.read('user_taste')
+    expect(taste).toContain('prefers bun')
+    expect(taste).toContain('prefers terse output')
+  })
+})
+
+test('process-wide self-memory cache stays bounded like a simple LRU', () => {
+  clearAgentSelfMemoryCache()
+  const evicted = getAgentSelfMemory('cache-agent-0')
+  for (let index = 1; index < 300; index += 1) getAgentSelfMemory(`cache-agent-${index}`)
+  const retained = getAgentSelfMemory('cache-agent-299')
+
+  expect(getAgentSelfMemory('cache-agent-299')).toBe(retained)
+  // The oldest entry was evicted past the 256-entry bound and is re-created.
+  expect(getAgentSelfMemory('cache-agent-0')).not.toBe(evicted)
+  clearAgentSelfMemoryCache()
 })

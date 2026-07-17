@@ -18,6 +18,7 @@ const JOURNAL_RESPONSE_MAX_CHARS = 500
 const MAX_PREVIEW_CHARS = 4_096
 const NO_RESPONSE_TEXT = '(no response)'
 const PREVIEW_PLACEHOLDER = '...'
+const TURN_FAILED_TEXT = '(turn failed)'
 const PATH_REDACTION = /(?:\/Users\/[^\s'"]+|\/home\/[^\s'"]+|\/private\/[^\s'"]+|\/var\/[^\s'"]+|\/tmp\/[^\s'"]+|~\/\.xerxes[^\s'"]*)/g
 const TRACEBACK_REDACTION = /Traceback \(most recent call last\):.*?(?=\n\n|$)/gs
 
@@ -101,6 +102,12 @@ export class ChannelTurnRouter {
   /** Accept one inbound message, serializing concurrent deliveries for its conversation. */
   async handle(message: ChannelMessage): Promise<void> {
     if (!message.text.trim()) return
+    if (message.channelUserId === undefined && message.roomId === undefined) {
+      // Without a user or room identity every anonymous sender would collapse
+      // into one shared daemon session; reject the message instead of pooling.
+      this.report(new ChannelRoutingError(message.channel), message)
+      return
+    }
     const key = channelSessionKey(message)
     const previous = this.pendingBySession.get(key) ?? Promise.resolve()
     const current = previous.catch(() => undefined).then(() => this.run(message, key))
@@ -185,6 +192,11 @@ export class ChannelTurnRouter {
         if (chunk) preview?.push(chunk)
         collectOutput(output, event)
       })
+    } catch (error) {
+      // Finish the placeholder (which also cancels its pending edit timer) so a
+      // failed turn never leaves a live '...' message or a stray timer behind.
+      await preview?.finish(TURN_FAILED_TEXT)
+      throw error
     } finally {
       await typing.stop()
     }
@@ -320,6 +332,14 @@ export class ChannelTurnRouter {
     } catch {
       // Diagnostic callbacks must not alter platform delivery semantics.
     }
+  }
+}
+
+/** Raised when an inbound message carries no user or room identity to route by. */
+export class ChannelRoutingError extends Error {
+  constructor(channel: string) {
+    super(`channel '${channel}' message has no channelUserId or roomId; refusing to pool it into a shared session`)
+    this.name = new.target.name
   }
 }
 

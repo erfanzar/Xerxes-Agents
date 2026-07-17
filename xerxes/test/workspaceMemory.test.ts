@@ -32,6 +32,20 @@ test('workspace line memory preserves Python-compatible CRUD results and seriali
   }
 })
 
+test('workspace line memory rejects multi-line content instead of corrupting line-based entries', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-workspace-memory-'))
+  try {
+    const store = new WorkspaceMemoryStore({ workspaceRoot: root })
+    expect(await store.add('memory', 'first\nsecond')).toEqual({ ok: false, error: 'content must be a single line' })
+    expect(await store.add('memory', 'carriage\rreturn')).toEqual({ ok: false, error: 'content must be a single line' })
+    expect(await store.add('memory', 'kept')).toEqual({ ok: true, id: 1, content: 'kept' })
+    expect(await store.replace('memory', 1, 'a\nb')).toEqual({ ok: false, error: 'content must be a single line' })
+    expect(await store.list('memory')).toEqual({ ok: true, items: [{ content: 'kept', id: 1 }] })
+  } finally {
+    await rm(root, { force: true, recursive: true })
+  }
+})
+
 test('workspace line-memory tools return structured failures and preserve workspace containment', async () => {
   const root = await mkdtemp(join(tmpdir(), 'xerxes-workspace-memory-'))
   const outside = await mkdtemp(join(tmpdir(), 'xerxes-workspace-memory-outside-'))

@@ -3,6 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
+import { ProviderError } from '../src/core/errors.js'
 import { AnthropicMessagesClient, messagesToAnthropic } from '../src/llms/anthropic.js'
 import type { CompletionRequest } from '../src/llms/client.js'
 
@@ -41,12 +42,13 @@ test('Anthropic conversion preserves signed thinking and error tool results', ()
 test('Anthropic SSE adapter normalizes text, thinking, usage, and tool calls', async () => {
   const payload = [
     { type: 'message_start', message: { usage: { input_tokens: 11 } } },
-    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', signature: 'sig-1' } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'Inspect.' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-1' } },
     { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tool-1', name: 'ReadFile', input: {} } },
     { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path":"README.md"}' } },
     { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: 'Calling tool.' } },
-    { type: 'message_delta', usage: { output_tokens: 7 } },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 7 } },
     { type: 'message_stop' },
   ]
   const response = sseResponse(payload)
@@ -61,7 +63,7 @@ test('Anthropic SSE adapter normalizes text, thinking, usage, and tool calls', a
   expect(events).toContainEqual({ thinking: 'Inspect.' })
   expect(events).toContainEqual({ content: 'Calling tool.' })
   expect(events).toContainEqual({ usage: { inputTokens: 11, outputTokens: 0 } })
-  expect(events).toContainEqual({ usage: { inputTokens: 0, outputTokens: 7 } })
+  expect(events).toContainEqual({ finishReason: 'tool_calls', usage: { inputTokens: 0, outputTokens: 7 } })
   expect(events).toContainEqual({
     toolCalls: [{ id: 'tool-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
@@ -161,6 +163,92 @@ test('Anthropic native completion uses a non-streaming request and retains think
     toolCalls: [{ id: 'tool-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
   })
 })
+
+test('Anthropic streaming throws on in-stream error events with the provider payload', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => sseResponse([
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } },
+    ]),
+  })
+
+  await expect(collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'read file' }],
+  }))).rejects.toThrow('stream returned API error (overloaded_error): Overloaded')
+})
+
+test('Anthropic streaming maps stop reasons onto the neutral finish vocabulary', async () => {
+  const cases = [
+    ['end_turn', 'stop'],
+    ['stop_sequence', 'stop'],
+    ['max_tokens', 'length'],
+    ['tool_use', 'tool_calls'],
+  ] as const
+  for (const [stopReason, finishReason] of cases) {
+    const client = new AnthropicMessagesClient({
+      apiKey: 'test-key',
+      fetchImplementation: async () => sseResponse([
+        { type: 'message_delta', delta: { stop_reason: stopReason }, usage: { output_tokens: 3 } },
+        { type: 'message_stop' },
+      ]),
+    })
+    const events = await collect(client.stream({
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))
+    expect(events).toContainEqual({ finishReason, usage: { inputTokens: 0, outputTokens: 3 } })
+  }
+})
+
+test('Anthropic tool choice none disables tool use in the request payload', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([{ type: 'message_stop' }])
+    },
+  })
+  await collect(client.stream({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'Do not use tools.' }],
+    tools: [{
+      type: 'function',
+      function: {
+        name: 'ReadFile',
+        description: 'Read one file.',
+        parameters: { type: 'object', properties: {} },
+      },
+    }],
+    toolChoice: 'none',
+  }))
+
+  expect(payload?.tool_choice).toEqual({ type: 'none' })
+})
+
+test('Anthropic HTTP failures cap quoted provider error bodies', async () => {
+  const client = new AnthropicMessagesClient({
+    apiKey: 'test-key',
+    fetchImplementation: async () => new Response('x'.repeat(8_192), { status: 500 }),
+  })
+
+  const failure = await client.complete({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+  }).catch(error => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(failure.message).toBe(`Client anthropic: completion request failed (500): ${'x'.repeat(4_096)}`)
+})
+
+async function collect(stream: AsyncIterable<unknown>): Promise<unknown[]> {
+  const events: unknown[] = []
+  for await (const event of stream) {
+    events.push(event)
+  }
+  return events
+}
 
 function sseResponse(events: readonly Record<string, unknown>[]): Response {
   const encoder = new TextEncoder()
