@@ -170,12 +170,11 @@ describe('GatewayClient session lifecycle', () => {
     ])
   })
 
-  it('switches the selected provider profile before applying the picker model', async () => {
+  it('uses the live runtime profile identity and discovers profiles without fabricating catalog entries', async () => {
     const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:model-picker' })
     const calls: Array<{ method: string; params: Record<string, unknown> }> = []
     const privateClient = client as unknown as {
       configSet: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
-      modelOptions: () => Promise<Record<string, unknown>>
       rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
     }
 
@@ -192,18 +191,102 @@ describe('GatewayClient session lifecycle', () => {
         }
       }
 
+      if (method === 'session.status') {
+        return { ok: true, session: { model: 'k3', profile_name: 'openai-dev' } }
+      }
+
+      if (method === 'fetch_models') {
+        return { ok: true, models: ['k3', 'kimi-k2.5', 'k3', ''], source: 'remote' }
+      }
+
       return { ok: true }
     }
 
-    await expect(privateClient.modelOptions()).resolves.toMatchObject({ model: 'kimi-for-coding' })
+    const options = await client.request<Record<string, unknown>>('model.options', { session_id: 'live-session' })
+    expect(options).toEqual({
+      model: 'k3',
+      provider: 'openai-dev',
+      providers: [
+        {
+          configured_model: 'gpt-4.1',
+          is_current: true,
+          name: 'openai-dev',
+          provider_type: 'openai',
+          slug: 'openai-dev'
+        },
+        {
+          configured_model: 'kimi-for-coding',
+          is_current: false,
+          name: 'kimi-local',
+          provider_type: 'kimi-code',
+          slug: 'kimi-local'
+        }
+      ]
+    })
+    expect(options).not.toHaveProperty('providers.0.models')
+    expect(options).not.toHaveProperty('providers.0.total_models')
+    expect(options).not.toHaveProperty('providers.0.authenticated')
+    await expect(client.request('model.models', { profile_name: 'kimi-local' })).resolves.toEqual({
+      models: ['k3', 'kimi-k2.5'],
+      source: 'remote'
+    })
     await expect(
       privateClient.configSet({ key: 'model', value: 'gpt-4.1 --provider openai-dev --tui-session' })
     ).resolves.toEqual({ value: 'gpt-4.1' })
 
+    expect(calls.slice(0, 3)).toEqual([
+      { method: 'provider_list', params: {} },
+      { method: 'session.status', params: { session_key: 'live-session' } },
+      { method: 'fetch_models', params: { profile_name: 'kimi-local' } }
+    ])
     expect(calls.slice(-2)).toEqual([
       { method: 'provider_select', params: { name: 'openai-dev' } },
       { method: 'runtime.reload', params: { model: 'gpt-4.1' } }
     ])
+  })
+
+  it('does not mark a stored profile current when the live runtime matches none', async () => {
+    const client = new GatewayClient({ projectDir: process.cwd(), sessionKey: 'test:model-picker-unmatched' })
+    const privateClient = client as unknown as {
+      rawRequest: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
+    }
+
+    privateClient.rawRequest = async method => {
+      if (method === 'provider_list') {
+        return {
+          ok: true,
+          profiles: [
+            { active: false, model: 'gpt-4.1', name: 'openai-dev', provider: 'openai' },
+            { active: true, model: 'kimi-for-coding', name: 'kimi-local', provider: 'kimi-code' }
+          ]
+        }
+      }
+      if (method === 'session.status') {
+        return { ok: true, session: { model: 'runtime-override', profile_name: null } }
+      }
+      return { ok: true }
+    }
+
+    await expect(client.request('model.options', {})).resolves.toEqual({
+      model: 'runtime-override',
+      provider: '',
+      providers: [
+        {
+          configured_model: 'gpt-4.1',
+          is_current: false,
+          name: 'openai-dev',
+          provider_type: 'openai',
+          slug: 'openai-dev'
+        },
+        {
+          configured_model: 'kimi-for-coding',
+          is_current: false,
+          name: 'kimi-local',
+          provider_type: 'kimi-code',
+          slug: 'kimi-local'
+        }
+      ]
+    })
   })
 
   it('returns normalized reasoning info after config.set reasoning', async () => {

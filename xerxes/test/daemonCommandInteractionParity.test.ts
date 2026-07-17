@@ -140,6 +140,7 @@ test('slash steering stays on the issuing connection session and queues at the a
   const runner = new SteerBoundaryRunner()
   const runtime = new InMemoryDaemonRuntime(runner, {
     currentProjectDirectory: directory,
+    model: 'steer-model',
     sessionDirectory: join(directory, 'sessions'),
   })
   const server = new DaemonServer({ socketPath, runtime })
@@ -199,6 +200,7 @@ test('slash compact rewrites and persists the active native session without subm
   const socketPath = join(directory, 'daemon.sock')
   const runtime = new InMemoryDaemonRuntime(new UnexpectedTurnRunner(), {
     currentProjectDirectory: directory,
+    model: 'compact-model',
     sessionDirectory,
   })
   const server = new DaemonServer({ socketPath, runtime })

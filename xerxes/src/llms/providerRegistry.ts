@@ -8,7 +8,6 @@ export interface ProviderConfig {
   readonly baseUrl?: string
   readonly contextLimit: number
   readonly defaultApiKey?: string
-  readonly models: readonly string[]
   readonly name: string
   readonly transport: ProviderTransport
 }
@@ -19,97 +18,75 @@ const provider = (
   options: Omit<ProviderConfig, 'name' | 'transport'>,
 ): ProviderConfig => ({ name, transport, ...options })
 
-/** Static provider metadata ported from the Python registry. */
+/** Provider connection and routing metadata. Model catalogs are discovered live. */
 export const PROVIDERS = {
   anthropic: provider('anthropic', 'anthropic', {
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     baseUrl: 'https://api.anthropic.com',
     contextLimit: 200_000,
-    models: [
-      'claude-opus-4-6',
-      'claude-sonnet-4-6',
-      'claude-haiku-4-5-20251001',
-      'claude-opus-4-5',
-      'claude-sonnet-4-5',
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-haiku-20241022',
-    ],
   }),
   openai: provider('openai', 'openai', {
     apiKeyEnv: 'OPENAI_API_KEY',
     baseUrl: 'https://api.openai.com/v1',
     contextLimit: 128_000,
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'o3-mini', 'o3', 'o4-mini', 'o1', 'o1-mini'],
   }),
   openrouter: provider('openrouter', 'openai', {
     apiKeyEnv: 'OPENROUTER_API_KEY',
     baseUrl: 'https://openrouter.ai/api/v1',
     contextLimit: 1_000_000,
-    models: ['openrouter/auto', 'anthropic/claude-sonnet-4.5', 'openai/gpt-4o', 'google/gemini-2.5-pro', 'deepseek/deepseek-chat', 'qwen/qwen3-coder', 'x-ai/grok-code-fast-1'],
   }),
   'claude-code': provider('claude-code', 'claude-code', {
     baseUrl: 'claude-code://local',
     contextLimit: 200_000,
-    models: [],
   }),
   gemini: provider('gemini', 'openai', {
     apiKeyEnv: 'GEMINI_API_KEY',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/',
     contextLimit: 1_000_000,
-    models: ['gemini-2.5-pro-preview-03-25', 'gemini-2.5-flash-preview-04-17', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash'],
   }),
   kimi: provider('kimi', 'openai', {
     apiKeyEnv: 'MOONSHOT_API_KEY',
     baseUrl: 'https://api.moonshot.cn/v1',
     contextLimit: 128_000,
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'kimi-latest'],
   }),
   'kimi-code': provider('kimi-code', 'openai', {
     apiKeyEnv: 'KIMI_CODE_API_KEY',
     baseUrl: 'https://api.kimi.com/coding/v1',
     contextLimit: 256_000,
-    models: ['kimi-for-coding'],
   }),
   qwen: provider('qwen', 'openai', {
     apiKeyEnv: 'DASHSCOPE_API_KEY',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     contextLimit: 1_000_000,
-    models: ['qwen-max', 'qwen-plus', 'qwen-turbo', 'qwen-long', 'qwen3-235b-a22b', 'qwen2.5-72b-instruct', 'qwen2.5-coder-32b-instruct', 'qwq-32b'],
   }),
   zhipu: provider('zhipu', 'openai', {
     apiKeyEnv: 'ZHIPU_API_KEY',
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     contextLimit: 128_000,
-    models: ['glm-5.2', 'glm-5.1', 'glm-5v-turbo', 'glm-5-turbo', 'glm-5', 'glm-4.7', 'glm-4.6', 'glm-4.5', 'glm-4.5-air'],
   }),
   deepseek: provider('deepseek', 'openai', {
     apiKeyEnv: 'DEEPSEEK_API_KEY',
     baseUrl: 'https://api.deepseek.com/v1',
     contextLimit: 64_000,
-    models: ['deepseek-chat', 'deepseek-coder', 'deepseek-reasoner'],
   }),
   minimax: provider('minimax', 'openai', {
     apiKeyEnv: 'MINIMAX_API_KEY',
     baseUrl: 'https://api.minimax.io/v1',
     contextLimit: 128_000,
-    models: ['MiniMax-M2.7-highspeed', 'MiniMax-M2.7-flashspeed', 'MiniMax-Text-01', 'MiniMax-Text-01-MiniApp', 'abab6.5s-chat', 'abab6.5-chat', 'abab6-chat', 'abab5.5s-chat', 'abab5.5-chat', 'abab5-chat'],
   }),
   ollama: provider('ollama', 'openai', {
     baseUrl: 'http://localhost:11434/v1',
     contextLimit: 128_000,
     defaultApiKey: 'ollama',
-    models: ['llama3.3', 'llama3.2', 'llama3.1', 'phi4', 'mistral', 'mixtral', 'qwen2.5-coder', 'deepseek-r1', 'gemma3', 'codellama'],
   }),
   lmstudio: provider('lmstudio', 'openai', {
     baseUrl: 'http://localhost:1234/v1',
     contextLimit: 128_000,
     defaultApiKey: 'lm-studio',
-    models: [],
   }),
   custom: provider('custom', 'openai', {
     apiKeyEnv: 'CUSTOM_API_KEY',
     contextLimit: 128_000,
-    models: [],
   }),
 } as const satisfies Record<string, ProviderConfig>
 
@@ -236,7 +213,7 @@ const MODEL_CONTEXT_LIMITS: Readonly<Record<string, number>> = {
 }
 
 export function isProviderName(value: string): value is ProviderName {
-  return value in PROVIDERS
+  return Object.hasOwn(PROVIDERS, value)
 }
 
 /** Honor `provider/model` routing syntax before consulting model prefixes. */
@@ -335,12 +312,4 @@ export function getContextLimit(model: string, overrides: ProviderOverrides = {}
     return exact
   }
   return PROVIDERS[resolveProvider(model, overrides)].contextLimit
-}
-
-export function listAllModels(): Partial<Record<ProviderName, string[]>> {
-  return Object.fromEntries(
-    Object.entries(PROVIDERS)
-      .filter(([, providerConfig]) => providerConfig.models.length)
-      .map(([name, providerConfig]) => [name, [...providerConfig.models]]),
-  ) as Partial<Record<ProviderName, string[]>>
 }

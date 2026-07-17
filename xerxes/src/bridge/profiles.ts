@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
@@ -59,9 +59,19 @@ export class ProfileStore {
     return profiles[this.activeName(document, profiles)]
   }
 
+  /** Resolve one exact profile without changing the process-wide active selection. */
+  get(name: string): ProviderProfile | undefined {
+    const clean = name.trim()
+    if (!clean) {
+      return undefined
+    }
+    const profiles = this.merged(this.load())
+    return Object.hasOwn(profiles, clean) ? profiles[clean] : undefined
+  }
+
   save(input: SaveProfileInput): ProviderProfile {
     const document = this.load()
-    const existing = document.profiles[input.name]
+    const existing = Object.hasOwn(document.profiles, input.name) ? document.profiles[input.name] : undefined
     const baseUrl = input.baseUrl.replace(/\/+$/, '')
     const provider = input.provider?.trim().toLowerCase().replace('claude_code', 'claude-code') || guessProvider(baseUrl)
     const profile: ProviderProfile = {
@@ -118,7 +128,7 @@ export class ProfileStore {
 
   delete(name: string): boolean {
     const document = this.load()
-    if (!document.profiles[name]) {
+    if (!Object.hasOwn(document.profiles, name)) {
       return false
     }
     delete document.profiles[name]
@@ -131,7 +141,7 @@ export class ProfileStore {
 
   setActive(name: string): boolean {
     const document = this.load()
-    if (!this.merged(document)[name]) {
+    if (!Object.hasOwn(this.merged(document), name)) {
       return false
     }
     document.active = name
@@ -140,28 +150,29 @@ export class ProfileStore {
   }
 
   private activeName(document: ProfilesDocument, profiles: Record<string, ProviderProfile>): string {
-    return document.active && profiles[document.active] ? document.active : CLAUDE_CODE_PROFILE_NAME
+    return document.active && Object.hasOwn(profiles, document.active) ? document.active : CLAUDE_CODE_PROFILE_NAME
   }
 
   private builtinProfiles(): Record<string, ProviderProfile> {
-    return {
-      [CLAUDE_CODE_PROFILE_NAME]: {
-        name: CLAUDE_CODE_PROFILE_NAME,
-        base_url: 'claude-code://local',
-        api_key: '',
-        model: CLAUDE_CODE_DEFAULT_MODEL,
-        provider: 'claude-code',
-        sampling: {},
-      },
+    const profiles: Record<string, ProviderProfile> = Object.create(null)
+    profiles[CLAUDE_CODE_PROFILE_NAME] = {
+      name: CLAUDE_CODE_PROFILE_NAME,
+      base_url: 'claude-code://local',
+      api_key: '',
+      model: CLAUDE_CODE_DEFAULT_MODEL,
+      provider: 'claude-code',
+      sampling: {},
     }
+    return profiles
   }
 
   private ensureWritable(document: ProfilesDocument, name: string): ProviderProfile | undefined {
-    const existing = document.profiles[name]
+    const existing = Object.hasOwn(document.profiles, name) ? document.profiles[name] : undefined
     if (existing) {
       return existing
     }
-    const builtin = this.builtinProfiles()[name]
+    const builtins = this.builtinProfiles()
+    const builtin = Object.hasOwn(builtins, name) ? builtins[name] : undefined
     if (!builtin) {
       return undefined
     }
@@ -174,7 +185,7 @@ export class ProfileStore {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.filePath, 'utf8'))
       if (isRecord(parsed)) {
-        const profiles: Record<string, ProviderProfile> = {}
+        const profiles: Record<string, ProviderProfile> = Object.create(null)
         if (isRecord(parsed.profiles)) {
           for (const [name, value] of Object.entries(parsed.profiles)) {
             if (isProfile(value)) {
@@ -190,16 +201,26 @@ export class ProfileStore {
     } catch {
       // Corrupt/missing stores intentionally start empty, matching Python behavior.
     }
-    return { active: null, profiles: {} }
+    return { active: null, profiles: Object.create(null) }
   }
 
   private merged(document: ProfilesDocument): Record<string, ProviderProfile> {
-    return { ...this.builtinProfiles(), ...document.profiles }
+    const profiles: Record<string, ProviderProfile> = Object.create(null)
+    for (const [name, profile] of Object.entries(this.builtinProfiles())) {
+      profiles[name] = profile
+    }
+    for (const [name, profile] of Object.entries(document.profiles)) {
+      profiles[name] = profile
+    }
+    return profiles
   }
 
   private write(document: ProfilesDocument): void {
-    mkdirSync(dirname(this.filePath), { recursive: true })
-    writeFileSync(this.filePath, `${JSON.stringify(document, null, 2)}\n`, 'utf8')
+    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 })
+    writeFileSync(this.filePath, `${JSON.stringify(document, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    // `mode` only applies when writeFileSync creates the file. Repair older
+    // profile stores that may have inherited a permissive process umask.
+    chmodSync(this.filePath, 0o600)
   }
 }
 

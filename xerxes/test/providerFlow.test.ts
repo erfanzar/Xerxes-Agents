@@ -121,6 +121,8 @@ test('provider flow redacts a model-discovery failure that includes the submitte
 
     const prompt = requirePrompt(transition)
     expect(prompt.question.question).toContain('catalogue lookup was unavailable')
+    expect(prompt.question.options).not.toContain('gpt-4o')
+    expect(prompt.question.options).toContain(PROVIDER_FLOW_CUSTOM_MODEL_LABEL)
     expect(JSON.stringify(prompt)).not.toContain('failure-secret')
   } finally {
     await rm(directory, { recursive: true, force: true })

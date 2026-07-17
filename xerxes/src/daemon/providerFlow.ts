@@ -480,7 +480,6 @@ export class ProviderProfileFlow {
   }
 
   private async askModel(draft: AddDraft): Promise<ProviderFlowTransition> {
-    const staticModels = draft.provider === 'auto' ? [] : PROVIDERS[draft.provider].models
     let discovered: readonly string[] = []
     let discoveryUnavailable = false
     if (this.modelDiscovery && draft.provider !== 'claude-code') {
@@ -497,7 +496,6 @@ export class ProviderProfileFlow {
     }
     const models = uniqueStrings([
       draft.defaultModel,
-      ...staticModels,
       ...discovered,
     ])
     const normalizedDraft = {
@@ -614,7 +612,7 @@ function defaultDraft(name: string, provider: ProviderKind): AddDraft {
     baseUrl: '',
     defaultApiKey: config?.defaultApiKey ?? '',
     defaultBaseUrl: config?.baseUrl ?? '',
-    defaultModel: provider === 'claude-code' ? CLAUDE_CODE_DEFAULT_MODEL : config?.models[0] ?? '',
+    defaultModel: provider === 'claude-code' ? CLAUDE_CODE_DEFAULT_MODEL : '',
     name,
     provider,
   }

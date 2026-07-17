@@ -4,6 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import {
+  ConfigurationError,
   ShortTermMemory,
   SandboxMode,
   SandboxRouter,
@@ -123,7 +124,7 @@ test('fresh facade streams expose the shared event vocabulary and do not retain 
       yield { content: 'streaming output' }
     },
   }
-  const xerxes = new Xerxes({ llm: client, coreTools: false })
+  const xerxes = new Xerxes({ llm: client, coreTools: false, model: 'stream-test-model' })
   const stream = xerxes.runStream('stream this', { freshSession: true })
   const events = []
   while (true) {
@@ -147,6 +148,7 @@ test('Xerxes facade routes tool calls through an attached sandbox router', async
   })
   const xerxes = new Xerxes({
     llm: client,
+    model: 'sandbox-test-model',
     toolRegistry: registry,
     coreTools: false,
     permissionMode: 'accept-all',
@@ -162,4 +164,19 @@ test('Xerxes facade routes tool calls through an attached sandbox router', async
     role: 'tool',
     content: 'sandbox:hello',
   })
+})
+
+test('Xerxes facade reports an actionable typed error instead of choosing a model', async () => {
+  const client: LlmClient = {
+    async *stream(): AsyncGenerator<LlmDelta> {
+      yield { content: 'must not run' }
+    },
+  }
+  const xerxes = new Xerxes({ llm: client, coreTools: false })
+
+  await expect(xerxes.run('requires configuration')).rejects.toBeInstanceOf(ConfigurationError)
+  await expect(xerxes.run('requires configuration')).rejects.toThrow(
+    'select a provider model or pass an explicit model',
+  )
+  expect(() => new Xerxes({ coreTools: false })).toThrow(ConfigurationError)
 })

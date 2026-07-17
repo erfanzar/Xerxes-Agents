@@ -59,7 +59,12 @@ test('daemon WebSocket transport dispatches v35 JSON-RPC and broadcasts events',
       runtime: 'bun-typescript',
     })
 
-    client.send({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { session_key: 'remote-session' } })
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'initialize',
+      params: { model: 'websocket-model', session_key: 'remote-session' },
+    })
     expect((await client.next(frame => frame.id === 2)).result).toMatchObject({
       ok: true,
       session: { key: 'remote-session', status: 'idle' },
@@ -104,7 +109,12 @@ test('closing a WebSocket client cancels its pending interaction turn', async ()
   }
   const client = await WebSocketTestClient.connect(endpoint)
   try {
-    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { session_key: 'remote-wait' } })
+    client.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { model: 'websocket-approval-model', session_key: 'remote-wait' },
+    })
     await client.next(frame => frame.id === 1)
     await client.next(eventFrame('init_done'))
     await client.next(eventFrame('status_update'))

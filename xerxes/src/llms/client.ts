@@ -340,6 +340,7 @@ export function createLlmClient(
   overrides: ProviderOverrides = {},
   options: LlmClientFactoryOptions = {},
 ): LlmClient {
+  model = requireConfiguredModel(model)
   const pluginProvider = selectedPluginProvider(model, overrides, options.pluginRegistry)
   if (pluginProvider) {
     const client = pluginProvider.factory.createClient({
@@ -404,6 +405,18 @@ export function createLlmClient(
     ...(configuredApiKey ? { apiKey: configuredApiKey } : {}),
     ...(configuredBaseUrl ? { baseUrl: configuredBaseUrl } : {}),
   })
+}
+
+/** Reject execution that would otherwise guess a provider/model from an empty ID. */
+export function requireConfiguredModel(model: string | undefined): string {
+  const configured = model?.trim() ?? ''
+  if (!configured) {
+    throw new ConfigurationError(
+      'model',
+      'is not configured; select a provider model or pass an explicit model in runtime configuration',
+    )
+  }
+  return configured
 }
 
 /**

@@ -11,6 +11,7 @@ import { ProfileStore } from "../src/bridge/profiles.js";
 import { InMemoryDaemonRuntime } from "../src/daemon/runtime.js";
 import { PROVIDER_FLOW_ADD_LABEL } from "../src/daemon/providerFlow.js";
 import { DaemonServer } from "../src/daemon/server.js";
+import type { FetchImplementation } from "../src/llms/client.js";
 
 interface Frame {
   readonly id?: number;
@@ -33,19 +34,20 @@ test("daemon routes interactive provider setup through native question replies w
   );
   const socketPath = join(directory, "daemon.sock");
   const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  const nativeFetch = globalThis.fetch;
+  const nativeOpenAiKey = process.env.OPENAI_API_KEY;
+  const requests: Array<{ authorization: string | null; url: string }> = [];
+  const modelFetch: FetchImplementation = async (input, init) => {
+    requests.push({
+      authorization: new Headers(init?.headers).get("authorization"),
+      url: String(input),
+    });
+    return new Response(JSON.stringify({ data: [{ id: "daemon-remote-model" }] }));
+  };
+  globalThis.fetch = modelFetch as typeof globalThis.fetch;
   const server = new DaemonServer({
     socketPath,
     profileStore,
-    providerModelDiscovery: {
-      async discover(input) {
-        expect(input).toEqual({
-          apiKey: "daemon-secret",
-          baseUrl: "https://api.openai.com/v1",
-          provider: "openai",
-        });
-        return ["daemon-remote-model"];
-      },
-    },
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
       sessionDirectory: join(directory, "sessions"),
@@ -53,6 +55,7 @@ test("daemon routes interactive provider setup through native question replies w
   });
   await server.start();
   const client = await SocketTestClient.connect(socketPath);
+  process.env.OPENAI_API_KEY = "environment-must-not-leak";
   try {
     client.send({
       jsonrpc: "2.0",
@@ -88,7 +91,7 @@ test("daemon routes interactive provider setup through native question replies w
     expect(prompt.questionId).toBe("base_url");
     prompt = await answerAndNext(client, 6, prompt, "");
     expect(prompt.questionId).toBe("api_key");
-    prompt = await answerAndNext(client, 7, prompt, "daemon-secret");
+    prompt = await answerAndNext(client, 7, prompt, "");
     expect(prompt.questionId).toBe("model");
 
     client.send({
@@ -107,7 +110,7 @@ test("daemon routes interactive provider setup through native question replies w
     await client.next(eventFrame("question_response"));
     const notice = await client.next(eventFrame("notification"));
     expect(notice.params?.payload?.body).toContain("daemon-profile");
-    expect(JSON.stringify(notice)).not.toContain("daemon-secret");
+    expect(JSON.stringify(notice)).not.toContain("environment-must-not-leak");
     await client.next(eventFrame("init_done"));
     await client.next(eventFrame("status_update"));
 
@@ -122,8 +125,21 @@ test("daemon routes interactive provider setup through native question replies w
         }),
       ]),
     );
-    expect(JSON.stringify(listed.result)).not.toContain("daemon-secret");
+    expect(JSON.stringify(listed.result)).not.toContain("environment-must-not-leak");
+    expect(profileStore.get("daemon-profile")?.api_key).toBe("");
+    expect(requests).toEqual([
+      {
+        authorization: null,
+        url: "https://api.openai.com/v1/models",
+      },
+    ]);
   } finally {
+    globalThis.fetch = nativeFetch;
+    if (nativeOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = nativeOpenAiKey;
+    }
     client.close();
     await server.stop();
     await rm(directory, { recursive: true, force: true });

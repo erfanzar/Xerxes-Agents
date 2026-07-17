@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { ValidationError } from '../core/errors.js'
+import { requireConfiguredModel } from '../llms/client.js'
 import type { JsonObject, JsonValue } from '../types/toolCalls.js'
 import {
   HttpMediaClient,
@@ -13,8 +14,6 @@ import {
   type HttpMediaClientOptions,
 } from './mediaHttp.js'
 
-const DEFAULT_ANTHROPIC_VISION_MODEL = 'claude-sonnet-4-6'
-const DEFAULT_OPENAI_VISION_MODEL = 'gpt-4o-mini'
 const DEFAULT_VISION_PROMPT = 'Describe this image in detail.'
 const DEFAULT_VISION_MAX_TOKENS = 1024
 
@@ -52,19 +51,19 @@ export interface OpenAiCompatibleVisionOptions extends HttpMediaClientOptions {
 export class OpenAiCompatibleVisionPort implements VisionPort {
   private readonly client: HttpMediaClient
   private readonly defaultMaxTokens: number
-  private readonly defaultModel: string
+  private readonly defaultModel: string | undefined
   readonly providerName: string
 
   constructor(options: OpenAiCompatibleVisionOptions) {
     this.client = new HttpMediaClient({ ...options, providerName: options.providerName ?? 'openai-compatible-vision' })
-    this.defaultModel = requiredText(options.defaultModel ?? DEFAULT_OPENAI_VISION_MODEL, 'defaultModel')
+    this.defaultModel = optionalText(options.defaultModel)
     this.defaultMaxTokens = validMaxTokens(options.defaultMaxTokens ?? DEFAULT_VISION_MAX_TOKENS)
     this.providerName = this.client.providerName
   }
 
   async analyze(request: VisionAnalysisRequest, signal?: AbortSignal): Promise<VisionAnalysisResult> {
     const prompt = requiredText(request.prompt ?? DEFAULT_VISION_PROMPT, 'prompt')
-    const model = requiredText(request.model ?? this.defaultModel, 'model')
+    const model = requireConfiguredModel(request.model ?? this.defaultModel)
     const maxTokens = validMaxTokens(request.maxTokens ?? this.defaultMaxTokens)
     const imageUrl = openAiImageUrl(request.image)
     const raw = await this.client.postJson('chat/completions', {
@@ -98,7 +97,7 @@ export interface AnthropicVisionOptions extends Omit<HttpMediaClientOptions, 'au
 export class AnthropicVisionPort implements VisionPort {
   private readonly client: HttpMediaClient
   private readonly defaultMaxTokens: number
-  private readonly defaultModel: string
+  private readonly defaultModel: string | undefined
   readonly providerName: string
 
   constructor(options: AnthropicVisionOptions) {
@@ -112,14 +111,14 @@ export class AnthropicVisionPort implements VisionPort {
       },
       providerName: options.providerName ?? 'anthropic-vision',
     })
-    this.defaultModel = requiredText(options.defaultModel ?? DEFAULT_ANTHROPIC_VISION_MODEL, 'defaultModel')
+    this.defaultModel = optionalText(options.defaultModel)
     this.defaultMaxTokens = validMaxTokens(options.defaultMaxTokens ?? DEFAULT_VISION_MAX_TOKENS)
     this.providerName = this.client.providerName
   }
 
   async analyze(request: VisionAnalysisRequest, signal?: AbortSignal): Promise<VisionAnalysisResult> {
     const prompt = requiredText(request.prompt ?? DEFAULT_VISION_PROMPT, 'prompt')
-    const model = requiredText(request.model ?? this.defaultModel, 'model')
+    const model = requireConfiguredModel(request.model ?? this.defaultModel)
     const maxTokens = validMaxTokens(request.maxTokens ?? this.defaultMaxTokens)
     if (request.image.kind !== 'base64') {
       throw new ValidationError(
@@ -268,6 +267,11 @@ function requiredText(value: string, field: string): string {
     throw new ValidationError(field, 'must be a non-empty string', value)
   }
   return normalized
+}
+
+function optionalText(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  return normalized ? normalized : undefined
 }
 
 function providerKey(value: string): string {

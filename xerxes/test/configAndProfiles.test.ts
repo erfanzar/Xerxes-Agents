@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -43,6 +43,15 @@ test('profile store preserves active selection and filters sampling keys', async
     expect(store.updateSampling('local', { temperature: 0.2, not_supported: true })).toMatchObject({ sampling: { temperature: 0.2 } })
     expect(store.setActive('missing')).toBe(false)
     expect(store.list().find(profile => profile.name === 'local')).toMatchObject({ active: true })
+    expect(store.get('local')).toMatchObject({ name: 'local', model: 'llama3.3' })
+    expect(store.get('missing')).toBeUndefined()
+    expect(store.get('__proto__')).toBeUndefined()
+    expect(store.get('constructor')).toBeUndefined()
+    expect(store.updateSampling('__proto__', { temperature: 0.2 })).toBeUndefined()
+    expect(store.updateSampling('constructor', { temperature: 0.2 })).toBeUndefined()
+    expect(store.get('__proto__')).toBeUndefined()
+    expect(store.get('constructor')).toBeUndefined()
+    expect((await stat(store.filePath)).mode & 0o777).toBe(0o600)
   } finally {
     await rm(normalizedHome, { recursive: true, force: true })
   }

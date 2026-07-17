@@ -35,6 +35,7 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
     socketPath,
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
+      model: "protocol-model",
       sessionDirectory: join(directory, "sessions"),
       statusInventory: () => ({ activeSubagents: 2 }),
     }),
@@ -51,7 +52,7 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
     const status = await client.next((frame) => frame.id === 1);
     expect(status.result).toMatchObject({
       ok: true,
-      runtime_ready: false,
+      runtime_ready: true,
       active_subagents: 2,
       daemon_protocol: 35,
       runtime: "bun-typescript",
@@ -114,6 +115,67 @@ test("daemon preserves JSON-RPC v35 NDJSON responses and stream event framing", 
     expect((await client.next((frame) => frame.id === 5)).result).toEqual({
       ok: false,
       error: MIGRATED_ERROR,
+    });
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unconfigured daemon status is neutral and turn submission rejects model inference", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-unconfigured-"));
+  const socketPath = join(directory, "daemon.sock");
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      sessionDirectory: join(directory, "sessions"),
+    }),
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "unconfigured" },
+    });
+    const initialized = await client.next((frame) => frame.id === 1);
+    const initDone = await client.next(eventFrame("init_done"));
+    const status = await client.next(eventFrame("status_update"));
+    expect(initialized.result?.session).toMatchObject({
+      model: "",
+      context_limit: 0,
+      max_context: 0,
+    });
+    expect(initDone.params?.payload).toMatchObject({ model: "", context_limit: 0 });
+    expect(status.params?.payload).toMatchObject({ model: "", max_context: 0 });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "turn.submit",
+      params: { session_key: "unconfigured", text: "do not guess" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).error).toEqual({
+      code: -32000,
+      message: expect.stringContaining(
+        "Configuration model: is not configured; select a provider model",
+      ),
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session.status",
+      params: { session_key: "unconfigured" },
+    });
+    expect((await client.next((frame) => frame.id === 3)).result?.session).toMatchObject({
+      model: "",
+      messages: 0,
+      turn_count: 0,
     });
   } finally {
     client.close();
@@ -549,6 +611,7 @@ test("daemon history reports active session counters over the socket", async () 
     socketPath,
     runtime: new InMemoryDaemonRuntime(new UsageRunner(), {
       currentProjectDirectory: directory,
+      model: "usage-model",
       sessionDirectory: join(directory, "sessions"),
     }),
   });
@@ -633,7 +696,7 @@ test("daemon history reports active session counters over the socket", async () 
       calls: 1,
       context_max: 128_000,
       input: 17,
-      model: "gpt-4o",
+      model: "usage-model",
       output: 9,
       total: 26,
       usage_complete: true,
@@ -1034,6 +1097,7 @@ test("daemon supplies real direct session controls used by the native TUI", asyn
     socketPath,
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
+      model: "direct-session-model",
       sessionDirectory: join(directory, "sessions"),
     }),
   });
@@ -1138,6 +1202,7 @@ test("daemon saves named sessions and routes the advertised btw alias", async ()
     socketPath,
     runtime: new InMemoryDaemonRuntime(undefined, {
       currentProjectDirectory: directory,
+      model: "save-command-model",
       sessionDirectory: join(directory, "sessions"),
     }),
   });
@@ -1689,6 +1754,40 @@ test("daemon implements native completion, slash, steering, mode, and provider c
     await client.next(eventFrame("init_done"));
     await client.next(eventFrame("status_update"));
 
+    client.send({
+      jsonrpc: "2.0",
+      id: 80,
+      method: "session.status",
+      params: { session_key: "controls" },
+    });
+    const matchedRuntimeStatus = (
+      await client.next((frame) => frame.id === 80)
+    ).result?.session;
+    expect(matchedRuntimeStatus).toMatchObject({
+      model: "native-model",
+      profile_name: "native",
+    });
+    expect(matchedRuntimeStatus).not.toHaveProperty("api_key");
+    expect(matchedRuntimeStatus).not.toHaveProperty("base_url");
+
+    runtime.reload({
+      base_url: "https://runtime-override.example/v1",
+      provider: "anthropic",
+    });
+    client.send({
+      jsonrpc: "2.0",
+      id: 81,
+      method: "session.status",
+      params: { session_key: "controls" },
+    });
+    expect(
+      (await client.next((frame) => frame.id === 81)).result?.session,
+    ).toMatchObject({ profile_name: null });
+    runtime.reload({
+      base_url: "https://provider.example/v1",
+      provider: "openai",
+    });
+
     client.send({ jsonrpc: "2.0", id: 9, method: "provider_list", params: {} });
     expect(
       (await client.next((frame) => frame.id === 9)).result?.profiles,
@@ -1698,10 +1797,45 @@ test("daemon implements native completion, slash, steering, mode, and provider c
       ]),
     );
 
-    const mockFetch: FetchImplementation = async () =>
-      new Response(JSON.stringify({ data: [{ id: "remote-model" }] }), {
-        status: 200,
-      });
+    profileStore.save({
+      apiKey: "inactive-secret",
+      baseUrl: "https://inactive.example/v1",
+      model: "inactive-saved-model",
+      name: "inactive",
+      provider: "openai",
+      setActive: false,
+    });
+    profileStore.save({
+      apiKey: "fallback-secret",
+      baseUrl: "https://failure.example/v1",
+      model: "fallback-saved-model",
+      name: "fallback",
+      provider: "openai",
+      setActive: false,
+    });
+    const modelRequests: Array<{ authorization: string | null; url: string }> = [];
+    const mockFetch: FetchImplementation = async (input, init) => {
+      const request = {
+        authorization: new Headers(init?.headers).get("authorization"),
+        url: String(input),
+      };
+      modelRequests.push(request);
+      if (request.url.includes("failure.example")) {
+        throw new Error(`upstream echoed ${request.authorization}`);
+      }
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: String(input).includes("inactive.example")
+                ? "inactive-remote-model"
+                : "remote-model",
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    };
     globalThis.fetch = mockFetch as typeof globalThis.fetch;
     client.send({
       jsonrpc: "2.0",
@@ -1710,19 +1844,100 @@ test("daemon implements native completion, slash, steering, mode, and provider c
       params: { base_url: "https://provider.example/v1", provider: "openai" },
     });
     expect((await client.next((frame) => frame.id === 10)).result).toEqual({
-      ok: true,
-      models: ["remote-model"],
-      source: "remote",
+      ok: false,
+      error:
+        "model discovery only accepts a stored profile name; save the provider profile first",
+      models: [],
     });
-    globalThis.fetch = nativeFetch;
+    expect(modelRequests).toEqual([]);
 
     client.send({
       jsonrpc: "2.0",
       id: 11,
+      method: "fetch_models",
+      params: { profile_name: "inactive" },
+    });
+    expect((await client.next((frame) => frame.id === 11)).result).toEqual({
+      ok: true,
+      models: ["inactive-remote-model"],
+      profile: "inactive",
+      source: "remote",
+    });
+    expect(profileStore.active()?.name).toBe("native");
+    expect(modelRequests.at(-1)).toEqual({
+      authorization: "Bearer inactive-secret",
+      url: "https://inactive.example/v1/models",
+    });
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 12,
+      method: "fetch_models",
+      params: { profile_name: "fallback" },
+    });
+    const fallback = (await client.next((frame) => frame.id === 12)).result;
+    expect(fallback).toMatchObject({
+      ok: true,
+      models: ["fallback-saved-model"],
+      profile: "fallback",
+      source: "profile",
+      warning: expect.stringContaining("[redacted]"),
+    });
+    expect(JSON.stringify(fallback)).not.toContain("fallback-secret");
+
+    const requestCount = modelRequests.length;
+    client.send({
+      jsonrpc: "2.0",
+      id: 13,
+      method: "fetch_models",
+      params: { profile_name: "missing" },
+    });
+    expect((await client.next((frame) => frame.id === 13)).result).toEqual({
+      ok: false,
+      error: "No provider profile named missing",
+      models: [],
+    });
+    expect(modelRequests).toHaveLength(requestCount);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 14,
+      method: "fetch_models",
+      params: {
+        profile: "native",
+        base_url: "https://attacker.example/v1",
+      },
+    });
+    expect((await client.next((frame) => frame.id === 14)).result).toEqual({
+      ok: false,
+      error:
+        "model discovery only accepts a stored profile name; save the provider profile first",
+      models: [],
+    });
+    expect(modelRequests).toHaveLength(requestCount);
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 15,
+      method: "fetch_models",
+      params: { base_url: "http://127.0.0.1:11434/v1" },
+    });
+    expect((await client.next((frame) => frame.id === 15)).result).toMatchObject({
+      ok: false,
+      error:
+        "model discovery only accepts a stored profile name; save the provider profile first",
+      models: [],
+    });
+    expect(modelRequests).toHaveLength(requestCount);
+    globalThis.fetch = nativeFetch;
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 16,
       method: "provider_delete",
       params: { name: "native" },
     });
-    expect((await client.next((frame) => frame.id === 11)).result).toEqual({
+    expect((await client.next((frame) => frame.id === 16)).result).toEqual({
       ok: true,
     });
     await client.next(eventFrame("init_done"));
@@ -2054,6 +2269,7 @@ test("daemon routes approval and question replies through the active connection"
     runtime: new InMemoryDaemonRuntime(runner, {
       currentProjectDirectory: directory,
       interactions,
+      model: "reply-model",
       sessionDirectory: join(directory, "sessions"),
     }),
     interactions,
@@ -2140,6 +2356,7 @@ test("disconnecting an interaction owner cancels approval and question waits", a
   const runtime = new InMemoryDaemonRuntime(new ReplyRunner(interactions), {
     currentProjectDirectory: directory,
     interactions,
+    model: "reply-model",
     sessionDirectory: join(directory, "sessions"),
   });
   const server = new DaemonServer({ socketPath, runtime, interactions });
@@ -2226,6 +2443,7 @@ test("daemon applies queued steering at a native runner boundary", async () => {
     socketPath,
     runtime: new InMemoryDaemonRuntime(runner, {
       currentProjectDirectory: directory,
+      model: "steer-model",
       sessionDirectory: join(directory, "sessions"),
     }),
   });

@@ -42,8 +42,9 @@ document records the remaining unsupported control surfaces for that path.
   handling for the documented Bun command subset.
 - `approval.respond` and `clarify.respond` resolve native pending requests.
 - `complete.path` and `complete.slash` use native completion.
-- `model.options` uses native `provider_list`; profile mutation uses
-  `provider_save`, `provider_select`, `provider_delete`, and `fetch_models`.
+- `model.options` combines native `provider_list` with live `session.status`;
+  selecting a profile lazily calls `fetch_models { profile_name }`. Profile
+  mutation uses `provider_save`, `provider_select`, and `provider_delete`.
 - `config.set` model/mode changes use `runtime.reload` / `set_mode`.
 
 Unsupported slash/plugin/skill commands return an explicit Bun-daemon result;
