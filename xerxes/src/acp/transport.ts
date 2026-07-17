@@ -172,9 +172,19 @@ export class StdioJsonRpcServer {
         return
       case 'respond_permission':
       case 'permission_respond':
+        if (typeof request.params.allow !== 'boolean') {
+          if (request.canReply) {
+            await send(acpJsonRpcFailure(
+              request.id,
+              ACP_JSON_RPC_ERRORS.invalidParams,
+              'respond_permission requires a boolean allow parameter',
+            ))
+          }
+          return
+        }
         await this.result(request, this.server.respondPermission(
           stringParameter(request.params.permission_id),
-          Boolean(request.params.allow),
+          request.params.allow,
         ), send)
         return
       case 'pending_permissions':

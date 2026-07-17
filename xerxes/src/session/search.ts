@@ -102,8 +102,11 @@ export class SessionFTSIndex {
          ORDER BY rank LIMIT ?`,
       ).all(...parameters) as unknown as FtsRow[]
       return rows.map(row => ftsResult(row))
-    } catch {
-      return this.searchLike(query, options, k)
+    } catch (error) {
+      // Only malformed user-supplied FTS expressions degrade to LIKE; real
+      // storage failures must surface instead of silently changing semantics.
+      if (isFtsSyntaxError(error)) return this.searchLike(query, options, k)
+      throw error
     }
   }
 
@@ -124,8 +127,8 @@ export class SessionFTSIndex {
   }
 
   private searchLike(query: string, options: SearchOptions, k: number): FtsSearchResult[] {
-    const filters = ['content LIKE ?']
-    const parameters: Array<string | number> = [`%${query}%`]
+    const filters = ["content LIKE ? ESCAPE '\\'"]
+    const parameters: Array<string | number> = [`%${escapeLike(query)}%`]
     if (options.agentId !== undefined) {
       filters.push('agent_id = ?')
       parameters.push(options.agentId)
@@ -155,6 +158,8 @@ export class SessionFTSIndex {
 }
 
 export interface SessionIndexOptions {
+  /** Borrowed connection shared with the owning store; the caller keeps lifecycle ownership. */
+  readonly database?: Database
   readonly dbPath?: string
   readonly embedder?: Embedder
 }
@@ -170,17 +175,25 @@ export class SessionIndex {
   readonly embedder: Embedder | undefined
   readonly ftsAvailable: boolean
   private readonly database: Database
+  private readonly ownsDatabase: boolean
+  private transactionDepth = 0
 
   constructor(options: SessionIndexOptions = {}) {
     this.dbPath = options.dbPath ?? ':memory:'
     this.embedder = options.embedder
-    if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
-    this.database = new Database(this.dbPath)
-    this.ftsAvailable = this.initialize()
+    this.ownsDatabase = options.database === undefined
+    if (this.ownsDatabase && this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
+    this.database = options.database ?? new Database(this.dbPath)
+    try {
+      this.ftsAvailable = this.initialize()
+    } catch (error) {
+      this.close()
+      throw error
+    }
   }
 
   close(): void {
-    this.database.close()
+    if (this.ownsDatabase) this.database.close()
   }
 
   indexSession(session: SessionRecord): number {
@@ -189,6 +202,34 @@ export class SessionIndex {
       for (const turn of session.turns) this.insertTurn(session.sessionId, turn)
     })
     return session.turns.length
+  }
+
+  /**
+   * Index only new or content-changed turns, falling back to a full rebuild
+   * when turns were removed. Appending one turn no longer re-embeds the whole
+   * session on every save.
+   */
+  indexSessionIncremental(session: SessionRecord): number {
+    const rows = this.database
+      .query('SELECT turn_id, prompt, response FROM session_turns WHERE session_id = ?')
+      .all(session.sessionId) as unknown as Array<{ turn_id?: unknown; prompt?: unknown; response?: unknown }>
+    const existing = new Map<string, readonly [string, string]>()
+    for (const row of rows) {
+      if (typeof row.turn_id === 'string') existing.set(row.turn_id, [stringCell(row.prompt), stringCell(row.response)])
+    }
+    const currentIds = new Set(session.turns.map(turn => turn.turnId))
+    for (const turnId of existing.keys()) {
+      if (!currentIds.has(turnId)) return this.indexSession(session)
+    }
+    const pending = session.turns.filter(turn => {
+      const prior = existing.get(turn.turnId)
+      return prior === undefined || prior[0] !== turn.prompt || prior[1] !== (turn.responseContent ?? '')
+    })
+    if (pending.length === 0) return 0
+    this.transaction(() => {
+      for (const turn of pending) this.insertTurn(session.sessionId, turn)
+    })
+    return pending.length
   }
 
   indexTurn(sessionId: string, turn: TurnRecord): void {
@@ -346,8 +387,8 @@ export class SessionIndex {
   }
 
   private likeCandidates(query: string, k: number, options: SearchOptions): IndexedTurnRow[] {
-    const clauses = ['(prompt LIKE ? OR response LIKE ?)']
-    const params: Array<string | number> = [`%${query}%`, `%${query}%`]
+    const clauses = ["(prompt LIKE ? ESCAPE '\\' OR response LIKE ? ESCAPE '\\')"]
+    const params: Array<string | number> = [`%${escapeLike(query)}%`, `%${escapeLike(query)}%`]
     if (options.agentId !== undefined) {
       clauses.push('agent_id = ?')
       params.push(options.agentId)
@@ -371,14 +412,22 @@ export class SessionIndex {
     if (this.ftsAvailable) this.database.query('DELETE FROM session_turns_fts WHERE session_id = ?').run(sessionId)
   }
 
-  private transaction(work: () => void): void {
+  /** Run work inside one SQLite transaction; nested calls join the open transaction. */
+  transaction(work: () => void): void {
+    if (this.transactionDepth > 0) {
+      work()
+      return
+    }
     this.database.run('BEGIN')
+    this.transactionDepth += 1
     try {
       work()
       this.database.run('COMMIT')
     } catch (error) {
       this.database.run('ROLLBACK')
       throw error
+    } finally {
+      this.transactionDepth -= 1
     }
   }
 }
@@ -460,6 +509,15 @@ function ftsResult(row: FtsRow): FtsSearchResult {
     content: stringCell(row.content),
     rank: numberCell(row.rank),
   }
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')
+}
+
+function isFtsSyntaxError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /fts5|syntax error|unterminated string/i.test(message)
 }
 
 function indexedFtsRow(row: IndexedFtsRow): IndexedTurnRow {

@@ -294,7 +294,10 @@ async function mapConcurrent<T>(items: readonly T[], maxParallel: number, run: (
       if (item !== undefined) await run(item)
     }
   }
-  await Promise.all(Array.from({ length: workerCount }, worker))
+  // Settle every worker so a late sibling rejection is observed instead of escaping unhandled.
+  const outcomes = await Promise.allSettled(Array.from({ length: workerCount }, worker))
+  const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected')
+  if (failure !== undefined) throw failure.reason
 }
 
 function errorMessage(error: unknown): string {

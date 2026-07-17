@@ -130,7 +130,8 @@ export class AnthropicMessagesClient implements LlmClient {
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
-      throw new ProviderError('anthropic', `completion request failed (${response.status}): ${await response.text()}`)
+      const body = await response.text()
+      throw new ProviderError('anthropic', `completion request failed (${response.status}): ${body.slice(0, 4_096)}`)
     }
 
     const completion = parseEvent(await response.text())
@@ -196,7 +197,8 @@ export class AnthropicMessagesClient implements LlmClient {
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
-      throw new ProviderError('anthropic', `stream request failed (${response.status}): ${await response.text()}`)
+      const body = await response.text()
+      throw new ProviderError('anthropic', `stream request failed (${response.status}): ${body.slice(0, 4_096)}`)
     }
     if (!response.body) {
       throw new ProviderError('anthropic', 'stream request returned no response body')
@@ -211,6 +213,15 @@ export class AnthropicMessagesClient implements LlmClient {
       const event = parseEvent(data)
       const type = stringAt(event, 'type')
       const eventUsage = anthropicUsage(event)
+      if (type === 'error') {
+        const error = asRecord(event.error)
+        const errorType = stringAt(error, 'type')
+        const message = stringAt(error, 'message')
+        throw new ProviderError(
+          'anthropic',
+          `stream returned API error${errorType ? ` (${errorType})` : ''}: ${message || 'unknown error'}`,
+        )
+      }
       if (type === 'message_start') {
         if (eventUsage) {
           yield { usage: eventUsage }
@@ -246,6 +257,8 @@ export class AnthropicMessagesClient implements LlmClient {
           yield { content: stringAt(delta, 'text') }
         } else if (deltaType === 'thinking_delta' && stringAt(delta, 'thinking')) {
           yield { thinking: stringAt(delta, 'thinking') }
+        } else if (deltaType === 'signature_delta' && stringAt(delta, 'signature')) {
+          yield { thinkingSignature: stringAt(delta, 'signature') }
         } else if (deltaType === 'input_json_delta') {
           const index = numberAt(event, 'index')
           const current = index === undefined ? undefined : pendingToolCalls.get(index)
@@ -260,8 +273,12 @@ export class AnthropicMessagesClient implements LlmClient {
         continue
       }
       if (type === 'message_delta') {
-        if (eventUsage) {
-          yield { usage: eventUsage }
+        const stopReason = anthropicFinishReason(stringAt(asRecord(event.delta), 'stop_reason'))
+        if (stopReason || eventUsage) {
+          yield {
+            ...(stopReason ? { finishReason: stopReason } : {}),
+            ...(eventUsage ? { usage: eventUsage } : {}),
+          }
         }
         continue
       }
@@ -363,7 +380,24 @@ function anthropicToolChoice(choice: ToolChoice | undefined): Record<string, str
   if (choice === 'auto') {
     return { type: 'auto' }
   }
+  if (choice === 'none') {
+    return { type: 'none' }
+  }
   return undefined
+}
+
+/** Map Anthropic stop reasons onto the neutral OpenAI-style finish vocabulary. */
+function anthropicFinishReason(stopReason: string): string {
+  if (stopReason === 'end_turn' || stopReason === 'stop_sequence') {
+    return 'stop'
+  }
+  if (stopReason === 'max_tokens') {
+    return 'length'
+  }
+  if (stopReason === 'tool_use') {
+    return 'tool_calls'
+  }
+  return stopReason
 }
 
 function completeToolCalls(calls: Map<number, PendingToolCall>): ToolCall[] {

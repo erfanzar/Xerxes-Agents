@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import type { ProviderProfile } from '../bridge/profiles.js'
+import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
 import { DEFAULT_PERMISSION_MODE, type PermissionMode } from '../streaming/permissions.js'
 import type { DaemonConfig } from './config.js'
 
@@ -14,6 +15,7 @@ export interface RuntimeConnection {
   readonly provider?: string
   readonly responsesApi?: boolean
   readonly temperature?: number
+  readonly topK?: number
   readonly topP?: number
 }
 
@@ -31,8 +33,15 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
   const apiKey = stringSetting(runtime.api_key) || useProfile?.api_key
   const provider = stringSetting(runtime.provider) || useProfile?.provider
   const maxTokens = numberSetting(runtime.max_tokens)
+    ?? numberSetting(useProfile?.sampling.max_tokens)
   const temperature = numberSetting(runtime.temperature)
+    ?? numberSetting(useProfile?.sampling.temperature)
+    ?? DEFAULT_TEMPERATURE
+  const topK = numberSetting(runtime.top_k)
+    ?? numberSetting(useProfile?.sampling.top_k)
+    ?? DEFAULT_TOP_K
   const topP = numberSetting(runtime.top_p)
+    ?? numberSetting(useProfile?.sampling.top_p)
   const responsesApi = booleanSetting(runtime.responses_api)
   return {
     model,
@@ -42,7 +51,8 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
     ...(provider ? { provider } : {}),
     ...(responsesApi === undefined ? {} : { responsesApi }),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
-    ...(temperature !== undefined ? { temperature } : {}),
+    temperature,
+    topK,
     ...(topP !== undefined ? { topP } : {}),
   }
 }

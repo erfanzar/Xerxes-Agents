@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -155,7 +155,7 @@ test('fingerprint does not invent source contents when the injected reader fails
   })).rejects.toThrow('source root is unavailable')
 })
 
-test('daemon logger writes atomic daily JSONL records and rotates using the injected UTC clock', async () => {
+test('daemon logger appends daily JSONL records and rotates using the injected UTC clock', async () => {
   const files = new MemoryLogFiles()
   const output = new MemoryOutput()
   const timestamps = [
@@ -167,7 +167,6 @@ test('daemon logger writes atomic daily JSONL records and rotates using the inje
     files,
     output,
     clock: () => timestamps.shift() ?? new Date('2026-07-14T00:00:01.000Z'),
-    idFactory: sequence('one', 'two'),
   })
 
   const first = await logger.info('daemon_started', { worker: 1 })
@@ -175,13 +174,9 @@ test('daemon logger writes atomic daily JSONL records and rotates using the inje
 
   expect(first).toEqual({ ts: '2026-07-13T23:59:58.000Z', level: 'info', event: 'daemon_started', worker: 1 })
   expect(second).toEqual({ ts: '2026-07-14T00:00:01.000Z', level: 'error', event: 'turn_failed', reason: 'timeout' })
-  expect(files.directWrites).toEqual([
-    '/logs/.daemon-2026-07-13.one.tmp',
-    '/logs/.daemon-2026-07-14.two.tmp',
-  ])
-  expect(files.renames).toEqual([
-    ['/logs/.daemon-2026-07-13.one.tmp', '/logs/daemon-2026-07-13.jsonl'],
-    ['/logs/.daemon-2026-07-14.two.tmp', '/logs/daemon-2026-07-14.jsonl'],
+  expect(files.appends).toEqual([
+    ['/logs/daemon-2026-07-13.jsonl', '{"ts":"2026-07-13T23:59:58.000Z","level":"info","event":"daemon_started","worker":1}\n'],
+    ['/logs/daemon-2026-07-14.jsonl', '{"ts":"2026-07-14T00:00:01.000Z","level":"error","event":"turn_failed","reason":"timeout"}\n'],
   ])
   expect(files.text('/logs/daemon-2026-07-13.jsonl')).toBe(
     '{"ts":"2026-07-13T23:59:58.000Z","level":"info","event":"daemon_started","worker":1}\n',
@@ -203,7 +198,6 @@ test('daemon logger serializes concurrent appends and closes without retaining c
     files,
     output,
     clock: () => new Date(`2026-07-13T12:00:0${timestamp++}.000Z`),
-    idFactory: sequence('first', 'second'),
   })
 
   const [first, second] = await Promise.all([
@@ -224,23 +218,42 @@ test('daemon logger serializes concurrent appends and closes without retaining c
   await expect(logger.info('after_close')).rejects.toThrow('daemon logger is closed')
 })
 
-test('Bun daemon log files persist a complete daily JSONL replacement through the real filesystem port', async () => {
+test('daemon logger appends grow the daily file instead of rewriting it', async () => {
+  const files = new MemoryLogFiles()
+  let timestamp = 0
+  const logger = new DaemonLogger({
+    directory: '/logs',
+    files,
+    output: new MemoryOutput(),
+    clock: () => new Date(`2026-07-13T12:00:0${timestamp++}.000Z`),
+  })
+
+  for (let index = 0; index < 5; index += 1) await logger.info('tick', { index })
+  // One O_APPEND write per record, never a full-file rewrite.
+  expect(files.appends).toHaveLength(5)
+  for (const [, content] of files.appends) expect(content.startsWith('{')).toBe(true)
+  expect(files.text('/logs/daemon-2026-07-13.jsonl')?.split('\n').filter(Boolean)).toHaveLength(5)
+})
+
+test('Bun daemon log files append daily JSONL through the real filesystem port', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-daemon-log-'))
-  const temporary = join(directory, '.daemon-2026-07-13.atomic.tmp')
   const output = new MemoryOutput()
+  let timestamp = 0
   const logger = new DaemonLogger({
     directory,
     files: new BunDaemonLogFiles(),
     output,
-    clock: () => new Date('2026-07-13T12:00:00.000Z'),
-    idFactory: () => 'atomic',
+    clock: () => new Date(`2026-07-13T12:00:0${timestamp++}.000Z`),
   })
   try {
     await logger.info('persisted', { source: 'bun' })
+    await logger.info('second', { source: 'bun' })
     expect(await Bun.file(join(directory, 'daemon-2026-07-13.jsonl')).text()).toBe(
-      '{"ts":"2026-07-13T12:00:00.000Z","level":"info","event":"persisted","source":"bun"}\n',
+      '{"ts":"2026-07-13T12:00:00.000Z","level":"info","event":"persisted","source":"bun"}\n'
+      + '{"ts":"2026-07-13T12:00:01.000Z","level":"info","event":"second","source":"bun"}\n',
     )
-    expect(await Bun.file(temporary).exists()).toBeFalse()
+    // Appends leave no temporary files behind.
+    expect((await readdir(directory)).filter(entry => entry.endsWith('.tmp'))).toEqual([])
   } finally {
     await logger.close()
     await rm(directory, { recursive: true, force: true })
@@ -262,34 +275,17 @@ class MemorySourceReader implements DaemonSourceReader {
 }
 
 class MemoryLogFiles implements DaemonLogFiles {
-  readonly directWrites: string[] = []
+  readonly appends: Array<readonly [string, string]> = []
   readonly directories: string[] = []
-  readonly renames: Array<readonly [string, string]> = []
   private readonly content = new Map<string, string>()
+
+  async appendText(path: string, content: string): Promise<void> {
+    this.content.set(path, (this.content.get(path) ?? '') + content)
+    this.appends.push([path, content])
+  }
 
   async ensureDirectory(directory: string): Promise<void> {
     this.directories.push(directory)
-  }
-
-  async readText(path: string): Promise<string | undefined> {
-    return this.content.get(path)
-  }
-
-  async remove(path: string): Promise<void> {
-    this.content.delete(path)
-  }
-
-  async rename(from: string, to: string): Promise<void> {
-    const content = this.content.get(from)
-    if (content === undefined) throw new Error('temporary log file was not written')
-    this.content.set(to, content)
-    this.content.delete(from)
-    this.renames.push([from, to])
-  }
-
-  async writeText(path: string, content: string): Promise<void> {
-    this.content.set(path, content)
-    this.directWrites.push(path)
   }
 
   text(path: string): string | undefined {
@@ -307,9 +303,4 @@ class MemoryOutput implements DaemonLogOutput {
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value)
-}
-
-function sequence(...values: string[]): () => string {
-  let index = 0
-  return () => values[index++] ?? `overflow-${index}`
 }

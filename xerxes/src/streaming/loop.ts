@@ -6,7 +6,9 @@ import {
   type ToolExecutor,
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
+import type { HookPoint, HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, TokenUsage } from '../llms/client.js'
+import { classifyError } from '../runtime/errorClassifier.js'
 import { LoopDetector, ToolLoopError } from '../runtime/loopDetector.js'
 import {
   inspectObjectiveResponse,
@@ -14,7 +16,7 @@ import {
   type ObjectiveToolExecutionEvidence,
 } from '../runtime/objectiveGuard.js'
 import type { ChatMessage } from '../types/messages.js'
-import type { ToolCall, ToolDefinition } from '../types/toolCalls.js'
+import { isJsonObject, type ToolCall, type ToolDefinition } from '../types/toolCalls.js'
 import type {
   AgentState,
   PermissionRequest,
@@ -35,6 +37,10 @@ import { ThinkingParser, type ThinkingStreamParser } from './thinkingParser.js'
 /** Distinct productive tool rounds are unbounded unless the caller opts into a budget. */
 export const DEFAULT_MAX_TOOL_TURNS = Number.POSITIVE_INFINITY
 export const DEFAULT_RETRY_DELAYS = [1_000, 2_000] as const
+/** Generous default chunk-arrival budget before a provider stream is treated as stalled. */
+export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
+/** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */
+export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
 
 export interface TurnRequest {
   readonly agentId?: string
@@ -50,6 +56,7 @@ export interface TurnRequest {
   readonly state: AgentState
   readonly systemPrompt?: string
   readonly temperature?: number
+  readonly topK?: number
   readonly topP?: number
   readonly tools?: readonly ToolDefinition[]
   readonly userMessage: string
@@ -63,6 +70,8 @@ export interface TurnDependencies {
   readonly drainAgentEvents?: () => readonly string[]
   /** Supplies steering text at safe provider/tool boundaries for daemon turns. */
   readonly drainSteer?: () => readonly string[]
+  /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
+  readonly hookRunner?: HookRunner
   readonly llm: LlmClient
   readonly loopDetector?: LoopDetector
   /**
@@ -74,6 +83,13 @@ export interface TurnDependencies {
   readonly permissionBroker?: PermissionBroker
   readonly policy?: ToolPolicy
   readonly retryDelays?: readonly number[]
+  /**
+   * Abort a provider attempt that yields no chunk within this budget (ms), so a
+   * socket held open without data stalls one attempt instead of the whole turn.
+   * Defaults to {@link DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS}; non-positive or
+   * non-finite values disable the watchdog.
+   */
+  readonly streamInactivityTimeoutMs?: number
   /** Override parser behavior for an isolated diagnostic streaming surface. */
   readonly thinkingParserFactory?: () => ThinkingStreamParser
   readonly toolExecutor?: ToolExecutor
@@ -92,6 +108,9 @@ export async function* runTurn(
   const permissionMode = request.permissionMode ?? DEFAULT_PERMISSION_MODE
   const maxToolTurns = request.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS
   const retryDelays = dependencies.retryDelays ?? DEFAULT_RETRY_DELAYS
+  const streamInactivityTimeoutMs =
+    dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
+  const hookRunner = dependencies.hookRunner
   const loopDetector = dependencies.loopDetector ?? new LoopDetector()
   const toolContext: ToolExecutionContext = {
     ...(request.agentId ? { agentId: request.agentId } : {}),
@@ -103,6 +122,13 @@ export async function* runTurn(
   state.metadata.model = request.model
   state.turnCount += 1
   loopDetector.reset()
+  await dispatchHook(hookRunner, 'on_turn_start', {
+    ...(request.agentId ? { agentId: request.agentId } : {}),
+    model: request.model,
+    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    turnCount: state.turnCount,
+    userMessage: request.userMessage,
+  })
 
   let inputTokens = 0
   let outputTokens = 0
@@ -123,6 +149,24 @@ export async function* runTurn(
       ? {}
       : { objective_guard_max_retries: request.objectiveGuardMaxRetries },
   )
+  /** Record one tool result, letting tool_result_persist hooks rewrite it first. */
+  const recordToolResult = async (result: ToolResult, call: ToolCall): Promise<ToolResult> => {
+    if (hookRunner === undefined) {
+      appendToolResult(state, result, call, objectiveToolExecutions)
+      return result
+    }
+    const mutated = hookMutation(await dispatchHook(hookRunner, 'tool_result_persist', {
+      name: result.name,
+      permitted: result.permitted,
+      result: result.result,
+      toolCallId: result.toolCallId,
+    }), result.result)
+    const recorded = typeof mutated === 'string' && mutated !== result.result
+      ? { ...result, result: mutated }
+      : result
+    appendToolResult(state, recorded, call, objectiveToolExecutions)
+    return recorded
+  }
 
   for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
     appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
@@ -135,26 +179,41 @@ export async function* runTurn(
         })
       }
     }
-    const parser =
-      dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
-    const textParts: string[] = []
-    const thinkingParts: string[] = []
+    // Per-attempt accumulators sit at round scope so the surviving attempt is
+    // readable after the retry loop, but every attempt starts from a clean
+    // slate: partial text, thinking, usage, and tool calls from a failed
+    // attempt must never leak into the persisted assistant message.
+    let parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
+    let textParts: string[] = []
+    let thinkingParts: string[] = []
     let thinkingSignature: string | undefined
     let roundToolCalls: readonly ToolCall[] = []
     let lastUsage: TokenUsage | undefined
     let streamCompleted = false
-    const textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+    let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
 
     for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+      parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
+      textParts = []
+      thinkingParts = []
+      thinkingSignature = undefined
+      roundToolCalls = []
+      lastUsage = undefined
+      textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+      const attemptSignal = linkAttemptSignal(signal)
       try {
         apiCallsCount += 1
-        for await (const delta of dependencies.llm.stream(
-          completionRequest(
-            request,
-            state.messages,
-            forceToolFreeSummary ? [] : request.tools,
+        for await (const delta of watchProviderStream(
+          dependencies.llm.stream(
+            completionRequest(
+              request,
+              state.messages,
+              forceToolFreeSummary ? [] : request.tools,
+            ),
+            attemptSignal.controller.signal,
           ),
-          signal,
+          streamInactivityTimeoutMs,
+          attemptSignal,
         )) {
           const parts = processDelta(delta, parser, textParts, thinkingParts)
           for (const part of parts) {
@@ -187,13 +246,29 @@ export async function* runTurn(
         // successful-round usage as a complete total for the turn.
         usageComplete = false
         reasoningUsageComplete = false
-        const final = attempt === retryDelays.length || signal?.aborted === true
+        const classified = classifyError(error)
+        await dispatchHook(hookRunner, 'on_error', {
+          ...(request.agentId ? { agentId: request.agentId } : {}),
+          attempt: attempt + 1,
+          error: errorMessage(error),
+          kind: classified.kind,
+          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        })
+        // Only transient failures earn another attempt. Auth, validation,
+        // configuration, and other terminal errors fail the round at once.
+        const final = attempt === retryDelays.length
+          || !classified.retryable
+          || signal?.aborted === true
+        const suggestedDelay = classified.suggestedBackoffSeconds === undefined
+          ? 0
+          : Math.min(MAX_SUGGESTED_RETRY_DELAY_MS, classified.suggestedBackoffSeconds * 1_000)
+        const delay = final ? 0 : Math.max(retryDelays[attempt] ?? 0, suggestedDelay)
         yield {
           type: 'provider_retry',
           error: errorMessage(error),
           attempt: attempt + 1,
           maxAttempts: retryDelays.length + 1,
-          delay: final ? 0 : (retryDelays[attempt] ?? 0),
+          delay,
           final,
         }
         if (final) {
@@ -203,10 +278,9 @@ export async function* runTurn(
           streamCompleted = true
           break
         }
-        await (dependencies.delay ?? defaultDelay)(
-          retryDelays[attempt] ?? 0,
-          signal,
-        )
+        await (dependencies.delay ?? defaultDelay)(delay, signal)
+      } finally {
+        attemptSignal.release()
       }
     }
 
@@ -256,8 +330,7 @@ export async function* runTurn(
     if (unconfigured.length) {
       toolCallsCount += unconfigured.length
       for (const call of unconfigured) {
-        const result = unconfiguredToolResult(call)
-        appendToolResult(state, result, call, objectiveToolExecutions)
+        const result = await recordToolResult(unconfiguredToolResult(call), call)
         yield { type: 'tool_end', result }
       }
       if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
@@ -333,8 +406,7 @@ export async function* runTurn(
       }
       if (signal?.aborted) {
         for (const cancelled of roundToolCalls.slice(index)) {
-          const result = cancelledToolResult(cancelled)
-          appendToolResult(state, result, cancelled, objectiveToolExecutions)
+          const result = await recordToolResult(cancelledToolResult(cancelled), cancelled)
           yield { type: 'tool_end', result }
         }
         break
@@ -346,8 +418,7 @@ export async function* runTurn(
       if (loopEvent.severity === 'critical') {
         const loopError = new ToolLoopError(loopEvent)
         criticalToolLoop ??= loopError
-        const result = failedToolResult(call, loopError)
-        appendToolResult(state, result, call, objectiveToolExecutions)
+        const result = await recordToolResult(failedToolResult(call, loopError), call)
         yield { type: 'tool_end', result }
         continue
       }
@@ -359,8 +430,7 @@ export async function* runTurn(
         request.agentId,
       )
       if (permission === 'deny') {
-        const result = deniedToolResult(call)
-        appendToolResult(state, result, call, objectiveToolExecutions)
+        const result = await recordToolResult(deniedToolResult(call), call)
         yield { type: 'tool_end', result }
         continue
       }
@@ -376,41 +446,61 @@ export async function* runTurn(
         // may land while a prompt is open, so an approval that races the abort
         // must not start a privileged tool with an already-aborted signal.
         if (signal?.aborted) {
-          const result = cancelledToolResult(call)
-          appendToolResult(state, result, call, objectiveToolExecutions)
+          const result = await recordToolResult(cancelledToolResult(call), call)
           yield { type: 'tool_end', result }
           continue
         }
         if (decision === 'reject') {
-          const result = deniedToolResult(call)
-          appendToolResult(state, result, call, objectiveToolExecutions)
+          const result = await recordToolResult(deniedToolResult(call), call)
           yield { type: 'tool_end', result }
           continue
         }
       }
 
-      yield { type: 'tool_start', call }
+      const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
+        ...(request.agentId ? { agentId: request.agentId } : {}),
+        arguments: call.function.arguments,
+        name: call.function.name,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        toolCallId: call.id,
+      })
+      const effectiveCall = applyToolArgumentsMutation(
+        call,
+        hookMutation(beforeResult, call.function.arguments),
+      )
+
+      yield { type: 'tool_start', call: effectiveCall }
       const startedAt = performance.now()
       try {
         const output = dependencies.toolExecutor
-          ? await dependencies.toolExecutor.execute(call, toolContext, signal)
-          : `Tool ${call.function.name} is unavailable.`
-        const result: ToolResult = {
-          name: call.function.name,
+          ? await dependencies.toolExecutor.execute(effectiveCall, toolContext, signal)
+          : `Tool ${effectiveCall.function.name} is unavailable.`
+        let result: ToolResult = {
+          name: effectiveCall.function.name,
           result: output,
           permitted: true,
-          toolCallId: call.id,
+          toolCallId: effectiveCall.id,
           durationMs: performance.now() - startedAt,
         }
-        appendToolResult(state, result, call, objectiveToolExecutions)
-        yield { type: 'tool_end', result }
+        const afterResult = await dispatchHook(hookRunner, 'after_tool_call', {
+          ...(request.agentId ? { agentId: request.agentId } : {}),
+          arguments: effectiveCall.function.arguments,
+          name: effectiveCall.function.name,
+          result: result.result,
+          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+          toolCallId: effectiveCall.id,
+        })
+        const mutatedOutput = hookMutation(afterResult, result.result)
+        if (typeof mutatedOutput === 'string' && mutatedOutput !== result.result) {
+          result = { ...result, result: mutatedOutput }
+        }
+        const recorded = await recordToolResult(result, effectiveCall)
+        yield { type: 'tool_end', result: recorded }
       } catch (error) {
-        const result = failedToolResult(
-          call,
-          error,
-          performance.now() - startedAt,
+        const result = await recordToolResult(
+          failedToolResult(effectiveCall, error, performance.now() - startedAt),
+          effectiveCall,
         )
-        appendToolResult(state, result, call, objectiveToolExecutions)
         yield { type: 'tool_end', result }
       }
     }
@@ -442,6 +532,15 @@ export async function* runTurn(
 
   state.totalApiCalls += apiCallsCount
   state.usageComplete &&= usageComplete
+  await dispatchHook(hookRunner, 'on_turn_end', {
+    ...(request.agentId ? { agentId: request.agentId } : {}),
+    apiCallsCount,
+    model: request.model,
+    ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    toolCallsCount,
+    turnCount: state.turnCount,
+    usageComplete,
+  })
   yield {
     type: 'turn_done',
     apiCallsCount,
@@ -587,6 +686,7 @@ function completionRequest(
     ...(request.temperature !== undefined
       ? { temperature: request.temperature }
       : {}),
+    ...(request.topK !== undefined ? { topK: request.topK } : {}),
     ...(request.topP !== undefined ? { topP: request.topP } : {}),
   }
 }
@@ -786,4 +886,148 @@ function defaultDelay(
       { once: true },
     )
   })
+}
+
+/** Raised when a provider stream yields no chunk inside the inactivity budget. */
+export class StreamInactivityError extends Error {
+  readonly timeoutMs: number
+
+  constructor(timeoutMs: number) {
+    super(`Provider stream stalled: no chunk received within ${timeoutMs}ms (stream inactivity timeout)`)
+    this.name = 'StreamInactivityError'
+    this.timeoutMs = timeoutMs
+  }
+}
+
+interface AttemptSignal {
+  readonly controller: AbortController
+  readonly release: () => void
+}
+
+/** Chain a per-attempt controller to the caller's signal so the watchdog can cancel one attempt only. */
+function linkAttemptSignal(signal: AbortSignal | undefined): AttemptSignal {
+  const controller = new AbortController()
+  if (signal === undefined) {
+    return { controller, release: () => undefined }
+  }
+  if (signal.aborted) {
+    controller.abort(signal.reason)
+    return { controller, release: () => undefined }
+  }
+  const forward = () => controller.abort(signal.reason)
+  signal.addEventListener('abort', forward, { once: true })
+  return { controller, release: () => signal.removeEventListener('abort', forward) }
+}
+
+/**
+ * Wrap provider iteration with an inactivity watchdog. The timer only exists
+ * while waiting for the next chunk, so it cannot fire during tool execution,
+ * and it is cleared on completion, error, and consumer-close paths.
+ */
+async function* watchProviderStream(
+  stream: AsyncIterable<LlmDelta>,
+  timeoutMs: number,
+  attempt: AttemptSignal,
+): AsyncGenerator<LlmDelta> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    yield* stream
+    return
+  }
+  const iterator = stream[Symbol.asyncIterator]()
+  try {
+    while (true) {
+      const result = await nextDeltaWithTimeout(iterator, timeoutMs, attempt)
+      if (result.done) {
+        return
+      }
+      yield result.value
+    }
+  } finally {
+    // Best-effort release of the abandoned provider stream. A stalled provider
+    // may never settle its pending read, so cleanup must not block retry.
+    void iterator.return?.()?.catch(() => undefined)
+  }
+}
+
+async function nextDeltaWithTimeout(
+  iterator: AsyncIterator<LlmDelta>,
+  timeoutMs: number,
+  attempt: AttemptSignal,
+): Promise<IteratorResult<LlmDelta>> {
+  const signal = attempt.controller.signal
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let onAbort: (() => void) | undefined
+  const pending = iterator.next()
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new StreamInactivityError(timeoutMs)
+          attempt.controller.abort(error)
+          reject(error)
+        }, timeoutMs)
+      }),
+      new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason)
+          return
+        }
+        onAbort = () => reject(signal.reason)
+        signal.addEventListener('abort', onAbort, { once: true })
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer)
+    }
+    if (onAbort !== undefined) {
+      signal.removeEventListener('abort', onAbort)
+    }
+    // A timed-out or aborted attempt abandons the pending provider read; keep
+    // its late rejection from surfacing as an unhandled rejection.
+    void pending.catch(() => undefined)
+  }
+}
+
+/**
+ * Dispatch one plugin hook point without letting plugin code break the turn.
+ * HookRunner.run resolves with every hook result (sync and async); a
+ * runner-level rejection is tolerated the way per-callback failures are
+ * isolated inside the runner.
+ */
+async function dispatchHook(
+  hookRunner: HookRunner | undefined,
+  point: HookPoint,
+  payload: Record<string, unknown>,
+): Promise<unknown> {
+  if (hookRunner === undefined) {
+    return undefined
+  }
+  try {
+    return await hookRunner.run(point, payload)
+  } catch {
+    return undefined
+  }
+}
+
+/** Latest non-empty hook return wins, matching sequential mutation application. */
+function hookMutation(result: unknown, current: unknown): unknown {
+  if (Array.isArray(result)) {
+    for (let index = result.length - 1; index >= 0; index -= 1) {
+      if (result[index] !== undefined && result[index] !== null) {
+        return result[index]
+      }
+    }
+    return current
+  }
+  return result ?? current
+}
+
+/** Apply a before_tool_call argument mutation only when it is a real JSON object. */
+function applyToolArgumentsMutation(call: ToolCall, mutated: unknown): ToolCall {
+  if (!isJsonObject(mutated) || mutated === call.function.arguments) {
+    return call
+  }
+  return { ...call, function: { ...call.function, arguments: mutated } }
 }

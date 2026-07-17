@@ -40,45 +40,12 @@ export class HookRunner {
     callbacks.push(callback)
   }
 
-  run(point: HookPoint, payload: HookPayload = {}): unknown {
-    const callbacks = this.hooks.get(point) ?? []
-    if (MUTATION_HOOKS.has(point)) {
-      const key = point === 'before_tool_call' ? 'arguments' : 'result'
-      let value = payload[key]
-      for (const callback of callbacks) {
-        try {
-          const result = callback(payload)
-          if (isPromiseLike(result)) {
-            void result.catch(() => undefined)
-            continue
-          }
-          if (result !== undefined && result !== null) {
-            value = result
-            payload[key] = value
-          }
-        } catch {
-          // Plugin hooks cannot prevent a tool call or persistence operation.
-        }
-      }
-      return value
-    }
-    const results: unknown[] = []
-    for (const callback of callbacks) {
-      try {
-        const result = callback(payload)
-        if (isPromiseLike(result)) {
-          void result.then(value => { if (value !== undefined && value !== null) results.push(value) }).catch(() => undefined)
-        } else if (result !== undefined && result !== null) {
-          results.push(result)
-        }
-      } catch {
-        // Observer failure is intentionally isolated.
-      }
-    }
-    return results
-  }
-
-  async runAsync(point: HookPoint, payload: HookPayload = {}): Promise<unknown> {
+  /**
+   * Run every callback for a point, awaiting asynchronous hooks before resolving.
+   * Mutation hooks thread their returned value through the payload; observer hooks
+   * resolve to the complete ordered list of non-empty results.
+   */
+  async run(point: HookPoint, payload: HookPayload = {}): Promise<unknown> {
     const callbacks = this.hooks.get(point) ?? []
     if (MUTATION_HOOKS.has(point)) {
       const key = point === 'before_tool_call' ? 'arguments' : 'result'
@@ -90,8 +57,8 @@ export class HookRunner {
             value = result
             payload[key] = value
           }
-        } catch {
-          // See synchronous path above.
+        } catch (error) {
+          reportHookFailure(point, error)
         }
       }
       return value
@@ -101,11 +68,16 @@ export class HookRunner {
       try {
         const result = await callback(payload)
         if (result !== undefined && result !== null) results.push(result)
-      } catch {
-        // See synchronous path above.
+      } catch (error) {
+        reportHookFailure(point, error)
       }
     }
     return results
+  }
+
+  /** Alias of {@link run} retained for existing asynchronous dispatch sites. */
+  async runAsync(point: HookPoint, payload: HookPayload = {}): Promise<unknown> {
+    return this.run(point, payload)
   }
 
   unregister(point: HookPoint, callback: HookCallback): boolean {
@@ -118,6 +90,8 @@ export class HookRunner {
   }
 }
 
-function isPromiseLike(value: unknown): value is Promise<unknown> {
-  return typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function'
+/** Keep a hook failure observable without letting it prevent a tool call or persistence operation. */
+function reportHookFailure(point: HookPoint, error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error)
+  console.error(`Hook '${point}' callback failed: ${detail}`)
 }

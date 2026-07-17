@@ -356,6 +356,53 @@ describe("OpenTUI dynamic model picker", () => {
     }
   });
 
+  it("keeps a failed options load inline and retryable without taking over the picker", async () => {
+    let attempts = 0;
+    const request = vi.fn((method: string) => {
+      if (method === "model.options") {
+        attempts += 1;
+        return attempts === 1
+          ? Promise.reject(new Error("catalog unreachable"))
+          : Promise.resolve(options);
+      }
+      return Promise.reject(new Error(`unexpected request: ${method}`));
+    });
+    const { setup } = await renderPicker(request);
+
+    try {
+      // The failure renders inline inside the normal provider stage — no
+      // full-screen error takeover.
+      const errorFrame = setup.captureCharFrame();
+      expect(errorFrame).toContain("Select provider · step 1/2");
+      expect(errorFrame).toContain("error: catalog unreachable");
+      expect(errorFrame).toContain("no providers available");
+
+      // Browsing keys keep their normal meaning: filter input is accepted.
+      await act(async () => {
+        await setup.mockInput.typeText("kimi");
+      });
+      await setup.flush();
+      expect(setup.captureCharFrame()).toContain("filter: kimi");
+      expect(setup.captureCharFrame()).toContain("no providers match");
+
+      act(() => setup.mockInput.pressKey("u", { ctrl: true }));
+      await setup.flush();
+
+      // Ctrl+R retries the load and restores full browsing.
+      act(() => setup.mockInput.pressKey("r", { ctrl: true }));
+      await flushPromises(setup);
+
+      const retried = setup.captureCharFrame();
+      expect(retried).toContain("Kimi work");
+      expect(retried).not.toContain("error: catalog unreachable");
+      expect(
+        request.mock.calls.filter(([method]) => method === "model.options"),
+      ).toHaveLength(2);
+    } finally {
+      act(() => setup.renderer.destroy());
+    }
+  });
+
   it("retries one failed profile without reloading every provider", async () => {
     let attempts = 0;
     const request = vi.fn((method: string) => {

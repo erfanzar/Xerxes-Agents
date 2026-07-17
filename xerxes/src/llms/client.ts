@@ -14,8 +14,8 @@ import { SSEParser } from '../streaming/sse.js'
 import { AnthropicMessagesClient } from './anthropic.js'
 import { GeminiClient } from './gemini.js'
 import { OllamaClient } from './ollama.js'
-import type { ChatMessage } from '../types/messages.js'
-import { messagesToOpenAi } from '../types/messages.js'
+import type { ChatMessage, MessageContent } from '../types/messages.js'
+import { messageText, messagesToOpenAi } from '../types/messages.js'
 import type { JsonObject, ToolCall, ToolChoice, ToolDefinition } from '../types/toolCalls.js'
 import { parseToolArguments } from '../types/toolCalls.js'
 import {
@@ -30,6 +30,7 @@ import {
   providerModel,
   resolveProvider,
 } from './providerRegistry.js'
+import { DEFAULT_TEMPERATURE } from './samplingDefaults.js'
 
 export interface TokenUsage {
   readonly cacheCreationTokens?: number
@@ -167,13 +168,14 @@ export class OpenAiCompatibleClient implements LlmClient {
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
       headers: openAiCompatibleHeaders(this.providerName, this.apiKey, 'application/json'),
-      body: JSON.stringify(openAiCompatiblePayload(request, this.providerName, this.baseUrl, false)),
+      body: JSON.stringify(openAiCompatiblePayload(request, this.providerName, false)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
+      const body = await response.text()
       throw new ProviderError(
         this.providerName,
-        `completion request failed (${response.status}): ${await response.text()}`,
+        `completion request failed (${response.status}): ${body.slice(0, 4_096)}`,
       )
     }
 
@@ -204,13 +206,14 @@ export class OpenAiCompatibleClient implements LlmClient {
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
       headers: openAiCompatibleHeaders(this.providerName, this.apiKey, 'text/event-stream'),
-      body: JSON.stringify(openAiCompatiblePayload(request, this.providerName, this.baseUrl, true)),
+      body: JSON.stringify(openAiCompatiblePayload(request, this.providerName, true)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
+      const body = await response.text()
       throw new ProviderError(
         this.providerName,
-        `stream request failed (${response.status}): ${await response.text()}`,
+        `stream request failed (${response.status}): ${body.slice(0, 4_096)}`,
       )
     }
     if (!response.body) {
@@ -224,6 +227,7 @@ export class OpenAiCompatibleClient implements LlmClient {
         break
       }
       const chunk = parseJsonObject(data, this.providerName)
+      throwIfStreamError(chunk, this.providerName)
       const choice = firstChoice(chunk)
       const delta = asRecord(choice?.delta)
       const content = stringAt(delta, 'content')
@@ -293,13 +297,14 @@ export class ResponsesApiClient implements LlmClient {
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
       headers: responsesHeaders(this.providerName, this.apiKey, 'application/json'),
-      body: JSON.stringify(responsesPayload(request, this.providerName, this.baseUrl, false)),
+      body: JSON.stringify(responsesPayload(request, this.providerName, false)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
+      const body = await response.text()
       throw new ProviderError(
         this.providerName,
-        'Responses API completion request failed (' + response.status + '): ' + await response.text(),
+        'Responses API completion request failed (' + response.status + '): ' + body.slice(0, 4_096),
       )
     }
     return parseResponsesCompletion(parseJsonObject(await response.text(), this.providerName))
@@ -310,13 +315,14 @@ export class ResponsesApiClient implements LlmClient {
     const response = await this.fetchImplementation(endpoint, {
       method: 'POST',
       headers: responsesHeaders(this.providerName, this.apiKey, 'text/event-stream'),
-      body: JSON.stringify(responsesPayload(request, this.providerName, this.baseUrl, true)),
+      body: JSON.stringify(responsesPayload(request, this.providerName, true)),
       ...(signal ? { signal } : {}),
     })
     if (!response.ok) {
+      const body = await response.text()
       throw new ProviderError(
         this.providerName,
-        'Responses API stream request failed (' + response.status + '): ' + await response.text(),
+        'Responses API stream request failed (' + response.status + '): ' + body.slice(0, 4_096),
       )
     }
     if (!response.body) {
@@ -526,7 +532,7 @@ export function getLlmModelInfo(
   return {
     provider: resolveProvider(model, overrides),
     model,
-    temperature: options.temperature ?? 0.7,
+    temperature: options.temperature ?? DEFAULT_TEMPERATURE,
     maxTokens: options.maxTokens ?? 2_048,
     maxModelLen: getContextLimit(model, overrides),
     stream: options.stream ?? false,
@@ -599,18 +605,64 @@ function responsesToolChoice(choice: ToolChoice): string {
   return choice
 }
 
+/**
+ * Translate the neutral transcript into Responses API input items.
+ *
+ * Assistant tool calls become `function_call` items and tool replies become
+ * `function_call_output` items; multipart user content uses `input_text` and
+ * `input_image` parts. Chat-completions message shapes are not valid input.
+ */
+function messagesToResponsesInput(messages: readonly ChatMessage[]): Record<string, unknown>[] {
+  const input: Record<string, unknown>[] = []
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const text = messageText(message)
+      if (text) {
+        input.push({ role: 'assistant', content: text })
+      }
+      for (const call of message.tool_calls ?? []) {
+        input.push({
+          type: 'function_call',
+          call_id: call.id,
+          name: call.function.name,
+          arguments: JSON.stringify(call.function.arguments),
+        })
+      }
+      continue
+    }
+    if (message.role === 'tool') {
+      input.push({ type: 'function_call_output', call_id: message.tool_call_id, output: message.content })
+      continue
+    }
+    input.push({ role: message.role, content: responsesMessageContent(message.content) })
+  }
+  return input
+}
+
+function responsesMessageContent(content: MessageContent): unknown {
+  if (typeof content === 'string') {
+    return content
+  }
+  return content.map(part => part.type === 'text'
+    ? { type: 'input_text', text: part.text }
+    : {
+      type: 'input_image',
+      image_url: part.image_url.url,
+      ...(part.image_url.detail ? { detail: part.image_url.detail } : {}),
+    })
+}
+
 function responsesPayload(
   request: CompletionRequest,
   providerName: ProviderName,
-  baseUrl: string,
   stream: boolean,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model: providerModel(request.model, providerName),
-    input: messagesToOpenAi(request.messages),
+    input: messagesToResponsesInput(request.messages),
     stream,
   }
-  addSampling(payload, request, supportsOpenAiCompatibleSampling(baseUrl))
+  addSampling(payload, request, providerName)
   if (request.tools?.length) {
     payload.tools = request.tools.map(responsesToolDefinition)
     if (request.toolChoice) payload.tool_choice = responsesToolChoice(request.toolChoice)
@@ -631,7 +683,6 @@ function responsesHeaders(providerName: ProviderName, apiKey: string, accept: st
 function openAiCompatiblePayload(
   request: CompletionRequest,
   providerName: ProviderName,
-  baseUrl: string,
   stream: boolean,
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {
@@ -639,7 +690,7 @@ function openAiCompatiblePayload(
     messages: messagesToOpenAi(request.messages),
     stream,
   }
-  addSampling(payload, request, supportsOpenAiCompatibleSampling(baseUrl))
+  addSampling(payload, request, providerName)
   if (request.tools?.length) {
     payload.tools = request.tools
     if (request.toolChoice) {
@@ -667,9 +718,9 @@ function openAiCompatibleHeaders(providerName: ProviderName, apiKey: string, acc
 function addSampling(
   payload: Record<string, unknown>,
   request: CompletionRequest,
-  supportsCompatibleSampling: boolean,
+  providerName: ProviderName,
 ): void {
-  if (request.temperature !== undefined) {
+  if (request.temperature !== undefined && supportsTemperature(providerName, request.temperature)) {
     payload.temperature = request.temperature
   }
   if (request.maxTokens !== undefined) {
@@ -690,7 +741,7 @@ function addSampling(
   if (request.extraBody) {
     Object.assign(payload, request.extraBody)
   }
-  if (!supportsCompatibleSampling) {
+  if (!supportsExtendedSampling(providerName)) {
     return
   }
   if (request.topK !== undefined) {
@@ -704,17 +755,14 @@ function addSampling(
   }
 }
 
-/** Third-party OpenAI-compatible gateways accept additional sampling controls. */
-function supportsOpenAiCompatibleSampling(baseUrl: string): boolean {
-  let hostname = ''
-  try {
-    hostname = new URL(baseUrl).hostname.toLowerCase()
-  } catch {
-    return true
-  }
-  return hostname !== 'api.openai.com'
-    && hostname !== 'openai.azure.com'
-    && !hostname.endsWith('.openai.azure.com')
+/** Kimi Code fixes temperature at 1 and rejects every other explicit value. */
+function supportsTemperature(providerName: ProviderName, temperature: number): boolean {
+  return providerName !== 'kimi-code' || temperature === 1
+}
+
+/** Only providers that document these non-standard OpenAI-compatible fields receive them. */
+function supportsExtendedSampling(providerName: ProviderName): boolean {
+  return providerName === 'openrouter'
 }
 
 function withTrailingSlash(value: string): string {
@@ -755,10 +803,31 @@ function firstChoice(chunk: Record<string, unknown>): Record<string, unknown> | 
   return choices.length ? asRecord(choices[0]) : undefined
 }
 
+/** Some gateways deliver a terminal error payload as an in-stream chunk instead of an HTTP error. */
+function throwIfStreamError(chunk: Record<string, unknown>, providerName: string): void {
+  const error = chunk.error
+  if (error === undefined) {
+    return
+  }
+  if (typeof error === 'string') {
+    throw new ProviderError(providerName, `stream returned API error: ${error}`)
+  }
+  const record = asRecord(error)
+  const code = record.code
+  const label = typeof code === 'string' || typeof code === 'number' ? ` (${String(code)})` : ''
+  const message = stringAt(record, 'message') ?? ''
+  throw new ProviderError(providerName, `stream returned API error${label}: ${message || 'unknown error'}`)
+}
+
 function mergeToolDeltas(target: Map<number, PendingToolCall>, values: unknown[]): void {
+  let lastIndex: number | undefined
   for (const value of values) {
     const delta = asRecord(value) as OpenAiToolCallDelta
-    const index = typeof delta.index === 'number' ? delta.index : target.size
+    // Providers may omit `index` on continuation chunks; append those to the
+    // most recent tool call instead of opening a nameless new entry.
+    const index = typeof delta.index === 'number'
+      ? delta.index
+      : lastIndex ?? (target.size ? Math.max(...target.keys()) : 0)
     const existing: PendingToolCall = target.get(index) ?? { id: undefined, name: '', arguments: '' }
     const functionDelta = delta.function
     target.set(index, {
@@ -766,6 +835,7 @@ function mergeToolDeltas(target: Map<number, PendingToolCall>, values: unknown[]
       name: typeof functionDelta?.name === 'string' ? functionDelta.name : existing.name,
       arguments: `${existing.arguments}${typeof functionDelta?.arguments === 'string' ? functionDelta.arguments : ''}`,
     })
+    lastIndex = index
   }
 }
 
@@ -949,6 +1019,11 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
       yield event.data
     }
   } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Cleanup after an early exit must not mask the primary stream failure.
+    }
     reader.releaseLock()
   }
 }

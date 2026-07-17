@@ -24,6 +24,7 @@ export class ShortTermMemory extends Memory {
     const capacity = options.capacity ?? 20
     if (!Number.isInteger(capacity) || capacity < 1) throw new Error('ShortTermMemory capacity must be at least one')
     super(options.storage, capacity, options.enableEmbeddings ?? false)
+    this.hydrate()
   }
 
   clear(): void {
@@ -124,6 +125,27 @@ export class ShortTermMemory extends Memory {
     this.storage?.save(storageKey(memoryId), item.toRecord())
     return true
   }
+
+  /** Reload the newest persisted records (bounded by capacity) after a restart. */
+  private hydrate(): void {
+    if (!this.storage) return
+    const records: MemoryItem[] = []
+    for (const key of this.storage.listKeys('stm_')) {
+      if (!key.startsWith('stm_')) continue
+      try {
+        const record = this.storage.load(key)
+        if (isRecord(record)) records.push(MemoryItem.fromRecord(record))
+      } catch (error) {
+        console.warn(`Skipping corrupt short-term memory record ${key}:`, error)
+      }
+    }
+    records.sort((left, right) => left.timestamp.valueOf() - right.timestamp.valueOf())
+    for (const item of records.slice(-(this.maxItems ?? records.length))) this.append(item)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function storageKey(memoryId: string): string {

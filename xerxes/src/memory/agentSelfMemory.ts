@@ -100,10 +100,12 @@ export class AgentSelfMemory {
 
   async patch(key: AgentSelfMemoryKey | string, oldText: string, newText: string): Promise<boolean> {
     const normalized = normalizeKey(key)
-    const content = await this.read(normalized)
-    if (!content.includes(oldText)) return false
-    await this.write(normalized, content.replace(oldText, newText))
-    return true
+    return this.withAppendLock(normalized, async () => {
+      const content = await this.read(normalized)
+      if (!content.includes(oldText)) return false
+      await this.write(normalized, content.replace(oldText, newText))
+      return true
+    })
   }
 
   async syncProjectContext(projectRoot = this.projectRoot): Promise<void> {
@@ -163,20 +165,23 @@ export class AgentSelfMemory {
   }
 
   async updateUserTaste(preference: string, category = 'notes'): Promise<void> {
-    const content = await this.read('user_taste')
-    const header = '## ' + titleCase(category.replaceAll('_', ' '))
-    const entry = '\n- ' + preference
-    const index = content.indexOf(header)
-    if (index < 0) {
-      await this.append('user_taste', entry)
-      return
-    }
-    const afterHeader = index + header.length
-    const nextSection = content.indexOf('\n## ', afterHeader)
-    const updated = nextSection < 0
-      ? content + entry + '\n'
-      : content.slice(0, nextSection) + entry + '\n' + content.slice(nextSection)
-    await this.write('user_taste', updated)
+    await this.withAppendLock('user_taste', async () => {
+      const content = await this.read('user_taste')
+      const header = '## ' + titleCase(category.replaceAll('_', ' '))
+      const entry = '\n- ' + preference
+      const index = content.indexOf(header)
+      if (index < 0) {
+        // Inline the append so the read-modify-write stays inside this lock.
+        await this.write('user_taste', content + '\n' + entry)
+        return
+      }
+      const afterHeader = index + header.length
+      const nextSection = content.indexOf('\n## ', afterHeader)
+      const updated = nextSection < 0
+        ? content + entry + '\n'
+        : content.slice(0, nextSection) + entry + '\n' + content.slice(nextSection)
+      await this.write('user_taste', updated)
+    })
   }
 
   async proposeSkill(name: string, description: string, pattern: string): Promise<void> {
@@ -235,15 +240,25 @@ export class AgentSelfMemory {
 }
 
 const AgentSelfMemoryKeyProjectContext: AgentSelfMemoryKey = 'project_context'
+const MAX_SELF_MEMORY_CACHE_ENTRIES = 256
 const memories = new Map<string, AgentSelfMemory>()
 
 /** Return a process-local per-agent self-memory instance. */
 export function getAgentSelfMemory(agentId = 'default'): AgentSelfMemory {
   const normalized = normalizeAgentId(agentId)
   const existing = memories.get(normalized)
-  if (existing) return existing
+  if (existing) {
+    // Refresh recency so the bounded cache below behaves as a simple LRU.
+    memories.delete(normalized)
+    memories.set(normalized, existing)
+    return existing
+  }
   const memory = new AgentSelfMemory({ agentId: normalized })
   memories.set(normalized, memory)
+  if (memories.size > MAX_SELF_MEMORY_CACHE_ENTRIES) {
+    const oldest = memories.keys().next()
+    if (!oldest.done) memories.delete(oldest.value)
+  }
   return memory
 }
 

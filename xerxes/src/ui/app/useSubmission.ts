@@ -210,8 +210,8 @@ export function useSubmission(opts: UseSubmissionOptions) {
   //   - 'steer'     : inject into the current turn via session.steer; falls
   //                   back to queue when steer is rejected (no agent / no
   //                   tool window).
-  //   - 'interrupt' (default): queue the text + interrupt with `keepBusy`; the
-  //                   busy→false settle edge drains it once (desktop parity).
+  //   - 'interrupt' (default): queue the text + interrupt; the busy→false
+  //                   settle edge drains it once (desktop parity).
   //                   No optimistic send → no duplicate bubble / race note.
   //
   // `opts.fallbackToFront` re-inserts at the queue head (queue-edit picks keep
@@ -261,11 +261,12 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return
       }
 
-      // 'interrupt': queue + interrupt(keepBusy); the settle edge drains it once.
+      // 'interrupt': queue + interrupt; the daemon's settle edge
+      // (message.complete) drains the queue exactly once.
       enqueueText()
 
       if (live.sid) {
-        turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys }, { keepBusy: true })
+        turnController.interruptTurn({ gw, sid: live.sid, sys })
       }
     },
     [appendMessage, composerActions, composerRefs, gw, setLastUserMsg, sys]
@@ -383,7 +384,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
           // Match the queue panel's Grok-style "Enter send now" contract:
           // interrupt the current run and keep busy until its settle event
           // drains the oldest queued message exactly once.
-          return turnController.interruptTurn({ appendMessage, gw, sid: live.sid, sys }, { keepBusy: true })
+          return turnController.interruptTurn({ gw, sid: live.sid, sys })
         }
 
         if (decision.kind === 'drain' && live.sid) {

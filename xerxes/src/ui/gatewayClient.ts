@@ -41,6 +41,10 @@ const DAEMON_IDENTITY_TIMEOUT_MS = Math.min(5000, STARTUP_TIMEOUT_MS)
 // A bundled daemon is normally ready in 85-105 ms. A 25 ms cadence reaches
 // it within one short interval without a busy loop or the old 150 ms stall.
 export const DAEMON_CONNECT_RETRY_MS = 25
+// Bound the session-id → session-key map: a long-lived TUI switching through
+// many sessions must not grow it without limit. Insertion order doubles as
+// recency, so eviction simply drops the oldest entry (simple LRU).
+const MAX_SESSION_KEYS = 200
 
 // ── Path resolution (v35 daemon path contract) ───────────────────────────
 
@@ -508,6 +512,9 @@ export class GatewayClient extends EventEmitter {
 
   private attachSocket(sock: Socket): void {
     this.socket = sock
+    // A partial line buffered from a dead socket must not prefix the first
+    // frame decoded on its replacement.
+    this.buffer = ''
     sock.setEncoding('utf8')
     sock.on('data', (chunk: string) => this.onData(chunk))
     sock.on('error', err => this.emitClient('gateway.error', { message: String((err as Error).message ?? err) }))
@@ -808,8 +815,18 @@ export class GatewayClient extends EventEmitter {
 
   close(): void {
     this.closed = true
-    this.socket?.end()
+    const socket = this.socket
     this.socket = null
+    // Reject in-flight requests immediately: nulling this.socket first makes
+    // the socket 'close' handler skip this map, so without an explicit sweep
+    // callers would hang until their 120s timeout fires (and those timers
+    // keep the process alive the whole time).
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer)
+      p.reject(new Error('gateway closed'))
+    }
+    this.pending.clear()
+    socket?.end()
   }
 
   kill(_reason = ''): void {
@@ -944,13 +961,15 @@ export class GatewayClient extends EventEmitter {
   }
 
   private async sessionCreate(_params: Record<string, unknown>): Promise<RpcObject> {
-    this.activeSessionKey = `tui:${randomKey()}`
+    // Commit the new key only after the daemon confirms it; a failed
+    // initialize must not strand the client on a dead session key.
+    const nextSessionKey = `tui:${randomKey()}`
     const finishCapture = this.captureInitializeInfo()
 
     try {
       const raw = await this.nativeSuccess('initialize', {
         project_dir: this.projectDir,
-        session_key: this.activeSessionKey
+        session_key: nextSessionKey
       })
       const captured = finishCapture()
       const session = (raw.session ?? {}) as RpcObject
@@ -960,7 +979,8 @@ export class GatewayClient extends EventEmitter {
         throw new Error('native daemon initialize returned no session id')
       }
 
-      this.sessionKeys.set(sessionId, this.activeSessionKey)
+      this.activeSessionKey = nextSessionKey
+      this.rememberSessionKey(sessionId, nextSessionKey)
       return {
         info: this.sessionInfoFromInitialize(raw, session, captured),
         session_id: sessionId
@@ -973,7 +993,7 @@ export class GatewayClient extends EventEmitter {
 
   private async sessionResume(params: Record<string, unknown>): Promise<RpcObject> {
     const id = String(params.session_id ?? '')
-    this.activeSessionKey = id || this.sessionKey
+    const nextSessionKey = id || this.sessionKey
     // `initialize` replays persisted history as notifications before its RPC
     // response. Capture those rows at the transport boundary and hydrate the
     // React transcript once: the v35 response intentionally exposes only a
@@ -985,7 +1005,7 @@ export class GatewayClient extends EventEmitter {
       const raw = await this.nativeSuccess('initialize', {
         project_dir: this.projectDir,
         resume_session_id: id,
-        session_key: this.activeSessionKey
+        session_key: nextSessionKey
       })
       const captured = finishCapture()
       const session = (raw.session ?? {}) as RpcObject
@@ -1004,7 +1024,10 @@ export class GatewayClient extends EventEmitter {
             ? session.messages
             : messages.length
 
-      this.sessionKeys.set(sessionId, this.activeSessionKey)
+      // Same commit-after-confirm rule as sessionCreate: only adopt the key
+      // once the daemon accepted the resume.
+      this.activeSessionKey = nextSessionKey
+      this.rememberSessionKey(sessionId, nextSessionKey)
       return {
         info: this.sessionInfoFromInitialize(raw, session, captured),
         message_count: messageCount,
@@ -1026,17 +1049,17 @@ export class GatewayClient extends EventEmitter {
     const sessions = rows.map((row: RpcObject) => {
       const id = String(row.id ?? row.session_id ?? row.key ?? '')
       if (id && row.key) {
-        this.sessionKeys.set(id, String(row.key))
+        this.rememberSessionKey(id, String(row.key))
       }
+      // No last_active/started_at: the daemon does not expose real values for
+      // live rows, and fabricating `now` rendered every session as brand new.
       return {
         ...optionalSessionLinkFields(row),
         current: this.keyFor(id) === this.activeSessionKey,
         id,
-        last_active: Date.now() / 1000,
         message_count: Number(row.messages ?? 0),
         model: String(row.model ?? ''),
         preview: String(row.title ?? row.key ?? id),
-        started_at: Date.now() / 1000,
         status: row.active_turn_id ? 'working' : 'idle',
         title: String(row.title ?? row.key ?? id)
       }
@@ -1050,7 +1073,7 @@ export class GatewayClient extends EventEmitter {
     const sessions = rows.map((row: RpcObject) => {
       const id = String(row.session_id ?? row.id ?? row.key ?? '')
       if (id && row.key) {
-        this.sessionKeys.set(id, String(row.key))
+        this.rememberSessionKey(id, String(row.key))
       }
       const updatedAt = Date.parse(String(row.updated_at ?? '')) / 1000
       const title = String(row.title ?? row.key ?? id)
@@ -1288,6 +1311,17 @@ export class GatewayClient extends EventEmitter {
   private keyFor(id: unknown): string {
     const sid = String(id ?? '').trim()
     return sid ? (this.sessionKeys.get(sid) ?? sid) : this.activeSessionKey
+  }
+
+  private rememberSessionKey(id: string, key: string): void {
+    this.sessionKeys.delete(id)
+    this.sessionKeys.set(id, key)
+    if (this.sessionKeys.size > MAX_SESSION_KEYS) {
+      const oldest = this.sessionKeys.keys().next().value
+      if (oldest !== undefined) {
+        this.sessionKeys.delete(oldest)
+      }
+    }
   }
 
   private captureInitializeInfo(

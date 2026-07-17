@@ -153,11 +153,20 @@ test('skills_list and skill_view use the injected SkillRegistry with transparent
     match_strategy: 'lexical',
     skills: [expect.objectContaining({ name: 'deploy', score: expect.any(Number) })],
   })
-  expect(await execute(registry, 'skill_view', { name: 'release deploy' })).toMatchObject({
+  expect(await execute(registry, 'skill_view', { name: 'deploy' })).toMatchObject({
     name: 'deploy',
     instructions: 'Verify health checks before rollout.',
-    _matched_query: 'release deploy',
-    match_strategy: 'lexical',
+  })
+  // A fuzzy miss must report not-found with candidate names, never another skill's body.
+  expect(await execute(registry, 'skill_view', { name: 'release deploy' })).toEqual({
+    candidates: ['deploy'],
+    error: 'not_found',
+    name: 'release deploy',
+  })
+  expect(await execute(registry, 'skill_view', { name: 'unrelated-zzz' })).toEqual({
+    candidates: [],
+    error: 'not_found',
+    name: 'unrelated-zzz',
   })
 
   const unavailable = new ToolRegistry()

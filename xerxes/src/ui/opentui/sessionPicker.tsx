@@ -547,9 +547,21 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
     1,
     Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, width - 6), Math.max(1, width - 2))
   )
+  // Fixed chrome: shell padding+header (3), tab bar (1), footer (1), plus the
+  // optional error row. Clamp the list window so the chrome never overflows
+  // the modal on short terminals; the cosmetic ↑/↓ hint rows go first.
+  const errorRows = error ? 1 : 0
+  const coreRows = 5 + errorRows
   const visible = Math.max(1, Math.min(MAX_VISIBLE, height - 10))
-  const { items: visibleRows, offset } = windowItems(rows, selected, visible)
-  const panelHeight = Math.min(height, visible + 7 + (error ? 1 : 0))
+  const listRows = Math.max(1, Math.min(visible, height - coreRows - 2))
+  const showHints = listRows + coreRows + 2 <= height
+  const panelHeight = Math.min(height, listRows + coreRows + (showHints ? 2 : 0))
+  const { items: visibleRows, offset } = windowItems(rows, selected, listRows)
+  // Per-tab empty copy: Chats counts as empty when only the '+ new session'
+  // row remains; Agents when no live or saved agent rows exist. The hint row
+  // itself takes a list slot, so it only renders when one is actually free.
+  const showEmpty = (view === 'chats' ? chatRows.length <= 1 : agentRows.length === 0) && visibleRows.length < listRows
+  const emptyText = view === 'chats' ? 'No chats yet.' : 'No agent histories yet.'
 
   if (loading) {
     return (
@@ -568,7 +580,7 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         {` · ${activeSessions.length} live`}
       </InfoRow>
       {error ? <InfoRow color={t.color.error}>error: {error}</InfoRow> : null}
-      <InfoRow color={t.color.muted}>{offset > 0 ? `↑ ${offset} more` : ' '}</InfoRow>
+      {showHints ? <InfoRow color={t.color.muted}>{offset > 0 ? `↑ ${offset} more` : ' '}</InfoRow> : null}
 
       {visibleRows.map((row, index) => {
         const absoluteIndex = offset + index
@@ -585,16 +597,18 @@ export function SessionPicker({ actions, currentSessionId, onCancel, t: supplied
         )
       })}
 
-      {!rows.length ? <InfoRow color={t.color.muted}>No agent histories yet.</InfoRow> : null}
-      {Array.from({ length: Math.max(0, visible - visibleRows.length - (rows.length ? 0 : 1)) }, (_, index) => (
+      {showEmpty ? <InfoRow color={t.color.muted}>{emptyText}</InfoRow> : null}
+      {Array.from({ length: Math.max(0, listRows - visibleRows.length - (showEmpty ? 1 : 0)) }, (_, index) => (
         <InfoRow color={t.color.muted} key={`session-pad-${index}`}>
           {' '}
         </InfoRow>
       ))}
 
-      <InfoRow color={t.color.muted}>
-        {offset + visible < rows.length ? `↓ ${rows.length - offset - visible} more` : ' '}
-      </InfoRow>
+      {showHints ? (
+        <InfoRow color={t.color.muted}>
+          {offset + listRows < rows.length ? `↓ ${rows.length - offset - listRows} more` : ' '}
+        </InfoRow>
+      ) : null}
       <InfoRow color={t.color.muted}>Tab/←/→ views · ↑/↓ select · Enter open · Esc/q close</InfoRow>
     </ModalShell>
   )

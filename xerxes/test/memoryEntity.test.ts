@@ -45,3 +45,35 @@ test('entity memory persists records and removes mentions with deletion', () => 
   expect(memory.entityMentions.Carol).toEqual([])
   expect(storage.exists(`entity_${item.memoryId}`)).toBeFalse()
 })
+
+test('entity memory enforces maxItems and caps per-entity contexts', () => {
+  const memory = new EntityMemory({ maxItems: 3 })
+  for (let index = 0; index < 5; index += 1) memory.save(`Alice mention ${index}`, {}, { entities: ['Alice'] })
+
+  expect(memory.size).toBe(3)
+  const retained = memory.retrieve(undefined, undefined, 10)
+  expect(Array.isArray(retained) ? retained.map(item => item.content) : []).toEqual([
+    'Alice mention 2',
+    'Alice mention 3',
+    'Alice mention 4',
+  ])
+  // The graph still tracks every mention, but contexts stay bounded.
+  expect(memory.entities.Alice?.frequency).toBe(5)
+  for (let index = 0; index < 30; index += 1) memory.save(`Alice context ${index}`, {}, { entities: ['Alice'] })
+  expect(memory.entities.Alice?.contexts.length).toBeLessThanOrEqual(20)
+})
+
+test('entity memory hydrates records and graph snapshots back from storage', () => {
+  const storage = new SimpleStorage()
+  const first = new EntityMemory({ storage })
+  first.save('Alice knows Bob')
+  const item = first.save('Bob created Widget', {}, { entities: ['Bob', 'Widget'] })
+
+  const restored = new EntityMemory({ storage })
+  expect(restored.size).toBe(2)
+  expect(restored.retrieve(item.memoryId)).toBeDefined()
+  expect(restored.entities.Alice?.frequency).toBe(1)
+  expect(restored.entities.Alice?.firstSeen).toBeInstanceOf(Date)
+  expect(restored.getRelatedEntities('Alice', 1)).toEqual(new Set(['Bob', 'Widget']))
+  expect(restored.entityMentions.Bob).toHaveLength(2)
+})

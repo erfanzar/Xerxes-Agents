@@ -437,7 +437,6 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       }
 
       return turnController.interruptTurn({
-        appendMessage: actions.appendMessage,
         gw: gateway.gw,
         sid: live.sid,
         sys: actions.sys
@@ -503,7 +502,6 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     if (key.ctrl && ch.toLowerCase() === 'c') {
       if (live.busy && live.sid) {
         return turnController.interruptTurn({
-          appendMessage: actions.appendMessage,
           gw: gateway.gw,
           sid: live.sid,
           sys: actions.sys

@@ -63,6 +63,10 @@ import {
   calcCost,
   getContextLimit,
 } from "../llms/providerRegistry.js";
+import {
+  DEFAULT_TEMPERATURE,
+  DEFAULT_TOP_K,
+} from "../llms/samplingDefaults.js";
 import { requireConfiguredModel } from "../llms/client.js";
 import { formatDoctorReport, runAllDoctorChecks } from "../runtime/doctor.js";
 import { formatGitUpdateStatus, gitUpdateStatus } from "../runtime/update.js";
@@ -84,9 +88,11 @@ import { SnapshotManager, type SnapshotRecord } from "../session/snapshots.js";
 import { processAtMentions } from "./atMentions.js";
 import { DaemonInteractionBoard } from "./interactions.js";
 import {
+  discoverModelCatalog,
   discoverModelIds,
   profileDiscoveryApiKey,
   sanitizeModelDiscoveryError,
+  type DiscoveredModel,
 } from "./modelDiscovery.js";
 import {
   ProviderProfileFlow,
@@ -113,6 +119,9 @@ import {
 
 export const MIGRATED_ERROR =
   "Old daemon task API was removed; use session.open, turn.submit, turn.cancel, session.list, and runtime.status.";
+
+/** Matches the WebSocket gateway default so both transports cap inbound frames. */
+const DEFAULT_MAX_SOCKET_FRAME_BYTES = 16 * 1024 * 1024;
 
 interface DaemonSlashCommand {
   readonly aliases: readonly string[];
@@ -304,6 +313,7 @@ const DISPLAYED_RUNTIME_CONFIG_KEYS = [
   "provider",
   "responses_api",
   "temperature",
+  "top_k",
   "top_p",
 ] as const;
 
@@ -401,6 +411,8 @@ export interface DaemonServerOptions {
     workspaceDirectory: string,
   ) => SnapshotManager;
   readonly socketPath: string;
+  /** Max buffered inbound bytes per Unix connection before the client is dropped. */
+  readonly maxSocketFrameBytes?: number;
   /** Tool inventory port for `/tools`; omit only when the runtime owns no visible tool registry. */
   readonly toolCatalog?: DaemonToolCatalogPort;
   /** Typed bridge for UI-only slash commands such as `/skin` and `/paste`. */
@@ -440,7 +452,9 @@ export class DaemonServer {
   private readonly cronStore: JobStore;
   private readonly cronStoreFactory: () => JobStore;
   private readonly interactions: DaemonInteractionBoard;
+  private readonly inFlightTurns = new Set<Promise<void>>();
   private readonly mcpManager: MCPManager | undefined;
+  private readonly maxSocketFrameBytes: number;
   private readonly memoryFactory: (
     session: DaemonSession | undefined,
   ) => AgentMemory;
@@ -454,6 +468,7 @@ export class DaemonServer {
   >();
   private readonly providerModelDiscovery:
     ProviderModelDiscoveryPort | undefined;
+  private readonly discoveredContextLimits = new Map<string, number>();
   private readonly profileStore: ProfileStore;
   private readonly questionOwners = new Map<
     string,
@@ -475,6 +490,7 @@ export class DaemonServer {
   private server: Server | undefined;
   private readonly socketPath: string;
   private readonly toolCatalog: DaemonToolCatalogPort | undefined;
+  private readonly turnOwners = new Map<string, DaemonTransportConnection>();
   private readonly uiControl: DaemonUiControlPort | undefined;
   private readonly websocketOptions: DaemonWebSocketGatewayOptions | undefined;
   private websocketGateway: DaemonWebSocketGateway | undefined;
@@ -494,6 +510,8 @@ export class DaemonServer {
     this.agentDefinitionLoader =
       options.agentDefinitionLoader ?? ((cwd) => listAgentDefinitions({ cwd }));
     this.interactions = options.interactions ?? new DaemonInteractionBoard();
+    this.maxSocketFrameBytes =
+      options.maxSocketFrameBytes ?? DEFAULT_MAX_SOCKET_FRAME_BYTES;
     this.cronStoreFactory =
       options.cronStoreFactory ??
       (() => new JobStore(join(xerxesHome(), "cron", "jobs.json")));
@@ -576,6 +594,11 @@ export class DaemonServer {
       server.once("error", reject);
       server.listen(this.socketPath, () => {
         server.off("error", reject);
+        // A listening server without an "error" listener crashes the process
+        // on any asynchronous transport failure; log it instead.
+        server.on("error", (error) => {
+          console.error("Xerxes daemon socket server error:", error);
+        });
         resolve();
       });
     });
@@ -636,6 +659,9 @@ export class DaemonServer {
       await channelWebhook?.stop();
       await this.channelManager?.stopAll();
       this.runtime.cancelAllTurns();
+      // Let cancelled turns land their final state sync and saveSession before
+      // the flush below persists the last known state for every session.
+      await Promise.all([...this.inFlightTurns]);
       await this.runtime.flushSessions();
       for (const connection of this.connections) {
         connection.socket.destroy();
@@ -687,6 +713,15 @@ export class DaemonServer {
   private receive(connection: Connection, chunk: string | Uint8Array): void {
     connection.buffer +=
       typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+    if (Buffer.byteLength(connection.buffer, "utf8") > this.maxSocketFrameBytes) {
+      // Matches the WebSocket frame cap: an uncapped buffer lets one client
+      // exhaust daemon memory, so drop the offending connection.
+      console.error(
+        "Xerxes daemon dropping client: request exceeds the socket frame limit",
+      );
+      connection.socket.destroy();
+      return;
+    }
     let newline = connection.buffer.indexOf("\n");
     while (newline >= 0) {
       const line = connection.buffer.slice(0, newline);
@@ -764,12 +799,19 @@ export class DaemonServer {
         { cwd },
       );
       connection.activeSessionKey = key;
-      return { ok: true, session: sessionPayload(session) };
+      return {
+        ok: true,
+        session: sessionPayload(session, this.contextLimit(session.model)),
+      };
     }
     if (method === "session.active_list") {
       return {
         ok: true,
-        sessions: this.runtime.listSessions().map(sessionPayload),
+        sessions: this.runtime
+          .listSessions()
+          .map((session) =>
+            sessionPayload(session, this.contextLimit(session.model)),
+          ),
       };
     }
     if (method === "session.list") {
@@ -790,8 +832,17 @@ export class DaemonServer {
       );
       const activeProject = optionalString(activeSession?.metadata.project_root) || activeSession?.cwd;
       const projectDirectory = projectScoped
-        ? optionalString(params.project_dir) || activeProject || process.cwd()
+        ? optionalString(params.project_dir) || activeProject
         : undefined;
+      if (projectScoped && !projectDirectory) {
+        // Falling back to the daemon's cwd would silently scope history to an
+        // unrelated project; say so instead of guessing.
+        return {
+          ok: false,
+          error:
+            "project-scoped session.list needs an active session or project_dir; pass scope \"global\" to list every project",
+        };
+      }
       const sessions = await this.runtime.listSavedSessions(limit, {
         ...(typeof params.include_subagents === "boolean"
           ? { includeSubagents: params.include_subagents }
@@ -809,7 +860,7 @@ export class DaemonServer {
         ok: Boolean(session),
         session: session
           ? {
-              ...sessionPayload(session),
+              ...sessionPayload(session, this.contextLimit(session.model)),
               // This is intentionally an identity only. The picker can use it
               // to select the exact stored profile without receiving the live
               // endpoint or credential that proved the match.
@@ -823,7 +874,10 @@ export class DaemonServer {
         sessionKey(connection, params),
       );
       return session
-        ? { ok: true, ...sessionUsagePayload(session) }
+        ? {
+            ok: true,
+            ...sessionUsagePayload(session, this.contextLimit(session.model)),
+          }
         : { ok: false, error: "no active session" };
     }
     if (method === "session.title") {
@@ -976,7 +1030,12 @@ export class DaemonServer {
         (typeof params.display_text === "string"
           ? params.display_text.trim()
           : "") || text;
-      void this.runtime
+      // A duplicate submit while a turn is active fails in submitTurn; keep
+      // the running turn's owner so its submitter stays the cancellation tie.
+      if (!this.turnOwners.has(key)) {
+        this.turnOwners.set(key, connection);
+      }
+      const turnPromise: Promise<void> = this.runtime
         .submitTurn(key, text, (event) =>
           this.emit(connection, event.type, event.payload),
           { displayText },
@@ -987,6 +1046,13 @@ export class DaemonServer {
             message: errorMessage(error),
           }),
         );
+      this.inFlightTurns.add(turnPromise);
+      void turnPromise.then(() => {
+        this.inFlightTurns.delete(turnPromise);
+        if (this.turnOwners.get(key) === connection) {
+          this.turnOwners.delete(key);
+        }
+      });
       return { ok: true };
     }
     if (method === "turn.cancel" || method === "cancel") {
@@ -1433,6 +1499,7 @@ export class DaemonServer {
         model,
         stringValue(this.runtime.status().reasoning_effort) || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
+        this.contextLimit(model),
       ),
     );
   }
@@ -1464,7 +1531,7 @@ export class DaemonServer {
       statusUpdatePayload(
         session,
         model,
-        configuredContextLimit(model),
+        this.contextLimit(model),
         this.channelStatusData(),
         stringValue(this.runtime.status().reasoning_effort) || "off",
         runtimePermissionMode(this.runtime.status().permission_mode),
@@ -1520,12 +1587,14 @@ export class DaemonServer {
 
     const apiKey = profileDiscoveryApiKey(profile);
     try {
-      const models = await discoverModelIds({
+      const catalog = await discoverModelCatalog({
         allowPrivateEndpoint: true,
         apiKey,
         baseUrl: profile.base_url,
         provider: profile.provider,
       });
+      this.rememberDiscoveredContextLimits(profile, catalog);
+      const models = catalog.map((model) => model.id);
       return models.length
         ? {
             ok: true,
@@ -1591,6 +1660,42 @@ export class DaemonServer {
       return null;
     }
     return profile.name;
+  }
+
+  private rememberDiscoveredContextLimits(
+    profile: ProviderProfile,
+    models: readonly DiscoveredModel[],
+  ): void {
+    const profilePrefix = discoveredContextProfilePrefix(profile);
+    for (const key of this.discoveredContextLimits.keys()) {
+      if (key.startsWith(profilePrefix)) {
+        this.discoveredContextLimits.delete(key);
+      }
+    }
+    for (const model of models) {
+      if (model.contextLimit !== undefined) {
+        this.discoveredContextLimits.set(
+          discoveredContextKey(profile, model.id),
+          model.contextLimit,
+        );
+      }
+    }
+  }
+
+  private contextLimit(model: string): number {
+    const profileName = this.activeRuntimeProfileName();
+    const profile = profileName ? this.profileStore.get(profileName) : undefined;
+    const discovered = profile
+      ? this.discoveredContextLimits.get(discoveredContextKey(profile, model))
+      : undefined;
+    if (discovered !== undefined) {
+      return discovered;
+    }
+    const status = this.runtime.status();
+    return configuredContextLimit(model, {
+      provider: status.provider,
+      base_url: status.base_url,
+    });
   }
 
   private async handleSlash(
@@ -1714,7 +1819,7 @@ export class DaemonServer {
           connection,
           formatSessionUsage(
             session,
-            configuredContextLimit(session.model),
+            this.contextLimit(session.model),
           ),
         );
         return { ok: true };
@@ -1746,7 +1851,10 @@ export class DaemonServer {
         this.emitSlash(connection, `New session \`${fresh.id}\` started.`);
         this.emitInitDone(connection, fresh);
         this.emitStatus(connection, fresh);
-        return { ok: true, session: sessionPayload(fresh) };
+        return {
+          ok: true,
+          session: sessionPayload(fresh, this.contextLimit(fresh.model)),
+        };
       }
       case "stop": {
         const cancelled = this.runtime.cancelTurn(key);
@@ -2631,15 +2739,22 @@ export class DaemonServer {
     }
 
     if (input.toLowerCase() === "reset") {
-      const reset = Object.fromEntries(
+      const cleared = Object.fromEntries(
         NATIVE_SAMPLING_KEYS.map((key) => [key, null]),
       );
-      this.runtime.reload(reset);
+      this.runtime.reload({
+        ...cleared,
+        temperature: DEFAULT_TEMPERATURE,
+        top_k: DEFAULT_TOP_K,
+      });
       const active = this.profileStore.active();
       if (active) {
-        this.profileStore.updateSampling(active.name, reset);
+        this.profileStore.updateSampling(active.name, cleared);
       }
-      this.emitSlash(connection, "Cleared native sampling overrides.");
+      this.emitSlash(
+        connection,
+        `Restored native sampling defaults (temperature ${DEFAULT_TEMPERATURE}, top_k ${DEFAULT_TOP_K}).`,
+      );
       return { ok: true, sampling: samplingConfig(this.runtime.status()) };
     }
 
@@ -2763,7 +2878,7 @@ export class DaemonServer {
       return { ok: false, error };
     }
     const compressor = new ContextCompressor({
-      contextWindow: getContextLimit(model),
+      contextWindow: this.contextLimit(model),
       model,
       summarizer: naiveSummarizer,
       threshold: 0.000_001,
@@ -2806,7 +2921,7 @@ export class DaemonServer {
       return { ok: false, error: "no active session" };
     }
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = configuredContextLimit(model);
+    const contextLimit = this.contextLimit(model);
     const used = estimateContextTokens(session.messages, {
       model,
     });
@@ -3085,7 +3200,12 @@ export class DaemonServer {
       return { ok: false, error: "saved session not found" };
     }
     await this.runtime.flushSessions();
-    this.runtime.evictSession(target.id);
+    // Live sessions are keyed by sessionKey, not session id; resolve the key
+    // like deleteSavedSession does before evicting.
+    const activeKey = this.runtime
+      .listSessions()
+      .find((candidate) => candidate.id === target.id)?.sessionKey;
+    this.runtime.evictSession(activeKey ?? target.id);
     connection.activeSessionKey = target.id;
     const session = await this.runtime.openSession(target.id, undefined, {
       resume: true,
@@ -3094,7 +3214,10 @@ export class DaemonServer {
     this.emitStatus(connection, session);
     this.replaySessionHistory(connection, session);
     this.emitSlash(connection, `Resumed session \`${session.id}\`.`);
-    return { ok: true, session: sessionPayload(session) };
+    return {
+      ok: true,
+      session: sessionPayload(session, this.contextLimit(session.model)),
+    };
   }
 
   private async listSavedSessionBranches(
@@ -3174,7 +3297,7 @@ export class DaemonServer {
       ok: true,
       session: persisted
         ? savedSessionPayload(persisted)
-        : sessionPayload(branch),
+        : sessionPayload(branch, this.contextLimit(branch.model)),
     };
   }
 
@@ -3241,11 +3364,19 @@ export class DaemonServer {
     discardLastUserTurn(session.messages);
     session.turnCount = Math.max(0, session.turnCount - 1);
     this.emitSlash(connection, "Retrying the last prompt…");
-    await this.runtime.submitTurn(
-      connection.activeSessionKey,
-      prompt,
-      (event) => this.emit(connection, event.type, event.payload),
-    );
+    const key = connection.activeSessionKey;
+    this.turnOwners.set(key, connection);
+    try {
+      await this.runtime.submitTurn(
+        key,
+        prompt,
+        (event) => this.emit(connection, event.type, event.payload),
+      );
+    } finally {
+      if (this.turnOwners.get(key) === connection) {
+        this.turnOwners.delete(key);
+      }
+    }
     return { ok: true, retried: true };
   }
 
@@ -3523,17 +3654,17 @@ export class DaemonServer {
     return archivePath;
   }
 
-  private createSnapshot(
+  private async createSnapshot(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
     label: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
     if (!session) {
       this.emitSlash(connection, "No active session yet.", "warning");
       return { ok: false, error: "no active session" };
     }
     try {
-      const snapshot = this.snapshotManagerFactory(session.cwd).snapshot(
+      const snapshot = await this.snapshotManagerFactory(session.cwd).snapshot(
         label || "manual",
       );
       this.emitSlash(connection, `Snapshot \`${snapshot.id}\` saved.`);
@@ -3584,11 +3715,11 @@ export class DaemonServer {
     }
   }
 
-  private rollbackSnapshot(
+  private async rollbackSnapshot(
     connection: DaemonTransportConnection,
     session: DaemonSession | undefined,
     ref: string,
-  ): JsonRpcPayload {
+  ): Promise<JsonRpcPayload> {
     if (!session) {
       this.emitSlash(connection, "No active session yet.", "warning");
       return { ok: false, error: "no active session" };
@@ -3602,7 +3733,7 @@ export class DaemonServer {
       return { ok: false, error: "snapshot reference is required" };
     }
     try {
-      const snapshot = this.snapshotManagerFactory(session.cwd).rollback(ref);
+      const snapshot = await this.snapshotManagerFactory(session.cwd).rollback(ref);
       this.emitSlash(connection, `Rolled back to snapshot \`${ref}\`.`);
       return { ok: true, snapshot: snapshotPayload(snapshot) };
     } catch (error) {
@@ -3766,7 +3897,7 @@ export class DaemonServer {
       .all()
       .filter((skill) => skillMatchesPlatform(skill));
     const model = session.model || stringValue(this.runtime.status().model);
-    const contextLimit = configuredContextLimit(model);
+    const contextLimit = this.contextLimit(model);
     const initPayload: JsonRpcPayload = {
       session_id: session.id,
       model,
@@ -3810,7 +3941,7 @@ export class DaemonServer {
       ...this.runtimeStatusWithChannels(),
       ...initPayload,
       ok: true,
-      session: sessionPayload(session),
+      session: sessionPayload(session, contextLimit),
       daemon_protocol: DAEMON_PROTOCOL_VERSION,
       daemon_build_id: this.daemonBuildId(),
     };
@@ -3920,6 +4051,19 @@ export class DaemonServer {
       const requestId = optionalString(payload.id);
       if (requestId) this.questionOwners.set(requestId, connection);
     }
+    if (type === "status_update") {
+      const session = this.runtime.sessionStatus(connection.activeSessionKey);
+      const model = optionalString(payload.model) || session?.model || "";
+      if (model) {
+        connection.send(
+          daemonEvent(type, {
+            ...payload,
+            max_context: this.contextLimit(model),
+          }),
+        );
+        return;
+      }
+    }
     connection.send(daemonEvent(type, payload));
   }
 
@@ -3935,9 +4079,16 @@ export class DaemonServer {
   }
 
   private disconnect(connection: DaemonTransportConnection): void {
-    const session = this.runtime.sessionStatus(connection.activeSessionKey);
-    if (session?.activeTurnId) {
-      this.runtime.cancelTurn(connection.activeSessionKey);
+    // Only cancel turns this connection actually submitted: on a shared
+    // session key, another client's disconnect must not kill a live turn.
+    for (const [key, owner] of this.turnOwners) {
+      if (owner !== connection) {
+        continue;
+      }
+      this.turnOwners.delete(key);
+      if (this.runtime.sessionStatus(key)?.activeTurnId) {
+        this.runtime.cancelTurn(key);
+      }
     }
     this.dropConnectionRequests(connection);
   }
@@ -4135,10 +4286,12 @@ function requestedSessionKey(params: JsonRpcPayload, fallback: string): string {
   );
 }
 
-function sessionPayload(session: DaemonSession): JsonRpcPayload {
+function sessionPayload(
+  session: DaemonSession,
+  contextLimit = configuredContextLimit(session.model),
+): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
-  const contextLimit = configuredContextLimit(model);
   const calls = exactSessionApiCalls(session);
   const hierarchy = sessionHierarchyPayload(session.metadata);
   const title = optionalString(session.metadata.title);
@@ -4195,10 +4348,12 @@ function sessionHierarchyPayload(
   };
 }
 
-function sessionUsagePayload(session: DaemonSession): JsonRpcPayload {
+function sessionUsagePayload(
+  session: DaemonSession,
+  contextMax = configuredContextLimit(session.model),
+): JsonRpcPayload {
   const model = session.model;
   const contextUsed = sessionContextTokens(session, model);
-  const contextMax = configuredContextLimit(model);
   const calls = exactSessionApiCalls(session);
   const total = session.totalInputTokens + session.totalOutputTokens;
   return {
@@ -4301,12 +4456,13 @@ function initPayload(
   model: string,
   reasoningEffort = "off",
   permissionMode = DEFAULT_PERMISSION_MODE,
+  contextLimit = configuredContextLimit(model),
 ): JsonRpcPayload {
   return {
     session_id: session.id,
     model,
     cwd: session.cwd,
-    context_limit: configuredContextLimit(model),
+    context_limit: contextLimit,
     agent_name: session.agentId,
     mode: session.interactionMode,
     plan_mode: session.planMode,
@@ -4361,9 +4517,12 @@ function sessionContextTokens(session: DaemonSession, model: string): number {
   );
 }
 
-function configuredContextLimit(model: string): number {
+function configuredContextLimit(
+  model: string,
+  overrides: Readonly<Record<string, unknown>> = {},
+): number {
   const configured = model.trim();
-  return configured ? getContextLimit(configured) : 0;
+  return configured ? getContextLimit(configured, overrides) : 0;
 }
 
 function channelStatusPayload(status: ManagedChannelStatus): JsonRpcPayload {
@@ -4467,6 +4626,22 @@ function normalizeProviderIdentity(value: string): string {
 
 function normalizeBaseUrlIdentity(value: string): string {
   return value.trim().replace(/\/+$/u, "");
+}
+
+function discoveredContextKey(
+  profile: ProviderProfile,
+  model: string,
+): string {
+  return [
+    profile.name,
+    normalizeProviderIdentity(profile.provider),
+    normalizeBaseUrlIdentity(profile.base_url),
+    model.trim(),
+  ].join("\u0000");
+}
+
+function discoveredContextProfilePrefix(profile: ProviderProfile): string {
+  return `${profile.name}\u0000`;
 }
 
 function stringValue(value: unknown): string {
@@ -4664,13 +4839,20 @@ function samplingConfig(
   return Object.fromEntries(
     NATIVE_SAMPLING_KEYS.map((key) => {
       const value = status[key];
-      return [
-        key,
+      const configured =
         typeof value === "boolean" ||
         typeof value === "number" ||
         typeof value === "string"
           ? value
-          : undefined,
+          : undefined;
+      return [
+        key,
+        configured ??
+          (key === "temperature"
+            ? DEFAULT_TEMPERATURE
+            : key === "top_k"
+              ? DEFAULT_TOP_K
+              : undefined),
       ];
     }),
   );
@@ -4744,8 +4926,20 @@ function agentDefinitionPayload(definition: AgentDefinition): JsonRpcPayload {
 function profileOverrides(
   profile: ProviderProfile | undefined,
 ): JsonRpcPayload {
-  if (!profile) return {};
+  const clearedSampling = Object.fromEntries(
+    NATIVE_SAMPLING_KEYS.map((key) => [key, null]),
+  );
+  if (!profile) {
+    return {
+      ...clearedSampling,
+      temperature: DEFAULT_TEMPERATURE,
+      top_k: DEFAULT_TOP_K,
+    };
+  }
   return {
+    ...clearedSampling,
+    temperature: DEFAULT_TEMPERATURE,
+    top_k: DEFAULT_TOP_K,
     ...profile.sampling,
     model: profile.model,
     base_url: profile.base_url,

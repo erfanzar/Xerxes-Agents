@@ -7,7 +7,7 @@ import {
 } from './contextualMemory.js'
 import { EntityMemory, type EntitySaveOptions } from './entityMemory.js'
 import type { MemoryItem, MemoryMetadata, MemorySearchOptions } from './base.js'
-import type { MemoryStorage } from './storage.js'
+import { NamespacedStorage, type MemoryStorage } from './storage.js'
 
 const USER_PREFERENCES_KEY = '_user_preferences'
 
@@ -59,11 +59,14 @@ export class UserMemory {
     const existing = this.userMemories.get(userId)
     if (existing) return existing
 
+    // Persist under a per-user key namespace so tiers over a shared backend
+    // only hydrate, search, and clear their own user's records.
+    const storage = this.storage ? new NamespacedStorage(this.storage, `user_${userId}_`) : undefined
     const memory = new ContextualMemory({
-      ...(this.storage ? { longTermStorage: this.storage } : {}),
+      ...(storage ? { longTermStorage: storage } : {}),
     })
     const entityMemory = new EntityMemory({
-      ...(this.storage ? { storage: this.storage } : {}),
+      ...(storage ? { storage } : {}),
     })
     this.userMemories.set(userId, memory)
     this.userEntities.set(userId, entityMemory)

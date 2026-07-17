@@ -13,6 +13,7 @@ import { WorkspacePathError, WorkspacePathResolver } from './pathSafety.js'
 export const DEFAULT_READ_LINE_LIMIT = 400
 export const DEFAULT_MAX_RESULTS = 500
 const MAX_GREP_FILE_BYTES = 1_000_000
+const MAX_READ_FILE_BYTES = 10_000_000
 const MAX_TOOL_RESULTS = 5_000
 
 export const READ_FILE_DEFINITION: ToolDefinition = {
@@ -200,6 +201,15 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
 
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
+  const fileInfo = await stat(target)
+  if (fileInfo.size > MAX_READ_FILE_BYTES) {
+    throw new ValidationError(
+      'file_path',
+      'is ' + fileInfo.size + ' bytes, exceeding the ' + MAX_READ_FILE_BYTES
+        + '-byte ReadFile limit; search it with GrepTool or split it into smaller files first',
+      filePath,
+    )
+  }
   const text = await Bun.file(target).text()
   if (limit === -1) {
     return truncateCharacters(text, maxChars)

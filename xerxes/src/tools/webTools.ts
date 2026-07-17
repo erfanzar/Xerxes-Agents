@@ -3,7 +3,7 @@
 
 import { ClientError, ConfigurationError, ValidationError, XerxesTimeoutError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
-import { checkUrl, type UrlSafetyDecision, type UrlSafetyOptions } from '../security/urlSafety.js'
+import { checkUrl, checkUrlDns, type UrlSafetyDecision, type UrlSafetyOptions } from '../security/urlSafety.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../types/toolCalls.js'
 import { optionalBoolean, optionalInteger, optionalString, requiredString } from './inputs.js'
 
@@ -42,7 +42,7 @@ export interface PublicFetchResponse {
   readonly url: string
 }
 
-/** HTTP-only client that blocks literal private URLs and rechecks every redirect target. */
+/** HTTP-only client that blocks private URLs — literal IPs and DNS answers — and rechecks every redirect target. */
 export class PublicWebClient {
   private readonly fetcher: WebFetch
   private readonly maxRedirects: number
@@ -64,7 +64,7 @@ export class PublicWebClient {
   }
 
   async fetch(url: string, init: RequestInit = {}, options: PublicFetchOptions = {}): Promise<PublicFetchResponse> {
-    let currentUrl = assertPublicHttpUrl(url, this.urlSafety)
+    let currentUrl = await assertPublicHttpUrl(url, this.urlSafety)
     const { signal: initSignal, ...requestBase } = init
     const signal = options.signal ?? initSignal ?? undefined
     const timeoutMs = boundedInteger(options.timeoutMs ?? this.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
@@ -89,7 +89,7 @@ export class PublicWebClient {
       if (redirectCount >= this.maxRedirects) {
         throw new ClientError('web', `redirect limit of ${this.maxRedirects} exceeded`)
       }
-      currentUrl = assertPublicHttpUrl(new URL(location, currentUrl).toString(), this.urlSafety)
+      currentUrl = await assertPublicHttpUrl(new URL(location, currentUrl).toString(), this.urlSafety)
       redirectCount += 1
     }
   }
@@ -465,7 +465,7 @@ export function registerWebTools(registry: ToolRegistry, client: PublicWebClient
   }, client, signal), agentId)
 }
 
-function assertPublicHttpUrl(value: string, safetyOptions: UrlSafetyOptions): string {
+async function assertPublicHttpUrl(value: string, safetyOptions: UrlSafetyOptions): Promise<string> {
   let parsed: URL
   try {
     parsed = new URL(value)
@@ -478,6 +478,13 @@ function assertPublicHttpUrl(value: string, safetyOptions: UrlSafetyOptions): st
   const safety = checkUrl(parsed.toString(), safetyOptions)
   if (!safety.allowed) {
     throw new ValidationError('url', `is not allowed: ${safety.reason}`, value)
+  }
+  // Resolve the host so a public name cannot hide private DNS answers (SSRF). This
+  // runs before the initial request and on every redirect hop. Residual TOCTOU:
+  // the fetch resolves the name again when dialing; see checkUrlDns.
+  const dnsSafety = await checkUrlDns(parsed.toString(), safetyOptions)
+  if (!dnsSafety.allowed) {
+    throw new ValidationError('url', `is not allowed: ${dnsSafety.reason}`, value)
   }
   return parsed.toString()
 }

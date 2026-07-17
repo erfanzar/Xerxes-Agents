@@ -1007,9 +1007,9 @@ async function checkSnapshot(context: RealUseContext): Promise<string> {
     await mkdir(workspace, { recursive: true })
     await Bun.write(join(workspace, 'note.txt'), 'version one\n')
     const manager = new SnapshotManager(workspace, { shadowRoot })
-    const snapshot = manager.snapshot('baseline')
+    const snapshot = await manager.snapshot('baseline')
     await Bun.write(join(workspace, 'note.txt'), 'broken version\n')
-    manager.rollback(snapshot.id)
+    await manager.rollback(snapshot.id)
     require(await readFile(join(workspace, 'note.txt'), 'utf8') === 'version one\n', 'snapshot rollback did not restore the original file')
     return `shadow snapshot ${snapshot.id.slice(0, 8)} created and rolled back`
   })

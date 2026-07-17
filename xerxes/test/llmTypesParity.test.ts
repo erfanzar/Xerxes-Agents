@@ -5,6 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { CortexAgent } from '../src/cortex/agents/agent.js'
 import { LLMConfig } from '../src/core/config.js'
+import { ProviderError } from '../src/core/errors.js'
 import {
   OpenAiCompatibleClient,
   closeLlmClient,
@@ -41,7 +42,8 @@ test('native LLM configuration keeps validated defaults and explicit sampling co
   const defaults = new LLMConfig({}, {})
   expect(defaults).toMatchObject({
     model: 'gpt-4',
-    temperature: 0.7,
+    temperature: 0.6,
+    topK: 64,
     maxTokens: 2_048,
     enableStreaming: true,
   })
@@ -127,7 +129,7 @@ test('native completions collect stream-only clients, honor cleanup, and expose 
     maxModelLen: 1_000_000,
     stream: true,
   })
-  expect(getLlmModelInfo('unprefixed-model', {}, { provider: 'custom' }).maxModelLen).toBe(128_000)
+  expect(getLlmModelInfo('unprefixed-model', {}, { provider: 'custom' }).maxModelLen).toBe(0)
   expect(formatLlmMessages([{ role: 'user', content: 'Hello' }], 'Be concise.')).toEqual([
     { role: 'system', content: 'Be concise.' },
     { role: 'user', content: 'Hello' },
@@ -179,7 +181,7 @@ test('OpenAI-compatible native completion requests do not require SSE and normal
   })
 })
 
-test('OpenAI-compatible streams retain reasoning and send custom-gateway sampling as native JSON fields', async () => {
+test('OpenAI-compatible streams retain reasoning without guessing custom-gateway sampling extensions', async () => {
   let payload: Record<string, unknown> | undefined
   const client = new OpenAiCompatibleClient({
     providerName: 'openai',
@@ -220,15 +222,71 @@ test('OpenAI-compatible streams retain reasoning and send custom-gateway samplin
     presence_penalty: 0.3,
     stop: ['END'],
     chat_template_kwargs: { enable_thinking: true },
-    top_k: 20,
-    min_p: 0.05,
-    repetition_penalty: 1.15,
     stream_options: { include_usage: true },
   })
+  expect(payload).not.toHaveProperty('top_k')
+  expect(payload).not.toHaveProperty('min_p')
+  expect(payload).not.toHaveProperty('repetition_penalty')
   expect(events).toEqual([
     { thinking: 'Inspect the request first.' },
     { content: 'Final answer.', finishReason: 'stop' },
   ])
+})
+
+test('OpenRouter receives its documented extended sampling fields', async () => {
+  let payload: Record<string, unknown> | undefined
+  const client = new OpenAiCompatibleClient({
+    providerName: 'openrouter',
+    apiKey: 'test-key',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    fetchImplementation: async (_input, init) => {
+      payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+      return sseResponse([])
+    },
+  })
+
+  await collect(client.stream({
+    model: 'anthropic/claude-sonnet-4.6',
+    messages: [{ role: 'user', content: 'Hello' }],
+    topK: 20,
+    minP: 0.05,
+    repetitionPenalty: 1.15,
+  }))
+
+  expect(payload).toMatchObject({
+    top_k: 20,
+    min_p: 0.05,
+    repetition_penalty: 1.15,
+  })
+})
+
+test('vendor and custom OpenAI-compatible endpoints omit non-standard sampling fields', async () => {
+  const providers = ['custom', 'deepseek', 'qwen', 'zhipu', 'minimax'] as const
+
+  for (const providerName of providers) {
+    let payload: Record<string, unknown> | undefined
+    const client = new OpenAiCompatibleClient({
+      providerName,
+      apiKey: 'test-key',
+      baseUrl: `https://${providerName}.example.test/v1`,
+      fetchImplementation: async (_input, init) => {
+        payload = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return sseResponse([])
+      },
+    })
+
+    await collect(client.stream({
+      model: 'test-model',
+      messages: [{ role: 'user', content: 'Hello' }],
+      topK: 64,
+      minP: 0.05,
+      repetitionPenalty: 1.15,
+    }))
+
+    expect(payload).not.toHaveProperty('top_k')
+    expect(payload).not.toHaveProperty('min_p')
+    expect(payload).not.toHaveProperty('repetition_penalty')
+  }
 })
 
 test('official OpenAI endpoints retain standard penalties while omitting incompatible sampling fields', async () => {
@@ -262,6 +320,32 @@ test('official OpenAI endpoints retain standard penalties while omitting incompa
   expect(payload).not.toHaveProperty('repetition_penalty')
 })
 
+test('Kimi Code keeps its fixed temperature and omits unsupported extended sampling fields', async () => {
+  const payloads: Record<string, unknown>[] = []
+  const client = new OpenAiCompatibleClient({
+    providerName: 'kimi-code',
+    apiKey: 'test-key',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    fetchImplementation: async (_input, init) => {
+      payloads.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
+      return sseResponse([])
+    },
+  })
+
+  const request = {
+    model: 'kimi-for-coding',
+    messages: [{ role: 'user' as const, content: 'Hello' }],
+    topK: 64,
+  }
+  await collect(client.stream({ ...request, temperature: 0.6 }))
+  await collect(client.stream({ ...request, temperature: 1 }))
+
+  expect(payloads[0]).not.toHaveProperty('temperature')
+  expect(payloads[0]).not.toHaveProperty('top_k')
+  expect(payloads[1]).toMatchObject({ temperature: 1 })
+  expect(payloads[1]).not.toHaveProperty('top_k')
+})
+
 test('provider registry retains Kimi, Claude Code, OpenRouter, and context-window routing', () => {
   expect(resolveProvider('kimi/kimi-latest', { base_url: 'https://api.kimi.com/coding/v1' })).toBe('kimi-code')
   expect(resolveProvider('kimi/kimi-latest', { base_url: 'https://api.moonshot.cn/v1' })).toBe('kimi')
@@ -275,7 +359,7 @@ test('provider registry retains Kimi, Claude Code, OpenRouter, and context-windo
     baseUrl: 'https://openrouter.ai/api/v1',
   })
   expect(providerModel('anthropic/claude-sonnet-4.5', 'openrouter')).toBe('anthropic/claude-sonnet-4.5')
-  expect(getContextLimit('kimi/kimi-for-coding')).toBe(256_000)
+  expect(getContextLimit('kimi/kimi-for-coding')).toBe(262_144)
   expect(getContextLimit('claude-code/opus')).toBe(1_000_000)
   expect(getContextLimit('claude-code/custom')).toBe(200_000)
   expect(getContextLimit('anthropic/claude-sonnet-4-6')).toBe(1_000_000)
@@ -351,6 +435,104 @@ test('native Cortex agents retain explicit identity and sampling fields while re
     llm: EMPTY_LLM,
     tools: [duplicateTool, duplicateTool],
   })).toThrow('Duplicate CortexAgent tool: search')
+})
+
+test('OpenAI-compatible streams throw on in-stream error payloads instead of skipping them', async () => {
+  const structured = new OpenAiCompatibleClient({
+    providerName: 'openrouter',
+    apiKey: 'test-key',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    fetchImplementation: async () => sseResponse([
+      { choices: [{ delta: { content: 'partial' } }] },
+      { error: { code: 502, message: 'Provider returned error' } },
+    ]),
+  })
+  await expect(collect(structured.stream({
+    model: 'anthropic/claude-sonnet-4.5',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('stream returned API error (502): Provider returned error')
+
+  const plain = new OpenAiCompatibleClient({
+    providerName: 'openrouter',
+    apiKey: 'test-key',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    fetchImplementation: async () => sseResponse([{ error: 'stream broke' }]),
+  })
+  await expect(collect(plain.stream({
+    model: 'anthropic/claude-sonnet-4.5',
+    messages: [{ role: 'user', content: 'hi' }],
+  }))).rejects.toThrow('stream returned API error: stream broke')
+})
+
+test('OpenAI-compatible streams append tool-call continuations that omit the chunk index', async () => {
+  const client = new OpenAiCompatibleClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://api.openai.com/v1',
+    fetchImplementation: async () => sseResponse([
+      {
+        choices: [{
+          delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'ReadFile', arguments: '{"path":' } }] },
+        }],
+      },
+      { choices: [{ delta: { tool_calls: [{ function: { arguments: '"README.md"}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ]),
+  })
+
+  const events = await collect(client.stream({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'read the file' }],
+  }))
+
+  expect(events).toContainEqual({
+    finishReason: 'tool_calls',
+    toolCalls: [{ id: 'call-1', type: 'function', function: { name: 'ReadFile', arguments: { path: 'README.md' } } }],
+  })
+})
+
+test('OpenAI-compatible HTTP failures cap quoted provider error bodies', async () => {
+  const client = new OpenAiCompatibleClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://api.openai.com/v1',
+    fetchImplementation: async () => new Response('x'.repeat(8_192), { status: 500 }),
+  })
+
+  const failure = await collect(client.stream({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'hi' }],
+  })).catch(error => error)
+  expect(failure).toBeInstanceOf(ProviderError)
+  expect(failure.message).toBe(`Client openai: stream request failed (500): ${'x'.repeat(4_096)}`)
+})
+
+test('OpenAI-compatible streams cancel the response body when the consumer exits early', async () => {
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'))
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  const client = new OpenAiCompatibleClient({
+    providerName: 'openai',
+    apiKey: 'test-key',
+    baseUrl: 'https://api.openai.com/v1',
+    fetchImplementation: async () => new Response(body, { headers: { 'Content-Type': 'text/event-stream' } }),
+  })
+
+  for await (const event of client.stream({
+    model: 'gpt-4o-mini',
+    messages: [{ role: 'user', content: 'hi' }],
+  })) {
+    void event
+    break
+  }
+
+  expect(cancelled).toBe(true)
 })
 
 async function collect(stream: AsyncIterable<LlmDelta>): Promise<LlmDelta[]> {

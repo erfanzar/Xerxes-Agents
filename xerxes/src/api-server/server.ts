@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { timingSafeEqual } from 'node:crypto'
+
 import type { CompletionRequest, LlmClient, LlmDelta, TokenUsage } from '../llms/client.js'
 import { ThinkingParser } from '../streaming/thinkingParser.js'
 import type { ToolCall } from '../types/toolCalls.js'
@@ -18,6 +20,10 @@ import {
 } from './protocol.js'
 
 export type LlmClientResolver = (model: string) => LlmClient
+
+const DEFAULT_HOSTNAME = '127.0.0.1'
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
+const MAX_RATE_LIMIT_KEYS = 10_000
 
 /** Browser cross-origin policy applied when the API is called from a web page. */
 export interface OpenAiApiCorsOptions {
@@ -65,7 +71,10 @@ export interface OpenAiApiServerOptions {
   readonly cors?: OpenAiApiCorsOptions
   /** Enables bearer authentication for all paths except configured exemptions. */
   readonly auth?: OpenAiApiBearerAuthOptions
-  /** Rejects chat-completion request bodies larger than this many bytes. Disabled by default. */
+  /**
+   * Rejects chat-completion request bodies larger than this many bytes.
+   * Defaults to 16 MiB; set to 0 to disable the limit.
+   */
   readonly maxRequestBodyBytes?: number
   /** Enables in-memory sliding-window request limiting. Disabled by default. */
   readonly rateLimit?: OpenAiApiRateLimitOptions
@@ -80,8 +89,17 @@ export interface OpenAiApiHandler {
 }
 
 export interface OpenAiApiListenOptions {
+  /**
+   * Interface to bind. Defaults to loopback (`127.0.0.1`) so an unauthenticated
+   * server is not exposed on every interface; pass a public address explicitly.
+   */
   readonly hostname?: string
   readonly port?: number
+  /**
+   * Seconds a connection may idle before Bun closes it. Defaults to 0 (disabled)
+   * so long-running completions and quiet SSE streams are not cut off mid-turn.
+   */
+  readonly idleTimeout?: number
 }
 
 interface CompletionAggregate {
@@ -154,6 +172,7 @@ class SlidingWindowRateLimiter {
 
     activeRequests.push(now)
     this.requestTimes.set(key, activeRequests)
+    this.evictOldestKeyWhenFull()
     return {
       allowed: true,
       headers: rateLimitHeaders(
@@ -162,6 +181,25 @@ class SlidingWindowRateLimiter {
         activeRequests[0] ?? now,
         this.windowMs,
       ),
+    }
+  }
+
+  /** Keep the key map bounded under multi-IP floods by evicting the idlest key. */
+  private evictOldestKeyWhenFull(): void {
+    if (this.requestTimes.size <= MAX_RATE_LIMIT_KEYS) {
+      return
+    }
+    let oldestKey: string | undefined
+    let oldestSeen = Number.POSITIVE_INFINITY
+    for (const [key, timestamps] of this.requestTimes) {
+      const lastSeen = timestamps[timestamps.length - 1] ?? 0
+      if (lastSeen < oldestSeen) {
+        oldestSeen = lastSeen
+        oldestKey = key
+      }
+    }
+    if (oldestKey !== undefined) {
+      this.requestTimes.delete(oldestKey)
     }
   }
 
@@ -202,9 +240,9 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     this.auth = options.auth === undefined ? undefined : normalizeBearerAuth(options.auth)
     this.cortex = options.cortex
     this.cors = options.cors === undefined ? undefined : normalizeCors(options.cors)
-    this.maxRequestBodyBytes = options.maxRequestBodyBytes === undefined
-      ? undefined
-      : normalizeMaxRequestBodyBytes(options.maxRequestBodyBytes)
+    this.maxRequestBodyBytes = normalizeMaxRequestBodyBytes(
+      options.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES,
+    )
     this.rateLimit = options.rateLimit === undefined ? undefined : normalizeRateLimit(options.rateLimit)
     this.models = [...new Set(options.models)]
     this.now = options.now ?? Date.now
@@ -224,7 +262,12 @@ export class OpenAiApiServer implements OpenAiApiHandler {
       return this.decorateResponse(request, authenticationFailure)
     }
 
-    const rateLimitDecision = this.consumeRateLimit(request, clientAddress)
+    let rateLimitDecision: RateLimitDecision | null
+    try {
+      rateLimitDecision = this.consumeRateLimit(request, clientAddress)
+    } catch {
+      return this.decorateResponse(request, apiError(500, 'Internal server error.', 'api_error', null, null))
+    }
     if (rateLimitDecision && !rateLimitDecision.allowed) {
       return this.decorateResponse(
         request,
@@ -256,10 +299,20 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     return this.decorateResponse(request, response, rateLimitDecision?.headers)
   }
 
-  /** Start this handler on Bun's native HTTP server. */
+  /** Start this handler on Bun's native HTTP server, bound to loopback unless overridden. */
   listen(options: OpenAiApiListenOptions = {}) {
+    const hostname = options.hostname ?? DEFAULT_HOSTNAME
+    if (this.auth === undefined && !isLoopbackHostname(hostname)) {
+      console.warn(
+        `OpenAiApiServer is binding to '${hostname}' without bearer authentication; ` +
+        'the OpenAI-compatible API will be reachable without credentials. ' +
+        'Configure the auth option or keep the default 127.0.0.1 loopback bind.',
+      )
+    }
     return Bun.serve({
       ...options,
+      hostname,
+      idleTimeout: options.idleTimeout ?? 0,
       fetch: (request, server) => this.fetch(request, server.requestIP(request)?.address),
     })
   }
@@ -318,7 +371,7 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     const id = this.responseId()
     const created = this.epochSeconds()
     if (parsed.stream) {
-      return this.streamingCompletion(client, parsed.completion, id, created, request.signal)
+      return this.streamingCompletion(client, parsed.completion, parsed.includeUsage, id, created, request.signal)
     }
     try {
       const aggregate = await collectCompletion(client, parsed.completion, request.signal)
@@ -384,6 +437,7 @@ export class OpenAiApiServer implements OpenAiApiHandler {
   private streamingCompletion(
     client: LlmClient,
     completion: CompletionRequest,
+    includeUsage: boolean | undefined,
     id: string,
     created: number,
     requestSignal: AbortSignal,
@@ -442,7 +496,8 @@ export class OpenAiApiServer implements OpenAiApiHandler {
           for (const text of visibleTail(parser)) {
             sendChunk({ content: text })
           }
-          sendChunk({}, resolvedFinishReason(finishReason, toolCalls), toOpenAiUsage(lastUsage))
+          const usage = lastUsage !== undefined && includeUsage !== false ? toOpenAiUsage(lastUsage) : undefined
+          sendChunk({}, resolvedFinishReason(finishReason, toolCalls), usage)
           sendDone()
         } catch {
           if (!cancelled) {
@@ -525,7 +580,7 @@ export class OpenAiApiServer implements OpenAiApiHandler {
       return null
     }
     const authorization = request.headers.get('authorization')
-    if (authorization === `Bearer ${this.auth.token}`) {
+    if (authorization !== null && bearerAuthorizationMatches(authorization, this.auth.token)) {
       return null
     }
     return apiError(
@@ -669,9 +724,9 @@ function normalizeBearerAuth(options: OpenAiApiBearerAuthOptions): BearerAuthCon
   return { token: options.token, exemptPaths: new Set(exemptPaths) }
 }
 
-function normalizeMaxRequestBodyBytes(value: number): number {
+function normalizeMaxRequestBodyBytes(value: number): number | undefined {
   assertNonNegativeSafeInteger(value, 'maxRequestBodyBytes')
-  return value
+  return value === 0 ? undefined : value
 }
 
 function normalizeRateLimit(options: OpenAiApiRateLimitOptions): RateLimitConfiguration {
@@ -812,11 +867,54 @@ function visibleTail(parser: ThinkingParser): string[] {
 }
 
 function resolvedFinishReason(reason: string | undefined, toolCalls: readonly ToolCall[]): string {
-  return reason ?? (toolCalls.length ? 'tool_calls' : 'stop')
+  if (reason !== undefined) {
+    return normalizeOpenAiFinishReason(reason)
+  }
+  return toolCalls.length ? 'tool_calls' : 'stop'
+}
+
+/**
+ * Map provider-specific finish vocabularies (Responses API statuses, Anthropic
+ * stop reasons, Gemini finish reasons) onto the chat-completions enum. Mid-stream
+ * failures already surface through the SSE error-frame path, so provider error
+ * markers and unknown values degrade to `stop` here.
+ */
+function normalizeOpenAiFinishReason(reason: string): string {
+  switch (reason.toLowerCase()) {
+    case 'stop':
+    case 'end_turn':
+    case 'stop_sequence':
+    case 'completed':
+      return 'stop'
+    case 'length':
+    case 'max_tokens':
+    case 'incomplete':
+      return 'length'
+    case 'tool_calls':
+    case 'tool_use':
+      return 'tool_calls'
+    case 'content_filter':
+    case 'safety':
+    case 'recitation':
+      return 'content_filter'
+    default:
+      return 'stop'
+  }
 }
 
 function isCortexModel(model: string): boolean {
   return model.toLowerCase().includes('cortex')
+}
+
+function bearerAuthorizationMatches(authorization: string, token: string): boolean {
+  const actualBytes = Buffer.from(authorization)
+  const expectedBytes = Buffer.from(`Bearer ${token}`)
+  return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase()
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === '[::1]' || normalized === 'localhost'
 }
 
 function cortexMetadata(value: unknown): CortexCompletionMetadata | undefined {

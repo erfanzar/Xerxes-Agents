@@ -97,7 +97,7 @@ Review native changes.`, '/workspace/skills/review/SKILL.md'))
     expect(state.getSandboxRouter('constrained')).toBeDefined()
     expect(state.operatorState?.toolDefinitions().map(tool => tool.function.name)).toContain('exec_command')
     expect(state.registeredHooks.on_turn_start).toBe(1)
-    expect(state.hookRunner.run('on_turn_start')).toEqual(['observed'])
+    expect(await state.hookRunner.run('on_turn_start')).toEqual(['observed'])
     expect(hookCalls).toBe(1)
   } finally {
     await state.close()
@@ -133,7 +133,7 @@ Inspect native runtime state.
       expect(state.discovery.skillNames).toEqual(['inspect'])
       expect(state.pluginRegistry.getTool('native_tool')).toBeDefined()
       expect(state.getEnabledSkills().map(skill => skill.metadata.name)).toEqual(['inspect'])
-      expect(state.hookRunner.run('on_turn_end')).toEqual(['native-hook'])
+      expect(await state.hookRunner.run('on_turn_end')).toEqual(['native-hook'])
     } finally {
       await state.close()
     }

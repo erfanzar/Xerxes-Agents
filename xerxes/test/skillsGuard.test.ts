@@ -2,11 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import type { PathLike } from 'node:fs'
+import * as fsp from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 
 import {
   SkillGuardPathError,
@@ -145,5 +147,83 @@ test('guarded moves reject traversal and symlinked skills without touching outsi
     expect(scanned.isSafe).toBeFalse()
     expect(scanned.reasons[0]).toContain('Unreadable SKILL.md')
     expect(await readFile(join(outside, 'SKILL.md'), 'utf8')).toBe('outside skill')
+  })
+})
+
+test('approveSkill sets the active skill aside and restores it when the move fails', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const active = join(skillsDirectory, 'replaced')
+    const pending = join(skillsDirectory, '.hub', 'quarantine', 'replaced')
+    const paths = { skillsDirectory }
+    await mkdir(active, { recursive: true })
+    await writeFile(join(active, 'SKILL.md'), 'active version', 'utf8')
+    await mkdir(pending, { recursive: true })
+    await writeFile(join(pending, 'SKILL.md'), 'quarantined version', 'utf8')
+
+    // A healthy approval replaces the active skill and leaves no backup behind.
+    expect(await approveSkill('replaced', paths)).toBe("Approved and activated skill 'replaced'")
+    expect(await readFile(join(active, 'SKILL.md'), 'utf8')).toBe('quarantined version')
+    await expect(lstat(pending)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(skillsDirectory)).filter(entry => entry.includes('.approve-'))).toEqual([])
+
+    // A failed move restores the previous active skill instead of losing it.
+    await mkdir(pending, { recursive: true })
+    await writeFile(join(pending, 'SKILL.md'), 'second quarantined version', 'utf8')
+    const originalRename = fsp.rename
+    const spy = spyOn(fsp, 'rename').mockImplementation(async (source: PathLike, destination: PathLike) => {
+      if (String(source).includes('quarantine')) {
+        throw Object.assign(new Error('simulated move failure'), { code: 'EPERM' })
+      }
+      return originalRename(source, destination)
+    })
+    try {
+      await expect(approveSkill('replaced', paths)).rejects.toBeInstanceOf(SkillGuardPathError)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await readFile(join(active, 'SKILL.md'), 'utf8')).toBe('quarantined version')
+    expect(await readFile(join(pending, 'SKILL.md'), 'utf8')).toBe('second quarantined version')
+    expect((await readdir(skillsDirectory)).filter(entry => entry.includes('.approve-'))).toEqual([])
+  })
+})
+
+test('approveSkill survives EXDEV across filesystems with a copy and delete fallback', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const active = join(skillsDirectory, 'portable')
+    const pending = join(skillsDirectory, '.hub', 'quarantine', 'portable')
+    const paths = { skillsDirectory }
+    await mkdir(active, { recursive: true })
+    await writeFile(join(active, 'SKILL.md'), 'active version', 'utf8')
+    await mkdir(join(pending, 'references'), { recursive: true })
+    await writeFile(join(pending, 'SKILL.md'), 'quarantined version', 'utf8')
+    await writeFile(join(pending, 'references', 'guide.md'), 'nested guide', 'utf8')
+
+    const spy = spyOn(fsp, 'rename').mockImplementation(async () => {
+      throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' })
+    })
+    try {
+      expect(await approveSkill('portable', paths)).toBe("Approved and activated skill 'portable'")
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await readFile(join(active, 'SKILL.md'), 'utf8')).toBe('quarantined version')
+    expect(await readFile(join(active, 'references', 'guide.md'), 'utf8')).toBe('nested guide')
+    await expect(lstat(pending)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readdir(skillsDirectory)).filter(entry => entry.includes('.approve-'))).toEqual([])
+  })
+})
+
+test('trusted hash normalization skips only the malformed entries', async () => {
+  await inTemporaryDirectory(async directory => {
+    const skillsDirectory = join(directory, 'skills')
+    const paths = { skillsDirectory }
+    await saveTrustedHashes({ '/tmp/good/SKILL.md': 'a'.repeat(64) }, paths)
+    const database = join(skillsDirectory, '.hub', 'trusted_hashes.json')
+    const stored = JSON.parse(await readFile(database, 'utf8')) as Record<string, unknown>
+    stored['/tmp/bad/SKILL.md'] = 42
+    await writeFile(database, JSON.stringify(stored), 'utf8')
+    expect(await loadTrustedHashes(paths)).toEqual({ '/tmp/good/SKILL.md': 'a'.repeat(64) })
   })
 })

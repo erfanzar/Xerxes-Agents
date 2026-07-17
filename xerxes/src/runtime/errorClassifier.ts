@@ -46,11 +46,12 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
     ErrorKind.CONTEXT_OVERFLOW,
     [/context.{0,8}length/i, /maximum.{0,8}context/i, /context window/i, /too many tokens/i, /reduce.{0,8}messages/i],
   ],
-  [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b401\b/]],
+  [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b40[13]\b/, /forbidden/i]],
   [ErrorKind.QUOTA_EXCEEDED, [/quota/i, /insufficient.{0,8}credit/i, /billing/i]],
-  [ErrorKind.PROVIDER_DOWN, [/\b50[023]\b/, /service unavailable/i, /overloaded/i, /bad gateway/i]],
+  [ErrorKind.PROVIDER_DOWN, [/\b(?:50[0-4]|529)\b/, /service unavailable/i, /overloaded/i, /bad gateway/i]],
   [ErrorKind.TIMEOUT, [/timeout/i, /timed out/i, /\b408\b/]],
   [ErrorKind.BAD_REQUEST, [/\b400\b/, /invalid request/i, /malformed/i]],
+  [ErrorKind.TRANSIENT, [/transient/i, /temporarily/i]],
 ]
 
 const CONNECTION_CODES = new Set([
@@ -72,8 +73,14 @@ export class ErrorClassifier {
     if (details.name === 'AbortError' || details.name === 'InterruptedError') {
       return classified(ErrorKind.FATAL, error, 'user interrupt')
     }
-    if (details.name === 'TimeoutError' || details.code === 'ETIMEDOUT') {
+    if (details.name === 'TimeoutError' || details.name === 'StreamInactivityError' || details.code === 'ETIMEDOUT') {
       return classified(ErrorKind.TIMEOUT, error, details.message, retryAfter)
+    }
+    if (details.name === 'ConfigurationError') {
+      return classified(ErrorKind.FATAL, error, details.message, retryAfter)
+    }
+    if (details.name === 'ValidationError') {
+      return classified(ErrorKind.BAD_REQUEST, error, details.message, retryAfter)
     }
     if (
       details.name === 'ConnectionError'
@@ -157,10 +164,10 @@ function describeError(error: unknown): ErrorDetails {
 
 function kindForStatus(status: number | undefined): ErrorKind | undefined {
   if (status === 429) return ErrorKind.RATE_LIMIT
-  if (status === 401) return ErrorKind.AUTH
+  if (status === 401 || status === 403) return ErrorKind.AUTH
   if (status === 400) return ErrorKind.BAD_REQUEST
   if (status === 408) return ErrorKind.TIMEOUT
-  if (status !== undefined && (status === 500 || status === 502 || status === 503)) return ErrorKind.PROVIDER_DOWN
+  if (status !== undefined && ((status >= 500 && status <= 504) || status === 529)) return ErrorKind.PROVIDER_DOWN
   return undefined
 }
 

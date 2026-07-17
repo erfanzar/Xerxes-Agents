@@ -109,7 +109,7 @@ test('ACP agent runner maps the portable loop into persistent ACP session events
 
 test('ACP agent runner gives a session model override precedence over its fallback model', async () => {
   const client = new RecordingModelClient()
-  const runner = new AcpAgentRunner({ llm: client, model: 'fallback-model' })
+  const runner = new AcpAgentRunner({ llm: client, model: 'fallback-model', topK: 64 })
   const server = new AcpServer({ runner })
   const sessionId = String(server.openSession('/workspace').session_id)
   const session = server.sessions.get(sessionId)
@@ -122,6 +122,7 @@ test('ACP agent runner gives a session model override precedence over its fallba
 
   expect(client.requests).toHaveLength(1)
   expect(client.requests[0]?.model).toBe('session-model')
+  expect(client.requests[0]?.topK).toBe(64)
 })
 
 test('ACP agent runner automatically joins detached subagents and asks the model to synthesize them', async () => {
@@ -254,6 +255,30 @@ test('ACP cancellation aborts a pending approval without leaving the turn blocke
   expect(server.cancel(sessionId)).toEqual({ ok: true })
   await expect(turn).resolves.toMatchObject({ ok: true, cancelled: true })
   expect(server.pendingPermissions()).toEqual([])
+})
+
+test('ACP session accepts a new prompt after a cancellation', async () => {
+  const runner = new AcpAgentRunner({ llm: new TextClient(), model: 'gpt-4o' })
+  const server = new AcpServer({ runner })
+  const sessionId = String(server.openSession('/workspace').session_id)
+  const session = server.sessions.get(sessionId)
+  if (!session) {
+    throw new Error('expected ACP session')
+  }
+
+  expect(server.cancel(sessionId)).toEqual({ ok: true })
+  expect(session.cancelled).toBe(true)
+
+  const events: Record<string, unknown>[] = []
+  const result = await runner.runPrompt({
+    session,
+    text: 'prompt after cancel',
+    emit: event => { events.push(event) },
+  })
+
+  expect(result).toEqual({ ok: true, cancelled: false, input_tokens: 3, output_tokens: 5, tool_calls_count: 0, model: 'gpt-4o' })
+  expect(events.filter(event => event.kind === 'text_delta').map(event => event.text)).toEqual(['Hello from ACP.'])
+  expect(runner.stateFor(sessionId)?.messages.map(message => message.role)).toEqual(['user', 'assistant'])
 })
 
 test('ACP agent runner surfaces and resolves tool-driven input requests', async () => {

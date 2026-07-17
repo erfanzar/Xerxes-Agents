@@ -532,9 +532,10 @@ export class MemoryStore {
   }
 
   private hydratePersistedEntries(): void {
-    const loaded = this.longTerm.retrieve(undefined, undefined, UNBOUNDED_TIER_CAPACITY)
-    const items = Array.isArray(loaded) ? loaded : loaded ? [loaded] : []
-    for (const item of items) {
+    // mostImportant is read-only: boot hydration must not touch access state or
+    // trigger one re-persist/re-embed write per restored entry. Reversed to
+    // ascending importance so enforceLimit evicts the least valuable entries.
+    for (const item of this.longTerm.mostImportant(UNBOUNDED_TIER_CAPACITY).reverse()) {
       const memoryType = persistedMemoryType(item)
       if (!memoryType || !isLongTermType(memoryType)) continue
       this.memories[memoryType].push(MemoryEntry.fromMemoryItem(item))

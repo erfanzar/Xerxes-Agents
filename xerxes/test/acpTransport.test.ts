@@ -55,6 +55,28 @@ test('ACP stdio transport preserves NDJSON framing, aliases, streamed updates, a
   expect(updates.every(frame => (frame.params as { request_id: number }).request_id === 3)).toBe(true)
 })
 
+test('ACP respond_permission requires a strictly boolean allow parameter', async () => {
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  const input = readableChunks([
+    '{"jsonrpc":"2.0","id":1,"method":"respond_permission","params":{"permission_id":"p1","allow":"false"}}\n',
+    '{"jsonrpc":"2.0","id":2,"method":"respond_permission","params":{"permission_id":"p1","allow":1}}\n',
+    '{"jsonrpc":"2.0","id":3,"method":"respond_permission","params":{"permission_id":"p1","allow":false}}\n',
+    '{"jsonrpc":"2.0","id":4,"method":"permission/respond","params":{"permission_id":"p1","allow":true}}\n',
+  ])
+
+  await serveACPStdio(server, input, line => {
+    output.push(line)
+  })
+
+  const frames = output.map(line => JSON.parse(line) as Record<string, unknown>)
+  const byId = new Map(frames.map(frame => [frame.id, frame]))
+  expect((byId.get(1)?.error as { code: number } | undefined)?.code).toBe(-32602)
+  expect((byId.get(2)?.error as { code: number } | undefined)?.code).toBe(-32602)
+  expect(byId.get(3)?.result).toEqual({ ok: false })
+  expect(byId.get(4)?.result).toEqual({ ok: false })
+})
+
 test('ACP stdio transport reports parse and method errors but does not answer notifications', async () => {
   const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
   const output: string[] = []

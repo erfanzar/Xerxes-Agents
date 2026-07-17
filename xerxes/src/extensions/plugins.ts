@@ -98,6 +98,15 @@ export interface XerxesPluginModule {
   readonly register?: (registry: PluginRegistry) => void | Promise<void>
 }
 
+/** Point-in-time view of every capability index, used to roll back a failed plugin registration. */
+interface PluginRegistrationSnapshot {
+  readonly channels: ReadonlySet<string>
+  readonly hooks: ReadonlyMap<string, number>
+  readonly plugins: ReadonlySet<string>
+  readonly providers: ReadonlySet<string>
+  readonly tools: ReadonlySet<string>
+}
+
 /** Owns plugin capability indexes and validates dependency-compatible load order. */
 export class PluginRegistry {
   private readonly channels = new Map<string, { readonly owner: string; readonly value: unknown }>()
@@ -105,9 +114,16 @@ export class PluginRegistry {
   private readonly plugins = new Map<string, RegisteredPlugin>()
   private readonly providers = new Map<string, { readonly owner: string; readonly value: PluginLlmProviderFactory }>()
   private readonly tools = new Map<string, { readonly owner: string; readonly value: PluginTool }>()
+  private readonly failures: string[] = []
+  private readonly loadedModules = new Set<string>()
 
   get pluginNames(): string[] {
     return [...this.plugins.keys()]
+  }
+
+  /** Formatted per-module errors captured during discovery, in discovery order. */
+  get loadErrors(): readonly string[] {
+    return [...this.failures]
   }
 
   async discover(directory: string): Promise<string[]> {
@@ -115,14 +131,21 @@ export class PluginRegistry {
     const discovered: string[] = []
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (!entry.isFile() || entry.name.startsWith('_') || !/\.(?:[cm]?js|ts)$/.test(entry.name)) continue
-      const before = new Set(this.plugins.keys())
+      const path = join(directory, entry.name)
+      const href = pathToFileURL(path).href
+      // An already-loaded module must not re-execute; its registrations would conflict with themselves.
+      if (this.loadedModules.has(href)) continue
+      const snapshot = this.registrationSnapshot()
       try {
-        const path = join(directory, entry.name)
-        const module = await import(`${pathToFileURL(path).href}?xerxes=${Date.now()}`) as XerxesPluginModule
+        const module = await import(href) as XerxesPluginModule
         await module.register?.(this)
-        for (const name of this.plugins.keys()) if (!before.has(name)) discovered.push(name)
-      } catch {
-        // One third-party plugin must not prevent discovery of the next.
+        this.loadedModules.add(href)
+        for (const name of this.plugins.keys()) if (!snapshot.plugins.has(name)) discovered.push(name)
+      } catch (error) {
+        this.rollbackRegistrations(snapshot)
+        const message = `${path}: ${errorMessage(error)}`
+        this.failures.push(message)
+        console.error(`Plugin discovery failed: ${message}`)
       }
     }
     return discovered
@@ -262,6 +285,45 @@ export class PluginRegistry {
     index.set(name, { value, owner })
   }
 
+  private registrationSnapshot(): PluginRegistrationSnapshot {
+    return {
+      plugins: new Set(this.plugins.keys()),
+      tools: new Set(this.tools.keys()),
+      providers: new Set(this.providers.keys()),
+      channels: new Set(this.channels.keys()),
+      hooks: new Map([...this.hooks].map(([name, entries]) => [name, entries.length])),
+    }
+  }
+
+  /** Remove every capability a failed plugin module added, including standalone and foreign-owned entries. */
+  private rollbackRegistrations(snapshot: PluginRegistrationSnapshot): void {
+    for (const name of [...this.plugins.keys()]) {
+      if (!snapshot.plugins.has(name)) this.unregisterPlugin(name)
+    }
+    for (const [name, entry] of [...this.tools]) {
+      if (snapshot.tools.has(name)) continue
+      this.tools.delete(name)
+      this.plugins.get(entry.owner)?.tools.delete(name)
+    }
+    for (const [name, entry] of [...this.providers]) {
+      if (snapshot.providers.has(name)) continue
+      this.providers.delete(name)
+      const plugin = this.plugins.get(entry.owner)
+      if (plugin?.provider === entry.value) plugin.provider = undefined
+    }
+    for (const [name, entry] of [...this.channels]) {
+      if (snapshot.channels.has(name)) continue
+      this.channels.delete(name)
+      this.plugins.get(entry.owner)?.channels.delete(name)
+    }
+    for (const [name, entries] of [...this.hooks]) {
+      const retained = snapshot.hooks.get(name) ?? 0
+      const removed = entries.splice(retained)
+      if (!entries.length) this.hooks.delete(name)
+      for (const entry of removed) this.plugins.get(entry.owner)?.hooks.delete(name)
+    }
+  }
+
   private resolveOwner(meta: PluginMeta | undefined, explicitOwner: string | undefined): string {
     const owner = explicitOwner ?? meta?.name ?? '__standalone__'
     if (meta && !this.plugins.has(owner)) this.registerPlugin(meta)
@@ -279,4 +341,8 @@ function normalizeMeta(meta: PluginMeta): RequiredPluginMeta {
     dependencies: [...(meta.dependencies ?? [])],
     versionConstraints: { ...(meta.versionConstraints ?? {}) },
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

@@ -7,17 +7,21 @@ import { join } from 'node:path'
 
 import { ClientError, ValidationError } from '../../core/errors.js'
 import { ToolRegistry, type ToolExecutionContext } from '../../executors/toolRegistry.js'
-import { skillPromptSection, type SkillRegistry } from '../../extensions/skills.js'
+import { skillMetadataIndexLine, skillPromptSection, type SkillRegistry } from '../../extensions/skills.js'
 import { SpawnedAgentManager, type SpawnedAgentDescriptor, type SpawnedAgentSnapshot } from '../../operators/subagents.js'
 import { UserPromptManager } from '../../operators/userPrompt.js'
 import { resolveInteractionMode, type InteractionMode } from '../../runtime/interactionModes.js'
 import type { AgentDefinition } from '../../agents/definitions.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
-import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
+import { optionalBoolean, optionalString, optionalStringArray, requiredString } from '../inputs.js'
 
 export type { InteractionMode } from '../../runtime/interactionModes.js'
 
 const DEFAULT_PLAN_TIMEOUT_MS = 120_000
+const DEFAULT_GIT_TIMEOUT_MS = 30_000
+const MAX_SKILL_SEARCH_RESULTS = 20
+const MAX_SKILL_SEARCH_QUERY_CHARACTERS = 240
+const MAX_SKILL_SEARCH_TAGS = 12
 
 export interface WorkflowTodo {
   readonly content: string
@@ -83,7 +87,9 @@ export interface WorktreeManager {
 export class NativeWorktreeManager implements WorktreeManager {
   private readonly created = new Set<string>()
 
-  constructor(private readonly cwd = process.cwd()) {}
+  constructor(private readonly cwd = process.cwd()) {
+    registerWorktreeExitSweep(this)
+  }
 
   async create(branchName?: string): Promise<WorktreeCreated> {
     const base = (await runGit(['rev-parse', '--show-toplevel'], this.cwd)).trim()
@@ -112,6 +118,35 @@ export class NativeWorktreeManager implements WorktreeManager {
     await runGit(['worktree', 'remove', ...(force ? ['--force'] : []), worktreePath], this.cwd)
     this.created.delete(worktreePath)
   }
+
+  /**
+   * Best-effort synchronous sweep of worktrees this process created but never removed
+   * through ExitWorktreeTool. Wired to process exit so os.tmpdir() is not littered.
+   */
+  sweepCreated(): void {
+    for (const path of this.created) {
+      try {
+        Bun.spawnSync(['git', 'worktree', 'remove', '--force', path], { cwd: this.cwd })
+      } catch {
+        // Best effort only: leaving one temporary worktree behind must never fail the exit path.
+      }
+    }
+    this.created.clear()
+  }
+}
+
+const worktreeExitManagers = new Set<NativeWorktreeManager>()
+let worktreeExitSweepRegistered = false
+
+function registerWorktreeExitSweep(manager: NativeWorktreeManager): void {
+  worktreeExitManagers.add(manager)
+  if (worktreeExitSweepRegistered) return
+  worktreeExitSweepRegistered = true
+  process.once('exit', () => {
+    for (const registered of worktreeExitManagers) {
+      registered.sweepCreated()
+    }
+  })
 }
 
 export interface WorkflowPlanStep {
@@ -145,12 +180,17 @@ export interface ClaudeWorkflowToolsOptions {
 
 export const SKILL_TOOL_DEFINITION: ToolDefinition = definition(
   'SkillTool',
-  'Render instructions for a discovered named skill.',
+  'Discover installed skills by query/tags, or activate one exact skill name and render its instructions.',
   {
-    skill_name: stringSchema('Skill name.'),
-    args: stringSchema('Optional user request appended to the skill instructions.'),
+    skill_name: stringSchema('Exact installed skill name to activate. Omit to search or list skills.'),
+    query: stringSchema('Optional name/description search. Omit or use an empty string to list installed skills.'),
+    tags: {
+      type: 'array',
+      description: 'Optional skill tags to match while searching.',
+      items: { type: 'string' },
+    },
+    args: stringSchema('Optional user request appended only when activating skill_name.'),
   },
-  ['skill_name'],
 )
 
 export const CLAUDE_WORKFLOW_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
@@ -388,16 +428,43 @@ export class ClaudeWorkflowTools {
 }
 
 function renderSkill(registry: SkillRegistry, inputs: JsonObject): string {
-  const skillName = requiredString(inputs, 'skill_name')
+  const skillName = optionalString(inputs, 'skill_name')?.trim()
+  if (!skillName) {
+    if (optionalString(inputs, 'args')?.trim()) {
+      throw new ValidationError('skill_name', 'is required when args is provided')
+    }
+    return renderSkillSearch(registry, inputs)
+  }
   const skill = registry.get(skillName)
   if (skill === undefined) {
-    const names = registry.names
-    return names.length
-      ? `Skill '${skillName}' not found. Available: ${names.slice(0, 20).join(', ')}`
-      : `Skill '${skillName}' not found. No skills discovered.`
+    return `No installed skill has that exact name.\n${renderSkillSearch(registry, { query: skillName })}`
   }
   const args = optionalString(inputs, 'args')?.trim()
   return `[Skill: ${skillName}]\n${skillPromptSection(skill)}${args ? `\n\nUser request: ${args}` : ''}`
+}
+
+function renderSkillSearch(registry: SkillRegistry, inputs: JsonObject): string {
+  const query = (optionalString(inputs, 'query') ?? '')
+    .trim()
+    .slice(0, MAX_SKILL_SEARCH_QUERY_CHARACTERS)
+  const tags = optionalStringArray(inputs, 'tags')
+    .map(tag => tag.trim())
+    .filter(Boolean)
+    .slice(0, MAX_SKILL_SEARCH_TAGS)
+  const matches = registry.search(query, tags)
+  if (!matches.length) {
+    return 'No installed skills match that search. Refine query or tags, or call SkillTool with no arguments to list installed skills.'
+  }
+  const shown = matches.slice(0, MAX_SKILL_SEARCH_RESULTS)
+  const lines = [
+    `Installed skill results (${shown.length} of ${matches.length}; untrusted metadata only):`,
+    ...shown.map(skill => skillMetadataIndexLine(skill)),
+  ]
+  if (shown.length < matches.length) {
+    lines.push(`  ... ${matches.length - shown.length} more matching skills omitted; refine query or tags`)
+  }
+  lines.push('Use SkillTool with an exact skill_name to activate one result and render its instructions.')
+  return lines.join('\n')
 }
 
 /** Parse the XML shape emitted by the legacy Python planner. */
@@ -528,11 +595,21 @@ async function runGit(arguments_: readonly string[], cwd: string): Promise<strin
   } catch (error) {
     throw new ValidationError('git', error instanceof Error ? error.message : String(error))
   }
-  const [exitCode, stdout, stderr] = await Promise.all([
-    process.exited,
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-  ])
-  if (exitCode !== 0) throw new ValidationError('git', stderr.trim() || `git exited with code ${exitCode}`)
-  return stdout
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    process.kill()
+  }, DEFAULT_GIT_TIMEOUT_MS)
+  try {
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ])
+    if (timedOut) throw new ValidationError('git', `command timed out after ${DEFAULT_GIT_TIMEOUT_MS}ms`)
+    if (exitCode !== 0) throw new ValidationError('git', stderr.trim() || `git exited with code ${exitCode}`)
+    return stdout
+  } finally {
+    clearTimeout(timer)
+  }
 }

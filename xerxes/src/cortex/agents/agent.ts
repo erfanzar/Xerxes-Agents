@@ -1039,7 +1039,8 @@ function throwIfAborted(signal: AbortSignal | undefined, agentId: string): void 
   throw new AgentError(agentId, 'execution cancelled')
 }
 
-function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+/** Delay that rejects promptly on abort and always removes its abort listener when it settles. */
+export function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   if (!Number.isFinite(milliseconds) || milliseconds < 0) {
     return Promise.reject(new TypeError('delay milliseconds must be a non-negative finite number'))
   }
@@ -1048,11 +1049,14 @@ function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<voi
       reject(signal.reason)
       return
     }
-    const timer = setTimeout(resolve, milliseconds)
     const abort = () => {
       clearTimeout(timer)
       reject(signal?.reason)
     }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, milliseconds)
     signal?.addEventListener('abort', abort, { once: true })
   })
 }

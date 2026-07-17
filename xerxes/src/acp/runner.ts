@@ -29,6 +29,7 @@ export interface AcpAgentRunnerOptions {
   readonly temperature?: number
   readonly toolExecutor?: ToolExecutor
   readonly tools?: readonly ToolDefinition[]
+  readonly topK?: number
   readonly topP?: number
 }
 
@@ -122,10 +123,10 @@ export class AcpAgentRunner {
       return { ok: false, error: `prompt already active for session: ${session.sessionId}` }
     }
 
+    // A cancellation targets the turn that was active when it arrived; a new
+    // prompt for the same session must not inherit the stale cancelled flag.
+    session.cancelled = false
     const controller = new AbortController()
-    if (session.cancelled) {
-      controller.abort(new Error('ACP session is cancelled'))
-    }
     const emit = request.emit ?? (() => undefined)
     const active: ActivePrompt = { session, controller, emit }
     this.activePrompts.set(session.sessionId, active)
@@ -151,6 +152,7 @@ export class AcpAgentRunner {
         ...(this.options.systemPrompt ? { systemPrompt: this.options.systemPrompt } : {}),
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
         ...(this.options.tools ? { tools: this.options.tools } : {}),
+        ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(this.options.topP !== undefined ? { topP: this.options.topP } : {}),
         permissionMode,
       }, {

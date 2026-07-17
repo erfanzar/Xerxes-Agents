@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdir, rename, rm } from 'node:fs/promises'
+import { appendFile, mkdir } from 'node:fs/promises'
 
 import type { JsonValue } from '../types/toolCalls.js'
 
@@ -10,37 +10,20 @@ export interface DaemonLogOutput {
   write(chunk: string): void | Promise<void>
 }
 
-/** File operations needed to atomically replace one daily JSONL file. */
+/** File operations needed to append records to one daily JSONL file. */
 export interface DaemonLogFiles {
+  appendText(path: string, content: string): Promise<void>
   ensureDirectory(directory: string): Promise<void>
-  readText(path: string): Promise<string | undefined>
-  remove(path: string): Promise<void>
-  rename(from: string, to: string): Promise<void>
-  writeText(path: string, content: string): Promise<void>
 }
 
-/** Bun filesystem implementation. It uses a temp file plus same-directory rename for atomic replacement. */
+/** Bun filesystem implementation. Appends use O_APPEND so writes stay O(1) per record. */
 export class BunDaemonLogFiles implements DaemonLogFiles {
+  async appendText(path: string, content: string): Promise<void> {
+    await appendFile(path, content, 'utf8')
+  }
+
   async ensureDirectory(directory: string): Promise<void> {
     await mkdir(directory, { recursive: true })
-  }
-
-  async readText(path: string): Promise<string | undefined> {
-    const file = Bun.file(path)
-    if (!await file.exists()) return undefined
-    return file.text()
-  }
-
-  async remove(path: string): Promise<void> {
-    await rm(path, { force: true })
-  }
-
-  async rename(from: string, to: string): Promise<void> {
-    await rename(from, to)
-  }
-
-  async writeText(path: string, content: string): Promise<void> {
-    await Bun.write(path, content)
   }
 }
 
@@ -52,7 +35,6 @@ export interface DaemonLoggerOptions {
   readonly clock: () => Date
   readonly directory: string
   readonly files?: DaemonLogFiles
-  readonly idFactory?: () => string
   /** Required output mirror; the logger never implicitly reads process stderr. */
   readonly output: DaemonLogOutput
 }
@@ -67,16 +49,14 @@ interface PendingDaemonLog {
 /**
  * Daily-rotated daemon JSONL logger.
  *
- * Records are serialized through one in-process queue. Each append reads the
- * current daily file, writes a complete replacement to a same-directory temp
- * file, and atomically renames it into place. This preserves complete JSONL
- * files through an interrupted write and avoids concurrent in-process loss.
+ * Records are serialized through one in-process queue and appended to the
+ * current daily file with an O_APPEND write, so each record costs one small
+ * write instead of a full-file read/replace cycle.
  */
 export class DaemonLogger {
   readonly #clock: () => Date
   readonly #directory: string
   readonly #files: DaemonLogFiles
-  readonly #idFactory: () => string
   readonly #output: DaemonLogOutput
   #closed = false
   #currentPath: string | undefined
@@ -88,7 +68,6 @@ export class DaemonLogger {
     this.#clock = options.clock
     this.#output = options.output
     this.#files = options.files ?? new BunDaemonLogFiles()
-    this.#idFactory = options.idFactory ?? defaultTemporaryId
   }
 
   /** Path selected for the most recently persisted UTC-day record. */
@@ -129,23 +108,9 @@ export class DaemonLogger {
       this.#directoryReady = true
     }
     const target = daemonLogPath(this.#directory, pending.date)
-    await this.appendAtomically(target, `${JSON.stringify(pending.record)}\n`, pending.date)
+    await this.#files.appendText(target, `${JSON.stringify(pending.record)}\n`)
     this.#currentPath = target
     await this.#output.write(`[${pending.level}] ${pending.event}\n`)
-  }
-
-  private async appendAtomically(target: string, line: string, date: string): Promise<void> {
-    const current = await this.#files.readText(target)
-    const content = appendJsonLine(current, line)
-    const temporary = daemonLogTemporaryPath(this.#directory, date, nextTemporaryId(this.#idFactory))
-    let renamed = false
-    try {
-      await this.#files.writeText(temporary, content)
-      await this.#files.rename(temporary, target)
-      renamed = true
-    } finally {
-      if (!renamed) await this.#files.remove(temporary)
-    }
   }
 }
 
@@ -200,27 +165,6 @@ function requiredLabel(value: string, name: string): string {
     throw new TypeError(`${name} must be a non-empty single-line string`)
   }
   return value
-}
-
-function appendJsonLine(current: string | undefined, line: string): string {
-  if (!current) return line
-  return current.endsWith('\n') ? current + line : `${current}\n${line}`
-}
-
-function daemonLogTemporaryPath(directory: string, date: string, identifier: string): string {
-  return joinPath(directory, `.daemon-${date}.${identifier}.tmp`)
-}
-
-function nextTemporaryId(factory: () => string): string {
-  const identifier = factory()
-  if (typeof identifier !== 'string' || !identifier.trim() || /[\\/]/.test(identifier)) {
-    throw new TypeError('daemon log temporary id factory must return a non-empty path-safe identifier')
-  }
-  return identifier
-}
-
-function defaultTemporaryId(): string {
-  return crypto.randomUUID()
 }
 
 function joinPath(directory: string, fileName: string): string {

@@ -41,6 +41,8 @@ export interface NativeSubagentHostOptions {
   readonly agentDefinitions: ReadonlyMap<string, AgentDefinition>
   readonly cwd: string
   readonly eventBus: DaemonSubagentEventBus
+  /** Bounded supplemental bootstrap context, such as the discovered skill catalog. */
+  readonly extraContext?: string
   readonly llm: LlmClient
   readonly maxTokens?: number
   readonly model: string
@@ -48,6 +50,7 @@ export interface NativeSubagentHostOptions {
   readonly temperature?: number
   readonly toolExecutor: ToolExecutor
   readonly tools: readonly ToolDefinition[]
+  readonly topK?: number
   readonly topP?: number
   /** Shared daemon store; omitted hosts keep child conversations in memory only. */
   readonly transcriptStore?: DaemonTranscriptStore
@@ -78,6 +81,8 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
   const generationOptions = new Map<number, NativeSubagentHostOptions>([[activeGeneration, options]])
   const conversations = new SubagentConversationPersistence(options.transcriptStore)
   const historySessionIds = new Map<string, string>()
+  /** Child depth advertised by the manager for each in-flight run, keyed by the agent id its tools see. */
+  const runningChildDepths = new Map<string, { readonly childDepth: number, readonly taskId: string }>()
   const manager = new SubAgentManager({
     idFactory: () => {
       const taskId = `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
@@ -97,6 +102,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
         generation === undefined ? activeOptions : generationOptions.get(generation) ?? activeOptions,
         conversations,
         historySessionIds.get(request.task.id),
+        runningChildDepths,
       )
     },
   })
@@ -105,6 +111,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     options,
     activeGeneration,
     historySessionIds,
+    runningChildDepths,
   )
   const managerPort = new RecoverableSubagentManagerPort(liveManagerPort)
   const turnCoordinator = new NativeSubagentTurnCoordinator(
@@ -114,6 +121,13 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
     undefined,
     snapshots => managerPort.restoreSnapshots(snapshots),
   )
+  /** Drop option generations no live task can still start with; the active generation is always kept. */
+  const pruneGenerationOptions = (): void => {
+    const live = liveManagerPort.liveGenerations()
+    for (const generation of generationOptions.keys()) {
+      if (generation !== activeGeneration && !live.has(generation)) generationOptions.delete(generation)
+    }
+  }
   return {
     manager,
     managerPort,
@@ -138,6 +152,7 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
       activeDefinitionsFingerprint = nextDefinitionsFingerprint
       generationOptions.set(activeGeneration, nextOptions)
       managerPort.reconfigure(nextOptions, activeGeneration)
+      pruneGenerationOptions()
     },
   }
 }
@@ -147,6 +162,7 @@ interface HandleMetadata {
   closed: boolean
   readonly createdAt: string
   readonly creatorAgentId: string | undefined
+  readonly generation: number
   readonly historySessionId: string | undefined
   lastInput: string | undefined
   readonly parentAgentId: string | undefined
@@ -170,7 +186,8 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     private readonly manager: SubAgentManager,
     options: NativeSubagentHostOptions,
     generation: number,
-    private readonly historySessionIds: ReadonlyMap<string, string>,
+    private readonly historySessionIds: Map<string, string>,
+    private readonly runningChildDepths: ReadonlyMap<string, { readonly childDepth: number, readonly taskId: string }>,
   ) {
     this.availableTools = options.tools
     this.definitions = options.agentDefinitions
@@ -189,6 +206,16 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
 
   listHandles(): SpawnedAgentSnapshot[] {
     return this.manager.listTasks().map(task => this.snapshot(task))
+  }
+
+  /** Generations still pinned by a task that has not reached a terminal state. */
+  liveGenerations(): Set<number> {
+    const generations = new Set<number>()
+    for (const task of this.manager.listTasks()) {
+      if (task.status !== 'pending' && task.status !== 'running') continue
+      generations.add(this.handles.get(task.id)?.generation ?? this.generation)
+    }
+    return generations
   }
 
   async spawn(options: SpawnAgentOptions = {}): Promise<SpawnedAgentSnapshot> {
@@ -228,6 +255,10 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     }
     const toolsets = subagentTools(this.availableTools, config).map(tool => tool.function.name)
     const rules = nativeRuleLabels(permissionMode, definition.isolation)
+    const parentKey = options.parentAgentId ?? options.creatorAgentId
+    const childDepth = parentKey === undefined
+      ? undefined
+      : this.runningChildDepths.get(parentKey)?.childDepth
     const task = await this.manager.spawn({
       prompt,
       ...(options.title ? { title: options.title } : {}),
@@ -236,6 +267,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       ...(options.sourceAgentId ? { sourceId: options.sourceAgentId } : {}),
       ...(options.creatorAgentId ? { creatorId: options.creatorAgentId } : {}),
       ...(options.parentAgentId ? { parentId: options.parentAgentId } : {}),
+      ...(childDepth === undefined ? {} : { depth: childDepth }),
       model,
       rules,
       toolsets,
@@ -246,6 +278,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: options.creatorAgentId,
+      generation: this.generation,
       historySessionId: this.historySessionIds.get(task.id),
       lastInput: prompt,
       parentAgentId: options.parentAgentId ?? options.creatorAgentId,
@@ -284,6 +317,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       if (task.status === 'pending' || task.status === 'running') {
         if (this.manager.cancel(task.id)) cancelled += 1
       }
+      this.historySessionIds.delete(task.id)
     }
     return cancelled
   }
@@ -333,6 +367,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       const previous = this.handles.get(task.id)
       if (previous) {
         previous.closed = true
+        this.historySessionIds.delete(task.id)
         this.handles.set(replacement.id, {
           ...previous,
           closed: false,
@@ -383,6 +418,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
     this.manager.cancel(task.id)
     const metadata = this.handles.get(task.id)
     if (metadata) metadata.closed = true
+    this.historySessionIds.delete(task.id)
     return { ...this.snapshot(task, 'closed'), previousStatus }
   }
 
@@ -401,6 +437,7 @@ class RichSubagentManagerPort implements SpawnedAgentManagerPort {
       closed: false,
       createdAt: new Date().toISOString(),
       creatorAgentId: task.creatorId || undefined,
+      generation: this.generation,
       historySessionId: this.historySessionIds.get(task.id),
       lastInput: task.prompt,
       parentAgentId: task.parentId || undefined,
@@ -615,6 +652,7 @@ async function runNativeSubagent(
   options: NativeSubagentHostOptions,
   conversations: SubagentConversationPersistence,
   persistedHistorySessionId: string | undefined,
+  runningChildDepths: Map<string, { readonly childDepth: number, readonly taskId: string }>,
 ): Promise<{ readonly content: string }> {
   const model = request.task.model.trim() || stringConfig(request.config.model) || options.model
   const permissionMode = permissionModeConfig(request.config.permissionMode, options.permissionMode)
@@ -650,6 +688,10 @@ async function runNativeSubagent(
     throw error
   }
   state.metadata.project_root = options.cwd
+  // The run request carries the depth children of this task must be spawned at
+  // (the manager precomputes task.depth + 1); publish it while the turn runs.
+  const depthKey = request.task.agentDefName || request.task.id
+  runningChildDepths.set(depthKey, { childDepth: request.depth, taskId: request.task.id })
   let output = ''
   const previousMessageCount = state.messages.length
   const previousTurnCount = state.turnCount
@@ -661,7 +703,12 @@ async function runNativeSubagent(
 
   try {
     try {
-      const boot = await bootstrap({ cwd, model, tools })
+      const boot = await bootstrap({
+        cwd,
+        ...(options.extraContext ? { extraContext: options.extraContext } : {}),
+        model,
+        tools,
+      })
       const events = runTurn({
         agentId: request.task.agentDefName || request.task.id,
         ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
@@ -671,6 +718,7 @@ async function runNativeSubagent(
         state,
         systemPrompt: [boot.systemPrompt, request.systemPrompt].filter(Boolean).join('\n\n'),
         ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+        ...(options.topK === undefined ? {} : { topK: options.topK }),
         tools,
         ...(options.topP === undefined ? {} : { topP: options.topP }),
         userMessage: request.prompt,
@@ -680,51 +728,61 @@ async function runNativeSubagent(
         toolExecutor: options.toolExecutor,
       }, request.cancelSignal)
       const iterator = events[Symbol.asyncIterator]()
-      const firstEventPromise = iterator.next()
-      await waitForTurnStart(state, previousTurnCount)
-      if (state.turnCount > previousTurnCount) {
-        await conversations.save(conversation, state, 'running')
-        partialBaseMessageCount = state.messages.length
-      }
-      const checkpoint = async (event: StreamEvent): Promise<void> => {
-        if (state.messages.length > partialBaseMessageCount) {
-          partialAssistantContent = ''
-          partialAssistantThinking = ''
+      try {
+        const firstEventPromise = iterator.next()
+        // Attach a rejection handler before the first await so a provider stream
+        // that fails during the turn-start checkpoint cannot crash the process
+        // with an unhandled rejection; the await below still rethrows it.
+        void firstEventPromise.catch(() => undefined)
+        await waitForTurnStart(state, previousTurnCount)
+        if (state.turnCount > previousTurnCount) {
+          await conversations.save(conversation, state, 'running')
           partialBaseMessageCount = state.messages.length
-          partialCheckpointed = false
         }
-        const visibleText = reportNativeSubagentEvent(event, request)
-        output += visibleText
-        if (event.type === 'text') partialAssistantContent += visibleText
-        if (event.type === 'thinking') partialAssistantThinking += event.text
-        const now = Date.now()
-        const timedCheckpoint = (event.type === 'text' || event.type === 'thinking')
-          && (!partialCheckpointed || now - lastCheckpointAt >= 1_000)
-        const committedCheckpoint = event.type === 'permission_request'
-          || event.type === 'tool_start'
-          || event.type === 'tool_end'
-        if (committedCheckpoint || timedCheckpoint) {
-          await conversations.save(
-            conversation,
-            state,
-            'running',
-            undefined,
-            timedCheckpoint && !committedCheckpoint
-              ? { content: partialAssistantContent, thinking: partialAssistantThinking }
-              : undefined,
-          )
-          lastCheckpointAt = now
-          if (timedCheckpoint) partialCheckpointed = true
+        const checkpoint = async (event: StreamEvent): Promise<void> => {
+          if (state.messages.length > partialBaseMessageCount) {
+            partialAssistantContent = ''
+            partialAssistantThinking = ''
+            partialBaseMessageCount = state.messages.length
+            partialCheckpointed = false
+          }
+          const visibleText = reportNativeSubagentEvent(event, request)
+          output += visibleText
+          if (event.type === 'text') partialAssistantContent += visibleText
+          if (event.type === 'thinking') partialAssistantThinking += event.text
+          const now = Date.now()
+          const timedCheckpoint = (event.type === 'text' || event.type === 'thinking')
+            && (!partialCheckpointed || now - lastCheckpointAt >= 1_000)
+          const committedCheckpoint = event.type === 'permission_request'
+            || event.type === 'tool_start'
+            || event.type === 'tool_end'
+          if (committedCheckpoint || timedCheckpoint) {
+            await conversations.save(
+              conversation,
+              state,
+              'running',
+              undefined,
+              timedCheckpoint && !committedCheckpoint
+                ? { content: partialAssistantContent, thinking: partialAssistantThinking }
+                : undefined,
+            )
+            lastCheckpointAt = now
+            if (timedCheckpoint) partialCheckpointed = true
+          }
         }
+        const firstEvent = await firstEventPromise
+        if (!firstEvent.done) await checkpoint(firstEvent.value)
+        for await (const event of iterator) await checkpoint(event)
+        await conversations.save(
+          conversation,
+          state,
+          request.cancelSignal.aborted ? 'cancelled' : 'completed',
+        )
+      } finally {
+        // Close the turn generator on every error or early-exit path so an
+        // in-flight provider stream cannot leak past this run.
+        await iterator.return(undefined)
       }
-      const firstEvent = await firstEventPromise
-      if (!firstEvent.done) await checkpoint(firstEvent.value)
-      for await (const event of iterator) await checkpoint(event)
-      await conversations.save(
-        conversation,
-        state,
-        request.cancelSignal.aborted ? 'cancelled' : 'completed',
-      )
     } catch (error) {
       const attemptedInputPersisted = state.messages.slice(previousMessageCount).some(message => (
         message.role === 'user' && message.content === request.prompt
@@ -751,6 +809,8 @@ async function runNativeSubagent(
     }
     return { content: latestAssistantText(state.messages) || output }
   } finally {
+    const tracked = runningChildDepths.get(depthKey)
+    if (tracked?.taskId === request.task.id) runningChildDepths.delete(depthKey)
     releaseConversation()
   }
 }

@@ -117,9 +117,19 @@ export class FileSessionStore implements SessionStore {
 
   listSessionRecords(workspaceId?: string): SessionRecord[] {
     return this.listSessions(workspaceId).flatMap(sessionId => {
-      const session = this.loadSession(sessionId)
+      const session = this.tryLoadSession(sessionId)
       return session ? [session] : []
     })
+  }
+
+  /** Bulk-path load that skips (and reports) corrupt records instead of poisoning the whole batch. */
+  private tryLoadSession(sessionId: string): SessionRecord | undefined {
+    try {
+      return this.loadSession(sessionId)
+    } catch (error) {
+      console.warn(`Skipping corrupt session record ${sessionId}:`, error)
+      return undefined
+    }
   }
 
   private findSessionPath(sessionId: string): string | undefined {
@@ -188,26 +198,33 @@ export class SQLiteSessionStore implements SessionStore {
     this.schemaVersion = options.schemaVersion ?? CURRENT_SESSION_SCHEMA_VERSION
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
-    this.database.run('PRAGMA journal_mode = WAL')
-    this.database.run(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        session_id TEXT PRIMARY KEY,
-        workspace_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        agent_id TEXT,
-        parent_session_id TEXT,
-        schema_version INTEGER NOT NULL,
-        metadata TEXT NOT NULL,
-        record TEXT NOT NULL
-      )
-    `)
-    this.database.run('CREATE INDEX IF NOT EXISTS sessions_workspace_updated ON sessions(workspace_id, updated_at DESC)')
-    this.database.run('CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC)')
-    this.index = new SessionIndex({
-      dbPath: this.dbPath,
-      ...(options.embedder === undefined ? {} : { embedder: options.embedder }),
-    })
+    try {
+      this.database.run('PRAGMA journal_mode = WAL')
+      this.database.run(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          session_id TEXT PRIMARY KEY,
+          workspace_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          agent_id TEXT,
+          parent_session_id TEXT,
+          schema_version INTEGER NOT NULL,
+          metadata TEXT NOT NULL,
+          record TEXT NOT NULL
+        )
+      `)
+      this.database.run('CREATE INDEX IF NOT EXISTS sessions_workspace_updated ON sessions(workspace_id, updated_at DESC)')
+      this.database.run('CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC)')
+      // The index shares this connection so session row writes and turn
+      // re-indexing commit inside one transaction.
+      this.index = new SessionIndex({
+        database: this.database,
+        ...(options.embedder === undefined ? {} : { embedder: options.embedder }),
+      })
+    } catch (error) {
+      this.database.close()
+      throw error
+    }
   }
 
   close(): void {
@@ -216,9 +233,12 @@ export class SQLiteSessionStore implements SessionStore {
   }
 
   deleteSession(sessionId: string): boolean {
-    const result = this.database.query('DELETE FROM sessions WHERE session_id = ?').run(sessionId)
-    this.index.removeSession(sessionId)
-    return result.changes > 0
+    let deleted = 0
+    this.index.transaction(() => {
+      deleted = this.database.query('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes
+      this.index.removeSession(sessionId)
+    })
+    return deleted > 0
   }
 
   listSessions(workspaceId?: string): string[] {
@@ -242,31 +262,33 @@ export class SQLiteSessionStore implements SessionStore {
 
   saveSession(session: SessionRecord): void {
     const record = session.toRecord()
-    this.database.query(`
-      INSERT INTO sessions
-        (session_id, workspace_id, created_at, updated_at, agent_id, parent_session_id, schema_version, metadata, record)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        workspace_id = excluded.workspace_id,
-        created_at = excluded.created_at,
-        updated_at = excluded.updated_at,
-        agent_id = excluded.agent_id,
-        parent_session_id = excluded.parent_session_id,
-        schema_version = excluded.schema_version,
-        metadata = excluded.metadata,
-        record = excluded.record
-    `).run(
-      session.sessionId,
-      session.workspaceId,
-      session.createdAt,
-      session.updatedAt,
-      session.agentId,
-      session.parentSessionId,
-      session.schemaVersion,
-      JSON.stringify(session.metadata),
-      JSON.stringify(record),
-    )
-    this.index.indexSession(session)
+    this.index.transaction(() => {
+      this.database.query(`
+        INSERT INTO sessions
+          (session_id, workspace_id, created_at, updated_at, agent_id, parent_session_id, schema_version, metadata, record)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
+          created_at = excluded.created_at,
+          updated_at = excluded.updated_at,
+          agent_id = excluded.agent_id,
+          parent_session_id = excluded.parent_session_id,
+          schema_version = excluded.schema_version,
+          metadata = excluded.metadata,
+          record = excluded.record
+      `).run(
+        session.sessionId,
+        session.workspaceId,
+        session.createdAt,
+        session.updatedAt,
+        session.agentId,
+        session.parentSessionId,
+        session.schemaVersion,
+        JSON.stringify(session.metadata),
+        JSON.stringify(record),
+      )
+      this.index.indexSessionIncremental(session)
+    })
   }
 
   search(query: string, options: SearchOptions = {}): SearchHit[] {
@@ -277,7 +299,7 @@ export class SQLiteSessionStore implements SessionStore {
 
   listSessionRecords(workspaceId?: string): SessionRecord[] {
     return this.listSessions(workspaceId).flatMap(sessionId => {
-      const session = this.loadSession(sessionId)
+      const session = this.tryLoadSession(sessionId)
       return session ? [session] : []
     })
   }
@@ -286,6 +308,16 @@ export class SQLiteSessionStore implements SessionStore {
     let turns = 0
     for (const session of this.listSessionRecords()) turns += this.index.indexSession(session)
     return turns
+  }
+
+  /** Bulk-path load that skips (and reports) corrupt records instead of poisoning the whole batch. */
+  private tryLoadSession(sessionId: string): SessionRecord | undefined {
+    try {
+      return this.loadSession(sessionId)
+    } catch (error) {
+      console.warn(`Skipping corrupt session record ${sessionId}:`, error)
+      return undefined
+    }
   }
 
   private migrateIfNeeded(record: SessionRecordData): SessionRecordData {

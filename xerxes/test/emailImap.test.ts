@@ -50,12 +50,13 @@ test('email channel normalizes webhook and IMAP inbound mail, then supplies SMTP
     channel: 'email',
     text: 'Hello world\nagain',
     channelUserId: 'alice@example.test',
-    roomId: 'xerxes@example.test',
     platformMessageId: 'message-1',
     replyTo: 'parent-1',
     metadata: { subject: 'Re: status' },
     attachments: [{ filename: 'report.txt', content_type: 'text/plain' }],
   })
+  // Our own recipient address must not become the routing room.
+  expect(received[0]?.roomId).toBeUndefined()
 
   if (!imapInbound) {
     throw new Error('IMAP transport did not receive an inbound callback')
@@ -70,10 +71,10 @@ test('email channel normalizes webhook and IMAP inbound mail, then supplies SMTP
   expect(received[1]).toMatchObject({
     text: 'Only HTML',
     channelUserId: 'bob@example.test',
-    roomId: 'xerxes@example.test',
     platformMessageId: 'message-2',
     metadata: { subject: 'HTML only' },
   })
+  expect(received[1]?.roomId).toBeUndefined()
 
   await channel.send(createChannelMessage({
     channel: 'email',
@@ -100,6 +101,44 @@ test('email channel normalizes webhook and IMAP inbound mail, then supplies SMTP
 
   await channel.stop()
   expect(imapStops).toBe(1)
+})
+
+test('email reply follows the original sender instead of our own mailbox', async () => {
+  const smtpRequests: EmailSmtpSendRequest[] = []
+  const channel = new EmailChannel({
+    smtpHost: 'smtp.example.test',
+    fromAddress: 'xerxes@example.test',
+    smtpTransport: { send: async request => { smtpRequests.push(request) } },
+  })
+  const received: ChannelMessage[] = []
+  await channel.start(async message => { received.push(message) })
+
+  expect(await channel.handleWebhook({}, encoder.encode(JSON.stringify({
+    from: 'Alice <alice@example.test>',
+    to: 'xerxes@example.test',
+    subject: 'question',
+    text: 'how does this work?',
+    message_id: 'inbound-1',
+  })))).toEqual({ status: 200, body: 'ok' })
+  const inbound = received[0]
+  if (!inbound) throw new Error('inbound email was not delivered')
+
+  // Mirror ChannelTurnRouter.reply: copy the correspondent identity onto the outbound message.
+  await channel.send(createChannelMessage({
+    channel: 'email',
+    direction: MessageDirection.OUTBOUND,
+    metadata: inbound.metadata,
+    text: 'here is the answer',
+    ...(inbound.channelUserId === undefined ? {} : { channelUserId: inbound.channelUserId }),
+    ...(inbound.platformMessageId === undefined ? {} : { replyTo: inbound.platformMessageId }),
+    ...(inbound.roomId === undefined ? {} : { roomId: inbound.roomId }),
+  }))
+
+  expect(smtpRequests).toHaveLength(1)
+  expect(smtpRequests[0]?.to).toBe('alice@example.test')
+  expect(smtpRequests[0]?.mime).toContain('To: alice@example.test')
+  expect(smtpRequests[0]?.mime).not.toContain('To: xerxes@example.test')
+  await channel.stop()
 })
 
 test('email channel uses Bun native SMTP when no host sender is injected', async () => {

@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 
 export interface UrlSafetyDecision {
@@ -9,9 +10,14 @@ export interface UrlSafetyDecision {
   readonly url: string
 }
 
+/** Resolve every A/AAAA address for a hostname. Injectable for deterministic tests. */
+export type DnsLookup = (hostname: string) => Promise<readonly string[]>
+
 export interface UrlSafetyOptions {
   /** Hosts explicitly allowed despite an otherwise internal address classification. */
   readonly allowlist?: ReadonlySet<string>
+  /** Resolver used by {@link checkUrlDns}; defaults to the system DNS via node:dns. */
+  readonly dnsLookup?: DnsLookup
 }
 
 export const DENIED_URL_SCHEMES: ReadonlySet<string> = new Set(['file', 'ftp', 'gopher', 'data'])
@@ -45,6 +51,50 @@ export function checkUrl(url: string, options: UrlSafetyOptions = {}): UrlSafety
 /** Return only the allow/deny result of {@link checkUrl}. */
 export function isUrlSafe(url: string, options: UrlSafetyOptions = {}): boolean {
   return checkUrl(url, options).allowed
+}
+
+/**
+ * Resolve the URL's host and require every A/AAAA answer to be a public address.
+ *
+ * Literal IPs and allowlisted hosts never touch the resolver, and resolution
+ * failures fail closed. Residual TOCTOU limitation: answers are validated here,
+ * but the HTTP client resolves the host again when dialing, so a DNS-rebinding
+ * attacker could return different answers on the second lookup. Pinning the
+ * dialed connection to a validated address would close that gap; until then this
+ * blocks hosts with static private answers, not a determined rebinding adversary.
+ */
+export async function checkUrlDns(url: string, options: UrlSafetyOptions = {}): Promise<UrlSafetyDecision> {
+  const parsed = parseNetworkUrl(url)
+  if (parsed === undefined) {
+    return decision(url, false, 'missing scheme or host')
+  }
+
+  const host = normalizedHostname(parsed.hostname)
+  if (isAllowlisted(host, options.allowlist)) {
+    return decision(url, true, 'allowlisted host')
+  }
+  if (isIP(host) || host === 'localhost' || host === 'localhost.localdomain') {
+    return isInternalHost(host)
+      ? decision(url, false, `private/internal host: ${host}`)
+      : decision(url, true, 'public host')
+  }
+
+  const resolve = options.dnsLookup ?? systemDnsLookup
+  let addresses: readonly string[]
+  try {
+    addresses = await resolve(host)
+  } catch {
+    return decision(url, false, `DNS resolution failed for host: ${host}`)
+  }
+  if (addresses.length === 0) {
+    return decision(url, false, `DNS returned no addresses for host: ${host}`)
+  }
+  for (const address of addresses) {
+    if (!isIP(address) || isInternalHost(address)) {
+      return decision(url, false, `host ${host} resolves to private/internal address: ${address}`)
+    }
+  }
+  return decision(url, true, 'public DNS answers')
 }
 
 function decision(url: string, allowed: boolean, reason: string): UrlSafetyDecision {
@@ -96,9 +146,15 @@ function isInternalHost(host: string): boolean {
   if (family === 6) {
     return isInternalIpv6(host)
   }
-  // DNS is intentionally not resolved here. Callers that make network requests
-  // should pin and re-check the resolved address to prevent DNS rebinding.
+  // Literal-address checks only; hostnames are never resolved on this synchronous
+  // path. Network callers must additionally run checkUrlDns so a public name
+  // cannot hide private DNS answers.
   return false
+}
+
+async function systemDnsLookup(hostname: string): Promise<readonly string[]> {
+  const results = await lookup(hostname, { all: true, verbatim: true })
+  return results.map(result => result.address)
 }
 
 function isInternalIpv4(host: string): boolean {

@@ -11,7 +11,7 @@ import { ToolPolicyViolation } from '../src/core/errors.js'
 import { PathEscape, resolveWithin, safePath } from '../src/security/pathSecurity.js'
 import { PolicyAction, PolicyEngine, ToolPolicy } from '../src/security/policy.js'
 import { scanContextContent, scanContextFile } from '../src/security/promptScanner.js'
-import { checkUrl, isUrlSafe } from '../src/security/urlSafety.js'
+import { checkUrl, checkUrlDns, isUrlSafe } from '../src/security/urlSafety.js'
 
 async function inTemporaryDirectory(run: (directory: string) => Promise<void>): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'xerxes-bun-security-'))
@@ -78,6 +78,41 @@ test('URL safety blocks non-network, private, encoded loopback, and mapped IPv6 
   expect(isUrlSafe('http://[::ffff:169.254.169.254]/latest')).toBeFalse()
   expect(isUrlSafe('http://localhost:8000/dev', { allowlist: new Set(['LOCALHOST']) })).toBeTrue()
   expect(checkUrl('http://192.168.1.1/x').reason).toContain('private')
+})
+
+test('URL DNS checks block public names that resolve to private addresses', async () => {
+  const resolving = (addresses: readonly string[]) => checkUrlDns('https://internal.example/api', {
+    dnsLookup: async () => addresses,
+  })
+  expect((await resolving(['93.184.216.34'])).allowed).toBeTrue()
+  expect((await resolving(['10.0.0.8'])).allowed).toBeFalse()
+  expect((await resolving(['127.0.0.1'])).allowed).toBeFalse()
+  expect((await resolving(['::1'])).allowed).toBeFalse()
+  expect((await resolving(['93.184.216.34', '169.254.169.254'])).allowed).toBeFalse()
+  expect((await resolving([])).allowed).toBeFalse()
+  expect((await resolving(['not-an-ip'])).allowed).toBeFalse()
+  expect((await resolving(['10.0.0.8'])).reason).toContain('private')
+
+  // Literal IPs and allowlisted hosts never touch the resolver.
+  const failLookup = async (): Promise<readonly string[]> => {
+    throw new Error('resolver must not run')
+  }
+  expect((await checkUrlDns('http://127.0.0.1/x', { dnsLookup: failLookup })).allowed).toBeFalse()
+  expect((await checkUrlDns('https://8.8.8.8/dns', { dnsLookup: failLookup })).allowed).toBeTrue()
+  const allowlisted = await checkUrlDns('http://localhost:8000/x', {
+    allowlist: new Set(['localhost']),
+    dnsLookup: failLookup,
+  })
+  expect(allowlisted.allowed).toBeTrue()
+
+  // Resolution failures fail closed.
+  const unresolved = await checkUrlDns('https://unresolved.example', {
+    dnsLookup: async () => {
+      throw new Error('ENOTFOUND')
+    },
+  })
+  expect(unresolved.allowed).toBeFalse()
+  expect(unresolved.reason).toContain('DNS resolution failed')
 })
 
 test('prompt scanner replaces hostile spans in place and file scanner fails closed', async () => {

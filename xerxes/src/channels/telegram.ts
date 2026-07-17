@@ -105,6 +105,20 @@ export class TelegramChannel extends WebhookChannel {
     return super.handleWebhook(headers, body)
   }
 
+  /**
+   * Ingest one update received through authenticated Bot API long polling.
+   *
+   * Polling is already authenticated by the bot token, so this path bypasses
+   * the webhook-only secret-token check while retaining the shared parser and
+   * inbound error containment.
+   */
+  async ingestPolledUpdate(body: Uint8Array): Promise<import('./webhooks.js').WebhookResponse> {
+    if (body.byteLength > this.maxWebhookBodyBytes) {
+      return { status: 413, body: 'payload too large' }
+    }
+    return super.handleWebhook({}, body)
+  }
+
   /** Long-poll Telegram updates when a deployment does not expose a webhook. */
   async getUpdates(options: TelegramUpdatesOptions = {}): Promise<Readonly<Record<string, unknown>>> {
     const timeout = options.timeout ?? 30

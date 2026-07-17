@@ -2,10 +2,12 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, test } from 'bun:test'
+import { getEventListeners } from 'node:events'
 
 import { RateLimitError, XerxesTimeoutError } from '../src/core/errors.js'
 import {
   CortexAgent,
+  abortableDelay,
   createSchemaExample,
   formatOutputGuidance,
 } from '../src/cortex/agents/agent.js'
@@ -102,6 +104,18 @@ test('CortexAgent retries only terminal provider failures and surfaces a real su
   expect(client.requests).toHaveLength(2)
   expect(callbacks).toEqual(['execution_start', 'retry', 'execution_complete'])
   expect(agent.getExecutionStats()).toMatchObject({ timesExecuted: 1 })
+})
+
+test('abortableDelay removes its abort listener whether it resolves or rejects', async () => {
+  const resolved = new AbortController()
+  await abortableDelay(5, resolved.signal)
+  expect(getEventListeners(resolved.signal, 'abort')).toHaveLength(0)
+
+  const aborted = new AbortController()
+  const pending = abortableDelay(10_000, aborted.signal)
+  aborted.abort(new Error('stop waiting'))
+  await expect(pending).rejects.toThrow('stop waiting')
+  expect(getEventListeners(aborted.signal, 'abort')).toHaveLength(0)
 })
 
 test('CortexAgent propagates timeout/cancellation through the injected LLM signal and never reports success', async () => {

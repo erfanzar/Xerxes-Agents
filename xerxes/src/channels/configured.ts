@@ -407,7 +407,7 @@ function pollingInteger(settings: ChannelSettings, key: string, fallback: number
   const value = firstSetting(settings, [key])
   const parsed = typeof value === 'number'
     ? value
-    : typeof value === 'string' && /^\\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN
+    : typeof value === 'string' && /^\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
@@ -433,7 +433,7 @@ function optionalPort(settings: ChannelSettings, ...keys: readonly string[]): nu
   const value = firstSetting(settings, keys)
   const parsed = typeof value === 'number'
     ? value
-    : typeof value === 'string' && /^\\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN
+    : typeof value === 'string' && /^\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN
   return Number.isSafeInteger(parsed) ? parsed : undefined
 }
 

@@ -41,3 +41,24 @@ test('user preferences have defaults, merge updates, and survive rehydration', (
   expect(restored.userEntities.has('alice')).toBeFalse()
   expect(restored.getUserPreferences('alice')).toMatchObject({ language: 'en' })
 })
+
+test('per-user tiers over one shared backend stay isolated across instances', () => {
+  const storage = new SimpleStorage()
+  const first = new UserMemory(storage)
+  first.saveMemory('alice', 'Alice prefers Bun', {}, { toLongTerm: true })
+  first.saveMemory('bob', 'Bob prefers Node', {}, { toLongTerm: true })
+
+  // A fresh facade hydrating from the same backend must only see each user's own items.
+  const restored = new UserMemory(storage)
+  expect(restored.searchUserMemory('alice', 'prefers').map(item => item.content)).toEqual(['Alice prefers Bun'])
+  expect(restored.searchUserMemory('bob', 'prefers').map(item => item.content)).toEqual(['Bob prefers Node'])
+  expect(restored.userEntities.get('alice')?.entities.Alice).toBeDefined()
+  expect(restored.userEntities.get('alice')?.entities.Bob).toBeUndefined()
+  expect(restored.userEntities.get('bob')?.entities.Alice).toBeUndefined()
+
+  // Clearing one user must leave the other user's persisted records intact.
+  restored.clearUserMemory('alice')
+  const third = new UserMemory(storage)
+  expect(third.searchUserMemory('alice', 'prefers')).toEqual([])
+  expect(third.searchUserMemory('bob', 'prefers').map(item => item.content)).toEqual(['Bob prefers Node'])
+})

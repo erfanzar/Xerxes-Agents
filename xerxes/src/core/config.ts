@@ -6,6 +6,7 @@ import { extname, join, resolve } from 'node:path'
 
 import { ConfigurationError } from './errors.js'
 import { xerxesSubdirFor } from './paths.js'
+import { DEFAULT_TEMPERATURE, DEFAULT_TOP_K } from '../llms/samplingDefaults.js'
 
 export const LogLevel = {
   DEBUG: 'DEBUG',
@@ -389,10 +390,10 @@ export class LLMConfig {
       apiKey: optionalStringField(['api_key']),
       apiKeyEnvVar: stringField('OPENAI_API_KEY', ['api_key_env_var']),
       baseUrl: optionalStringField(['base_url']),
-      temperature: numberField(0.7, 0, 2),
+      temperature: numberField(DEFAULT_TEMPERATURE, 0, 2),
       maxTokens: numberField(2_048, 1, 1_000_000, ['max_tokens'], true),
       topP: numberField(0.95, 0, 1, ['top_p']),
-      topK: numberField(0, 0, 100, ['top_k'], true),
+      topK: numberField(DEFAULT_TOP_K, 0, 100, ['top_k'], true),
       frequencyPenalty: numberField(0, -2, 2, ['frequency_penalty']),
       presencePenalty: numberField(0, -2, 2, ['presence_penalty']),
       repetitionPenalty: numberField(1, 0.1, 2, ['repetition_penalty']),

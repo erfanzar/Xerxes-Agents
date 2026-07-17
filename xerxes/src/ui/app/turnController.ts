@@ -110,7 +110,6 @@ const finalTail = (finalText: string, segments: Msg[]) => {
 }
 
 export interface InterruptDeps {
-  appendMessage: (msg: Msg) => void
   gw: { request: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T> }
   sid: string
   sys: (text: string) => void
@@ -340,71 +339,29 @@ class TurnController {
     resetFlowOverlays()
   }
 
-  // `keepBusy` holds the session busy after interrupting so a queued message
-  // drains on the gateway's real settle edge (message.complete, suppressed
-  // while `interrupted`) instead of racing the still-unwinding turn — the race
-  // duplicated the user bubble, leaked a "queued: …" note, and surfaced the
-  // cancelled turn's "[interrupted]" reply.
-  interruptTurn({ appendMessage, gw, sid, sys }: InterruptDeps, opts: { keepBusy?: boolean } = {}) {
+  // An Esc/Ctrl+C interrupt is a *request*, not a fact: the daemon answers on
+  // its real settle edge (message.complete). Tearing the turn down here raced
+  // an already-in-flight natural turn_end and suppressed its final messages
+  // behind a false "[interrupted]" — so the transcript archive is deferred to
+  // recordMessageComplete, which can tell a daemon-confirmed cancellation from
+  // the turn's real ending. `interrupted` still gates late deltas/tools from
+  // mutating live state, and busy stays set so queued input drains on the
+  // settle edge instead of racing the still-unwinding turn.
+  interruptTurn({ gw, sid, sys }: InterruptDeps) {
     this.interrupted = true
-    gw.request<SessionInterruptResponse>('session.interrupt', { session_id: sid }).catch(() => {})
-
-    this.closeReasoningSegment()
-
-    const segments = this.segmentMessages
-    const partial = this.bufRef.trimStart()
-    const tools = this.pendingSegmentTools
-    const subagents = getTurnState().subagents.map(archiveSubagentAtTurnBoundary)
-
-    if (subagents.length) {
-      pushSnapshot(subagents, { sessionId: sid, startedAt: null })
-    }
-
-    // Drain streaming/segment state off the nanostore before writing the
-    // preserved snapshot to the transcript — otherwise each flushed segment
-    // appears in both `turn.streamSegments` and the transcript for one frame.
-    this.idle()
-    this.clearReasoning()
-    this.turnTools = []
-    patchTurnState({ activity: [], outcome: '' })
-
-    for (const msg of segments) {
-      appendMessage(msg)
-    }
-
-    // Always surface an interruption indicator — if there's an in-flight
-    // `partial` or pending tools, fold them into a single assistant message;
-    // otherwise emit a sys note so the transcript always records that the
-    // turn was cancelled, even when only prior `segments` were preserved.
-    if (partial || tools.length || subagents.length) {
-      appendMessage({
-        role: 'assistant',
-        text: partial ? `${partial}\n\n*[interrupted]*` : '*[interrupted]*',
-        ...(subagents.length && { subagents }),
-        ...(tools.length && { tools })
-      })
-    } else {
-      sys('interrupted')
-    }
-
     this.clearStatusTimer()
+    patchUiState({ busy: true, status: 'interrupting…' })
 
-    if (opts.keepBusy) {
-      // `idle()` already cleared busy; re-assert it so the drain waits for settle.
-      patchUiState({ busy: true, status: 'interrupting…' })
-
-      return
-    }
-
-    patchUiState({ status: 'interrupted' })
-
-    this.statusTimer = setTimeout(() => {
-      this.statusTimer = null
-      patchUiState({ status: 'ready' })
-    }, INTERRUPT_COOLDOWN_MS)
-
-    // Real turn end: surface any notice held back while busy.
-    this.flushPendingNotice()
+    gw.request<SessionInterruptResponse>('session.interrupt', { session_id: sid }).catch((error: unknown) => {
+      // The daemon never confirmed — the turn is still running. Re-arm live
+      // recording and report the failure instead of a false "interrupted".
+      // When the turn already settled on its own, the failure is moot.
+      if (this.interrupted) {
+        this.interrupted = false
+        patchUiState({ status: getUiState().busy ? 'running…' : 'ready' })
+        sys(`error: interrupt failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    })
   }
 
   pruneTransient() {
@@ -637,8 +594,68 @@ class TurnController {
     return preserved
   }
 
-  recordMessageComplete(payload: { rendered?: string; reasoning?: string; text?: string }) {
+  recordMessageComplete(payload: { interrupted?: boolean; rendered?: string; reasoning?: string; text?: string }) {
     this.closeReasoningSegment()
+
+    // An interrupt requested via Esc/Ctrl+C is only real once the daemon
+    // confirms it (a cancelled turn_end, or the legacy '[interrupted]'
+    // marker). A natural turn_end that raced the keystroke still carries the
+    // turn's real ending — fall through and render those messages instead of
+    // a false interruption.
+    const interruptConfirmed =
+      this.interrupted && (payload.interrupted === true || String(payload.text ?? '').trim() === '[interrupted]')
+
+    if (interruptConfirmed) {
+      const segments = this.segmentMessages
+      const partial = this.bufRef.trimStart()
+      const tools = this.pendingSegmentTools
+      const subagents = getTurnState().subagents.map(archiveSubagentAtTurnBoundary)
+
+      if (subagents.length) {
+        pushSnapshot(subagents, { sessionId: getUiState().sid, startedAt: null })
+      }
+
+      // Drain streaming/segment state off the nanostore before the handler
+      // writes the preserved snapshot to the transcript — otherwise each
+      // flushed segment appears in both `turn.streamSegments` and the
+      // transcript for one frame.
+      this.idle()
+      this.clearReasoning()
+      this.turnTools = []
+      this.completedToolIds.clear()
+      this.persistedToolIds.clear()
+      this.persistedToolLabels.clear()
+      this.bufRef = ''
+      this.interrupted = false
+      patchTurnState({ activity: [], outcome: '' })
+
+      const finalMessages: Msg[] = [...segments]
+
+      // Always surface an interruption indicator when anything was live —
+      // folded into a single assistant message; the handler emits the bare
+      // "interrupted" sys note when there is nothing else to preserve.
+      if (partial || tools.length || subagents.length) {
+        finalMessages.push({
+          role: 'assistant',
+          text: partial ? `${partial}\n\n*[interrupted]*` : '*[interrupted]*',
+          ...(subagents.length && { subagents }),
+          ...(tools.length && { tools })
+        })
+      }
+
+      this.clearStatusTimer()
+      patchUiState({ status: 'interrupted' })
+
+      this.statusTimer = setTimeout(() => {
+        this.statusTimer = null
+        patchUiState({ status: 'ready' })
+      }, INTERRUPT_COOLDOWN_MS)
+
+      // Real turn end: surface any notice held back while busy.
+      this.flushPendingNotice()
+
+      return { finalMessages, finalText: '', wasInterrupted: true }
+    }
 
     // OpenTUI renders markdown natively; the gateway's Rich-rendered ANSI
     // (`payload.rendered`) is for plain terminals. Prioritising
@@ -704,8 +721,6 @@ class TurnController {
       finalMessages.push({ role: 'assistant', text: finalText })
     }
 
-    const wasInterrupted = this.interrupted
-
     // Archive the turn's spawn tree to history BEFORE idle() drops subagents
     // from turnState.  Lets /replay and the overlay's history nav pull up
     // finished fan-outs without a round-trip to disk.
@@ -729,7 +744,10 @@ class TurnController {
     // idle() flips busy=false so applyNotice() reaches the visible slot.
     this.flushPendingNotice()
 
-    return { finalMessages, finalText, wasInterrupted }
+    // Reaching the natural path means the daemon did not confirm an
+    // interruption — even when Esc was pressed mid-flight, this turn_end
+    // carries the turn's real ending and wins over the interrupt request.
+    return { finalMessages, finalText, wasInterrupted: false }
   }
 
   recordMessageDelta({ text }: { rendered?: string; text?: string }) {

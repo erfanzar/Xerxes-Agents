@@ -54,16 +54,22 @@ export class CronScheduler {
       const ran: string[] = []
       for (const job of this.store.listJobs()) {
         if (job.paused || !this.isDue(job, current)) continue
-        const output = await this.runJob(job)
-        ran.push(job.id)
-        if (this.onComplete) {
-          try {
-            await this.onComplete(job, output)
-          } catch (error) {
-            this.reportError(`onComplete failed for job ${job.id}`, error)
+        try {
+          const output = await this.runJob(job)
+          ran.push(job.id)
+          if (this.onComplete) {
+            try {
+              await this.onComplete(job, output)
+            } catch (error) {
+              this.reportError(`onComplete failed for job ${job.id}`, error)
+            }
           }
+        } catch (error) {
+          // One failing job must not reject the tick or starve later jobs.
+          this.reportError(`job ${job.id} failed`, error)
+        } finally {
+          this.scheduleNext(job, current)
         }
-        this.scheduleNext(job, current)
       }
       return ran
     } finally {

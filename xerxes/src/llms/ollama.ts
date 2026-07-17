@@ -234,8 +234,9 @@ function samplingOptions(request: CompletionRequest, topK: number | undefined): 
   if (request.stop?.length) {
     options.stop = request.stop
   }
-  if (topK !== undefined) {
-    options.top_k = topK
+  const requestTopK = request.topK ?? topK
+  if (requestTopK !== undefined) {
+    options.top_k = requestTopK
   }
   return options
 }
@@ -347,6 +348,11 @@ async function* ndjsonLines(body: ReadableStream<Uint8Array>, maxLineBytes: numb
       }
     }
   } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // Cleanup after an early exit must not mask the primary stream failure.
+    }
     reader.releaseLock()
   }
 }

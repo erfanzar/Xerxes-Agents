@@ -36,6 +36,11 @@ export interface ModelDiscoveryOptions {
   readonly timeoutMs?: number;
 }
 
+export interface DiscoveredModel {
+  readonly contextLimit?: number;
+  readonly id: string;
+}
+
 const platformFetch = globalThis.fetch;
 
 /** Resolve a stored profile credential without ever exposing it through the daemon protocol. */
@@ -87,6 +92,14 @@ export async function discoverModelIds(
   input: ModelDiscoveryInput,
   options: ModelDiscoveryOptions = {},
 ): Promise<string[]> {
+  return (await discoverModelCatalog(input, options)).map((model) => model.id);
+}
+
+/** Discover model ids together with provider-reported context metadata. */
+export async function discoverModelCatalog(
+  input: ModelDiscoveryInput,
+  options: ModelDiscoveryOptions = {},
+): Promise<DiscoveredModel[]> {
   const validationError = validateModelDiscoveryUrl(
     input.baseUrl,
     input.allowPrivateEndpoint === true,
@@ -158,7 +171,7 @@ export async function discoverModelIds(
     } catch {
       throw new Error("model endpoint returned invalid JSON");
     }
-    return modelsFromResponse(parsed);
+    return modelCatalogFromResponse(parsed);
   } catch (error) {
     throw new Error(
       sanitizeModelDiscoveryError(error, { apiKey, baseUrl: input.baseUrl }),
@@ -229,6 +242,11 @@ export function modelDiscoveryEndpoint(
 
 /** Normalize OpenAI/Anthropic-compatible model-list payloads and remove duplicates. */
 export function modelsFromResponse(value: unknown): string[] {
+  return modelCatalogFromResponse(value).map((model) => model.id);
+}
+
+/** Normalize model-list payloads while preserving trustworthy positive context lengths. */
+export function modelCatalogFromResponse(value: unknown): DiscoveredModel[] {
   if (!isRecord(value)) {
     return [];
   }
@@ -237,7 +255,7 @@ export function modelsFromResponse(value: unknown): string[] {
     : Array.isArray(value.models)
       ? value.models
       : [];
-  const models = new Set<string>();
+  const models = new Map<string, DiscoveredModel>();
   for (const candidate of candidates) {
     const id =
       typeof candidate === "string"
@@ -245,11 +263,28 @@ export function modelsFromResponse(value: unknown): string[] {
         : isRecord(candidate)
           ? firstString(candidate.id, candidate.name, candidate.model)
           : "";
-    if (id) {
-      models.add(id);
+    if (!id) {
+      continue;
     }
+    const contextLimit = isRecord(candidate)
+      ? firstPositiveInteger(
+          candidate.context_length,
+          candidate.contextLength,
+          candidate.context_window,
+          candidate.max_context_length,
+          candidate.max_model_len,
+        )
+      : undefined;
+    const existing = models.get(id);
+    const resolvedContextLimit = contextLimit ?? existing?.contextLimit;
+    models.set(id, {
+      id,
+      ...(resolvedContextLimit === undefined
+        ? {}
+        : { contextLimit: resolvedContextLimit }),
+    });
   }
-  return [...models];
+  return [...models.values()];
 }
 
 export function sanitizeModelDiscoveryError(
@@ -426,6 +461,15 @@ function firstString(...values: unknown[]): string {
     }
   }
   return "";
+}
+
+function firstPositiveInteger(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function isPrivateAddress(hostname: string): boolean {

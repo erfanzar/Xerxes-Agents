@@ -308,7 +308,7 @@ test('native FTS, indexed history, and session search retain filters, replacemen
   }
 })
 
-test('summaries and snapshots preserve deterministic history inspection behavior', () => {
+test('summaries and snapshots preserve deterministic history inspection behavior', async () => {
   const summarizer = new SessionSummarizer()
   const empty = summarizer.summarize(new SessionRecord({ sessionId: 'empty' }))
   expect(empty.title).toStartWith('Session ')
@@ -357,16 +357,16 @@ test('summaries and snapshots preserve deterministic history inspection behavior
     const manager = new SnapshotManager(workspace, { shadowRoot: join(directory, 'shadow') })
     mkdirSync(workspace)
     writeFileSync(join(workspace, 'note.txt'), 'version one', 'utf8')
-    const first = manager.snapshot('first')
-    const second = manager.snapshot('second')
+    const first = await manager.snapshot('first')
+    const second = await manager.snapshot('second')
     expect(manager.get(first.id)).toEqual(first)
     expect(manager.get('second')).toEqual(second)
     expect(manager.get(first.commitSha.slice(0, 7))).toEqual(first)
-    expect(() => manager.rollback('missing')).toThrow('snapshot not found')
-    manager.snapshot('third')
-    manager.snapshot('fourth')
-    manager.snapshot('fifth')
-    expect(manager.prune({ keep: 2 })).toBe(3)
+    await expect(manager.rollback('missing')).rejects.toThrow('snapshot not found')
+    await manager.snapshot('third')
+    await manager.snapshot('fourth')
+    await manager.snapshot('fifth')
+    expect(await manager.prune({ keep: 2 })).toBe(3)
     expect(manager.list()).toHaveLength(2)
     manager.reset()
     expect(manager.list()).toEqual([])

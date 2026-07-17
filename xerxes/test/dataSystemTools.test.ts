@@ -160,6 +160,34 @@ test('text, conversion, and date tools preserve practical dependency-free operat
   })
 })
 
+test('TextProcessor refuses model-supplied regexes on oversized subjects', async () => {
+  await inWorkspace(async workspace => {
+    const registry = new ToolRegistry()
+    registerDataTools(registry, new WorkspacePathResolver(workspace))
+    const context = { metadata: {} }
+    const oversized = 'x'.repeat(1_000_001)
+
+    await expect(registry.execute(call('TextProcessor', {
+      operation: 'extract',
+      pattern: 'x+',
+      text: oversized,
+    }), context)).rejects.toThrow('subject limit')
+    await expect(registry.execute(call('TextProcessor', {
+      operation: 'replace',
+      pattern: 'x+',
+      replacement: 'y',
+      text: oversized,
+    }), context)).rejects.toThrow('subject limit')
+
+    // Pattern-free operations stay usable on the same subject.
+    const stats = result(await registry.execute(call('TextProcessor', {
+      operation: 'stats',
+      text: oversized,
+    }), context))
+    expect(stats.length).toBe(1_000_001)
+  })
+})
+
 test('SystemInfo uses Bun and Node primitives, while EnvironmentManager redacts sensitive values', async () => {
   const registry = new ToolRegistry()
   registerSystemTools(registry)
@@ -179,9 +207,16 @@ test('SystemInfo uses Bun and Node primitives, while EnvironmentManager redacts 
       operation: 'get',
       key,
     }), context))
-    expect(sensitive.exists).toBeTrue()
-    expect(sensitive.redacted).toBeTrue()
-    expect(sensitive.value).toBe('[REDACTED]')
+    // Redaction-list keys must be indistinguishable from unset keys (no existence oracle).
+    expect(sensitive.exists).toBeFalse()
+    expect(sensitive.redacted).toBeFalse()
+    expect(sensitive.value).toBeNull()
+
+    const unset = result(await registry.execute(call('EnvironmentManager', {
+      operation: 'get',
+      key: 'XERXES_TEST_DEFINITELY_UNSET',
+    }), context))
+    expect(unset).toEqual({ ...sensitive, key: 'XERXES_TEST_DEFINITELY_UNSET' })
 
     const listed = result(await registry.execute(call('EnvironmentManager', { operation: 'list' }), context))
     expect(typeof listed.count).toBe('number')

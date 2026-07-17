@@ -320,7 +320,7 @@ test('scheduler starts with an immediate background tick', async () => {
   }
 })
 
-test('scheduler contains background runner failures at the polling boundary', async () => {
+test('scheduler logs background job failures without rejecting the tick', async () => {
   const directory = temporaryDirectory()
   const previousError = console.error
   let resolveLog: (value: void) => void = () => {}
@@ -353,10 +353,67 @@ test('scheduler contains background runner failures at the polling boundary', as
     scheduler.start()
     try {
       await Promise.race([logged, Bun.sleep(100)])
-      expect(errors[0]?.[0]).toBe('CronScheduler tick failed')
+      expect(errors[0]?.[0]).toBe('CronScheduler job background-error failed')
     } finally {
       scheduler.stop()
     }
+  } finally {
+    console.error = previousError
+    removeDirectory(directory)
+  }
+})
+
+test('scheduler isolates a failing job, always reschedules, and runs later jobs', async () => {
+  const directory = temporaryDirectory()
+  const previousError = console.error
+  const errors: unknown[][] = []
+  console.error = (...args: unknown[]) => {
+    errors.push(args)
+  }
+  try {
+    const store = new JobStore(join(directory, 'jobs.json'))
+    store.add(
+      new CronJob({
+        id: 'broken',
+        prompt: 'p',
+        schedule: '* * * * *',
+        nextRunAt: '2026-05-15T12:00:00.000Z',
+      }),
+    )
+    store.add(
+      new CronJob({
+        id: 'healthy',
+        prompt: 'p',
+        schedule: '* * * * *',
+        nextRunAt: '2026-05-15T12:00:00.000Z',
+      }),
+    )
+    store.add(
+      new CronJob({
+        id: 'once-broken',
+        prompt: 'p',
+        oneshot: true,
+        nextRunAt: '2026-05-15T12:00:00.000Z',
+      }),
+    )
+    const scheduler = new CronScheduler(store, (job) => {
+      if (job.id !== 'healthy') throw new Error('runner exploded')
+      return `ran:${job.id}`
+    })
+
+    const ran = await scheduler.tick(new Date('2026-05-15T12:00:30.000Z'))
+
+    expect(ran).toEqual(['healthy'])
+    // The failing recurring job still advances instead of refiring forever.
+    expect(store.get('broken')?.nextRunAt).toBe('2026-05-15T12:01:00.000Z')
+    expect(store.get('broken')?.lastRunAt).toBe('2026-05-15T12:00:30.000Z')
+    expect(store.get('healthy')?.nextRunAt).toBe('2026-05-15T12:01:00.000Z')
+    // A failing one-shot is retired rather than retried on every tick.
+    expect(store.get('once-broken')).toBeUndefined()
+    expect(errors.map(entry => entry[0])).toEqual([
+      'CronScheduler job broken failed',
+      'CronScheduler job once-broken failed',
+    ])
   } finally {
     console.error = previousError
     removeDirectory(directory)

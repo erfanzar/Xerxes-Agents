@@ -276,3 +276,38 @@ test('Cortex rejects promptly on caller cancellation and passes the signal to th
   controller.abort('stop now')
   await expect(run).rejects.toBeInstanceOf(CortexCancellationError)
 })
+
+test('Cortex consensus observes late sibling rejections instead of leaking unhandled rejections', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const fast = {
+      id: 'fast',
+      role: 'Fast',
+      execute: () => { throw new CortexCancellationError('fast failure') },
+    }
+    const slow = {
+      id: 'slow',
+      role: 'Slow',
+      execute: async () => {
+        await Bun.sleep(25)
+        throw new CortexCancellationError('slow failure')
+      },
+    }
+    const cortex = new Cortex({
+      process: ProcessType.CONSENSUS,
+      agents: [fast, slow],
+      tasks: [{ id: 'boom', description: 'Fail together', expectedOutput: 'Nothing' }],
+      consensus: { maxCandidatesParallel: 2 },
+    })
+
+    const output = await cortex.run()
+    expect(output.taskOutputs[0]?.status).toBe('failed')
+    expect(output.taskOutputs[0]?.error).toContain('fast failure')
+    await Bun.sleep(50)
+    expect(unhandled).toEqual([])
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled)
+  }
+})

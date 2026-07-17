@@ -111,7 +111,9 @@ export class ToolRegistry implements ToolExecutor {
         return agentTool
       }
     }
-    return entries[0]
+    // Fall back only to the shared default registration; a variant registered for one
+    // agent must never be silently callable by (or visible to) any other agent.
+    return entries.find(entry => entry.agentId === 'default')
   }
 }
 

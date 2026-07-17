@@ -304,14 +304,14 @@ function inboundChannelMessage(channel: string, payload: Readonly<Record<string,
   const replyTo = firstString(payload, 'inReplyTo', 'in_reply_to')
   const timestamp = timestampValue(payload.date ?? payload.timestamp)
   const sender = mailboxAddress(fromHeader)
-  const recipient = mailboxAddress(toHeader)
+  // The recipient is this adapter's own mailbox; recording it as roomId would
+  // address every reply back to ourselves and re-ingest it as a self-reply loop.
   return createChannelMessage({
     channel,
     direction: MessageDirection.INBOUND,
     text,
     attachments: attachmentsValue(payload.attachments),
     ...(sender ? { channelUserId: sender } : {}),
-    ...(recipient ? { roomId: recipient } : {}),
     ...(platformMessageId ? { platformMessageId } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(timestamp ? { timestamp } : {}),

@@ -20,6 +20,47 @@ test('safe shell checks reject chained destructive commands', () => {
   expect(isSafeShellCommand('find . -delete')).toBe(false)
 })
 
+test('shell bypass attempts with newline separators, substitution, or redirection always prompt', () => {
+  // Newlines and single `&` are command separators; a benign first line cannot smuggle a payload.
+  expect(isSafeShellCommand('echo ok\n/bin/bash -c "id"')).toBe(false)
+  expect(isSafeShellCommand('ls\nrm -rf /')).toBe(false)
+  expect(isSafeShellCommand('cat & /bin/bash -i')).toBe(false)
+  expect(isSafeShellCommand('ls\ngit status')).toBe(true)
+
+  // Command substitution, backticks, and process substitution execute even inside double quotes.
+  expect(isSafeShellCommand('echo $(whoami)')).toBe(false)
+  expect(isSafeShellCommand('echo "prefix $(id)"')).toBe(false)
+  expect(isSafeShellCommand('echo `whoami`')).toBe(false)
+  expect(isSafeShellCommand('cat <(ls)')).toBe(false)
+  expect(isSafeShellCommand('ls > >(tee log)')).toBe(false)
+
+  // Output redirection outside quotes must prompt; quoted operators stay inert.
+  expect(isSafeShellCommand('echo hi > /tmp/x')).toBe(false)
+  expect(isSafeShellCommand('echo hi >> /tmp/x')).toBe(false)
+  expect(isSafeShellCommand('echo "a > b"')).toBe(true)
+  expect(isSafeShellCommand("echo 'literal $(whoami)'")).toBe(true)
+
+  // Embedded runtimes in shell one-liners are never auto-approved.
+  expect(isSafeShellCommand('node -e "require(\'child_process\').execSync(\'id\')"')).toBe(false)
+  expect(isSafeShellCommand('node -e "await import(\'node:fs\')"')).toBe(false)
+
+  const bash = (command: string) => call('Bash', { command })
+  expect(permissionDisposition(bash('echo ok\n/bin/bash -c "id"'), 'auto')).toBe('prompt')
+  expect(permissionDisposition(bash('echo $(whoami)'), 'plan')).toBe('prompt')
+  expect(permissionDisposition(bash('echo hi > out.txt'), 'auto')).toBe('prompt')
+})
+
+test('environment dumping commands always prompt instead of auto-approving', () => {
+  expect(isSafeShellCommand('env')).toBe(false)
+  expect(isSafeShellCommand('printenv')).toBe(false)
+  expect(isSafeShellCommand('printenv PATH')).toBe(false)
+
+  expect(permissionDisposition(call('Bash', { command: 'env' }), 'auto')).toBe('prompt')
+  expect(permissionDisposition(call('Bash', { command: 'printenv' }), 'plan')).toBe('prompt')
+  expect(permissionDisposition(call('exec_command', { cmd: 'printenv' }), 'auto')).toBe('prompt')
+  expect(permissionDisposition(call('exec_command', { cmd: 'env' }), 'auto')).toBe('prompt')
+})
+
 test('permission modes preserve read-only and write behavior', () => {
   expect(checkPermission(call('ReadFile', {}), 'auto')).toBe(true)
   expect(checkPermission(call('WriteFile', { file_path: 'a.txt' }), 'auto')).toBe(false)

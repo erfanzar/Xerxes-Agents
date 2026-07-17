@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { ProviderError } from '../core/errors.js'
 import type { LlmDelta, TokenUsage } from '../llms/client.js'
 import { isJsonObject, parseToolArguments, type ToolCall } from '../types/toolCalls.js'
 
@@ -20,6 +21,7 @@ interface PendingFunctionCall {
  *
  * It keeps partial function-call arguments out of visible model text and
  * produces the same neutral LlmDelta vocabulary consumed by the agent loop.
+ * Terminal provider error events throw instead of passing as silent success.
  */
 export class ResponsesEventTranslator {
   usage: ResponsesUsage = {
@@ -62,9 +64,13 @@ export class ResponsesEventTranslator {
       this.completeUsage(recordValue(event.response))
       return [this.completionDelta()]
     }
+    if (type === 'response.incomplete') {
+      this.completeUsage(recordValue(event.response))
+      this.usage = { ...this.usage, finishReason: incompleteFinishReason(recordValue(event.response)) }
+      return [this.completionDelta()]
+    }
     if (type === 'response.failed' || type === 'error') {
-      this.usage = { ...this.usage, finishReason: 'error' }
-      return []
+      throw new ProviderError('responses', responsesErrorMessage(event))
     }
     return []
   }
@@ -167,6 +173,22 @@ export class ResponsesEventTranslator {
 function isFunctionCallItem(item: Readonly<Record<string, unknown>>): boolean {
   const type = stringValue(item.type)
   return type === 'function_call' || type === 'tool_call'
+}
+
+/** Map an incomplete response's reason onto the neutral finish vocabulary. */
+function incompleteFinishReason(response: Readonly<Record<string, unknown>>): string {
+  const reason = stringValue(recordValue(response.incomplete_details).reason)
+  if (reason === 'max_output_tokens') return 'length'
+  return reason || stringValue(response.status) || 'incomplete'
+}
+
+/** Format a terminal Responses API error event with its provider-supplied payload. */
+function responsesErrorMessage(event: Readonly<Record<string, unknown>>): string {
+  const nested = recordValue(recordValue(event.response).error)
+  const direct = recordValue(event.error)
+  const code = stringValue(nested.code) || stringValue(direct.code) || stringValue(event.code)
+  const message = stringValue(nested.message) || stringValue(direct.message) || stringValue(event.message)
+  return `stream returned API error${code ? ` (${code})` : ''}: ${message || 'unknown error'}`
 }
 
 function argumentsText(value: unknown): string {

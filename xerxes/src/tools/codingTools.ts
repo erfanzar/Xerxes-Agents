@@ -22,6 +22,10 @@ const DEFAULT_GIT_TIMEOUT = 30_000
 const MAX_GIT_OUTPUT = 200_000
 const MAX_DIRECTORY_DEPTH = 100
 const MAX_DIRECTORY_RESULTS = 10_000
+const MAX_READ_FILE_BYTES = 10_000_000
+const MAX_DIFF_LINES = 1_000
+const MAX_DIFF_BYTES = 500_000
+const MAX_REGEX_SUBJECT_BYTES = 1_000_000
 
 export const CODING_READ_FILE_DEFINITION = codingDefinition(
   'read_file',
@@ -39,12 +43,12 @@ export const CODING_READ_FILE_DEFINITION = codingDefinition(
 
 export const CODING_WRITE_FILE_DEFINITION = codingDefinition(
   'write_file',
-  'Write UTF-8 text within the workspace and return a capped unified diff.',
+  'Write UTF-8 text within the workspace and return a capped unified diff (skipped for oversized files).',
   {
     file_path: { type: 'string', description: 'Workspace-relative destination path.' },
     content: { type: 'string', description: 'Complete UTF-8 content to write.' },
     create_dirs: { type: 'boolean', default: true },
-    overwrite: { type: 'boolean', default: true, description: 'Allow replacing an existing regular file.' },
+    overwrite: { type: 'boolean', default: false, description: 'Allow replacing an existing regular file.' },
   },
   ['file_path', 'content'],
 )
@@ -255,6 +259,15 @@ export async function readFile(inputs: JsonObject, paths: WorkspacePathResolver)
 
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
+  const fileInfo = await stat(target)
+  if (fileInfo.size > MAX_READ_FILE_BYTES) {
+    throw new ValidationError(
+      'file_path',
+      'is ' + fileInfo.size + ' bytes, exceeding the ' + MAX_READ_FILE_BYTES
+        + '-byte read_file limit; search it with grep or split it into smaller files first',
+      filePath,
+    )
+  }
   const text = await Bun.file(target).text()
   const lines = splitTextLines(text)
   const fullFile = requestedEnd === -1
@@ -283,7 +296,7 @@ export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver
   const filePath = requiredString(inputs, 'file_path')
   const content = requiredText(inputs, 'content')
   const createDirs = optionalBoolean(inputs, 'create_dirs', true)
-  const overwrite = optionalBoolean(inputs, 'overwrite', true)
+  const overwrite = optionalBoolean(inputs, 'overwrite', false)
   const target = await paths.resolve(filePath)
   const exists = await pathExists(target)
   if (exists && !overwrite) {
@@ -305,6 +318,12 @@ export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver
   const summary = 'Successfully wrote ' + content.length + ' characters (' + lineCount + ' lines) to ' + relativePath
   if (previous === content) {
     return summary
+  }
+  if (exceedsDiffLimits(previous, content)) {
+    // The write already succeeded; only the best-effort diff preview is skipped so the
+    // quadratic Myers trace can never block or exhaust the single-threaded daemon.
+    return summary + ' (diff skipped: input exceeds the ' + MAX_DIFF_LINES + '-line or '
+      + MAX_DIFF_BYTES + '-byte diff limit)'
   }
   const diff = createUnifiedDiff(previous, content, basename(target), basename(target))
   const lines = diff.split('\n')
@@ -676,7 +695,27 @@ export function applyDiff(inputs: JsonObject): string {
   return joinSourceLines(output)
 }
 
+/**
+ * The Myers trace keeps one frontier snapshot per edit-distance step, so memory grows
+ * quadratically with the line counts; cap each side before building an in-memory diff.
+ */
+function exceedsDiffLimits(original: string, modified: string): boolean {
+  if (original.length > MAX_DIFF_BYTES || modified.length > MAX_DIFF_BYTES) {
+    return true
+  }
+  const originalLines = original.length === 0 ? 0 : original.split('\n').length
+  const modifiedLines = modified.length === 0 ? 0 : modified.split('\n').length
+  return originalLines > MAX_DIFF_LINES || modifiedLines > MAX_DIFF_LINES
+}
+
 export function createUnifiedDiff(original: string, modified: string, fromFile = 'file.txt', toFile = fromFile): string {
+  if (exceedsDiffLimits(original, modified)) {
+    throw new ValidationError(
+      'diff',
+      'inputs exceed the ' + MAX_DIFF_LINES + '-line or ' + MAX_DIFF_BYTES
+        + '-byte diff limit; refusing to build an in-memory line diff',
+    )
+  }
   const before = splitTextLines(original)
   const after = splitTextLines(modified)
   const operations = myersDiff(before, after)
@@ -999,17 +1038,10 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
   const backup = optionalBoolean(inputs, 'backup', true)
   const target = await paths.resolve(filePath)
   await requireRegularFile(target, filePath)
-  const content = await Bun.file(target).text()
-  const backupPath = backup ? await paths.resolve(filePath + '.bak') : undefined
 
-  if (backupPath !== undefined) {
-    await Bun.write(backupPath, content)
-  }
-
-  let count: number
-  let updated: string
+  // Validate the model-supplied regex before any workspace mutation, including the backup write.
+  let pattern: RegExp | undefined
   if (regex) {
-    let pattern: RegExp
     try {
       pattern = new RegExp(search, caseSensitive ? 'g' : 'gi')
     } catch (error) {
@@ -1019,15 +1051,39 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
         search,
       )
     }
+  }
+
+  const content = await Bun.file(target).text()
+  if (pattern !== undefined && content.length > MAX_REGEX_SUBJECT_BYTES) {
+    // A synchronous regex cannot be timed out; cap the subject size so catastrophic
+    // backtracking cannot freeze the single-threaded daemon.
+    throw new ValidationError(
+      'file_path',
+      'is ' + content.length + ' characters, exceeding the ' + MAX_REGEX_SUBJECT_BYTES
+        + '-character regex subject limit; use literal mode or a smaller file',
+      filePath,
+    )
+  }
+
+  const backupPath = backup ? await paths.resolve(filePath + '.bak') : undefined
+  if (backupPath !== undefined) {
+    await Bun.write(backupPath, content)
+  }
+
+  let count: number
+  let updated: string
+  if (pattern !== undefined) {
     count = [...content.matchAll(pattern)].length
-    updated = content.replace(pattern, replacement)
+    // A function replacer keeps $-sequences in the replacement literal,
+    // consistent with the literal search modes below.
+    updated = content.replace(pattern, () => replacement)
   } else if (caseSensitive) {
     count = content.split(search).length - 1
     updated = content.replaceAll(search, () => replacement)
   } else {
-    const pattern = new RegExp(escapeRegularExpression(search), 'gi')
+    const literalPattern = new RegExp(escapeRegularExpression(search), 'gi')
     count = 0
-    updated = content.replace(pattern, () => {
+    updated = content.replace(literalPattern, () => {
       count += 1
       return replacement
     })

@@ -5,7 +5,9 @@ import { expect, test } from "bun:test";
 
 import type { ProviderProfile } from "../src/bridge/profiles.js";
 import {
+  discoverModelCatalog,
   discoverModelIds,
+  modelCatalogFromResponse,
   modelDiscoveryEndpoint,
   modelsFromResponse,
   profileDiscoveryApiKey,
@@ -256,4 +258,39 @@ test("model response normalization accepts data or models arrays only", () => {
   ).toEqual(["first", "second"]);
   expect(modelsFromResponse({ data: "not-an-array" })).toEqual([]);
   expect(modelsFromResponse(null)).toEqual([]);
+});
+
+test("model discovery preserves provider-reported context metadata", async () => {
+  await expect(
+    discoverModelCatalog(
+      {
+        baseUrl: "https://provider.example/v1",
+        provider: "custom",
+        resolveProviderCredential: false,
+      },
+      {
+        fetchImplementation: async () =>
+          new Response(
+            JSON.stringify({
+              data: [
+                { id: "k3", context_length: 262_144 },
+                { id: "k3" },
+                { id: "wide", max_model_len: 1_000_000 },
+                { id: "invalid", context_window: -1 },
+              ],
+            }),
+          ),
+      },
+    ),
+  ).resolves.toEqual([
+    { id: "k3", contextLimit: 262_144 },
+    { id: "wide", contextLimit: 1_000_000 },
+    { id: "invalid" },
+  ]);
+
+  expect(
+    modelCatalogFromResponse({
+      models: [{ name: "camel", contextLength: 32_768 }],
+    }),
+  ).toEqual([{ id: "camel", contextLimit: 32_768 }]);
 });

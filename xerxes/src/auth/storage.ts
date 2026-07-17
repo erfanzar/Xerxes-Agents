@@ -75,10 +75,12 @@ export class CredentialStorage {
     try {
       raw = await readFile(path, 'utf8')
     } catch (error) {
+      // Only a missing file means "not logged in". Other filesystem failures
+      // (EACCES, EISDIR, ...) must surface instead of masquerading as absence.
       if (isMissingFile(error)) {
         return undefined
       }
-      return undefined
+      throw error
     }
 
     try {

@@ -223,8 +223,8 @@ test('Cortex streaming completions frame native events as OpenAI SSE with Cortex
   expect(payloads[8]).toMatchObject({ metadata: { event: 'completion', functions_executed: 2 } })
   expect(payloads[9]).toMatchObject({
     choices: [{ index: 0, delta: { content: '' }, finish_reason: 'stop' }],
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   })
+  expect(payloads[9]).not.toHaveProperty('usage')
   expect(frames.at(-1)).toBe('data: [DONE]\n\n')
 })
 

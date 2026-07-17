@@ -119,8 +119,11 @@ export function loadAgentSpecData(
 
 /** Resolve a prompt file and apply `${name}` and `${name:-fallback}` substitutions. */
 export function resolveSystemPrompt(path: string | undefined, args: Readonly<Record<string, string>>): string {
-  if (!path || !existsSync(path)) {
+  if (!path) {
     return ''
+  }
+  if (!existsSync(path)) {
+    throw new AgentSpecError(`System prompt file not found: ${path}`)
   }
   return readFileSync(path, 'utf8').replace(/\$\{([^}]+)\}/g, (match, expression: string) => {
     const fallbackIndex = expression.indexOf(':-')
@@ -181,7 +184,15 @@ function parseRawAgentSpec(path: string, input: YamlValue): RawAgentSpec {
   }
   const agentValue = data.agent ?? {}
   const agent = yamlMap(agentValue, `${path}.agent`)
-  const scalar = (key: string): string | undefined => Object.hasOwn(agent, key) ? String(agent[key]) : undefined
+  const scalar = (key: string): string | undefined => {
+    if (!Object.hasOwn(agent, key)) return undefined
+    const value = agent[key]
+    if (value === undefined || value === null) return undefined
+    if (typeof value === 'object') {
+      throw new AgentSpecError(`${path}.agent.${key} must be a scalar, not a mapping or list`)
+    }
+    return String(value)
+  }
   const raw: RawAgentSpec = {
     version,
     sourcePath: path,

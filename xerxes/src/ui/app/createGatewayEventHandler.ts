@@ -126,13 +126,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
   // When a clarify prompt is dismissed without an answer (the backend _block
   // timed out and returned an empty string), the live ClarifyPrompt overlay is
-  // left set until the next turn's idle() silently nulls it — so the question
-  // and options vanish from the screen while the agent's follow-up still refers
-  // to them.  The reliable signal is the clarify tool's own tool.complete (and,
-  // as a backstop, message.complete): at those points the overlay is provably
-  // still set on a timeout, but already cleared by answerClarify() on a real
-  // answer (so this no-ops there).  Flush the question + options into the
-  // transcript as a persistent system line, then clear the overlay.
+  // left set until the turn boundary's idle() silently nulls it — so the
+  // question and options vanish from the screen while the agent's follow-up
+  // still refers to them.  The reliable signal is the clarify tool's own
+  // tool.complete, with message.complete and a turn-level error as backstops:
+  // at those points the overlay is provably still set on a timeout, but
+  // already cleared by answerClarify() on a real answer (so this no-ops
+  // there).  Flush the question + options into the transcript as a persistent
+  // system line, then clear the overlay.
   const flushAbandonedClarify = () => {
     const { clarify } = getOverlayState()
 
@@ -940,18 +941,34 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       case 'message.complete': {
+        // Turn-end backstop for an abandoned clarify prompt: recordMessageComplete's
+        // idle() would otherwise drop the live overlay without a trace.
+        flushAbandonedClarify()
+
         const { finalMessages, finalText, wasInterrupted } = turnController.recordMessageComplete(ev.payload ?? {})
 
-        if (!wasInterrupted) {
+        if (wasInterrupted) {
+          // The daemon confirmed the interruption (turn_end cancelled). Persist
+          // the archived turn ending — but no completion bell and no 'ready'
+          // flip; the controller already staged 'interrupted' + its cooldown.
+          finalMessages.forEach(appendMessage)
+
+          if (!finalMessages.length) {
+            sys('interrupted')
+          }
+        } else {
           const msgs: Msg[] = finalMessages.length ? finalMessages : [{ role: 'assistant', text: finalText }]
           msgs.forEach(appendMessage)
 
           if (bellOnComplete && stdout?.isTTY) {
-            stdout.write('\x07')
+            // `stdout` here is OpenTUI's guarded proxy, which swallows writes
+            // to protect the renderer's cell model. BEL has no cell/cursor
+            // effect, so ring it on the real stdout directly.
+            process.stdout.write('\x07')
           }
-        }
 
-        setStatus('ready')
+          setStatus('ready')
+        }
 
         if (ev.payload?.usage) {
           patchUiState(state => ({ ...state, usage: { ...state.usage, ...ev.payload!.usage } }))
@@ -963,7 +980,9 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'error':
         // Error teardown clears the live progress store. Archive any settled
         // reasoning/tool segments first so a failed turn cannot erase work
-        // the user already watched happen.
+        // the user already watched happen. The same teardown would silently
+        // drop a live clarify overlay, so record the abandoned prompt first.
+        flushAbandonedClarify()
         turnController.recordError().forEach(appendMessage)
 
         {

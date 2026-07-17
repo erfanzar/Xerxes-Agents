@@ -61,7 +61,7 @@ test('Responses API translator streams text and thinking while assembling functi
   })
 })
 
-test('Responses API translator flushes unfinished calls and marks failed streams', () => {
+test('Responses API translator flushes unfinished calls when the transport truncates', () => {
   const translator = new ResponsesEventTranslator()
   const deltas = [...translator.translateAll([
     {
@@ -69,11 +69,10 @@ test('Responses API translator flushes unfinished calls and marks failed streams
       item: { type: 'tool_call', id: 'call_2', name: 'ListDir' },
     },
     { type: 'response.function_call_arguments.delta', call_id: 'call_2', delta: '{"directory":"."}' },
-    { type: 'response.failed' },
   ])]
 
   expect(deltas).toEqual([{
-    finishReason: 'error',
+    finishReason: 'stop',
     usage: { inputTokens: 0, outputTokens: 0 },
     toolCalls: [{
       id: 'call_2',
@@ -81,4 +80,44 @@ test('Responses API translator flushes unfinished calls and marks failed streams
       function: { name: 'ListDir', arguments: { directory: '.' } },
     }],
   }])
+})
+
+test('Responses API translator throws on failed and error events with the provider payload', () => {
+  expect(() => [...new ResponsesEventTranslator().translateAll([
+    { type: 'response.output_text.delta', delta: 'partial' },
+    {
+      type: 'response.failed',
+      response: { status: 'failed', error: { code: 'server_error', message: 'Model exploded' } },
+    },
+  ])]).toThrow('stream returned API error (server_error): Model exploded')
+
+  expect(() => [...new ResponsesEventTranslator().translateAll([
+    { type: 'error', code: 'rate_limit_exceeded', message: 'Slow down' },
+  ])]).toThrow('stream returned API error (rate_limit_exceeded): Slow down')
+})
+
+test('Responses API translator surfaces incomplete responses with a mapped finish reason', () => {
+  const truncated = [...new ResponsesEventTranslator().translateAll([
+    { type: 'response.output_text.delta', delta: 'cut off' },
+    {
+      type: 'response.incomplete',
+      response: {
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        usage: { input_tokens: 5, output_tokens: 9 },
+      },
+    },
+  ])]
+  expect(truncated).toEqual([
+    { content: 'cut off' },
+    { finishReason: 'length', usage: { inputTokens: 5, outputTokens: 9 } },
+  ])
+
+  const filtered = [...new ResponsesEventTranslator().translateAll([
+    {
+      type: 'response.incomplete',
+      response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' } },
+    },
+  ])]
+  expect(filtered).toEqual([{ finishReason: 'content_filter', usage: { inputTokens: 0, outputTokens: 0 } }])
 })

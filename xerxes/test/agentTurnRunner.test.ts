@@ -337,6 +337,7 @@ test('agent turn runner applies the selected agent prompt, model, and allowed to
     agentDefinitions: new Map([[definition.name, definition]]),
     llm: client,
     model: 'gpt-4o',
+    topK: 64,
     tools: [
       { type: 'function', function: { name: 'ReadFile', description: '', parameters: {} } },
       { type: 'function', function: { name: 'WriteFile', description: '', parameters: {} } },
@@ -353,6 +354,7 @@ test('agent turn runner applies the selected agent prompt, model, and allowed to
   }
   expect(client.requests).toHaveLength(1)
   expect(client.requests[0]?.model).toBe('gpt-4.1-mini')
+  expect(client.requests[0]?.topK).toBe(64)
   expect(client.requests[0]?.messages[0]).toMatchObject({ role: 'system', content: 'Review safely and explain findings.' })
   expect(client.requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
 })
@@ -762,3 +764,163 @@ test('agent turn runner routes AskUserQuestionTool through the native daemon rep
     release()
   }
 })
+
+test('agent turn runner preserves external undo edits across turns', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-undo-'))
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' }), {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    await runtime.submitTurn('tui:undo', 'first prompt', () => {})
+    const session = runtime.sessionStatus('tui:undo')
+    if (!session) throw new Error('expected a live session')
+    expect(session.messages.map(message => message.role)).toEqual(['user', 'assistant'])
+
+    // /undo mutates session.messages directly while the runner keeps state.
+    session.messages.pop()
+    session.messages.pop()
+    session.turnCount = Math.max(0, session.turnCount - 1)
+
+    await runtime.submitTurn('tui:undo', 'second prompt', () => {})
+    expect(session.messages).toMatchObject([
+      { role: 'user', content: 'second prompt' },
+      { role: 'assistant', content: 'Hello from the real loop.' },
+    ])
+    expect(session.turnCount).toBe(1)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('agent turn runner preserves idle steering appended to the session across turns', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-steer-'))
+  const runtime = new InMemoryDaemonRuntime(new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' }), {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    await runtime.submitTurn('tui:steer', 'first prompt', () => {})
+    expect(runtime.steerTurn('tui:steer', 'hold on')).toBe(true)
+    const session = runtime.sessionStatus('tui:steer')
+    if (!session) throw new Error('expected a live session')
+    expect(session.messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: '[steer from user]\nhold on',
+    })
+
+    await runtime.submitTurn('tui:steer', 'second prompt', () => {})
+    expect(session.messages.map(message => `${message.role}:${message.content}`)).toEqual([
+      'user:first prompt',
+      'assistant:Hello from the real loop.',
+      'user:[steer from user]\nhold on',
+      'user:second prompt',
+      'assistant:Hello from the real loop.',
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('agent turn runner drops cached session state when the session is evicted', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-drop-'))
+  const runner = new AgentTurnRunner({ llm: new TextClient(), model: 'gpt-4o' })
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    await runtime.submitTurn('tui:drop', 'cache this state', () => {})
+    const session = runtime.sessionStatus('tui:drop')
+    if (!session) throw new Error('expected a live session')
+    expect(runner.stateFor(session.id)).toBeDefined()
+
+    runtime.evictSession('tui:drop')
+    expect(runner.stateFor(session.id)).toBeUndefined()
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('daemon session eviction aborts the in-flight turn and frees the session key', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-evict-turn-'))
+  const runner = new GatedTurnRunner()
+  const runtime = new InMemoryDaemonRuntime(runner, {
+    currentProjectDirectory: directory,
+    model: 'gpt-4o',
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    const firstEvents: DaemonEvent[] = []
+    const first = runtime.submitTurn('tui:evict-turn', 'long work', event => firstEvents.push(event))
+    await waitForCondition(() => runner.runs === 1)
+
+    runtime.evictSession('tui:evict-turn')
+    await first
+    expect(firstEvents.find(event => event.type === 'turn_end')?.payload).toMatchObject({ cancelled: true })
+    expect(runtime.sessionStatus('tui:evict-turn')).toBeUndefined()
+
+    const secondEvents: DaemonEvent[] = []
+    await runtime.submitTurn('tui:evict-turn', 'replacement turn', event => secondEvents.push(event))
+    expect(secondEvents.filter(event => event.type === 'text_part').map(event => event.payload.text)).toEqual([
+      'replacement done',
+    ])
+    expect(secondEvents.some(event => `${event.payload.message ?? ''}`.includes('already active'))).toBe(false)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('daemon cancellation reports false when the session has no active turn', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'xerxes-agent-cancel-idle-'))
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    sessionDirectory: join(directory, 'sessions'),
+  })
+  try {
+    await runtime.openSession('tui:idle')
+
+    expect(runtime.cancelTurn('tui:idle')).toBe(false)
+    expect(runtime.cancelTurn('missing')).toBe(false)
+    expect(runtime.sessionStatus('tui:idle')?.cancelRequested).toBe(false)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+class GatedTurnRunner {
+  runs = 0
+
+  async *run(
+    _session: DaemonSession,
+    _text: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<DaemonEvent> {
+    this.runs += 1
+    if (this.runs > 1) {
+      yield { type: 'text_part', payload: { text: 'replacement done' } }
+      return
+    }
+    yield { type: 'text_part', payload: { text: 'gated' } }
+    await new Promise<void>(resolve => {
+      if (signal.aborted) {
+        resolve()
+        return
+      }
+      signal.addEventListener('abort', () => resolve(), { once: true })
+    })
+  }
+}
+
+async function waitForCondition(predicate: () => boolean, timeout = 2_000): Promise<void> {
+  const deadline = Date.now() + timeout
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for daemon runner state')
+    }
+    await Bun.sleep(5)
+  }
+}

@@ -58,7 +58,13 @@ export class SQLiteVectorStorage implements MemoryStorage {
     this.embedder = options.embedder ?? getDefaultEmbedder()
     if (this.dbPath !== ':memory:') mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
-    this.initialize()
+    try {
+      this.initialize()
+    } catch (error) {
+      // Do not leak the open handle when a later constructor step fails.
+      this.close()
+      throw error
+    }
   }
 
   clear(): number {
