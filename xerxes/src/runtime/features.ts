@@ -14,13 +14,11 @@ import {
 } from '../operators/index.js'
 import { PolicyEngine, ToolPolicy } from '../security/policy.js'
 import { SandboxRouter, type SandboxBackend, type SandboxConfig } from '../security/sandbox.js'
-import { LoopDetector, type LoopDetectionConfig } from './loopDetector.js'
 
 /** Per-agent values that replace the corresponding runtime-wide setting. */
 export interface AgentRuntimeOverrides {
   readonly enabledSkills?: readonly string[]
   readonly guardrails?: readonly string[]
-  readonly loopDetection?: Partial<LoopDetectionConfig>
   readonly policy?: ToolPolicy
   readonly sandbox?: SandboxConfig
 }
@@ -37,7 +35,6 @@ export interface RuntimeFeaturesConfig {
   readonly discoverConventionalExtensions?: boolean
   readonly guardrails?: readonly string[]
   readonly policy?: ToolPolicy
-  readonly loopDetection?: Partial<LoopDetectionConfig>
   readonly sandbox?: SandboxConfig
   readonly enabledSkills?: readonly string[]
   readonly operator?: OperatorRuntimeConfig
@@ -259,15 +256,6 @@ export class RuntimeFeaturesState {
 
   getMissingEnabledSkillNames(agentId?: string): string[] {
     return this.getEnabledSkillNames(agentId).filter(name => this.skillRegistry.get(name) === undefined)
-  }
-
-  getLoopDetectionConfig(agentId?: string): Partial<LoopDetectionConfig> | undefined {
-    return this.getAgentOverrides(agentId).loopDetection ?? this.config.loopDetection
-  }
-
-  createLoopDetector(agentId?: string): LoopDetector | undefined {
-    const config = this.getLoopDetectionConfig(agentId)
-    return config === undefined ? undefined : new LoopDetector(config)
   }
 
   getSandboxConfig(agentId?: string): SandboxConfig | undefined {

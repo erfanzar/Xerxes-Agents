@@ -9,7 +9,6 @@ import {
 import type { HookPoint, HookRunner } from '../extensions/hooks.js'
 import type { LlmClient, LlmDelta, TokenUsage } from '../llms/client.js'
 import { classifyError } from '../runtime/errorClassifier.js'
-import { LoopDetector, ToolLoopError } from '../runtime/loopDetector.js'
 import {
   inspectObjectiveResponse,
   objectiveGuardRetryLimit,
@@ -73,7 +72,6 @@ export interface TurnDependencies {
   /** Optional plugin hook dispatch surface; when absent the turn dispatches no hooks. */
   readonly hookRunner?: HookRunner
   readonly llm: LlmClient
-  readonly loopDetector?: LoopDetector
   /**
    * Observes provider-requested tools that were not included in the model-visible
    * surface. Returning `stop` ends the current turn without executing or retrying
@@ -111,7 +109,6 @@ export async function* runTurn(
   const streamInactivityTimeoutMs =
     dependencies.streamInactivityTimeoutMs ?? DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS
   const hookRunner = dependencies.hookRunner
-  const loopDetector = dependencies.loopDetector ?? new LoopDetector()
   const toolContext: ToolExecutionContext = {
     ...(request.agentId ? { agentId: request.agentId } : {}),
     ...(request.sessionId ? { sessionId: request.sessionId } : {}),
@@ -121,7 +118,6 @@ export async function* runTurn(
   state.messages.push({ role: 'user', content: request.userMessage })
   state.metadata.model = request.model
   state.turnCount += 1
-  loopDetector.reset()
   await dispatchHook(hookRunner, 'on_turn_start', {
     ...(request.agentId ? { agentId: request.agentId } : {}),
     model: request.model,
@@ -398,7 +394,6 @@ export async function* runTurn(
     }
 
     toolCallsCount += roundToolCalls.length
-    let criticalToolLoop: ToolLoopError | undefined
     for (let index = 0; index < roundToolCalls.length; index += 1) {
       const call = roundToolCalls[index]
       if (!call) {
@@ -411,18 +406,6 @@ export async function* runTurn(
         }
         break
       }
-      const loopEvent = loopDetector.recordCall(
-        call.function.name,
-        call.function.arguments,
-      )
-      if (loopEvent.severity === 'critical') {
-        const loopError = new ToolLoopError(loopEvent)
-        criticalToolLoop ??= loopError
-        const result = await recordToolResult(failedToolResult(call, loopError), call)
-        yield { type: 'tool_end', result }
-        continue
-      }
-
       const permission = permissionDisposition(
         call,
         permissionMode,
@@ -508,16 +491,6 @@ export async function* runTurn(
       break
     }
     let needsFinalization = false
-    if (criticalToolLoop) {
-      forceToolFreeSummary = true
-      needsFinalization = true
-      state.messages.push({
-        role: 'user',
-        content:
-          `[Tool loop stopped]\n${criticalToolLoop.message}. ` +
-          'Do not call more tools. Return the best concise final result supported by the work already completed.',
-      })
-    }
     if (toolTurn + 1 >= turnLimit) {
       const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
       const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)

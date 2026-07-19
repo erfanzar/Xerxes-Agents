@@ -13,7 +13,6 @@ import { ConfigurationError } from './core/errors.js'
 import { ToolRegistry } from './executors/toolRegistry.js'
 import { createLlmClient, requireConfiguredModel, type LlmClient } from './llms/client.js'
 import { ShortTermMemory, type Memory } from './memory/index.js'
-import { LoopDetector } from './runtime/loopDetector.js'
 import {
   QueryEngine,
   type QueryEngineConfig,
@@ -59,7 +58,6 @@ export interface XerxesOptions {
   readonly coreTools?: CoreToolsOptions | false
   readonly enableMemory?: boolean
   readonly llm?: LlmClient
-  readonly loopDetector?: LoopDetector
   readonly memory?: Memory
   readonly memoryMinChars?: number
   readonly model?: string
@@ -91,7 +89,6 @@ export class Xerxes {
   readonly agentOrchestrator = new AgentOrchestrator()
   readonly auditEmitter: AuditEmitter | undefined
   readonly llm: LlmClient
-  readonly loopDetector: LoopDetector
   readonly memory: Memory | undefined
   readonly sandboxRouter: SandboxRouter | undefined
   readonly toolRegistry: ToolRegistry
@@ -111,7 +108,6 @@ export class Xerxes {
     const clientModel = firstConfiguredModel(this.defaultModel, ...suppliedAgents.map(agent => agent.model))
     this.llm = options.llm ?? createLlmClient(requireConfiguredModel(clientModel))
     this.toolRegistry = options.toolRegistry ?? new ToolRegistry()
-    this.loopDetector = options.loopDetector ?? new LoopDetector()
     this.memory = options.memory ?? (options.enableMemory ? new ShortTermMemory({ capacity: 100 }) : undefined)
     this.memoryMinChars = options.memoryMinChars ?? DEFAULT_MEMORY_MIN_CHARS
     this.defaultPermissionMode = options.permissionMode ?? DEFAULT_PERMISSION_MODE
@@ -209,7 +205,6 @@ export class Xerxes {
     }
     return new QueryEngine({
       llm: this.llm,
-      loopDetector: this.loopDetector,
       toolExecutor: this.sandboxRouter
         ? new SandboxedToolExecutor(this.toolRegistry, this.sandboxRouter)
         : this.toolRegistry,
