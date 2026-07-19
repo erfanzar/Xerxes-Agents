@@ -91,12 +91,38 @@ export function checkPlatform(options: DoctorOptions = {}): Diagnosis {
   return diagnosis('platform', 'ok', platform + ' host')
 }
 
+const MACOS_COMPUTER_USE_BINARIES = ['/usr/sbin/screencapture', '/usr/bin/sips', '/usr/bin/osascript'] as const
+
+/** Report whether the zero-install macOS computer_use backend can run on this host. */
+export function checkComputerUse(options: DoctorOptions = {}): Diagnosis {
+  const platform = options.platform ?? process.platform
+  if (platform !== 'darwin') {
+    return diagnosis('computer-use', 'ok', 'computer_use macOS backend is not applicable on ' + platform)
+  }
+  const exists = options.fileExists ?? existsSync
+  const missing = MACOS_COMPUTER_USE_BINARIES.filter(path => !exists(path))
+  if (missing.length) {
+    return diagnosis(
+      'computer-use',
+      'warn',
+      'computer_use macOS backend is missing system tools: ' + missing.join(', '),
+      'screencapture, sips, and osascript ship with macOS; reinstall the OS command line tools if they are absent.',
+    )
+  }
+  return diagnosis(
+    'computer-use',
+    'ok',
+    'computer_use macOS backend available (enable with XERXES_COMPUTER_USE=1); grant Screen Recording and Accessibility to the terminal app',
+  )
+}
+
 export const DEFAULT_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([
   checkBunRuntime,
   checkPlatform,
   checkXerxesOnPath,
   checkProviderKeys,
   checkXerxesHome,
+  checkComputerUse,
 ])
 
 export const MINIMAL_DOCTOR_CHECKS: readonly DoctorCheck[] = Object.freeze([

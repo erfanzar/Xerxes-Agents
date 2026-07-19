@@ -3,5 +3,7 @@
 
 export * from './backend.js'
 export * from './cuaBackend.js'
+export * from './macosPort.js'
+export * from './macosScripts.js'
 export * from './schema.js'
 export * from './tool.js'

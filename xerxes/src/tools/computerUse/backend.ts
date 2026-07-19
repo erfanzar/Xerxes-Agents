@@ -93,6 +93,12 @@ export interface SetValueRequest {
   readonly value: string
 }
 
+export interface MouseMoveRequest {
+  readonly captureAfter: boolean
+  readonly x: number
+  readonly y: number
+}
+
 /**
  * Privileged desktop boundary.
  *
@@ -104,6 +110,8 @@ export interface SetValueRequest {
 export interface ComputerUsePort {
   capture(request: CaptureRequest, signal?: AbortSignal): CaptureResult | Promise<CaptureResult>
   click(request: ClickRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
+  /** Report the current cursor position in logical points (meta: x, y). */
+  cursorPosition?(signal?: AbortSignal): ActionResult | Promise<ActionResult>
   doubleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   drag(request: DragRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   focusApp(app: string, signal?: AbortSignal): ActionResult | Promise<ActionResult>
@@ -111,11 +119,15 @@ export interface ComputerUsePort {
   key(request: KeyRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   listApps(signal?: AbortSignal): ActionResult | Promise<ActionResult>
   middleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): ActionResult | Promise<ActionResult>
+  /** Move the cursor without pressing a button. */
+  mouseMove?(request: MouseMoveRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   rightClick(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   scroll(request: ScrollRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   setValue(request: SetValueRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   start?(signal?: AbortSignal): void | Promise<void>
   stop?(signal?: AbortSignal): void | Promise<void>
+  /** Triple-click, e.g. to select a paragraph. */
+  tripleClick?(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   type(request: TextRequest, signal?: AbortSignal): ActionResult | Promise<ActionResult>
   wait(ms: number, signal?: AbortSignal): ActionResult | Promise<ActionResult>
 }
@@ -204,6 +216,33 @@ export class ComputerUseSession {
 
   async middleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): Promise<ActionResult> {
     return this.action('middle_click', signal, port => port.middleClick(request, signal))
+  }
+
+  async tripleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>, signal?: AbortSignal): Promise<ActionResult> {
+    return this.action('triple_click', signal, port => {
+      if (port.tripleClick === undefined) {
+        throw new ComputerUseUnavailableError('configured ComputerUsePort does not support triple_click')
+      }
+      return port.tripleClick(request, signal)
+    })
+  }
+
+  async mouseMove(request: MouseMoveRequest, signal?: AbortSignal): Promise<ActionResult> {
+    return this.action('mouse_move', signal, port => {
+      if (port.mouseMove === undefined) {
+        throw new ComputerUseUnavailableError('configured ComputerUsePort does not support mouse_move')
+      }
+      return port.mouseMove(request, signal)
+    })
+  }
+
+  async cursorPosition(signal?: AbortSignal): Promise<ActionResult> {
+    return this.action('cursor_position', signal, port => {
+      if (port.cursorPosition === undefined) {
+        throw new ComputerUseUnavailableError('configured ComputerUsePort does not support cursor_position')
+      }
+      return port.cursorPosition(signal)
+    })
   }
 
   async drag(request: DragRequest, signal?: AbortSignal): Promise<ActionResult> {

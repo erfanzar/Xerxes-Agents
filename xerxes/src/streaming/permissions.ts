@@ -212,6 +212,15 @@ export function permissionDescription(call: Pick<ToolCall, 'function'>): string 
     const message = stringInput(inputs, 'message').trim()
     return message ? `Message ${target}: ${message.slice(0, 60)}` : `Message ${target}`
   }
+  if (name === 'computer_use') {
+    const action = stringInput(inputs, 'action') || 'action'
+    const app = stringInput(inputs, 'app').trim()
+    const x = inputs['x']
+    const y = inputs['y']
+    const at = typeof x === 'number' && typeof y === 'number' ? ` at (${x}, ${y})` : ''
+    const detail = app ? ` (${app})` : at
+    return `Desktop: ${action}${detail}`
+  }
   const firstValue = Object.values(inputs)[0]
   return `${name}(${String(firstValue ?? '').slice(0, 60)})`
 }
