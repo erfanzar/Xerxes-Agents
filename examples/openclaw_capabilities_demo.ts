@@ -9,7 +9,6 @@ import { join } from 'node:path'
 
 import {
   HookRunner,
-  LoopDetector,
   PluginRegistry,
   PluginType,
   PolicyEngine,
@@ -62,12 +61,6 @@ export async function runOpenClawCapabilitiesDemo(): Promise<readonly string[]> 
     policy.enforce('delete_file', 'reader_agent')
   } catch (error) {
     lines.push(`Policy enforcement: ${error instanceof Error ? error.message : String(error)}`)
-  }
-
-  const detector = new LoopDetector({ sameCallWarning: 3, sameCallCritical: 5 })
-  for (let index = 0; index < 6; index += 1) {
-    const event = detector.recordCall('web_search', { query: 'same query' })
-    lines.push(`Loop call ${index + 1}: ${event.severity}`)
   }
 
   const hooks = new HookRunner()

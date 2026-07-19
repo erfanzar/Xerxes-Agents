@@ -5,7 +5,6 @@ import { expect, test } from 'bun:test'
 
 import type { ToolExecutor } from '../src/executors/toolRegistry.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
-import { LoopDetector } from '../src/runtime/loopDetector.js'
 import { PolicyEngine, ToolPolicy } from '../src/security/policy.js'
 import { createAgentState, type StreamEvent } from '../src/streaming/events.js'
 import { runTurn } from '../src/streaming/loop.js'
@@ -317,89 +316,6 @@ test('default tool turns can exceed fifty without a hidden round ceiling', async
   expect(events.filter(event => event.type === 'tool_end')).toHaveLength(52)
   expect(events).toContainEqual({ type: 'text', text: 'Finished after fifty-two productive tool rounds.' })
   expect(events.at(-1)).toMatchObject({ type: 'turn_done', toolCallsCount: 52 })
-})
-
-test('retained same-call protection stops repeated work and forces a tool-free summary', async () => {
-  const requests: CompletionRequest[] = []
-  const executed: string[] = []
-  const events = await collect(runTurn({
-    model: 'gpt-4o',
-    permissionMode: 'accept-all',
-    state: createAgentState(),
-    tools: [READ_FILE],
-    userMessage: 'do not repeat the same work forever',
-  }, {
-    llm: {
-      async *stream(request): AsyncGenerator<LlmDelta> {
-        requests.push(request)
-        if (requests.length <= 5) {
-          yield { toolCalls: [readFileCall(`repeat-${requests.length}`)] }
-          return
-        }
-        yield { content: 'Summarized after stopping the repeated call.' }
-      },
-    },
-    toolExecutor: {
-      async execute(call): Promise<string> {
-        executed.push(call.id)
-        return 'same evidence'
-      },
-    },
-  }))
-
-  expect(executed).toEqual(['repeat-1', 'repeat-2', 'repeat-3', 'repeat-4'])
-  expect(requests).toHaveLength(6)
-  expect(requests[5]?.tools).toBeUndefined()
-  expect(requests[5]?.messages).toContainEqual(expect.objectContaining({
-    role: 'user',
-    content: expect.stringContaining('Tool loop detected (same_call)'),
-  }))
-  expect(events.filter(event => event.type === 'tool_start')).toHaveLength(4)
-  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(5)
-  expect(events).toContainEqual({ type: 'text', text: 'Summarized after stopping the repeated call.' })
-  expect(events.at(-1)).toMatchObject({ type: 'turn_done', toolCallsCount: 5 })
-})
-
-test('tool-call budget exhaustion allows the configured maximum then forces one tool-free summary', async () => {
-  const requests: CompletionRequest[] = []
-  const executed: string[] = []
-  const events = await collect(runTurn({
-    model: 'gpt-4o',
-    permissionMode: 'accept-all',
-    state: createAgentState(),
-    tools: [READ_FILE],
-    userMessage: 'inspect without looping forever',
-  }, {
-    llm: {
-      async *stream(request): AsyncGenerator<LlmDelta> {
-        requests.push(request)
-        if (requests.length < 3) {
-          yield { toolCalls: [readFileCall(`budget-${requests.length}`)] }
-          return
-        }
-        yield { content: 'Final summary from completed work.' }
-      },
-    },
-    loopDetector: new LoopDetector({ maxToolCallsPerTurn: 1 }),
-    toolExecutor: {
-      async execute(call): Promise<string> {
-        executed.push(call.id)
-        return 'evidence'
-      },
-    },
-  }))
-
-  expect(executed).toEqual(['budget-1'])
-  expect(requests).toHaveLength(3)
-  expect(requests[0]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
-  expect(requests[1]?.tools?.map(tool => tool.function.name)).toEqual(['ReadFile'])
-  expect(requests[2]?.tools).toBeUndefined()
-  expect(requests[2]?.messages).toContainEqual(expect.objectContaining({
-    role: 'user',
-    content: expect.stringContaining('[Tool loop stopped]'),
-  }))
-  expect(events.filter(event => event.type === 'tool_end')).toHaveLength(2)
-  expect(events).toContainEqual({ type: 'text', text: 'Final summary from completed work.' })
 })
 
 test('streaming loop keeps the full tool result, timing, and cache usage in its native state', async () => {

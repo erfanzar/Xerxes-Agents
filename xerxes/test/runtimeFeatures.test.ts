@@ -62,7 +62,6 @@ Review native changes.`, '/workspace/skills/review/SKILL.md'))
     discoverConventionalExtensions: false,
     enabledSkills: ['review', 'not-installed'],
     guardrails: ['global-guardrail'],
-    loopDetection: { enabled: false },
     policy,
     sandbox: { mode: SandboxMode.WARN, sandboxedTools: ['exec_command'] },
     operator: createOperatorRuntimeConfig({ enabled: true, powerToolsEnabled: true }),
@@ -70,7 +69,6 @@ Review native changes.`, '/workspace/skills/review/SKILL.md'))
       constrained: {
         enabledSkills: [],
         guardrails: ['agent-guardrail'],
-        loopDetection: { maxToolCallsPerTurn: 2 },
         policy: new ToolPolicy({ deny: ['agent_only'] }),
         sandbox: { mode: SandboxMode.OFF },
       },
@@ -91,8 +89,6 @@ Review native changes.`, '/workspace/skills/review/SKILL.md'))
     expect(state.policyEngine.check('blocked_tool')).toBe(PolicyAction.DENY)
     expect(state.policyEngine.check('agent_only', 'constrained')).toBe(PolicyAction.DENY)
     expect(policy.evaluate('exec_command')).toBe(PolicyAction.DENY)
-    expect(state.createLoopDetector()).toBeDefined()
-    expect(state.createLoopDetector('constrained')).toBeDefined()
     expect(state.getSandboxRouter()).toBeDefined()
     expect(state.getSandboxRouter('constrained')).toBeDefined()
     expect(state.operatorState?.toolDefinitions().map(tool => tool.function.name)).toContain('exec_command')
