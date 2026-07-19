@@ -72,6 +72,7 @@ import {
   savedSessionSummary,
   selectSavedSession,
 } from "./runtime/sessionExport.js";
+import { createMacOSComputerUseToolOptions } from "./tools/computerUse/macosPort.js";
 import {
   registerClaudeAgentTools,
   registerClaudeSkillTool,
@@ -612,8 +613,13 @@ function daemonRuntime(
       return undefined;
     }
     const tools = new ToolRegistry();
+    const computerUseTool = createMacOSComputerUseToolOptions({
+      ...config.runtime,
+      ...settings,
+    });
     registerCoreTools(tools, {
       workspaceRoot,
+      ...(computerUseTool === undefined ? {} : { computerUseTool }),
       agentMemoryTools: {
         resolveMemory: (context) => {
           const projectRoot = context.metadata.project_root;
@@ -845,8 +851,10 @@ async function acpServer(
   const skillRegistry = new SkillRegistry();
   await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
+  const acpComputerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
     workspaceRoot,
+    ...(acpComputerUseTool === undefined ? {} : { computerUseTool: acpComputerUseTool }),
     agentMemoryTools: {
       memory: new AgentMemory({ projectRoot: workspaceRoot }),
       resolveSelfMemory: (context) =>
@@ -970,8 +978,10 @@ async function runOneShot(prompt: string): Promise<void> {
   await skillRegistry.refresh(...defaultSkillDiscoveryDirectories({ cwd: workspaceRoot }));
   const memoryToolContext = memoryToolContextResolver();
   const agentMemory = new AgentMemory({ projectRoot: workspaceRoot });
+  const computerUseTool = createMacOSComputerUseToolOptions(config.runtime);
   registerCoreTools(tools, {
     workspaceRoot,
+    ...(computerUseTool === undefined ? {} : { computerUseTool }),
     agentMemoryTools: {
       memory: agentMemory,
       resolveSelfMemory: (context) =>

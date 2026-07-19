@@ -17,6 +17,7 @@ import {
   type ComputerUsePort,
   type DragRequest,
   type KeyRequest,
+  type MouseMoveRequest,
   type ScrollRequest,
   type SetValueRequest,
   type TextRequest,
@@ -214,6 +215,55 @@ async function execute(registry: ToolRegistry, arguments_: JsonObject): Promise<
   return JSON.parse(await registry.execute(call(arguments_), { metadata: {} })) as JsonObject
 }
 
+test('computer_use routes mouse_move, triple_click, and cursor_position through the session', async () => {
+  const port = new FakeComputerPort()
+  const registry = new ToolRegistry()
+  registerComputerUseTool(registry, { session: new ComputerUseSession({ port }) })
+
+  expect(await execute(registry, { action: 'mouse_move', x: 10, y: 20 })).toEqual({
+    ok: true,
+    action: 'mouse_move',
+    message: 'moved',
+    meta: {},
+  })
+  expect(await execute(registry, { action: 'triple_click', element: 2 })).toEqual({
+    ok: true,
+    action: 'triple_click',
+    message: 'triple clicked',
+    meta: {},
+  })
+  expect(await execute(registry, { action: 'cursor_position' })).toEqual({
+    ok: true,
+    action: 'cursor_position',
+    message: 'cursor at 3, 4',
+    meta: { x: 3, y: 4 },
+  })
+  expect(port.events).toEqual([
+    'available',
+    'start',
+    'move:10,20',
+    'available',
+    'triple:2',
+    'available',
+    'cursor',
+  ])
+
+  await expect(registry.execute(call({ action: 'mouse_move', element: 3 }), { metadata: {} }))
+    .rejects.toThrow('is not valid for action=mouse_move')
+  await expect(registry.execute(call({ action: 'cursor_position', x: 1 }), { metadata: {} }))
+    .rejects.toThrow('is not valid for action=cursor_position')
+})
+
+test('computer_use session fails clearly when a port lacks optional parity methods', async () => {
+  const port = new FakeComputerPort()
+  Object.assign(port, { cursorPosition: undefined, mouseMove: undefined, tripleClick: undefined })
+  const session = new ComputerUseSession({ port })
+
+  await expect(session.tripleClick({ captureAfter: false })).rejects.toThrow('does not support triple_click')
+  await expect(session.mouseMove({ captureAfter: false, x: 1, y: 1 })).rejects.toThrow('does not support mouse_move')
+  await expect(session.cursorPosition()).rejects.toThrow('does not support cursor_position')
+})
+
 function call(arguments_: JsonObject): ToolCall {
   return {
     id: crypto.randomUUID(),
@@ -260,6 +310,21 @@ class FakeComputerPort implements ComputerUsePort {
   middleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>): ActionResult {
     this.events.push('middle:' + (request.element ?? request.x ?? 'unknown'))
     return result('middle_click', 'middle clicked', request.captureAfter)
+  }
+
+  tripleClick(request: Omit<ClickRequest, 'button' | 'clickCount'>): ActionResult {
+    this.events.push('triple:' + (request.element ?? request.x ?? 'unknown'))
+    return result('triple_click', 'triple clicked', request.captureAfter)
+  }
+
+  mouseMove(request: MouseMoveRequest): ActionResult {
+    this.events.push('move:' + request.x + ',' + request.y)
+    return result('mouse_move', 'moved')
+  }
+
+  cursorPosition(): ActionResult {
+    this.events.push('cursor')
+    return { ...result('cursor_position', 'cursor at 3, 4'), meta: { x: 3, y: 4 } }
   }
 
   drag(request: DragRequest): ActionResult {

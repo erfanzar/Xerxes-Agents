@@ -4,6 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import {
+  checkComputerUse,
   checkPlatform,
   checkProviderKeys,
   checkXerxesHome,
@@ -24,10 +25,23 @@ test('Bun doctor checks use injected host facts and do not expose credential val
   }
   const report = runAllDoctorChecks(options)
 
-  expect(report.map(item => item.severity)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok'])
+  expect(report.map(item => item.severity)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'ok'])
   expect(formatDoctorReport(report)).toContain('OPENAI_API_KEY')
   expect(formatDoctorReport(report)).not.toContain('secret-value')
   expect(hasDoctorFailures(report)).toBe(false)
+})
+
+test('computer_use doctor check reports platform fit, missing tools, and permission guidance', () => {
+  expect(checkComputerUse({ platform: 'linux' }).severity).toBe('ok')
+  expect(checkComputerUse({ platform: 'linux' }).message).toContain('not applicable')
+
+  const missing = checkComputerUse({ platform: 'darwin', fileExists: path => !path.includes('sips') })
+  expect(missing.severity).toBe('warn')
+  expect(missing.message).toContain('sips')
+
+  const ready = checkComputerUse({ platform: 'darwin', fileExists: () => true })
+  expect(ready.severity).toBe('ok')
+  expect(ready.message).toContain('Accessibility')
 })
 
 test('Bun doctor warns for absent optional setup and Windows Unix-socket limitations', () => {

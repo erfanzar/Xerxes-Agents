@@ -25,8 +25,11 @@ const ACTIONS = [
   'capture',
   'click',
   'double_click',
+  'triple_click',
   'right_click',
   'middle_click',
+  'mouse_move',
+  'cursor_position',
   'drag',
   'scroll',
   'type',
@@ -43,8 +46,11 @@ const ACTION_FIELDS: Readonly<Record<ComputerUseAction, readonly string[]>> = {
   capture: ['action', 'mode', 'app', 'max_elements'],
   click: ['action', 'element', 'x', 'y', 'capture_after'],
   double_click: ['action', 'element', 'x', 'y', 'capture_after'],
+  triple_click: ['action', 'element', 'x', 'y', 'capture_after'],
   right_click: ['action', 'element', 'x', 'y', 'capture_after'],
   middle_click: ['action', 'element', 'x', 'y', 'capture_after'],
+  mouse_move: ['action', 'x', 'y', 'capture_after'],
+  cursor_position: ['action'],
   drag: [
     'action',
     'start_element',
@@ -119,10 +125,16 @@ export async function computerUse(
       return formatActionResult(await session.click(clickRequest(inputs), signal), captureAfter(inputs))
     case 'double_click':
       return formatActionResult(await session.doubleClick(secondaryClickRequest(inputs), signal), captureAfter(inputs))
+    case 'triple_click':
+      return formatActionResult(await session.tripleClick(secondaryClickRequest(inputs), signal), captureAfter(inputs))
     case 'right_click':
       return formatActionResult(await session.rightClick(secondaryClickRequest(inputs), signal), captureAfter(inputs))
     case 'middle_click':
       return formatActionResult(await session.middleClick(secondaryClickRequest(inputs), signal), captureAfter(inputs))
+    case 'mouse_move':
+      return formatActionResult(await session.mouseMove(mouseMoveRequest(inputs), signal), captureAfter(inputs))
+    case 'cursor_position':
+      return formatActionResult(await session.cursorPosition(signal))
     case 'drag':
       return formatActionResult(await session.drag(dragRequest(inputs), signal), captureAfter(inputs))
     case 'scroll':
@@ -281,6 +293,14 @@ function secondaryClickRequest(inputs: JsonObject): {
     captureAfter: captureAfter(inputs),
     ...pointRequest(inputs),
   }
+}
+
+function mouseMoveRequest(inputs: JsonObject): { readonly captureAfter: boolean; readonly x: number; readonly y: number } {
+  const target = pointRequest(inputs)
+  if (target.x === undefined || target.y === undefined) {
+    throw new ValidationError('target', 'mouse_move requires x/y coordinates')
+  }
+  return { captureAfter: captureAfter(inputs), x: target.x, y: target.y }
 }
 
 function pointRequest(inputs: JsonObject): { readonly element?: number; readonly x?: number; readonly y?: number } {
