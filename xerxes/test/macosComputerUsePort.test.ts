@@ -252,10 +252,18 @@ test('capture_after attaches a fresh screenshot to a successful action', async (
   expect(fake.calls.some(call => call[0] === '/usr/sbin/screencapture')).toBe(true)
 })
 
-test('tool options gate on the runtime flag or XERXES_COMPUTER_USE and only build the macos backend', () => {
-  expect(createMacOSComputerUseToolOptions({}, {})).toBeUndefined()
-  expect(createMacOSComputerUseToolOptions({ computer_use_enabled: true }, {}) ).toBeDefined()
-  expect(createMacOSComputerUseToolOptions({}, { XERXES_COMPUTER_USE: '1' })).toBeDefined()
-  expect(createMacOSComputerUseToolOptions({}, { XERXES_COMPUTER_USE: 'off' })).toBeUndefined()
-  expect(createMacOSComputerUseToolOptions({ computer_use_enabled: true, computer_use_backend: 'cua-mcp' }, {})).toBeUndefined()
+test('tool options default on when the backend can run, with explicit opt-out and force-enable paths', () => {
+  // Default-on: no flags on a capable host registers the tool.
+  expect(createMacOSComputerUseToolOptions({}, {}, () => true)).toBeDefined()
+  // A host without the zero-install backend stays silent unless forced.
+  expect(createMacOSComputerUseToolOptions({}, {}, () => false)).toBeUndefined()
+  // Force-enable on an unsupported host registers the tool so calls error explicitly.
+  expect(createMacOSComputerUseToolOptions({ computer_use_enabled: true }, {}, () => false)).toBeDefined()
+  expect(createMacOSComputerUseToolOptions({}, { XERXES_COMPUTER_USE: '1' }, () => false)).toBeDefined()
+  // Explicit opt-out always wins.
+  expect(createMacOSComputerUseToolOptions({ computer_use_enabled: false }, {}, () => true)).toBeUndefined()
+  expect(createMacOSComputerUseToolOptions({}, { XERXES_COMPUTER_USE: 'off' }, () => true)).toBeUndefined()
+  expect(createMacOSComputerUseToolOptions({}, { XERXES_COMPUTER_USE: 'false' }, () => true)).toBeUndefined()
+  // Non-macos backends are host-injected, never auto-built here.
+  expect(createMacOSComputerUseToolOptions({ computer_use_backend: 'cua-mcp' }, {}, () => true)).toBeUndefined()
 })

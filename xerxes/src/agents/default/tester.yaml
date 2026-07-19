@@ -22,6 +22,7 @@ agent:
     - GlobTool
     - GrepTool
     - ListDir
+    - computer_use
   exclude_tools:
     - AgentTool
     - SpawnAgents
