@@ -10,6 +10,7 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { AppLayoutProps, Notice } from '../app/interfaces.js'
+import { registerComposerFocusTarget } from '../app/composerFocus.js'
 import { setInputSelection } from '../app/inputSelectionStore.js'
 import { isLiveTailActive, liveTailScrollKey, shouldAutoScrollLiveTail } from '../app/liveTailScroll.js'
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
@@ -834,6 +835,12 @@ function Composer({ composer }: Pick<AppLayoutProps, 'composer'>) {
   const isBlocked = useStore($isBlocked)
   const t = useStore($uiTheme)
   const ref = useRef<TextareaRenderable | null>(null)
+
+  // Share the live textarea with the global double-space refocus gesture.
+  useEffect(() => {
+    registerComposerFocusTarget(ref.current)
+    return () => registerComposerFocusTarget(null)
+  }, [])
 
   const modelLabel = ui.info?.model || 'choose model with /provider'
   const modeLabel = ui.info?.mode || 'code'
