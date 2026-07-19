@@ -17,6 +17,7 @@ import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionW
 import { forceRedraw, useInput } from '../lib/terminalRuntime.opentui.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
 
+import { refocusComposerOnDoubleSpace } from './composerFocus.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import type { InputHandlerContext, InputHandlerResult } from './interfaces.js'
 import { $isBlocked, $overlayState, clearApprovalOverlay, patchOverlayState } from './overlayStore.js'
@@ -347,6 +348,12 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       if (!fallThroughForScroll) {
         return
       }
+    }
+
+    // Double-space while the composer is not focused (focus drifted to the
+    // transcript, a selection, or a dismissed overlay) jumps back to the prompt.
+    if (ch === ' ' && refocusComposerOnDoubleSpace()) {
+      return
     }
 
     if (cState.completions.length && cState.input && cState.historyIdx === null && (key.upArrow || key.downArrow)) {
