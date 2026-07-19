@@ -109,7 +109,7 @@ export const JXA_CURSOR_POSITION = `
 function run(argv) {
   ObjC.import('CoreGraphics');
   var p = $.CGEventGetLocation($.CGEventCreate(null));
-  '' + p.x + ',' + p.y;
+  return '' + p.x + ',' + p.y;
 }
 `
 
@@ -118,7 +118,7 @@ export const JXA_SCREEN_INFO = `
 function run(argv) {
   ObjC.import('AppKit');
   var screen = $.NSScreen.mainScreen;
-  '' + screen.frame.size.width + ',' + screen.frame.size.height + ',' + screen.backingScaleFactor;
+  return '' + screen.frame.size.width + ',' + screen.frame.size.height + ',' + screen.backingScaleFactor;
 }
 `
 
@@ -130,11 +130,11 @@ function run(argv) {
   var names = [];
   for (var i = 0; i < apps.count; i++) {
     var app = apps.objectAtIndex(i);
-    if (app.activationPolicy === 0 && app.localizedName) {
+    if (Number(app.activationPolicy) === 0 && app.localizedName) {
       names.push(ObjC.unwrap(app.localizedName));
     }
   }
-  names.join(', ');
+  return names.join(', ');
 }
 `
 
@@ -150,11 +150,10 @@ function run(argv) {
     var bundle = app.bundleIdentifier ? ('' + ObjC.unwrap(app.bundleIdentifier)).toLowerCase() : '';
     if (name === target || bundle === target) {
       app.activateWithOptions(2);
-      'ok';
-      return;
+      return 'ok';
     }
   }
-  'not found';
+  return 'not found';
 }
 `
 
