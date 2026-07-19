@@ -16,6 +16,7 @@ agent:
     - list_terminal_sessions
     - close_terminal_session
     - DuckDuckGoSearch
+    - computer_use
     - agent_memory_status
     - agent_memory_read
     - agent_memory_write

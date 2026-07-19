@@ -22,6 +22,7 @@ agent:
     - GrepTool
     - ListDir
     - DuckDuckGoSearch
+    - computer_use
   exclude_tools:
     - AgentTool
     - SpawnAgents

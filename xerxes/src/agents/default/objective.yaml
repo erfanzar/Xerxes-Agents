@@ -27,6 +27,7 @@ agent:
     - GrepTool
     - ListDir
     - DuckDuckGoSearch
+    - computer_use
     - AgentTool
     - SpawnAgents
     - SendMessageTool
@@ -60,6 +61,7 @@ agent:
     - GrepTool
     - ListDir
     - DuckDuckGoSearch
+    - computer_use
     - AgentTool
     - SpawnAgents
     - SendMessageTool

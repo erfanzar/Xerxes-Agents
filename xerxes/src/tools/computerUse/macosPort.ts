@@ -478,21 +478,29 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Build the CoreTools `computerUseTool` option when the host enables it.
+ * Build the CoreTools `computerUseTool` option.
  *
- * Enable with `runtime.computer_use_enabled: true` in the daemon config or
- * `XERXES_COMPUTER_USE=1` in the environment. Only the zero-install 'macos'
- * backend is wired here; other backends must be injected by the host.
+ * Desktop control is part of the baseline agent surface: it is enabled by
+ * default whenever the zero-install macOS backend can run on this host. A
+ * user opts out with `runtime.computer_use_enabled: false` or
+ * `XERXES_COMPUTER_USE=off`. Force-enabling on an unsupported host
+ * (`computer_use_enabled: true`) registers the tool anyway so calls fail
+ * with an explicit unavailability error instead of a silent absence.
  */
 export function createMacOSComputerUseToolOptions(
   settings: Readonly<Record<string, unknown>>,
   environment: Readonly<Record<string, string | undefined>> = process.env,
+  hostAvailable?: () => boolean,
 ): ComputerUseToolsOptions | undefined {
   const flag = environment['XERXES_COMPUTER_USE']?.trim().toLowerCase()
-  const enabled = settings['computer_use_enabled'] === true
-    || flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on'
-  if (!enabled) return undefined
+  const explicitlyDisabled = settings['computer_use_enabled'] === false
+    || flag === '0' || flag === 'false' || flag === 'no' || flag === 'off'
+  if (explicitlyDisabled) return undefined
   const backend = settings['computer_use_backend']
   if (backend !== undefined && backend !== 'macos') return undefined
+  const explicitlyEnabled = settings['computer_use_enabled'] === true
+    || flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on'
+  const available = hostAvailable?.() ?? new MacOSComputerUsePort().isAvailable()
+  if (!explicitlyEnabled && !available) return undefined
   return { session: new ComputerUseSession({ port: new MacOSComputerUsePort() }) }
 }
