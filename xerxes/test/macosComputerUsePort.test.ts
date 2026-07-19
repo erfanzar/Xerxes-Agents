@@ -11,6 +11,20 @@ import {
   type MacOSComputerUsePortOptions,
   type MacOSCommandRunner,
 } from '../src/tools/computerUse/macosPort.js'
+import {
+  JXA_CURSOR_POSITION,
+  JXA_FOCUS_APP,
+  JXA_LIST_APPS,
+  JXA_SCREEN_INFO,
+} from '../src/tools/computerUse/macosScripts.js'
+
+test('output-producing JXA scripts use explicit return (bare expressions print nothing)', () => {
+  for (const script of [JXA_CURSOR_POSITION, JXA_SCREEN_INFO, JXA_LIST_APPS, JXA_FOCUS_APP]) {
+    expect(script).toContain('return')
+  }
+  // NSNumber boxing breaks strict equality in JXA; the app filter must coerce.
+  expect(JXA_LIST_APPS).toContain('Number(app.activationPolicy)')
+})
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
 const PNG_B64 = 'iVBORw=='

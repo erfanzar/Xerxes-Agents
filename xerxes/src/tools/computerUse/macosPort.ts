@@ -45,7 +45,7 @@ const DEFAULT_OSASCRIPT = '/usr/bin/osascript'
 const DRAG_STEPS = 24
 const PIXELS_PER_SCROLL_LINE = 40
 
-const PERMISSION_PROBLEM = /assistive|accessibility|screen recording|not permitted|not allowed|denied/i
+const PERMISSION_PROBLEM = /assistive|accessibility|screen recording|not permitted|not allowed|denied|could not create image/i
 const PERMISSION_HINT =
   'macOS blocked the action. Grant Screen Recording and Accessibility to the terminal app in System Settings > Privacy & Security, then retry.'
 
