@@ -134,8 +134,8 @@ export async function loadProjectAgentWorkspace(
   ]
   const loadedFiles: string[] = []
 
-  for (const candidate of await orderedContextFiles(agentsDir, canonicalAgentsDir)) {
-    const relativePath = relative(agentsDir, candidate).split(sep).join('/')
+  for (const candidate of await orderedContextFiles(canonicalAgentsDir)) {
+    const relativePath = relative(canonicalAgentsDir, candidate).split(sep).join('/')
     const content = await loadContextFile(root, canonicalAgentsDir, candidate, maximum)
     if (content === undefined) continue
     if (!content.trim()) continue
@@ -173,13 +173,17 @@ async function canonicalDirectoryOrLexical(path: string): Promise<string> {
  * honored when the files appear. Discovery results are filtered against the
  * resolved priority paths so a priority file is never injected twice.
  */
-async function orderedContextFiles(agentsDir: string, canonicalAgentsDir: string): Promise<string[]> {
-  const priority = PROJECT_AGENT_CONTEXT_FILES.map(path => join(agentsDir, ...path.split('/')))
+async function orderedContextFiles(canonicalAgentsDir: string): Promise<string[]> {
+  // Priority candidates are anchored at the canonical directory so a
+  // symlinked `.agents` root keeps its front-of-prompt position instead of
+  // failing lexical containment against itself. Sorting uses code-unit
+  // order, which is stable across host locales (localeCompare is not).
+  const priority = PROJECT_AGENT_CONTEXT_FILES.map(path => join(canonicalAgentsDir, ...path.split('/')))
   const priorityPaths = new Set(priority.map(path => resolve(path)))
   const discovered = await discoverMarkdownFiles(canonicalAgentsDir)
   const rest = discovered
     .filter(path => !priorityPaths.has(resolve(path)))
-    .sort((left, right) => left.localeCompare(right))
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
   return [...priority, ...rest]
 }
 

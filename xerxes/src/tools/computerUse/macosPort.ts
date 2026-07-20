@@ -210,9 +210,10 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     // Pipeline step 1: grab the raw framebuffer with screencapture (`-x`
     // silences the shutter sound). Requires the Screen Recording
     // permission; on Retina displays the PNG is backingScale times larger
-    // than the logical screen.
-    await this.mustRun([this.screencapture, '-x', '-t', 'png', path], signal)
+    // than the logical screen. It runs inside the try so a mid-write
+    // failure cannot leave a partial PNG behind.
     try {
+      await this.mustRun([this.screencapture, '-x', '-t', 'png', path], signal)
       const pixels = await this.imageDimensions(path, signal)
       const screen = await this.screenInfo(pixels, signal)
       // Normalize Retina pixels into logical points first: CoreGraphics
@@ -357,6 +358,11 @@ export class MacOSComputerUsePort implements ComputerUsePort {
   }
 
   async focusApp(app: string, signal?: AbortSignal): Promise<ActionResult> {
+    // An empty target would match the first unnamed process in the JXA
+    // script ('' === ''), so it is rejected before touching the wire.
+    if (!app.trim()) {
+      return { action: 'focus_app', message: 'app must not be empty', ok: false }
+    }
     const result = await this.runJxa(JXA_FOCUS_APP, [app], signal)
     if (!result.ok) return { action: 'focus_app', message: result.message, ok: false }
     if (result.message.trim() !== 'ok') {
@@ -368,7 +374,19 @@ export class MacOSComputerUsePort implements ComputerUsePort {
   async cursorPosition(signal?: AbortSignal): Promise<ActionResult> {
     const result = await this.runJxa(JXA_CURSOR_POSITION, [], signal)
     if (!result.ok) return { action: 'cursor_position', message: result.message, ok: false }
-    const [x = 0, y = 0] = result.message.trim().split(',').map(Number)
+    // Number('') is 0, so an empty or malformed read must be rejected
+    // explicitly; reporting NaN upstream would fail the session's JSON
+    // boundary with a less actionable error.
+    const parts = result.message.trim().split(',')
+    const x = Number(parts[0])
+    const y = Number(parts[1])
+    if (parts.length !== 2 || !Number.isFinite(x) || !Number.isFinite(y)) {
+      return {
+        action: 'cursor_position',
+        message: `could not parse cursor position from "${result.message.trim()}"`,
+        ok: false,
+      }
+    }
     return {
       action: 'cursor_position',
       message: `cursor at ${Math.round(x)}, ${Math.round(y)}`,
