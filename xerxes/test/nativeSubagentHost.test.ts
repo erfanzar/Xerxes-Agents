@@ -1109,7 +1109,7 @@ class BoundedSwarmChildClient implements LlmClient {
     this.calls += 1
     this.active += 1
     this.maxActive = Math.max(this.maxActive, this.active)
-    if (this.calls === 8) this.firstWaveStarted.resolve()
+    if (this.calls === 24) this.firstWaveStarted.resolve()
     try {
       await this.release.promise
       yield { content: 'bounded worker complete' }
@@ -1711,7 +1711,7 @@ test('native SpawnAgents runs two real child turns concurrently and routes their
   }
 })
 
-test('native swarm execution queues work above eight without exceeding eight live model turns', async () => {
+test('native swarm execution runs the whole batch concurrently without an artificial ceiling', async () => {
   const client = new BoundedSwarmChildClient()
   const registry = new ToolRegistry()
   const host = createNativeSubagentHost({
@@ -1741,9 +1741,8 @@ test('native swarm execution queues work above eight without exceeding eight liv
     }), { agentId: 'default', metadata: {}, sessionId: 'bounded-session' })) as Record<string, unknown>
 
     await client.firstWaveStarted.promise
-    await Bun.sleep(10)
-    expect(client.calls).toBe(8)
-    expect(client.maxActive).toBe(8)
+    expect(client.calls).toBe(24)
+    expect(client.maxActive).toBe(24)
     expect(receipt).toMatchObject({ accepted_count: 24, omitted_count: 16, shown_count: 8 })
 
     client.release.resolve()
@@ -1752,7 +1751,7 @@ test('native swarm execution queues work above eight without exceeding eight liv
     expect(settled.pending).toHaveLength(0)
     expect(settled.completed).toHaveLength(24)
     expect(client.calls).toBe(24)
-    expect(client.maxActive).toBe(8)
+    expect(client.maxActive).toBe(24)
   } finally {
     client.release.resolve()
     await host.manager.shutdown()

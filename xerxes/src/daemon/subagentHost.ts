@@ -91,8 +91,6 @@ export function createNativeSubagentHost(options: NativeSubagentHostOptions): Na
       }
       return taskId
     },
-    maxConcurrent: 8,
-    maxDepth: 5,
     onEvent: event => publishSubagentEvent(options.eventBus, event, historySessionIds.get(event.taskId)),
     pathResolver: rawPath => rawPath,
     runner: request => {

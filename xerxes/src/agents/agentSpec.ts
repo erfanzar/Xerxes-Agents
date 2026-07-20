@@ -79,7 +79,7 @@ export function loadAgentSpec(path: string, options: AgentSpecLoadOptions = {}):
     allowedTools: raw.allowedTools === INHERIT || raw.allowedTools === null ? null : Object.freeze([...raw.allowedTools]),
     excludeTools: Object.freeze(raw.excludeTools === INHERIT || raw.excludeTools === null ? [] : [...raw.excludeTools]),
     subagents: Object.freeze({ ...(raw.subagents === INHERIT ? {} : raw.subagents) }),
-    maxDepth: raw.maxDepth === INHERIT ? 5 : raw.maxDepth,
+    maxDepth: raw.maxDepth === INHERIT ? Number.POSITIVE_INFINITY : raw.maxDepth,
     isolation: raw.isolation === INHERIT ? '' : raw.isolation,
     source: 'yaml' as const,
   })
@@ -111,7 +111,7 @@ export function loadAgentSpecData(
     allowedTools: raw.allowedTools === INHERIT || raw.allowedTools === null ? null : Object.freeze([...raw.allowedTools]),
     excludeTools: Object.freeze(raw.excludeTools === INHERIT || raw.excludeTools === null ? [] : [...raw.excludeTools]),
     subagents: Object.freeze({ ...(raw.subagents === INHERIT ? {} : raw.subagents) }),
-    maxDepth: raw.maxDepth === INHERIT ? 5 : raw.maxDepth,
+    maxDepth: raw.maxDepth === INHERIT ? Number.POSITIVE_INFINITY : raw.maxDepth,
     isolation: raw.isolation === INHERIT ? '' : raw.isolation,
     source: 'yaml' as const,
   })

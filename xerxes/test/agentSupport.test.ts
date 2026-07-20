@@ -291,9 +291,10 @@ test('subagent tool filtering prevents recursive delegation and parent-mode muta
   expect(calls).toEqual(['ReadFile'])
 })
 
-test('subagent manager enforces default and definition depth limits with explicit errors', async () => {
+test('subagent manager enforces explicit and definition depth limits with explicit errors', async () => {
   const depths: number[] = []
   const manager = new SubAgentManager({
+    maxDepth: 5,
     runner: request => {
       depths.push(request.depth)
       return { content: 'ok' }
@@ -318,6 +319,18 @@ test('subagent manager enforces default and definition depth limits with explici
   const allowed = await manager.spawn({ prompt: 'allowed child', depth: 2, agentDefinition: definition })
   await manager.wait(allowed.id, 1_000)
   expect(allowed.status).toBe('completed')
+  await manager.close()
+})
+
+test('subagent manager defaults to unbounded depth and concurrency', async () => {
+  const manager = new SubAgentManager({ runner: () => ({ content: 'ok' }) })
+
+  expect(manager.maxDepth).toBe(Number.POSITIVE_INFINITY)
+  expect(manager.maxConcurrent).toBe(Number.POSITIVE_INFINITY)
+
+  const deep = await manager.spawn({ prompt: 'deep spawn', depth: 25 })
+  await manager.wait(deep.id, 1_000)
+  expect(deep.status).toBe('completed')
   await manager.close()
 })
 
