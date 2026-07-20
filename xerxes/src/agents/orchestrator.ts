@@ -67,7 +67,7 @@ export class AgentOrchestrator {
   private readonly triggers = new Map<AgentSwitchTrigger, AgentSwitchHandler>()
 
   constructor(options: AgentOrchestratorOptions = {}) {
-    this.maxAgents = options.maxAgents ?? 100
+    this.maxAgents = options.maxAgents ?? Number.POSITIVE_INFINITY
     this.now = options.now ?? (() => new Date())
     this.triggerError = options.onTriggerError ?? (() => undefined)
   }

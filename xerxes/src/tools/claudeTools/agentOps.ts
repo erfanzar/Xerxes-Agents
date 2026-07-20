@@ -18,8 +18,6 @@ import { optionalBoolean, optionalString, requiredString } from '../inputs.js'
 
 const DEFAULT_WAIT_SECONDS = 120
 const MAILBOX_EVENT_LIMIT = 1_000
-const MAX_SPAWN_AGENT_REQUESTS = 1_000
-const MAX_CONCURRENT_SPAWN_REQUESTS = 8
 const MAX_INLINE_BATCH_RECEIPT_AGENTS = 8
 const DEFAULT_TASK_LIST_PAGE_SIZE = 50
 const MAX_TASK_LIST_PAGE_SIZE = 50
@@ -183,12 +181,11 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: stringSchema('Stable subagent name.'),
     subagent_type: stringSchema('Agent definition to run.'),
   }, ['prompt', 'title']),
-  definition('SpawnAgents', 'Spawn up to 1,000 subagents as one queued batch and optionally wait for all of them.', {
+  definition('SpawnAgents', 'Spawn any number of subagents as one batch and optionally wait for all of them.', {
     agents: {
-      description: 'JSON array of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title. Work beyond the runtime concurrency is queued.',
+      description: 'JSON array of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title. The whole batch is spawned without an artificial ceiling.',
       type: 'array',
       minItems: 1,
-      maxItems: MAX_SPAWN_AGENT_REQUESTS,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -372,12 +369,9 @@ export class ClaudeAgentTools {
   ): Promise<readonly Record<string, unknown>[] | Record<string, unknown>> {
     const specs = parseAgentSpecs(inputs.agents)
     if (!specs.length) throw new ValidationError('agents', 'must contain at least one agent specification', inputs.agents)
-    if (specs.length > MAX_SPAWN_AGENT_REQUESTS) {
-      throw new ValidationError('agents', `must contain at most ${MAX_SPAWN_AGENT_REQUESTS} agents`, specs.length)
-    }
     const registration = await settleWithConcurrency(
       specs,
-      MAX_CONCURRENT_SPAWN_REQUESTS,
+      specs.length,
       spec => this.spawnSpec(spec, context),
       signal,
     )

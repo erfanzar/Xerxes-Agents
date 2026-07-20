@@ -322,7 +322,7 @@ export function buildBootstrapSystemPrompt(
     )
     if (toolNames.has('SpawnAgents')) {
       sections.push(
-        '- You may spawn 1 to 1,000 agents in one batch. Choose the count according to the scale and genuinely independent workload. Large swarms queue under bounded runtime concurrency; never add redundant agents just to increase the count.',
+        '- You may spawn any number of agents in one batch. Choose the count according to the scale and genuinely independent workload. The whole batch runs without an artificial ceiling; never add redundant agents just to increase the count.',
       )
     }
     if (subagents.length) {

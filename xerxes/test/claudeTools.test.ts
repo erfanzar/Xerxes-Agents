@@ -284,7 +284,7 @@ test('agent creation schemas require concise titles for single and batch delegat
   expect(properties.title?.maxLength).toBe(48)
   expect(spawnProperties.agents?.type).toBe('array')
   expect(spawnProperties.agents?.minItems).toBe(1)
-  expect(spawnProperties.agents?.maxItems).toBe(1_000)
+  expect(spawnProperties.agents?.maxItems).toBeUndefined()
   expect(properties.run_in_background?.default).toBe(false)
   expect(properties.wait?.default).toBe(true)
   expect(spawnProperties.wait?.default).toBe(true)
@@ -317,12 +317,15 @@ test('agent creation schemas require concise titles for single and batch delegat
     prompt: `oversized task ${index}`,
     title: `Oversized ${index}`,
   }))
-  await expect(registry.execute(toolCall('SpawnAgents', { agents: oversized }), { metadata: {} }))
-    .rejects.toThrow('at most 1000 agents')
-  expect(manager.listHandles()).toHaveLength(9)
+  const acceptedOversized = JSON.parse(await registry.execute(toolCall('SpawnAgents', {
+    agents: oversized,
+    wait: false,
+  }), { metadata: {} })) as Record<string, unknown>
+  expect(acceptedOversized).toMatchObject({ accepted_count: 1_001 })
+  expect(manager.listHandles().length).toBeGreaterThan(1_000)
 })
 
-test('SpawnAgents bounds concurrent spawn registration while preserving batch order', async () => {
+test('SpawnAgents spawns the full batch concurrently while preserving batch order', async () => {
   const snapshots: SpawnedAgentSnapshot[] = []
   let activeSpawns = 0
   let peakSpawns = 0
@@ -354,7 +357,7 @@ test('SpawnAgents bounds concurrent spawn registration while preserving batch or
     omitted_count: number
   }
 
-  expect(peakSpawns).toBe(8)
+  expect(peakSpawns).toBe(24)
   expect(result.agents.map(snapshot => snapshot.name)).toEqual(agents.slice(0, 8).map(agent => agent.name))
   expect(result.omitted_count).toBe(16)
 })
@@ -486,12 +489,12 @@ test('SpawnAgents abort stops claiming new registrations and closes in-flight su
   }))
 
   const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} }, controller.signal)
-  await waitUntil(() => started.length === 8)
+  await waitUntil(() => started.length === agents.length)
   controller.abort(new Error('stop registration'))
   release.resolve()
 
   await expect(pending).rejects.toThrow('stop registration')
-  expect(started).toHaveLength(8)
+  expect(started).toHaveLength(200)
   expect(closed.sort()).toEqual([...started].sort())
 })
 
@@ -531,13 +534,13 @@ test('SpawnAgents first failure stops claiming new registrations and closes part
   }))
 
   const pending = tools.execute('SpawnAgents', { agents, wait: false }, { metadata: {} })
-  await waitUntil(() => started.length === 8)
+  await waitUntil(() => started.length === agents.length)
   fail.resolve()
   await Bun.sleep(0)
   release.resolve()
 
   await expect(pending).rejects.toThrow('registration failed')
-  expect(started).toHaveLength(8)
+  expect(started).toHaveLength(200)
   expect(closed.sort()).toEqual(started.filter(name => name !== 'failure-0').sort())
 })
 

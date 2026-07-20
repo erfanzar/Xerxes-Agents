@@ -398,8 +398,8 @@ export class SubAgentManager {
   constructor(options: SubAgentManagerOptions) {
     if (typeof options.runner !== 'function') throw new TypeError('runner must be a function')
     this.runner = options.runner
-    this.maxConcurrent = positiveInteger(options.maxConcurrent ?? 8, 'maxConcurrent')
-    this.maxDepth = nonNegativeInteger(options.maxDepth ?? 5, 'maxDepth')
+    this.maxConcurrent = positiveIntegerOrInfinity(options.maxConcurrent ?? Number.POSITIVE_INFINITY, 'maxConcurrent')
+    this.maxDepth = positiveIntegerOrInfinity(options.maxDepth ?? Number.POSITIVE_INFINITY, 'maxDepth')
     this.gate = new ConcurrencyGate(this.maxConcurrent)
     this.now = options.now ?? (() => new Date())
     this.idFactory = options.idFactory ?? (() => `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`)
@@ -1203,6 +1203,12 @@ function stringValue(value: unknown): string {
 function positiveInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive safe integer`)
   return value
+}
+
+/** Positive safe integer or Infinity, the documented "unbounded" sentinel for agent limits. */
+function positiveIntegerOrInfinity(value: number, name: string): number {
+  if (value === Number.POSITIVE_INFINITY) return value
+  return positiveInteger(value, name)
 }
 
 function nonNegativeInteger(value: number, name: string): number {
