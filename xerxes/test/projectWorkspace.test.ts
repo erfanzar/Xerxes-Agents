@@ -145,3 +145,26 @@ test('discovers every markdown file recursively, keeping skills and non-markdown
     expect(deployIndex).toBeLessThan(notesIndex)
   })
 })
+
+test('a symlinked .agents root keeps priority files in front', async () => {
+  await inTemporaryDirectory(async root => {
+    const realAgents = join(root, 'real-agents')
+    await mkdir(join(realAgents, 'ops'), { recursive: true })
+    await writeFile(join(realAgents, 'AGENTS.md'), 'priority rules\n')
+    await writeFile(join(realAgents, 'ops', 'OPS.md'), 'priority runbook\n')
+    await writeFile(join(realAgents, 'zzz-notes.md'), 'discovered notes\n')
+    await symlink(realAgents, join(root, '.agents'))
+
+    const context = await loadProjectAgentWorkspace(root)
+
+    const agentsIndex = context.prompt.indexOf('## .agents/AGENTS.md')
+    const opsIndex = context.prompt.indexOf('## .agents/ops/OPS.md')
+    const notesIndex = context.prompt.indexOf('## .agents/zzz-notes.md')
+    expect(agentsIndex).toBeGreaterThanOrEqual(0)
+    expect(opsIndex).toBeGreaterThan(agentsIndex)
+    expect(notesIndex).toBeGreaterThan(opsIndex)
+    expect(context.prompt).toContain('priority rules')
+    expect(context.prompt).toContain('discovered notes')
+    expect(context.prompt).not.toContain('..')
+  })
+})

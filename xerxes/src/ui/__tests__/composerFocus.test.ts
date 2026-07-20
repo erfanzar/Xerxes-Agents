@@ -84,4 +84,21 @@ describe('composer double-space refocus', () => {
     expect(focusComposer()).toBe(false)
     expect(target.state.focusCalls).toBe(0)
   })
+
+  it('resets the gesture clock when the registered target changes (remount safety)', () => {
+    const first = fakeTarget(false)
+    const second = fakeTarget(false)
+    registerComposerFocusTarget(first)
+
+    // Arm the gesture on the old target...
+    expect(refocusComposerOnDoubleSpace(1_000)).toBe(false)
+    // ...then a remount swaps in a new textarea: the stale arming must not
+    // complete the pair on the first space after the swap.
+    registerComposerFocusTarget(second)
+    expect(refocusComposerOnDoubleSpace(1_050)).toBe(false)
+    expect(second.state.focusCalls).toBe(0)
+    // A fresh pair on the new target works normally.
+    expect(refocusComposerOnDoubleSpace(1_100)).toBe(true)
+    expect(second.state.focusCalls).toBe(1)
+  })
 })
