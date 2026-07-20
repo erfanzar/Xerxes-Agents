@@ -111,6 +111,14 @@ export class QueryEngine {
       state: this.state,
       tools: this.tools,
       userMessage: prompt,
+      ...(this.config.thinking
+        ? {
+            thinking: {
+              effort: 'medium',
+              ...(this.config.thinkingBudget !== undefined ? { budgetTokens: this.config.thinkingBudget } : {}),
+            },
+          }
+        : {}),
       ...(this.config.systemPrompt ? { systemPrompt: this.config.systemPrompt } : {}),
     }, this.dependencies, signal)) {
       if (event.type === 'text') {

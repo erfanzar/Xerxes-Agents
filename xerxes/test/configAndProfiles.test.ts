@@ -141,3 +141,35 @@ test('runtime connection defaults to YOLO while preserving explicit stricter mod
   expect(runtimeConnection({ ...base, runtime: { model: 'gpt-4o', permission_mode: 'manual' } }, undefined)?.permissionMode)
     .toBe('manual')
 })
+
+test('runtime connection resolves thinking settings from daemon runtime then profile sampling', () => {
+  const base = {
+    runtime: { model: 'glm-5.2', thinking: true, thinking_budget: 32_000, reasoning_effort: 'high' },
+    control: {},
+    workspace: {},
+    channels: {},
+    projectDirectory: '/project',
+    maxConcurrentTurns: 8,
+  }
+
+  expect(runtimeConnection(base, undefined)).toMatchObject({
+    thinking: true,
+    thinkingBudget: 32_000,
+    reasoningEffort: 'high',
+  })
+
+  const fromProfile = runtimeConnection({ ...base, runtime: { model: 'glm-5.2' } }, {
+    name: 'zai',
+    base_url: 'https://api.z.ai/api/coding/paas/v4',
+    api_key: 'profile-key',
+    model: 'glm-5.2',
+    provider: 'zhipu',
+    sampling: { thinking: true, thinking_budget: 24_576, reasoning_effort: 'high' },
+  })
+  expect(fromProfile).toMatchObject({ thinking: true, thinkingBudget: 24_576, reasoningEffort: 'high' })
+
+  const bare = runtimeConnection({ ...base, runtime: { model: 'glm-5.2' } }, undefined)
+  expect(bare?.thinking).toBeUndefined()
+  expect(bare?.thinkingBudget).toBeUndefined()
+  expect(bare?.reasoningEffort).toBeUndefined()
+})

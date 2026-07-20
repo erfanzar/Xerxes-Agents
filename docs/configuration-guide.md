@@ -47,6 +47,14 @@ Interactive sessions start in YOLO mode (`accept-all`). The TUI shows `YOLO ON`
 beside the active model while it is enabled; `/yolo` switches between `accept-all`
 and `auto`. Explicit tool-policy denials remain final in every permission mode.
 
+`/ultra` toggles session ultra mode: every turn runs the maximum thinking
+directive (32k token budget, high effort) until `/ultra off`. One-shot prompts
+can escalate a single turn instead with the thinking keywords `think`,
+`think hard` (alias `megathink`), `think harder`, or `ultrathink` — strongest
+keyword wins. Session defaults come from `thinking`, `thinking_budget`, and
+`reasoning_effort` in runtime settings or the active provider profile's
+`sampling` block. Ultra mode is session-scoped and not persisted.
+
 ## Embedded configuration
 
 `XerxesConfig`, `ExecutorConfig`, `MemoryConfig`, `SecurityConfig`, and `LLMConfig` validate

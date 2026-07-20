@@ -333,6 +333,12 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
+    help: 'toggle ultra mode: every turn runs the maximum thinking directive',
+    name: 'ultra',
+    run: (arg, ctx) => runNativeSlash(ctx, arg.trim() ? `ultra ${arg.trim()}` : 'ultra', 'ultra')
+  },
+
+  {
     aliases: ['thinking'],
     help: 'inspect or set reasoning effort (updates live agent)',
     name: 'reasoning',

@@ -924,3 +924,41 @@ async function waitForCondition(predicate: () => boolean, timeout = 2_000): Prom
     await Bun.sleep(5)
   }
 }
+
+test('agent turn runner resolves per-turn thinking from keywords, ultra mode, and session defaults', async () => {
+  const sessionFor = (id: string, ultra = false): DaemonSession => ({
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: process.cwd(), extra: {}, id,
+    interactionMode: 'code', sessionKey: id, lastActive: 0, messages: [], metadata: {}, model: 'gpt-4o',
+    planMode: false, status: 'working', thinkingContent: [], toolExecutions: [], totalInputTokens: 0,
+    totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+    ...(ultra ? { ultraMode: true } : {}),
+  })
+  const drain = async (events: AsyncIterable<DaemonEvent>): Promise<void> => {
+    for await (const _ of events) void _
+  }
+
+  const keyword = new CapturingClient()
+  await drain(new AgentTurnRunner({ llm: keyword, model: 'gpt-4o' })
+    .run(sessionFor('t-keyword'), 'please ultrathink this change', new AbortController().signal))
+  expect(keyword.requests[0]?.thinking).toEqual({ budgetTokens: 32_000, effort: 'high' })
+
+  const ultra = new CapturingClient()
+  await drain(new AgentTurnRunner({ llm: ultra, model: 'gpt-4o' })
+    .run(sessionFor('t-ultra', true), 'a plain prompt', new AbortController().signal))
+  expect(ultra.requests[0]?.thinking).toEqual({ budgetTokens: 32_000, effort: 'high' })
+
+  const defaults = new CapturingClient()
+  await drain(new AgentTurnRunner({
+    llm: defaults,
+    model: 'gpt-4o',
+    reasoningEffort: 'high',
+    thinking: true,
+    thinkingBudget: 24_576,
+  }).run(sessionFor('t-defaults'), 'a plain prompt', new AbortController().signal))
+  expect(defaults.requests[0]?.thinking).toEqual({ budgetTokens: 24_576, effort: 'high' })
+
+  const off = new CapturingClient()
+  await drain(new AgentTurnRunner({ llm: off, model: 'gpt-4o' })
+    .run(sessionFor('t-off'), 'a plain prompt', new AbortController().signal))
+  expect(off.requests[0]?.thinking).toBeUndefined()
+})

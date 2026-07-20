@@ -328,6 +328,13 @@ function anthropicRequestPayload(
   if (request.stop?.length) {
     payload.stop_sequences = request.stop
   }
+  if (request.thinking !== undefined) {
+    // Anthropic extended thinking; max_tokens must cover the budget plus reply.
+    payload.thinking = {
+      type: 'enabled',
+      budget_tokens: request.thinking.budgetTokens ?? 10_000,
+    }
+  }
   if (request.tools?.length) {
     const tools = request.tools.map(toolToAnthropic)
     payload.tools = promptCaching ? wrapToolsWithCache(tools) : tools
