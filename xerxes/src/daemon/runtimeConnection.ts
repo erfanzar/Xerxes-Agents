@@ -13,10 +13,23 @@ export interface RuntimeConnection {
   readonly model: string
   readonly permissionMode: PermissionMode
   readonly provider?: string
+  /**
+   * Session default effort hint for per-turn thinking resolution. This and
+   * the two thinking fields below were historically dropped from this
+   * interface because the connection was treated as display-only config for
+   * status surfaces; turns now consume them as session defaults, so they
+   * must survive resolution.
+   */
   readonly reasoningEffort?: string
   readonly responsesApi?: boolean
   readonly temperature?: number
+  /**
+   * Session default extended-thinking toggle. Carried through (not dropped
+   * as display-only) so each turn can weigh it against ultra mode and
+   * escalation keywords in the prompt.
+   */
   readonly thinking?: boolean
+  /** Session default thinking token budget, carried through for the same reason as `thinking`. */
   readonly thinkingBudget?: number
   readonly topK?: number
   readonly topP?: number
@@ -46,6 +59,10 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
   const topP = numberSetting(runtime.top_p)
     ?? numberSetting(useProfile?.sampling.top_p)
   const responsesApi = booleanSetting(runtime.responses_api)
+  // Daemon config wins over profile sampling for all three thinking knobs so
+  // an explicit runtime setting is never shadowed by a stored profile. Both
+  // sources feed the turn runner only as defaults; ultra mode and prompt
+  // keywords can still override them per turn.
   const thinking = booleanSetting(runtime.thinking) ?? booleanSetting(useProfile?.sampling.thinking)
   const thinkingBudget = numberSetting(runtime.thinking_budget)
     ?? numberSetting(useProfile?.sampling.thinking_budget)

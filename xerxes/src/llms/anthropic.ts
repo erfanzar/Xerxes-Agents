@@ -310,29 +310,45 @@ function anthropicRequestPayload(
   promptCaching: boolean,
   stream: boolean,
 ): Record<string, unknown> {
+  const thinkingBudget = request.thinking === undefined
+    ? undefined
+    : request.thinking.budgetTokens ?? 10_000
   const payload: Record<string, unknown> = {
     model: bareModel(request.model),
-    max_tokens: request.maxTokens ?? 2048,
+    // Extended thinking rejects budget_tokens >= max_tokens. An unconfigured
+    // or undersized max_tokens is raised to budget + reply headroom so a
+    // thinking escalation can never produce an invalid request.
+    max_tokens: thinkingBudget === undefined
+      ? request.maxTokens ?? 2048
+      : Math.max(request.maxTokens ?? 0, thinkingBudget + 4_096),
     messages: converted.messages,
     stream,
   }
   if (converted.system) {
     payload.system = promptCaching ? wrapSystemWithCache(converted.system) : converted.system
   }
-  if (request.temperature !== undefined) {
+  if (request.temperature !== undefined && (thinkingBudget === undefined || request.temperature === 1)) {
+    // Extended thinking requires temperature exactly 1; any other value is a
+    // provider-side rejection, so it is omitted rather than sent.
     payload.temperature = request.temperature
   }
-  if (request.topP !== undefined) {
+  if (request.topP !== undefined && thinkingBudget === undefined) {
+    // top_p sampling is likewise incompatible with extended thinking.
     payload.top_p = request.topP
   }
   if (request.stop?.length) {
     payload.stop_sequences = request.stop
   }
-  if (request.thinking !== undefined) {
-    // Anthropic extended thinking; max_tokens must cover the budget plus reply.
+  if (thinkingBudget !== undefined) {
+    // WHY budget_tokens: Anthropic extended thinking is budget-based, not
+    // effort-based — the wire contract is { type: 'enabled', budget_tokens },
+    // so the neutral ThinkingRequest's effort hint has no Anthropic meaning
+    // and is intentionally not translated. The 10_000 fallback mirrors the
+    // session-default budget in runtime/thinkingLevels.ts so an effort-only
+    // directive still produces a valid budget.
     payload.thinking = {
       type: 'enabled',
-      budget_tokens: request.thinking.budgetTokens ?? 10_000,
+      budget_tokens: thinkingBudget,
     }
   }
   if (request.tools?.length) {

@@ -10,7 +10,17 @@ import { scanContextContent } from '../security/promptScanner.js'
 
 export const PROJECT_AGENTS_DIR = '.agents'
 
-/** Fixed project-owned files rendered first, in declaration order. */
+/**
+ * Fixed project-owned files rendered first, in declaration order.
+ *
+ * These files are the stable "front matter" of the workspace: AGENTS.md is the
+ * project's operating contract, SKILL_MAP.md the skill index, and the ops/
+ * projects/ entry points its runbooks. They must lead the injected prompt
+ * because every other discovered file is sorted only by path, so declaration
+ * order here is the single deterministic way for a project to control which
+ * context the model reads first. Files listed here that do not exist are
+ * silently skipped by loadContextFile, so the list is safe to extend.
+ */
 export const PROJECT_AGENT_CONTEXT_FILES = [
   'AGENTS.md',
   'SKILL_MAP.md',
@@ -18,9 +28,30 @@ export const PROJECT_AGENT_CONTEXT_FILES = [
   'projects/README.md',
 ] as const
 
-/** Every Markdown file under `.agents/` is injected; these subtrees stay out. */
+/**
+ * Every Markdown file under `.agents/` is injected; these subtrees stay out.
+ *
+ * The `skills` subtree is deliberately excluded from bootstrap injection:
+ * skill bodies are reference material that is only relevant when a task
+ * actually needs them, and injecting every SKILL.md eagerly would dwarf the
+ * useful operating context and blow the aggregate byte ceiling. Instead the
+ * skill registry indexes `.agents/skills/` separately and the model pulls a
+ * skill body on demand through SkillTool. Only the top-level `skills`
+ * directory is excluded (matched at depth 0); a nested directory named
+ * `skills` elsewhere in the tree is ordinary documentation and is injected.
+ */
 const SKILLS_DIRECTORY = 'skills'
+/**
+ * Hard cap on discovered Markdown files. Bounds bootstrap latency and prompt
+ * size even if a project accumulates (or an attacker plants) a large tree;
+ * files beyond the cap remain readable with normal file tools.
+ */
 const MAX_DISCOVERED_CONTEXT_FILES = 200
+/**
+ * Hard cap on directory recursion depth. Together with the file count cap
+ * this guarantees discovery terminates quickly on pathological or hostile
+ * directory shapes instead of stalling session bootstrap.
+ */
 const MAX_DISCOVERY_DEPTH = 8
 
 export interface ProjectAgentWorkspaceContextOptions {
@@ -64,9 +95,21 @@ export function projectAgentSkillsDir(projectRoot: string): string {
 /**
  * Load compact, project-owned agent context in fixed declaration order.
  *
- * Missing, unreadable, scanned, or containment-escaping files are skipped.
- * Candidate files must resolve inside the project-owned `.agents` directory;
- * this prevents a symlinked runbook from injecting arbitrary host content.
+ * Ordering is deterministic: the PROJECT_AGENT_CONTEXT_FILES priority files
+ * come first in their declaration order, followed by every other Markdown
+ * file discovered under `.agents/` sorted lexically by path. This keeps the
+ * rendered prompt stable across runs and platforms, which matters for prompt
+ * caching and for reproducible agent behavior.
+ *
+ * Each candidate file is defended independently before it enters the prompt:
+ * its real path must stay contained inside the project-owned `.agents`
+ * directory (a symlinked runbook must not inject arbitrary host content),
+ * and its body passes the prompt-injection scanner; content flagged as
+ * blocked is dropped rather than quoted into the system prompt.
+ *
+ * Missing, unreadable, scanned, or containment-escaping files are skipped
+ * rather than failing the load: workspace context is best-effort enrichment,
+ * never a reason to refuse session bootstrap.
  */
 export async function loadProjectAgentWorkspace(
   projectRoot: string,
@@ -120,7 +163,16 @@ async function canonicalDirectoryOrLexical(path: string): Promise<string> {
   }
 }
 
-/** Priority files in declaration order, then every other Markdown file under .agents sorted by path. */
+/**
+ * Build the full deterministic candidate ordering: priority files in
+ * declaration order, then every other Markdown file under `.agents` sorted
+ * by path.
+ *
+ * Priority files are emitted even when they do not exist on disk — the
+ * per-file loader skips missing candidates — so declaration order is always
+ * honored when the files appear. Discovery results are filtered against the
+ * resolved priority paths so a priority file is never injected twice.
+ */
 async function orderedContextFiles(agentsDir: string, canonicalAgentsDir: string): Promise<string[]> {
   const priority = PROJECT_AGENT_CONTEXT_FILES.map(path => join(agentsDir, ...path.split('/')))
   const priorityPaths = new Set(priority.map(path => resolve(path)))
@@ -133,10 +185,20 @@ async function orderedContextFiles(agentsDir: string, canonicalAgentsDir: string
 
 /**
  * Recursively enumerate Markdown files under the canonical `.agents` directory.
- * The skills subtree stays on-demand via the skill registry, hidden and
- * dependency directories are skipped, and discovery is bounded so a hostile
- * or runaway tree cannot stall bootstrap. Symlinked entries are ignored here;
- * per-file containment is revalidated by loadContextFile.
+ *
+ * The top-level skills subtree stays on-demand via the skill registry (skill
+ * bodies load through SkillTool only when invoked), and hidden or dependency
+ * directories are skipped because they never carry project operating context.
+ *
+ * Discovery is bounded by MAX_DISCOVERY_DEPTH and
+ * MAX_DISCOVERED_CONTEXT_FILES so a hostile or runaway tree cannot stall
+ * bootstrap; hitting either bound simply stops the walk and leaves the
+ * remaining files available through normal file tools.
+ *
+ * Symlinked entries are ignored here (Dirent checks, no follows); per-file
+ * containment is revalidated against real paths by loadContextFile, so a
+ * symlink that escapes `.agents` or the project root is dropped at load time
+ * even if it were somehow discovered.
  */
 async function discoverMarkdownFiles(agentsDir: string): Promise<string[]> {
   const discovered: string[] = []
@@ -168,6 +230,12 @@ async function discoverMarkdownFiles(agentsDir: string): Promise<string[]> {
   return discovered
 }
 
+/**
+ * Resolve `candidate` to its real path and confirm it is a directory inside
+ * the project root. Returns undefined when the directory is missing,
+ * unreadable, or escapes the root via a symlink — in that case the loader
+ * emits an empty workspace rather than trusting a lexical path.
+ */
 async function containedDirectory(root: string, candidate: string): Promise<string | undefined> {
   try {
     const canonical = await realpath(candidate)
@@ -179,6 +247,19 @@ async function containedDirectory(root: string, candidate: string): Promise<stri
   }
 }
 
+/**
+ * Read one candidate file with defense-in-depth containment checks.
+ *
+ * The lexical candidate must sit under `.agents`, and its resolved real path
+ * must sit under both the project root and `.agents`: the lexical check
+ * guards priority entries built by path joining, while the realpath checks
+ * defeat symlink escapes (a checked-in runbook must never smuggle in host
+ * files such as ~/.ssh or /etc). Anything failing a check, missing, or
+ * unreadable returns undefined so the caller skips it. Prompt-injection
+ * scanning happens at the call site, which owns the decision to drop
+ * flagged content. Bodies are clipped to the per-file byte ceiling so one
+ * oversized document cannot crowd out the rest of the workspace.
+ */
 async function loadContextFile(
   root: string,
   agentsDir: string,

@@ -64,11 +64,23 @@ export interface AgentTurnRunnerOptions {
   readonly permissionBroker?: PermissionBroker
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
-  /** Session default effort hint for reasoning APIs; per-turn keywords and ultra mode override it. */
+  /**
+   * Session default effort hint for reasoning APIs. This is only the base
+   * layer of per-turn resolution: ultra mode and escalation keywords in the
+   * prompt override it for that turn, so a value here never forces a
+   * thinking directive on its own.
+   */
   readonly reasoningEffort?: string
-  /** Session default for extended thinking; false disables it unless a turn escalates. */
+  /**
+   * Session default for extended thinking. `false` keeps thinking off for
+   * ordinary turns but does not block escalation: an ultra-mode session or
+   * a keyword in the prompt still wins per turn.
+   */
   readonly thinking?: boolean
-  /** Session default thinking token budget. */
+  /**
+   * Session default thinking token budget, consulted only when neither ultra
+   * mode nor a prompt keyword supplies a per-turn directive.
+   */
   readonly thinkingBudget?: number
   /** Session-scoped delegated-turn events rendered alongside the parent turn. */
   readonly subagentEvents?: DaemonSubagentEventSource
@@ -198,6 +210,11 @@ export class AgentTurnRunner implements TurnRunner {
     let auditTurnEnded = false
     let resumedSubagentOutcome: 'cancelled' | 'completed' | 'error' = 'completed'
     const subagentCohort = this.options.subagentCoordinator?.begin(session.id)
+    // Resolve thinking per turn rather than once per session, because the
+    // strongest signal can change on every prompt: ultra mode wins first,
+    // then an escalation keyword in this turn's text, then the session
+    // defaults above. `session.ultraMode === true` narrows the optional
+    // in-memory flag so both absent and false mean "no ultra override".
     const thinking = resolveTurnThinking({
       defaults: {
         ...(this.options.thinking !== undefined ? { enabled: this.options.thinking } : {}),
