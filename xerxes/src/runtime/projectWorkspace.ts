@@ -1,7 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -9,13 +10,18 @@ import { scanContextContent } from '../security/promptScanner.js'
 
 export const PROJECT_AGENTS_DIR = '.agents'
 
-/** Fixed project-owned files rendered into the per-turn workspace index. */
+/** Fixed project-owned files rendered first, in declaration order. */
 export const PROJECT_AGENT_CONTEXT_FILES = [
   'AGENTS.md',
   'SKILL_MAP.md',
   'ops/OPS.md',
   'projects/README.md',
 ] as const
+
+/** Every Markdown file under `.agents/` is injected; these subtrees stay out. */
+const SKILLS_DIRECTORY = 'skills'
+const MAX_DISCOVERED_CONTEXT_FILES = 200
+const MAX_DISCOVERY_DEPTH = 8
 
 export interface ProjectAgentWorkspaceContextOptions {
   readonly agentsDir: string
@@ -79,17 +85,14 @@ export async function loadProjectAgentWorkspace(
     '# Project Agent Workspace',
     `Directory: ${agentsDir}`,
     '',
-    'This is project-owned agent operating context. Use it to stay organized:',
-    '- `.agents/skills/` contains repository-local skills.',
-    '- `.agents/ops/OPS.md` contains operational runbooks.',
-    '- `.agents/projects/` contains long-running project notes.',
-    '',
-    'Read the referenced files with normal file tools when the task needs more detail.',
+    'This is project-owned agent operating context. Every Markdown file under `.agents/` is included below.',
+    'Repository-local skills under `.agents/skills/` are discovered separately and load on demand.',
+    'Files clipped with a truncation note can be read directly with normal file tools.',
   ]
   const loadedFiles: string[] = []
 
-  for (const relativePath of PROJECT_AGENT_CONTEXT_FILES) {
-    const candidate = join(agentsDir, ...relativePath.split('/'))
+  for (const candidate of await orderedContextFiles(agentsDir, canonicalAgentsDir)) {
+    const relativePath = relative(agentsDir, candidate).split(sep).join('/')
     const content = await loadContextFile(root, canonicalAgentsDir, candidate, maximum)
     if (content === undefined) continue
     if (!content.trim()) continue
@@ -115,6 +118,54 @@ async function canonicalDirectoryOrLexical(path: string): Promise<string> {
   } catch {
     return path
   }
+}
+
+/** Priority files in declaration order, then every other Markdown file under .agents sorted by path. */
+async function orderedContextFiles(agentsDir: string, canonicalAgentsDir: string): Promise<string[]> {
+  const priority = PROJECT_AGENT_CONTEXT_FILES.map(path => join(agentsDir, ...path.split('/')))
+  const priorityPaths = new Set(priority.map(path => resolve(path)))
+  const discovered = await discoverMarkdownFiles(canonicalAgentsDir)
+  const rest = discovered
+    .filter(path => !priorityPaths.has(resolve(path)))
+    .sort((left, right) => left.localeCompare(right))
+  return [...priority, ...rest]
+}
+
+/**
+ * Recursively enumerate Markdown files under the canonical `.agents` directory.
+ * The skills subtree stays on-demand via the skill registry, hidden and
+ * dependency directories are skipped, and discovery is bounded so a hostile
+ * or runaway tree cannot stall bootstrap. Symlinked entries are ignored here;
+ * per-file containment is revalidated by loadContextFile.
+ */
+async function discoverMarkdownFiles(agentsDir: string): Promise<string[]> {
+  const discovered: string[] = []
+
+  async function walk(directory: string, depth: number): Promise<void> {
+    if (depth > MAX_DISCOVERY_DEPTH || discovered.length >= MAX_DISCOVERED_CONTEXT_FILES) return
+    let entries: Dirent[]
+    try {
+      entries = await readdir(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (discovered.length >= MAX_DISCOVERED_CONTEXT_FILES) return
+      const candidate = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === SKILLS_DIRECTORY && depth === 0) continue
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        await walk(candidate, depth + 1)
+        continue
+      }
+      if (entry.isFile() && entry.name.endsWith('.md')) {
+        discovered.push(candidate)
+      }
+    }
+  }
+
+  await walk(agentsDir, 0)
+  return discovered
 }
 
 async function containedDirectory(root: string, candidate: string): Promise<string | undefined> {

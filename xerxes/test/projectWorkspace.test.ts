@@ -109,3 +109,39 @@ async function inTemporaryDirectory(callback: (directory: string) => Promise<voi
     await rm(directory, { recursive: true, force: true })
   }
 }
+
+test('discovers every markdown file recursively, keeping skills and non-markdown out', async () => {
+  await inTemporaryDirectory(async root => {
+    const agentsDir = join(root, '.agents')
+    await mkdir(join(agentsDir, 'ops', 'runbooks'), { recursive: true })
+    await mkdir(join(agentsDir, 'projects', 'alpha'), { recursive: true })
+    await mkdir(join(agentsDir, 'skills', 'local-skill'), { recursive: true })
+    await writeFile(join(agentsDir, 'AGENTS.md'), 'root rules\n')
+    await writeFile(join(agentsDir, 'ops', 'OPS.md'), 'ops index\n')
+    await writeFile(join(agentsDir, 'ops', 'runbooks', 'deploy.md'), 'deploy steps\n')
+    await writeFile(join(agentsDir, 'projects', 'README.md'), 'projects index\n')
+    await writeFile(join(agentsDir, 'projects', 'alpha', 'notes.md'), 'alpha notes\n')
+    await writeFile(join(agentsDir, 'skills', 'local-skill', 'SKILL.md'), 'skill body stays on demand\n')
+    await writeFile(join(agentsDir, 'data.json'), '{"not":"markdown"}')
+
+    const context = await loadProjectAgentWorkspace(root)
+
+    expect(context.prompt).toContain('## .agents/ops/runbooks/deploy.md')
+    expect(context.prompt).toContain('deploy steps')
+    expect(context.prompt).toContain('## .agents/projects/alpha/notes.md')
+    expect(context.prompt).toContain('alpha notes')
+    expect(context.prompt).not.toContain('skill body stays on demand')
+    expect(context.prompt).not.toContain('not":"markdown')
+
+    const agentsIndex = context.prompt.indexOf('## .agents/AGENTS.md')
+    const opsIndex = context.prompt.indexOf('## .agents/ops/OPS.md')
+    const deployIndex = context.prompt.indexOf('## .agents/ops/runbooks/deploy.md')
+    const notesIndex = context.prompt.indexOf('## .agents/projects/alpha/notes.md')
+    // Priority files keep declaration order ahead of discovered files.
+    expect(agentsIndex).toBeGreaterThanOrEqual(0)
+    expect(opsIndex).toBeGreaterThan(agentsIndex)
+    expect(deployIndex).toBeGreaterThan(opsIndex)
+    // Discovered files sort deterministically by path.
+    expect(deployIndex).toBeLessThan(notesIndex)
+  })
+})

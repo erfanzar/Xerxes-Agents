@@ -32,7 +32,7 @@ export const MAX_BOOTSTRAP_INSTRUCTION_FILE_BYTES = 16 * 1024
 /** Aggregate ceiling for automatically imported global/project instructions. */
 export const MAX_BOOTSTRAP_INSTRUCTIONS_BYTES = 32 * 1024
 /** Ceiling for project-owned `.agents` context included automatically. */
-export const MAX_BOOTSTRAP_PROJECT_WORKSPACE_BYTES = 24 * 1024
+export const MAX_BOOTSTRAP_PROJECT_WORKSPACE_BYTES = 96 * 1024
 /** Ceiling for caller-supplied supplemental context such as the skill index. */
 export const MAX_BOOTSTRAP_EXTRA_CONTEXT_BYTES = 16 * 1024
 /** Ceiling for Git metadata after the status-specific limit is applied. */
