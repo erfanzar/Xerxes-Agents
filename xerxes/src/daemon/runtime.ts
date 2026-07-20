@@ -65,6 +65,8 @@ export interface DaemonSession {
   totalInputTokens: number;
   totalOutputTokens: number;
   turnCount: number;
+  /** Session-scoped ultra mode: pins every turn to the maximum thinking directive. Not persisted. */
+  ultraMode?: boolean;
   /** Whether cumulative token totals cover every provider attempt in this session. */
   usageComplete?: boolean;
   workspace: string;
@@ -156,6 +158,11 @@ export interface DaemonRuntime {
     sessionKey: string,
     mode: string,
     planMode?: boolean,
+  ): Promise<DaemonSession | undefined>;
+  /** Optional session-scoped ultra mode toggle; runtimes without it reject the command. */
+  setSessionUltra?(
+    sessionKey: string,
+    enabled: boolean,
   ): Promise<DaemonSession | undefined>;
   sessionStatus(sessionKey: string): DaemonSession | undefined;
   /** Release host-owned resources such as native delegated-agent managers. */
@@ -462,6 +469,19 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.planMode = planMode ?? normalized === "plan";
     session.lastActive = Date.now();
     this.options.onSessionModeChange?.(session.id, normalized);
+    return session;
+  }
+
+  async setSessionUltra(
+    sessionKey: string,
+    enabled: boolean,
+  ): Promise<DaemonSession | undefined> {
+    const session = this.sessions.get(sessionKey);
+    if (!session) {
+      return undefined;
+    }
+    session.ultraMode = enabled;
+    session.lastActive = Date.now();
     return session;
   }
 

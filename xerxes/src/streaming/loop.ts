@@ -7,7 +7,7 @@ import {
   type ToolExecutionContext,
 } from '../executors/toolRegistry.js'
 import type { HookPoint, HookRunner } from '../extensions/hooks.js'
-import type { LlmClient, LlmDelta, TokenUsage } from '../llms/client.js'
+import type { LlmClient, LlmDelta, ThinkingRequest, TokenUsage } from '../llms/client.js'
 import { classifyError } from '../runtime/errorClassifier.js'
 import {
   inspectObjectiveResponse,
@@ -55,6 +55,8 @@ export interface TurnRequest {
   readonly state: AgentState
   readonly systemPrompt?: string
   readonly temperature?: number
+  /** Per-turn extended-thinking directive; adapters map it to provider wire fields. */
+  readonly thinking?: ThinkingRequest
   readonly topK?: number
   readonly topP?: number
   readonly tools?: readonly ToolDefinition[]
@@ -661,6 +663,7 @@ function completionRequest(
       : {}),
     ...(request.topK !== undefined ? { topK: request.topK } : {}),
     ...(request.topP !== undefined ? { topP: request.topP } : {}),
+    ...(request.thinking !== undefined ? { thinking: request.thinking } : {}),
   }
 }
 

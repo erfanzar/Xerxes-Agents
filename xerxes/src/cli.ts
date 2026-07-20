@@ -728,11 +728,18 @@ function daemonRuntime(
         : {}),
       model: connection.model,
       permissionMode: connection.permissionMode,
+      ...(connection.reasoningEffort === undefined
+        ? {}
+        : { reasoningEffort: connection.reasoningEffort }),
       subagentCoordinator: subagentHost.turnCoordinator,
       subagentEvents,
       ...(connection.temperature !== undefined
         ? { temperature: connection.temperature }
         : {}),
+      ...(connection.thinking === undefined ? {} : { thinking: connection.thinking }),
+      ...(connection.thinkingBudget === undefined
+        ? {}
+        : { thinkingBudget: connection.thinkingBudget }),
       ...(connection.topK !== undefined ? { topK: connection.topK } : {}),
       tools: tools.definitions(),
       toolExecutor: tools,

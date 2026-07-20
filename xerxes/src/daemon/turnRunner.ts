@@ -20,6 +20,7 @@ import type { LlmClient } from '../llms/client.js'
 import { getContextLimit } from '../llms/providerRegistry.js'
 import { agentNameForMode, modeSwitchHint, normalizeInteractionMode } from '../runtime/interactionModes.js'
 import { withActiveSession } from '../runtime/sessionContext.js'
+import { resolveTurnThinking } from '../runtime/thinkingLevels.js'
 import { captureUserWorkflowMemory } from '../runtime/workflowMemory.js'
 import { createAgentState, type AgentState, type StreamEvent } from '../streaming/events.js'
 import { runTurn } from '../streaming/loop.js'
@@ -63,6 +64,12 @@ export interface AgentTurnRunnerOptions {
   readonly permissionBroker?: PermissionBroker
   readonly permissionMode?: PermissionMode
   readonly policy?: ToolPolicy
+  /** Session default effort hint for reasoning APIs; per-turn keywords and ultra mode override it. */
+  readonly reasoningEffort?: string
+  /** Session default for extended thinking; false disables it unless a turn escalates. */
+  readonly thinking?: boolean
+  /** Session default thinking token budget. */
+  readonly thinkingBudget?: number
   /** Session-scoped delegated-turn events rendered alongside the parent turn. */
   readonly subagentEvents?: DaemonSubagentEventSource
   /** Joins explicitly detached child work back into the creating parent turn. */
@@ -191,6 +198,15 @@ export class AgentTurnRunner implements TurnRunner {
     let auditTurnEnded = false
     let resumedSubagentOutcome: 'cancelled' | 'completed' | 'error' = 'completed'
     const subagentCohort = this.options.subagentCoordinator?.begin(session.id)
+    const thinking = resolveTurnThinking({
+      defaults: {
+        ...(this.options.thinking !== undefined ? { enabled: this.options.thinking } : {}),
+        ...(this.options.thinkingBudget !== undefined ? { budgetTokens: this.options.thinkingBudget } : {}),
+        ...(this.options.reasoningEffort !== undefined ? { effort: this.options.reasoningEffort } : {}),
+      },
+      prompt: text,
+      ultraMode: session.ultraMode === true,
+    })
     try {
       const turnEvents = withActiveSession(session, runTurn({
         agentId: promptAgent?.name ?? session.agentId,
@@ -202,6 +218,7 @@ export class AgentTurnRunner implements TurnRunner {
         ...(this.options.maxTokens !== undefined ? { maxTokens: this.options.maxTokens } : {}),
         permissionMode,
         ...(this.options.temperature !== undefined ? { temperature: this.options.temperature } : {}),
+        ...(thinking === undefined ? {} : { thinking: { budgetTokens: thinking.budgetTokens, effort: thinking.effort } }),
         ...(this.options.topK !== undefined ? { topK: this.options.topK } : {}),
         ...(tools ? { tools } : {}),
         ...(systemPrompt ? { systemPrompt } : {}),

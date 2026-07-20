@@ -13,8 +13,11 @@ export interface RuntimeConnection {
   readonly model: string
   readonly permissionMode: PermissionMode
   readonly provider?: string
+  readonly reasoningEffort?: string
   readonly responsesApi?: boolean
   readonly temperature?: number
+  readonly thinking?: boolean
+  readonly thinkingBudget?: number
   readonly topK?: number
   readonly topP?: number
 }
@@ -43,15 +46,23 @@ export function runtimeConnection(config: DaemonConfig, profile: ProviderProfile
   const topP = numberSetting(runtime.top_p)
     ?? numberSetting(useProfile?.sampling.top_p)
   const responsesApi = booleanSetting(runtime.responses_api)
+  const thinking = booleanSetting(runtime.thinking) ?? booleanSetting(useProfile?.sampling.thinking)
+  const thinkingBudget = numberSetting(runtime.thinking_budget)
+    ?? numberSetting(useProfile?.sampling.thinking_budget)
+  const reasoningEffort = stringSetting(runtime.reasoning_effort)
+    || stringSetting(useProfile?.sampling.reasoning_effort)
   return {
     model,
     permissionMode,
     ...(baseUrl ? { baseUrl } : {}),
     ...(apiKey ? { apiKey } : {}),
     ...(provider ? { provider } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(responsesApi === undefined ? {} : { responsesApi }),
     ...(maxTokens !== undefined ? { maxTokens } : {}),
     temperature,
+    ...(thinking === undefined ? {} : { thinking }),
+    ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
     topK,
     ...(topP !== undefined ? { topP } : {}),
   }

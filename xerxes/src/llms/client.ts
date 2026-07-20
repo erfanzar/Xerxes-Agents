@@ -50,6 +50,8 @@ export interface CompletionRequest {
   readonly minP?: number
   readonly model: string
   readonly presencePenalty?: number
+  /** Provider-neutral extended-thinking request; adapters map it to their wire shape. */
+  readonly thinking?: ThinkingRequest
   readonly repetitionPenalty?: number
   readonly stop?: readonly string[]
   readonly temperature?: number
@@ -59,9 +61,16 @@ export interface CompletionRequest {
   readonly topP?: number
 }
 
+/** Provider-neutral extended-thinking request resolved per turn. */
+export interface ThinkingRequest {
+  /** Token budget for budget-based thinking APIs (Anthropic, Zhipu). */
+  readonly budgetTokens?: number
+  /** Effort hint for effort-based reasoning APIs (OpenAI-compatible). */
+  readonly effort?: string
+}
+
 /** Provider-neutral incremental response from a model adapter. */
-export interface LlmDelta {
-  readonly content?: string
+export interface LlmDelta {  readonly content?: string
   readonly finishReason?: string
   readonly thinking?: string
   readonly thinkingSignature?: string
@@ -737,6 +746,17 @@ function addSampling(
   }
   if (request.stop?.length) {
     payload.stop = request.stop
+  }
+  if (request.thinking !== undefined) {
+    // OpenAI-compatible transports: effort and budget are sent as-is; providers
+    // that do not document them ignore the fields. Profiles configure exactly
+    // these keys today (reasoning_effort, thinking_budget).
+    if (request.thinking.effort !== undefined) {
+      payload.reasoning_effort = request.thinking.effort
+    }
+    if (request.thinking.budgetTokens !== undefined) {
+      payload.thinking_budget = request.thinking.budgetTokens
+    }
   }
   if (request.extraBody) {
     Object.assign(payload, request.extraBody)

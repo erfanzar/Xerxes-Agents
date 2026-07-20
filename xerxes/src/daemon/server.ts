@@ -1969,6 +1969,8 @@ export class DaemonServer {
           args === "off" ? "code" : "plan",
           args !== "off",
         );
+      case "ultra":
+        return this.setUltra(connection, args !== "off");
       case "compact":
         return this.compactSession(connection);
       case "budget":
@@ -3856,6 +3858,27 @@ export class DaemonServer {
       ok: true,
       mode: session.interactionMode,
       plan_mode: session.planMode,
+    };
+  }
+
+  private async setUltra(
+    connection: DaemonTransportConnection,
+    enabled: boolean,
+  ): Promise<JsonRpcPayload> {
+    if (this.runtime.setSessionUltra === undefined) {
+      return { ok: false, error: "this runtime does not support ultra mode" };
+    }
+    const session = await this.runtime.setSessionUltra(
+      connection.activeSessionKey,
+      enabled,
+    );
+    if (!session) {
+      return { ok: false, error: "no active session" };
+    }
+    this.emitStatus(connection, session);
+    return {
+      ok: true,
+      ultra_mode: session.ultraMode === true,
     };
   }
 
