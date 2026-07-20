@@ -53,6 +53,15 @@ test('turn thinking precedence: ultra mode, then keyword, then session defaults,
     .toBe('think_harder')
 })
 
+test('session default effort: low is preserved and off-values disable thinking', () => {
+  expect(resolveTurnThinking({ defaults: { effort: 'low' }, prompt: 'plain', ultraMode: false })?.effort).toBe('low')
+  expect(resolveTurnThinking({ defaults: { budgetTokens: 8_000, effort: 'low' }, prompt: 'plain', ultraMode: false })?.effort)
+    .toBe('low')
+  expect(resolveTurnThinking({ defaults: { budgetTokens: 8_000, enabled: true, effort: 'off' }, prompt: 'plain', ultraMode: false }))
+    .toBeUndefined()
+  expect(resolveTurnThinking({ defaults: { effort: 'none' }, prompt: 'plain', ultraMode: false })).toBeUndefined()
+})
+
 test('runTurn threads the thinking directive into the provider request', async () => {
   const requests: CompletionRequest[] = []
   const events: StreamEvent[] = []
@@ -127,6 +136,64 @@ test('Anthropic payload maps neutral thinking to an enabled budget block', async
   }
 
   expect(body['thinking']).toEqual({ type: 'enabled', budget_tokens: 20_000 })
+})
+
+test('Anthropic thinking raises max_tokens past the budget and withholds incompatible sampling', async () => {
+  const capture = async (request: Partial<CompletionRequest> & Pick<CompletionRequest, 'model' | 'messages'>) => {
+    let body: Record<string, unknown> = {}
+    const client = new AnthropicMessagesClient({
+      apiKey: 'test-key',
+      fetchImplementation: async (_url, init) => {
+        body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+        return new Response(sse(
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n' +
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ), { headers: { 'Content-Type': 'text/event-stream' } })
+      },
+    })
+    for await (const _ of client.stream(request)) {
+      void _
+    }
+    return body
+  }
+
+  // Ultra escalation with default sampling: budget wins over max_tokens, and
+  // temperature 0.6 / top_p are withheld because extended thinking rejects them.
+  const escalated = await capture({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+    temperature: 0.6,
+    thinking: { budgetTokens: 32_000, effort: 'high' },
+    topP: 0.9,
+  })
+  expect(escalated['max_tokens']).toBe(32_000 + 4_096)
+  expect(escalated['temperature']).toBeUndefined()
+  expect(escalated['top_p']).toBeUndefined()
+  expect(escalated['thinking']).toEqual({ type: 'enabled', budget_tokens: 32_000 })
+
+  // An explicit larger maxTokens and temperature exactly 1 are preserved.
+  const explicit = await capture({
+    model: 'claude-sonnet-4-6',
+    maxTokens: 64_000,
+    messages: [{ role: 'user', content: 'hi' }],
+    temperature: 1,
+    thinking: { budgetTokens: 4_000, effort: 'medium' },
+  })
+  expect(explicit['max_tokens']).toBe(64_000)
+  expect(explicit['temperature']).toBe(1)
+
+  // Without thinking, sampling flows exactly as before.
+  const plain = await capture({
+    model: 'claude-sonnet-4-6',
+    messages: [{ role: 'user', content: 'hi' }],
+    temperature: 0.6,
+    topP: 0.9,
+  })
+  expect(plain['max_tokens']).toBe(2048)
+  expect(plain['temperature']).toBe(0.6)
+  expect(plain['top_p']).toBe(0.9)
+  expect(plain['thinking']).toBeUndefined()
 })
 
 function sse(payload: string): string {

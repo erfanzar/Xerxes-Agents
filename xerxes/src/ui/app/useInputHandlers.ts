@@ -352,6 +352,20 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     // Double-space while the composer is not focused (focus drifted to the
     // transcript, a selection, or a dismissed overlay) jumps back to the prompt.
+    //
+    // Placement is the overlay guard: this branch sits *after* the isBlocked
+    // block above, and that block returns early for every non-scroll key while
+    // a modal overlay (approval / clarify / confirm / pager) is up. The
+    // gesture therefore can never fire during a modal — a space typed at an
+    // approval prompt or inside the pager is consumed by that overlay's own
+    // handler and never reaches here.
+    //
+    // `ch === ' '` short-circuits first so non-space keys never touch the
+    // gesture's clock state. When the double-tap is recognized the refocus
+    // has already happened and the triggering space must be swallowed — it
+    // belongs to the gesture, not to the textarea — hence the early return.
+    // When it returns false (single press, or composer already focused) the
+    // key falls through to the normal input path untouched.
     if (ch === ' ' && refocusComposerOnDoubleSpace()) {
       return
     }

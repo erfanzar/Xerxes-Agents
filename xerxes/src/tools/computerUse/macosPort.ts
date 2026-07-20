@@ -38,14 +38,32 @@ import {
 } from './macosScripts.js'
 import type { ComputerUseToolsOptions } from './tool.js'
 
+// Vision models are billed per image token and lose click precision on very
+// large screenshots, so captures are capped at a longest edge that current
+// vision models ingest natively. 1568 keeps UI text legible while bounding
+// per-turn token cost.
 const DEFAULT_MAX_CAPTURE_EDGE = 1568
+// Absolute paths for the three system binaries are pinned so the backend
+// never depends on (or gets hijacked through) the caller's PATH.
 const DEFAULT_SCREENCAPTURE = '/usr/sbin/screencapture'
 const DEFAULT_SIPS = '/usr/bin/sips'
 const DEFAULT_OSASCRIPT = '/usr/bin/osascript'
+// A drag is posted as N interpolated mouse-dragged events because many
+// AppKit and web views only recognize a drag when they observe continuous
+// motion between press and release; a single teleport drop is ignored.
 const DRAG_STEPS = 24
+// CoreGraphics scroll events are expressed in line units while the public
+// tool API takes pixel deltas. 40 px/line approximates one native macOS
+// scroll line so a model's pixel intent lands at a natural scroll distance.
 const PIXELS_PER_SCROLL_LINE = 40
 
+// macOS reports missing Screen Recording / Accessibility grants through a
+// grab-bag of opaque stderr strings from screencapture and osascript. This
+// matcher recognizes those phrasings so failures can be upgraded from a
+// cryptic OS error into actionable guidance.
 const PERMISSION_PROBLEM = /assistive|accessibility|screen recording|not permitted|not allowed|denied|could not create image/i
+// Appended to any error that looks permission-related: the only fix is a
+// user grant in System Settings, so the hint names the exact pane.
 const PERMISSION_HINT =
   'macOS blocked the action. Grant Screen Recording and Accessibility to the terminal app in System Settings > Privacy & Security, then retry.'
 
@@ -83,7 +101,11 @@ interface ScreenInfo {
 async function defaultRunner(argv: readonly string[], signal?: AbortSignal): Promise<MacOSCommandResult> {
   const [command, ...args] = argv
   if (command === undefined) throw new Error('macOS command runner requires an executable')
+  // No shell is involved: argv goes straight to the kernel, so no
+  // model-produced value can be reinterpreted as shell syntax.
   const proc = Bun.spawn([command, ...args], { stderr: 'pipe', stdout: 'pipe' })
+  // AbortSignal must reap the child; otherwise a cancelled turn would leave
+  // screencapture/osascript running past the caller's intent.
   const onAbort = (): void => {
     try {
       proc.kill()
@@ -130,7 +152,15 @@ async function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * element-only targets return actionable failures instead of pretending.
  */
 export class MacOSComputerUsePort implements ComputerUsePort {
+  // Ratio of captured-image pixels to logical screen points, refreshed on
+  // every capture. The model reasons in the pixels of the image it was
+  // shown, but CoreGraphics only accepts logical points; this scale is the
+  // bridge between the two coordinate spaces. On Retina displays a raw
+  // screenshot is backingScale times larger than the logical screen, and
+  // the sips downscale shrinks it further, so this is almost never 1.
   private coordinateScale = 1
+  // Screen geometry and backing scale effectively never change mid-session,
+  // so the (relatively expensive) osascript probe is cached after first use.
   private screenInfoCache: ScreenInfo | undefined
 
   private readonly fileExists: (path: string) => boolean
@@ -174,20 +204,40 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     if (request.mode === 'ax') {
       return { elements: [], height: 0, mode: 'ax', width: 0 }
     }
+    // Unique temp name per capture so concurrent turns cannot clobber each
+    // other's screenshot file.
     const path = join(this.tmpDir, `xerxes-cua-${this.uniqueId()}.png`)
+    // Pipeline step 1: grab the raw framebuffer with screencapture (`-x`
+    // silences the shutter sound). Requires the Screen Recording
+    // permission; on Retina displays the PNG is backingScale times larger
+    // than the logical screen.
     await this.mustRun([this.screencapture, '-x', '-t', 'png', path], signal)
     try {
       const pixels = await this.imageDimensions(path, signal)
       const screen = await this.screenInfo(pixels, signal)
+      // Normalize Retina pixels into logical points first: CoreGraphics
+      // input dispatch speaks logical points, so every downstream size
+      // decision is made in that space, never in raw screenshot pixels.
       const logicalWidth = Math.max(1, Math.round(pixels.width / screen.backingScale))
       const logicalHeight = Math.max(1, Math.round(pixels.height / screen.backingScale))
+      // Never upscale (min with 1): upscaling would spend image tokens
+      // without giving the model any information it did not already have.
       const scale = Math.min(1, this.maxCaptureEdge / Math.max(logicalWidth, logicalHeight))
       const targetWidth = Math.max(1, Math.round(logicalWidth * scale))
       const targetHeight = Math.max(1, Math.round(logicalHeight * scale))
+      // Pipeline step 2: downscale in place with sips. When the target
+      // already equals the raw size (small non-Retina screen) the resize is
+      // skipped to avoid paying a second process spawn for an identity
+      // transform.
       if (targetWidth !== pixels.width || targetHeight !== pixels.height) {
         await this.mustRun([this.sips, '-z', String(targetHeight), String(targetWidth), path], signal)
       }
+      // Pipeline step 3: base64-encode the (now bounded) PNG into the wire
+      // format the model consumes.
       const bytes = await this.readFile(path)
+      // Record the image-px -> logical-point ratio for this exact image so
+      // click coordinates quoted in image pixels land on the right logical
+      // point; see logicalPoint().
       this.coordinateScale = targetWidth / logicalWidth
       return {
         elements: [],
@@ -198,6 +248,8 @@ export class MacOSComputerUsePort implements ComputerUsePort {
         width: targetWidth,
       }
     } finally {
+      // A screenshot contains the user's screen contents; never leave it on
+      // disk past the turn that needed it.
       await this.removeFile(path)
     }
   }
@@ -252,6 +304,9 @@ export class MacOSComputerUsePort implements ComputerUsePort {
       const moved = await this.runJxaAction('scroll', JXA_MOUSE_MOVE, [String(point.x), String(point.y)], false, signal)
       if (!moved.ok) return moved
     }
+    // CoreGraphics wheel deltas are positive when content moves down, while
+    // the tool API's dy follows the model's "scroll the view" intuition;
+    // the sign flip reconciles the two conventions.
     const wheelY = -scrollLines(request.dy)
     const wheelX = -scrollLines(request.dx)
     return this.runJxaAction('scroll', JXA_SCROLL, [String(wheelY), String(wheelX)], request.captureAfter, signal)
@@ -351,10 +406,18 @@ export class MacOSComputerUsePort implements ComputerUsePort {
   ): { readonly x: number; readonly y: number } | undefined {
     void label
     if (x !== undefined && y !== undefined) return { x, y }
+    // Element indices come from an accessibility-tree capture this
+    // zero-install backend intentionally does not provide; callers get an
+    // explicit unavailability error instead of a click at a guessed point.
     void element
     return undefined
   }
 
+  // Convert a point the model quoted in captured-image pixels into the
+  // logical points CoreGraphics requires. Without this mapping, every click
+  // on a Retina or downscaled capture would land scale times away from the
+  // intended target. The `|| 1` guard keeps dispatch sane when an action
+  // arrives before the first capture has set the scale.
   private logicalPoint(x: number, y: number): { readonly x: number; readonly y: number } {
     const scale = this.coordinateScale || 1
     return { x: Math.round(x / scale), y: Math.round(y / scale) }
@@ -384,6 +447,11 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     signal?: AbortSignal,
   ): Promise<{ readonly message: string; readonly ok: boolean }> {
     try {
+      // Injection safety is structural: after `-e script`, osascript treats
+      // every remaining token as an entry in JXA's `argv`, never as source.
+      // Model-supplied text (type payloads, app names) only ever travels
+      // through argv and is never interpolated into the script source, so a
+      // hostile payload cannot escape into the automation runtime.
       const result = await this.runner([this.osascript, '-l', 'JavaScript', '-e', script, ...args], signal)
       if (result.code !== 0) {
         return { message: permissionHint(result.stderr.trim() || `osascript exited ${result.code}`), ok: false }
@@ -399,9 +467,15 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     try {
       result = await this.runner(argv, signal)
     } catch (error) {
+      // Spawn-level failure (missing binary, sandbox refusal): surface it as
+      // backend unavailability, upgraded with a hint when it matches a
+      // known permission phrasing.
       throw new ComputerUseUnavailableError(permissionHint(errorMessage(error)), error)
     }
     if (result.code !== 0) {
+      // screencapture exits non-zero when Screen Recording is denied; the
+      // permission hint turns that opaque stderr into a fixable instruction
+      // instead of a dead-end error.
       throw new ComputerUseUnavailableError(permissionHint(result.stderr.trim() || `${argv[0]} exited ${result.code}`))
     }
     return result
@@ -432,12 +506,19 @@ export class MacOSComputerUsePort implements ComputerUsePort {
     } catch {
       // Fall through to the pixel-derived estimate below.
     }
+    // The osascript screen probe is best-effort (automation consent prompts
+    // can block it); a screenshot wider than 3000 px is effectively always
+    // a Retina 2x framebuffer, so estimate from the image itself rather
+    // than failing the whole capture.
     const backingScale = pixels.width >= 3000 ? 2 : 1
     this.screenInfoCache = { backingScale, logicalHeight: pixels.height, logicalWidth: pixels.width }
     return this.screenInfoCache
   }
 }
 
+// Convert a pixel delta into whole scroll lines. A sub-line remainder still
+// counts as one line because CoreGraphics cannot express fractional line
+// scrolls, and dropping it would make small model scrolls silent no-ops.
 function scrollLines(deltaPixels: number): number {
   if (deltaPixels === 0) return 0
   return Math.sign(deltaPixels) * Math.max(1, Math.round(Math.abs(deltaPixels) / PIXELS_PER_SCROLL_LINE))
@@ -451,6 +532,10 @@ interface Chord {
   readonly shift: boolean
 }
 
+// Parse "command+shift+p" style chords. The last segment is the key and
+// everything before it must be a modifier; an unknown modifier fails the
+// whole chord (undefined) instead of being silently dropped, so a typo like
+// "cmd+shfit+p" can never fire an unintended plain keystroke at the desktop.
 function parseChord(input: string): Chord | undefined {
   const parts = input.split('+').map(part => part.trim().toLowerCase()).filter(Boolean)
   if (!parts.length) return undefined
@@ -469,6 +554,9 @@ function unavailable(action: string, message: string): ActionResult {
   return { action, message, ok: false }
 }
 
+// Map macOS's many phrasings of "permission denied" onto a single hint
+// naming the exact System Settings pane. Without this, the model (and the
+// user) would see raw CoreGraphics/osascript errors with no path to a fix.
 function permissionHint(message: string): string {
   return PERMISSION_PROBLEM.test(message) ? `${message}\n${PERMISSION_HINT}` : message
 }
@@ -493,14 +581,23 @@ export function createMacOSComputerUseToolOptions(
   hostAvailable?: () => boolean,
 ): ComputerUseToolsOptions | undefined {
   const flag = environment['XERXES_COMPUTER_USE']?.trim().toLowerCase()
+  // Opt-out wins over everything: a user who said "no desktop control" must
+  // never have the tool registered, regardless of host capability or any
+  // other setting.
   const explicitlyDisabled = settings['computer_use_enabled'] === false
     || flag === '0' || flag === 'false' || flag === 'no' || flag === 'off'
   if (explicitlyDisabled) return undefined
+  // A non-macos backend selection means another port owns this surface;
+  // registering the macOS port too would shadow it.
   const backend = settings['computer_use_backend']
   if (backend !== undefined && backend !== 'macos') return undefined
   const explicitlyEnabled = settings['computer_use_enabled'] === true
     || flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on'
   const available = hostAvailable?.() ?? new MacOSComputerUsePort().isAvailable()
+  // Default-on semantics: with no explicit setting the tool registers
+  // whenever the host can actually run it. Force-enable (`true`/`on`)
+  // registers even on an unsupported host so calls fail loudly with an
+  // unavailability error instead of the tool silently going missing.
   if (!explicitlyEnabled && !available) return undefined
   return { session: new ComputerUseSession({ port: new MacOSComputerUsePort() }) }
 }

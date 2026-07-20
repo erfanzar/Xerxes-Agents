@@ -748,9 +748,14 @@ function addSampling(
     payload.stop = request.stop
   }
   if (request.thinking !== undefined) {
-    // OpenAI-compatible transports: effort and budget are sent as-is; providers
-    // that do not document them ignore the fields. Profiles configure exactly
-    // these keys today (reasoning_effort, thinking_budget).
+    // WHY verbatim passthrough: "OpenAI-compatible" is a family of transports
+    // (OpenAI, Groq, MiniMax, and others), not one schema with a single
+    // canonical thinking field. Translating the neutral ThinkingRequest into
+    // one guessed dialect would silently drop the variants each provider
+    // actually documents, so the resolved effort and budget are forwarded
+    // as-is under the exact wire keys profiles configure today
+    // (reasoning_effort, thinking_budget). Providers that do not document a
+    // field simply ignore it, which makes the passthrough safe by default.
     if (request.thinking.effort !== undefined) {
       payload.reasoning_effort = request.thinking.effort
     }

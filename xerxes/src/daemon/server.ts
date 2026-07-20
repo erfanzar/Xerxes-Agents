@@ -1969,8 +1969,10 @@ export class DaemonServer {
           args === "off" ? "code" : "plan",
           args !== "off",
         );
+      // /ultra [off] toggles session-scoped ultra mode; bare "/ultra" turns
+      // it on, only the explicit "off" argument disables it.
       case "ultra":
-        return this.setUltra(connection, args !== "off");
+        return this.setUltra(connection, args.trim().toLowerCase() !== "off");
       case "compact":
         return this.compactSession(connection);
       case "budget":
@@ -3861,6 +3863,12 @@ export class DaemonServer {
     };
   }
 
+  /**
+   * /ultra handler. Guards on the optional DaemonRuntime.setSessionUltra so
+   * runtimes without ultra support receive a typed error instead of a crash,
+   * and echoes the resolved flag in the payload so clients can render the
+   * new state without a second round trip.
+   */
   private async setUltra(
     connection: DaemonTransportConnection,
     enabled: boolean,

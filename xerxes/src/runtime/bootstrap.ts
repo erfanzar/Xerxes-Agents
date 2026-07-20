@@ -31,7 +31,21 @@ export const MAX_BOOTSTRAP_GIT_STATUS_BYTES = 8 * 1024
 export const MAX_BOOTSTRAP_INSTRUCTION_FILE_BYTES = 16 * 1024
 /** Aggregate ceiling for automatically imported global/project instructions. */
 export const MAX_BOOTSTRAP_INSTRUCTIONS_BYTES = 32 * 1024
-/** Ceiling for project-owned `.agents` context included automatically. */
+/**
+ * Aggregate ceiling for project-owned `.agents` workspace context included
+ * automatically at session bootstrap.
+ *
+ * Rationale for 96 KiB: the `.agents` tree can legitimately hold many
+ * Markdown files (up to 200 discovered files, each individually clipped by
+ * the loader's per-file cap), so this budget is intentionally larger than
+ * the 32 KiB instruction ceiling — roughly 3x — to fit a real workspace of
+ * AGENTS.md, skill maps, ops runbooks, and project notes. It is still a
+ * hard aggregate bound: unbounded injection would let a large or hostile
+ * tree crowd out conversation history and tool schemas in the model's
+ * context window and inflate per-turn token cost on every request, since
+ * bootstrap context is re-sent with each turn. Content beyond the ceiling
+ * is truncated with a note and remains readable via normal file tools.
+ */
 export const MAX_BOOTSTRAP_PROJECT_WORKSPACE_BYTES = 96 * 1024
 /** Ceiling for caller-supplied supplemental context such as the skill index. */
 export const MAX_BOOTSTRAP_EXTRA_CONTEXT_BYTES = 16 * 1024

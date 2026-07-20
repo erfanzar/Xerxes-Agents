@@ -55,7 +55,16 @@ export interface TurnRequest {
   readonly state: AgentState
   readonly systemPrompt?: string
   readonly temperature?: number
-  /** Per-turn extended-thinking directive; adapters map it to provider wire fields. */
+  /**
+   * Per-turn extended-thinking directive; adapters map it to provider wire
+   * fields. WHY a neutral ThinkingRequest type instead of extraBody: thinking
+   * is expressed per provider dialect (reasoning_effort / thinking_budget on
+   * OpenAI-compatible transports, thinking.budget_tokens on Anthropic), and
+   * extraBody only merges into OpenAI-style payloads. A single typed,
+   * provider-neutral shape keeps the resolution in runtime/thinkingLevels.ts
+   * decoupled from wire formats, stays type-checked, and lets every adapter
+   * translate the same directive into its own dialect.
+   */
   readonly thinking?: ThinkingRequest
   readonly topK?: number
   readonly topP?: number
@@ -663,6 +672,10 @@ function completionRequest(
       : {}),
     ...(request.topK !== undefined ? { topK: request.topK } : {}),
     ...(request.topP !== undefined ? { topP: request.topP } : {}),
+    // Passthrough, not translation: the resolved per-turn directive travels
+    // untouched from the TurnRequest to the CompletionRequest so the owning
+    // provider adapter (client.ts addSampling, anthropic.ts) is the single
+    // place that maps it onto wire-specific fields.
     ...(request.thinking !== undefined ? { thinking: request.thinking } : {}),
   }
 }

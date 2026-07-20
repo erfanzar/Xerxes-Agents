@@ -8,7 +8,18 @@
  * name or type-text payload cannot escape into the automation runtime.
  */
 
-/** Click, double/triple-click, right-click, middle-click. argv: x, y, button, count. */
+/**
+ * Click, double/triple-click, right-click, middle-click.
+ *
+ * argv: [x, y, button, count] — point in logical points, button name
+ * ('left' | 'right' | 'middle'), click count.
+ *
+ * Requires the Accessibility permission: macOS refuses CGEventPost to the
+ * HID event tap from unapproved processes. The clickState field is set per
+ * iteration because AppKit distinguishes single/double/triple clicks by
+ * clickState, not by timing alone — a synthetic double-click without
+ * clickState 2 registers as two unrelated singles.
+ */
 export const JXA_CLICK = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -33,7 +44,13 @@ function run(argv) {
 }
 `
 
-/** Move the cursor without pressing a button. argv: x, y. */
+/**
+ * Move the cursor without pressing a button. argv: [x, y] in logical points.
+ *
+ * Requires Accessibility (it posts a CG event). Also used to position the
+ * pointer before a coordinate-targeted scroll, because scroll wheel events
+ * land on whatever is under the cursor at post time.
+ */
 export const JXA_MOUSE_MOVE = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -43,7 +60,15 @@ function run(argv) {
 }
 `
 
-/** Drag from start to end in N interpolated steps. argv: x1, y1, x2, y2, steps. */
+/**
+ * Drag from start to end in N interpolated steps.
+ * argv: [x1, y1, x2, y2, steps] — logical points plus interpolation count.
+ *
+ * Requires Accessibility. The motion is emitted as discrete dragged events
+ * with small delays because drop targets (file managers, canvases, web
+ * drag-and-drop) track hover during the drag; an instant teleport from
+ * press to release is rejected by most of them.
+ */
 export const JXA_DRAG = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -64,7 +89,14 @@ function run(argv) {
 }
 `
 
-/** Scroll wheel event in line units. argv: wheelY, wheelX (signed). */
+/**
+ * Scroll wheel event in line units. argv: [wheelY, wheelX] (signed).
+ *
+ * Requires Accessibility. Line units (kCGScrollEventUnitLine) are used
+ * instead of pixel units so scrolling matches native trackpad behavior in
+ * AppKit lists and browsers; pixel-unit scrolls move far too little per
+ * event to be useful to a model.
+ */
 export const JXA_SCROLL = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -73,7 +105,14 @@ function run(argv) {
 }
 `
 
-/** Type Unicode text as one keyboard event payload. argv: text. */
+/**
+ * Type Unicode text as one keyboard event payload. argv: [text].
+ *
+ * Requires Accessibility. The whole string is attached to a single key
+ * event via CGEventKeyboardSetUnicodeString instead of synthesizing
+ * per-character keystrokes, because emoji, CJK, and accented characters
+ * have no virtual key codes and per-key simulation would mangle them.
+ */
 export const JXA_TYPE = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -85,7 +124,15 @@ function run(argv) {
 }
 `
 
-/** Key chord by virtual key code and modifier flags. argv: keycode, cmd, shift, alt, ctrl (each '1' or '0'). */
+/**
+ * Key chord by virtual key code and modifier flags.
+ * argv: [keycode, cmd, shift, alt, ctrl] — flags as literal '1' or '0'.
+ *
+ * Requires Accessibility. Flags are string tokens rather than booleans
+ * because JXA argv is string-only; the strict '1' comparison keeps any
+ * unexpected value safely "off" instead of truthy-coercing garbage into a
+ * stuck modifier.
+ */
 export const JXA_KEY_CHORD = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -104,7 +151,14 @@ function run(argv) {
 }
 `
 
-/** Current cursor location in logical points. Prints "x,y". No permissions required. */
+/**
+ * Current cursor location in logical points. Prints "x,y".
+ *
+ * No permissions required: reading event state via CGEventGetLocation is
+ * not gated by Accessibility the way posting events is, so this works even
+ * before the user grants anything — useful for diagnosing why input is
+ * failing.
+ */
 export const JXA_CURSOR_POSITION = `
 function run(argv) {
   ObjC.import('CoreGraphics');
@@ -113,7 +167,15 @@ function run(argv) {
 }
 `
 
-/** Logical screen size and backing scale factor. Prints "width,height,scale". */
+/**
+ * Logical screen size and backing scale factor of the main screen.
+ * Prints "width,height,scale".
+ *
+ * No permissions required (NSScreen reads are ungated). The backing scale
+ * is what lets the port translate raw Retina screenshot pixels into the
+ * logical points CoreGraphics input dispatch expects; without it every
+ * coordinate would be off by 2x on Retina hardware.
+ */
 export const JXA_SCREEN_INFO = `
 function run(argv) {
   ObjC.import('AppKit');
@@ -122,7 +184,13 @@ function run(argv) {
 }
 `
 
-/** Names of regular (foreground-capable) running apps. Prints a CSV list. */
+/**
+ * Names of regular (foreground-capable) running apps. Prints a CSV list.
+ *
+ * No permissions required. Filters on activationPolicy 0 (regular apps)
+ * because agents and background daemons cannot be focused and would only
+ * pad the list with targets focus_app can never activate.
+ */
 export const JXA_LIST_APPS = `
 function run(argv) {
   ObjC.import('AppKit');
@@ -138,7 +206,18 @@ function run(argv) {
 }
 `
 
-/** Bring an app to the front by localized name or bundle identifier. Prints "ok" or "not found". */
+/**
+ * Bring an app to the front by localized name or bundle identifier.
+ * argv: [nameOrBundleId], matched case-insensitively. Prints "ok" or
+ * "not found".
+ *
+ * No permissions required (NSWorkspace activation is not Accessibility
+ * gated). Bundle identifiers are accepted in addition to display names so
+ * a model can target apps whose localized name it cannot guess.
+ * activateWithOptions(2) is NSApplicationActivateIgnoringOtherApps, needed
+ * because the default policy may not raise the target above the current
+ * frontmost or a fullscreen app.
+ */
 export const JXA_FOCUS_APP = `
 function run(argv) {
   ObjC.import('AppKit');
@@ -157,7 +236,12 @@ function run(argv) {
 }
 `
 
-/** Modifier aliases accepted in key chords, mapped to JXA flag positions. */
+/**
+ * Modifier aliases accepted in key chords, mapped to JXA flag positions.
+ * Models and users variously say "cmd", "command", "meta", or "super" for
+ * the same physical key; accepting the aliases up front keeps a chord from
+ * failing over vocabulary rather than intent.
+ */
 export const MODIFIER_ALIASES: Readonly<Record<string, 'alt' | 'cmd' | 'ctrl' | 'shift'>> = Object.freeze({
   alt: 'alt',
   cmd: 'cmd',
@@ -171,7 +255,13 @@ export const MODIFIER_ALIASES: Readonly<Record<string, 'alt' | 'cmd' | 'ctrl' | 
   super: 'cmd',
 })
 
-/** macOS virtual key codes for chord keys (letters, digits, and named keys). */
+/**
+ * macOS virtual key codes for chord keys (letters, digits, and named keys).
+ * These are layout-independent hardware codes (HIToolbox kVK_* constants),
+ * not characters: CGEventCreateKeyboardEvent requires a key code, so chord
+ * dispatch goes through this table rather than through the character a key
+ * happens to produce on the user's layout.
+ */
 export const KEY_CODES: Readonly<Record<string, number>> = Object.freeze({
   '0': 29,
   '1': 18,

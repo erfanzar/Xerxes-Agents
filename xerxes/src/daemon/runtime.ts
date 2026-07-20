@@ -65,7 +65,13 @@ export interface DaemonSession {
   totalInputTokens: number;
   totalOutputTokens: number;
   turnCount: number;
-  /** Session-scoped ultra mode: pins every turn to the maximum thinking directive. Not persisted. */
+  /**
+   * Session-scoped ultra mode: pins every turn to the maximum thinking
+   * directive. Optional and deliberately NOT persisted: adding it to the
+   * durable session record would force a wire-format migration for every
+   * stored session, while an in-memory-only flag simply reads as
+   * `undefined` (off) for old, resumed, and imported sessions.
+   */
   ultraMode?: boolean;
   /** Whether cumulative token totals cover every provider attempt in this session. */
   usageComplete?: boolean;
@@ -159,7 +165,13 @@ export interface DaemonRuntime {
     mode: string,
     planMode?: boolean,
   ): Promise<DaemonSession | undefined>;
-  /** Optional session-scoped ultra mode toggle; runtimes without it reject the command. */
+  /**
+   * Optional session-scoped ultra mode toggle. Kept optional on the
+   * interface so existing DaemonRuntime implementations (test fakes, custom
+   * hosts) stay source-compatible without implementing it; the server checks
+   * for its absence and rejects the /ultra command with a typed error
+   * instead of crashing.
+   */
   setSessionUltra?(
     sessionKey: string,
     enabled: boolean,
@@ -480,6 +492,9 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     if (!session) {
       return undefined;
     }
+    // In-memory flip only: no persistence call, matching the field's
+    // wire-format contract (ultraMode never crosses the session store, so
+    // a daemon restart always starts sessions with ultra mode off).
     session.ultraMode = enabled;
     session.lastActive = Date.now();
     return session;

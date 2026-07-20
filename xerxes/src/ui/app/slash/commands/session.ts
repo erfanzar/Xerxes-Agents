@@ -333,8 +333,17 @@ export const sessionCommands: SlashCommand[] = [
   },
 
   {
-    help: 'toggle ultra mode: every turn runs the maximum thinking directive',
+    help: 'turn ultra mode on: maximum thinking every turn (use /ultra off to disable)',
     name: 'ultra',
+    // Like /yolo above, this TUI entry is a thin forwarder: it hands the raw
+    // command to `runNativeSlash`, which sends it to the daemon's canonical
+    // `slash.exec` RPC with the current session id. The ultra flag is
+    // session-scoped daemon state (single source of truth, shared with every
+    // client attached to the session), so the TUI keeps no local ultra state
+    // of its own and never duplicates the toggle logic. Any optional argument
+    // (e.g. an explicit on/off) is forwarded verbatim; the daemon's
+    // notification or typed response is rendered by `runNativeSlash`, so
+    // failures surface instead of being faked as success.
     run: (arg, ctx) => runNativeSlash(ctx, arg.trim() ? `ultra ${arg.trim()}` : 'ultra', 'ultra')
   },
 
