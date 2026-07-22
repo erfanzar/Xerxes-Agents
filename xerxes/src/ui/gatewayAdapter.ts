@@ -346,7 +346,11 @@ function notificationEvents(payload: Record<string, unknown>): AnyEvent[] {
 
   if (category === 'history') {
     if (kind === 'replay_assistant') {
-      return [{ type: 'transcript.append', payload: { role: 'assistant', text: body } }]
+      const thinking = str(payload.thinking)
+      return [{
+        type: 'transcript.append',
+        payload: { role: 'assistant', text: body, ...(thinking ? { thinking } : {}) }
+      }]
     }
     if (kind === 'replay_user') {
       // The daemon prefixes replay-only history notifications with a sparkle

@@ -936,7 +936,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'transcript.append':
         if (ev.payload?.text?.trim()) {
-          appendMessage({ role: ev.payload.role, text: ev.payload.text })
+          appendMessage({
+            role: ev.payload.role,
+            text: ev.payload.text,
+            ...(ev.payload.thinking ? { thinking: ev.payload.thinking } : {})
+          })
         }
 
         return

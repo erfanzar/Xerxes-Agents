@@ -22,6 +22,7 @@ export interface GatewayTranscriptMessage {
   name?: string
   role: 'assistant' | 'system' | 'tool' | 'user'
   text?: string
+  thinking?: string
 }
 
 export type ApprovalResponseKind = 'always' | 'approve' | 'approve_for_session' | 'reject'
