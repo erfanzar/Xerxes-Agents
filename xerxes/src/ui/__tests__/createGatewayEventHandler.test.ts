@@ -69,6 +69,19 @@ describe('createGatewayEventHandler', () => {
     vi.restoreAllMocks()
   })
 
+  it('passes replayed thinking through to the transcript row', () => {
+    const { appended, handler } = buildHarness()
+
+    handler({
+      payload: { role: 'assistant', text: 'old answer', thinking: 'old trace' },
+      type: 'transcript.append'
+    } as GatewayEvent)
+
+    expect(appended).toEqual([
+      { role: 'assistant', text: 'old answer', thinking: 'old trace' }
+    ])
+  })
+
   it('records an abandoned clarify prompt instead of dropping it at message.complete', () => {
     const { appended, handler } = buildHarness()
     liveClarify()

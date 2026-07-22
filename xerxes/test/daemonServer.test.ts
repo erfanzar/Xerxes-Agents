@@ -1541,6 +1541,121 @@ test("daemon refuses to compact while a turn is running", async () => {
   }
 });
 
+test("daemon persists /model selection to the active provider profile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-model-persist-"));
+  const socketPath = join(directory, "daemon.sock");
+  const profileStore = new ProfileStore(join(directory, "profiles.json"));
+  profileStore.save({
+    name: "main",
+    apiKey: "fake-api-key",
+    baseUrl: "https://api.openai.test",
+    model: "old-model",
+    provider: "openai",
+    setActive: true,
+  });
+  const server = new DaemonServer({
+    socketPath,
+    runtime: new InMemoryDaemonRuntime(undefined, {
+      currentProjectDirectory: directory,
+      model: "old-model",
+      sessionDirectory: join(directory, "sessions"),
+    }),
+    profileStore,
+  });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "model-persist", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "slash",
+      params: { command: "/model kimi-k3" },
+    });
+    expect((await client.next((frame) => frame.id === 2)).result).toMatchObject(
+      { ok: true, model: "kimi-k3" },
+    );
+    // A TUI/daemon restart resolves the model from the profile store, so the
+    // selection must be durable there, not only in runtime memory.
+    expect(profileStore.active()?.model).toBe("kimi-k3");
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("daemon replays persisted thinking traces on resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-replay-thinking-"));
+  const socketPath = join(directory, "daemon.sock");
+  const runtime = new InMemoryDaemonRuntime(undefined, {
+    currentProjectDirectory: directory,
+    model: "replay-model",
+    sessionDirectory: join(directory, "sessions"),
+  });
+  const server = new DaemonServer({ socketPath, runtime });
+  await server.start();
+  const client = await SocketTestClient.connect(socketPath);
+  try {
+    client.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { session_key: "think-origin", project_dir: directory },
+    });
+    await client.next((frame) => frame.id === 1);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+
+    const session = runtime.sessionStatus("think-origin");
+    if (!session) throw new Error("expected live session");
+    session.messages.push(
+      { role: "user", content: "question" },
+      { role: "assistant", content: "answer", thinking: "reasoning trace" },
+    );
+    const sessionId = session.id;
+    await runtime.flushSessions();
+
+    client.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "initialize",
+      params: {
+        resume_session_id: sessionId,
+        session_key: "ignored-slot",
+        project_dir: directory,
+      },
+    });
+    await client.next((frame) => frame.id === 2);
+    await client.next(eventFrame("init_done"));
+    await client.next(eventFrame("status_update"));
+    const replayedAssistant = await client.next(
+      (frame) =>
+        frame.method === "event" &&
+        frame.params?.type === "notification" &&
+        frame.params.payload?.type === "replay_assistant",
+    );
+    const notification = replayedAssistant.params?.payload as Record<string, unknown>;
+    expect(notification.body).toBe("answer");
+    expect((notification.payload as Record<string, unknown>).thinking).toBe(
+      "reasoning trace",
+    );
+  } finally {
+    client.close();
+    await server.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("daemon snapshots, lists, and rolls back the active session workspace", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xerxes-bun-snapshots-"));
   const workspace = join(directory, "workspace");

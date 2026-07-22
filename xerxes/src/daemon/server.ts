@@ -1927,6 +1927,13 @@ export class DaemonServer {
           return { ok: true };
         }
         this.runtime.reload({ model: args });
+        // Persist the choice so a TUI/daemon restart keeps it instead of
+        // falling back to the profile's stored default model.
+        try {
+          this.profileStore?.updateActiveModel(args);
+        } catch {
+          // Profile persistence is best-effort; the in-memory model applies regardless.
+        }
         this.emitSlash(connection, `Model set to \`${args}\`.`);
         await this.emitProviderInit(connection);
         return { ok: true, model: args };
@@ -4084,6 +4091,12 @@ export class DaemonServer {
       if (!text || (role === "user" && looksLikeInternalReplayMessage(text))) {
         continue;
       }
+      // Persisted thinking traces ride the replay payload so a reopened TUI
+      // can render them exactly like live thinking instead of dropping them.
+      const thinking =
+        role === "assistant" && typeof message.thinking === "string" && message.thinking.trim()
+          ? message.thinking
+          : undefined;
       this.emit(connection, "notification", {
         id: newConnectionKey(),
         category: "history",
@@ -4091,7 +4104,7 @@ export class DaemonServer {
         severity: "info",
         title: "",
         body: role === "user" ? `✨ ${text}` : text,
-        payload: {},
+        payload: thinking === undefined ? {} : { thinking },
       });
       count += 1;
     }

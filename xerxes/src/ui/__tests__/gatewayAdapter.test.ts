@@ -201,6 +201,15 @@ describe('gatewayAdapter', () => {
         type: 'replay_user'
       })
     ).toEqual([{ payload: { role: 'user', text: 'old prompt' }, type: 'transcript.append' }])
+
+    expect(
+      adaptDaemonEvent('notification', {
+        body: 'old answer',
+        category: 'history',
+        thinking: 'old trace',
+        type: 'replay_assistant'
+      })
+    ).toEqual([{ payload: { role: 'assistant', text: 'old answer', thinking: 'old trace' }, type: 'transcript.append' }])
   })
 
   it('keeps clarify responses addressable by daemon request id and question id', () => {
