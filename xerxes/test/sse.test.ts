@@ -45,6 +45,45 @@ test('finite SSE parsing flushes an unterminated final record', () => {
   }])
 })
 
+test('named events without data are never dispatched', () => {
+  const parser = new SSEParser()
+
+  parser.feed('event: ping\n\n')
+  parser.feed('event: tool_call\nid: late-id\n\n')
+  parser.feed('data: real\n\n')
+
+  expect(parser.drain()).toEqual([
+    { event: 'message', data: 'real', id: '', retry: undefined },
+  ])
+  expect(parser.lastEventId).toBe('')
+})
+
+test('only a single leading space is stripped from field values', () => {
+  const parser = new SSEParser()
+
+  parser.feed('data:  x\n\ndata:\t y\n\ndata:z\n\n')
+
+  expect(parser.drain()).toEqual([
+    { event: 'message', data: ' x', id: '', retry: undefined },
+    { event: 'message', data: '\t y', id: '', retry: undefined },
+    { event: 'message', data: 'z', id: '', retry: undefined },
+  ])
+})
+
+test('bare carriage returns terminate lines without merging records', () => {
+  const parser = new SSEParser()
+
+  parser.feed('data: one\r\rdata: two\r')
+  expect(parser.drain()).toEqual([{ event: 'message', data: 'one', id: '', retry: undefined }])
+
+  // A trailing '\r' is held because it may be half of a chunk-split '\r\n'.
+  parser.feed('\rdata: three\r\n\r\n')
+  expect(parser.drain()).toEqual([
+    { event: 'message', data: 'two', id: '', retry: undefined },
+    { event: 'message', data: 'three', id: '', retry: undefined },
+  ])
+})
+
 test('empty default records do not overwrite the last event id', () => {
   const parser = new SSEParser()
 

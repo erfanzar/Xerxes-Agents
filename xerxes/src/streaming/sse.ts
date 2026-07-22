@@ -29,10 +29,24 @@ export class SSEParser {
   /** Buffer raw text and process every complete line. */
   feed(chunk: string): void {
     this.buffer += chunk
-    while (this.buffer.includes('\n')) {
+    for (;;) {
       const newline = this.buffer.indexOf('\n')
-      const line = this.buffer.slice(0, newline).replace(/\r+$/, '')
-      this.buffer = this.buffer.slice(newline + 1)
+      const carriage = this.buffer.indexOf('\r')
+      let end = -1
+      let skip = 1
+      if (newline >= 0 && (carriage < 0 || newline < carriage)) {
+        end = newline
+      } else if (carriage >= 0) {
+        // A bare '\r' terminates a line, but a trailing '\r' may be half of a
+        // '\r\n' pair split across chunks, so wait for the next chunk.
+        if (carriage === this.buffer.length - 1) break
+        end = carriage
+        skip = this.buffer[carriage + 1] === '\n' ? 2 : 1
+      } else {
+        break
+      }
+      const line = this.buffer.slice(0, end)
+      this.buffer = this.buffer.slice(end + skip)
       this.handleLine(line)
     }
   }
@@ -55,7 +69,9 @@ export class SSEParser {
 
     const separator = line.indexOf(':')
     const field = separator < 0 ? line : line.slice(0, separator)
-    const value = (separator < 0 ? '' : line.slice(separator + 1)).replace(/^ +/, '')
+    const rawValue = separator < 0 ? '' : line.slice(separator + 1)
+    // The SSE spec removes exactly one leading space after the colon.
+    const value = rawValue.startsWith(' ') ? rawValue.slice(1) : rawValue
     if (field === 'event') {
       this.currentEvent = value
     } else if (field === 'data') {
@@ -68,7 +84,9 @@ export class SSEParser {
   }
 
   private dispatch(): void {
-    if (!this.currentData.length && this.currentEvent === 'message') {
+    // Per the WHATWG SSE spec, an event is never dispatched with an empty
+    // data buffer, regardless of the event type.
+    if (!this.currentData.length) {
       this.resetCurrentRecord()
       return
     }

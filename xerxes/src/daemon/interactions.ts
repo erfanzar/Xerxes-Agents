@@ -75,10 +75,12 @@ export class DaemonInteractionBoard {
     const binding: SessionBinding = { emit }
     this.bindings.set(sessionId, binding)
     return () => {
+      // A stale connection's cleanup must not force-reject the replacement
+      // binding's in-flight approvals or blank its pending questions.
       if (this.bindings.get(sessionId) === binding) {
         this.bindings.delete(sessionId)
+        this.endTurn(sessionId)
       }
-      this.endTurn(sessionId)
     }
   }
 

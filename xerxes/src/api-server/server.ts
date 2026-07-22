@@ -162,6 +162,9 @@ class SlidingWindowRateLimiter {
     this.cleanupStaleEntries(windowStart)
     if (activeRequests.length >= this.maxRequests) {
       this.requestTimes.set(key, activeRequests)
+      // Denied keys count toward the bounded map too: a flood of unique
+      // rejected keys must not grow past MAX_RATE_LIMIT_KEYS either.
+      this.evictOldestKeyWhenFull()
       const retryAfterSeconds = Math.max(1, Math.ceil(((activeRequests[0] ?? now) + this.windowMs - now) / 1_000))
       return {
         allowed: false,
@@ -391,7 +394,12 @@ export class OpenAiApiServer implements OpenAiApiHandler {
         }],
         usage: aggregate.usage,
       })
-    } catch {
+    } catch (error) {
+      if (request.signal.aborted || isAbortError(error)) {
+        // The client disconnected: converting the abort into a 500 response
+        // would misreport a client-side cancellation as a server failure.
+        throw error
+      }
       return apiError(500, 'Internal server error.', 'api_error', null, null)
     }
   }
@@ -429,7 +437,10 @@ export class OpenAiApiServer implements OpenAiApiHandler {
     }
     try {
       return json(await cortex.createCompletion(completion, requestSignal))
-    } catch {
+    } catch (error) {
+      if (requestSignal.aborted || isAbortError(error)) {
+        throw error
+      }
       return apiError(500, 'Internal server error.', 'api_error', null, null)
     }
   }
@@ -462,7 +473,6 @@ export class OpenAiApiServer implements OpenAiApiHandler {
         const sendChunk = (
           delta: Record<string, unknown>,
           finishReason: string | null = null,
-          usage?: OpenAiUsage,
         ): void => {
           send({
             id,
@@ -470,7 +480,6 @@ export class OpenAiApiServer implements OpenAiApiHandler {
             created,
             model: completion.model,
             choices: [{ index: 0, delta, finish_reason: finishReason }],
-            ...(usage ? { usage } : {}),
           })
         }
 
@@ -496,18 +505,40 @@ export class OpenAiApiServer implements OpenAiApiHandler {
           for (const text of visibleTail(parser)) {
             sendChunk({ content: text })
           }
-          const usage = lastUsage !== undefined && includeUsage !== false ? toOpenAiUsage(lastUsage) : undefined
-          sendChunk({}, resolvedFinishReason(finishReason, toolCalls), usage)
+          sendChunk({}, resolvedFinishReason(finishReason, toolCalls))
+          if (includeUsage === true && lastUsage !== undefined) {
+            // OpenAI emits usage only when stream_options.include_usage is
+            // set, in a dedicated chunk with an empty choices array.
+            send({
+              id,
+              object: 'chat.completion.chunk',
+              created,
+              model: completion.model,
+              choices: [],
+              usage: toOpenAiUsage(lastUsage),
+            })
+          }
           sendDone()
-        } catch {
-          if (!cancelled) {
-            send({ error: openAiError('Internal server error.', 'api_error', null, null) })
-            sendDone()
+        } catch (error) {
+          if (cancelled || requestSignal.aborted || upstreamAbort.signal.aborted) {
+            // Client disconnect or request abort: nothing can be reported.
+          } else {
+            console.warn(`OpenAI streaming completion failed: ${errorMessage(error)}`)
+            try {
+              send({ error: openAiError('Internal server error.', 'api_error', null, null) })
+              sendDone()
+            } catch {
+              // The stream is already torn down; the failure is logged above.
+            }
           }
         } finally {
           requestSignal.removeEventListener('abort', abortUpstream)
           if (!cancelled) {
-            controller.close()
+            try {
+              controller.close()
+            } catch {
+              // Closing an already-errored stream is a no-op for the client.
+            }
           }
         }
       },
@@ -544,15 +575,26 @@ export class OpenAiApiServer implements OpenAiApiHandler {
               controller.enqueue(encoder.encode(frame))
             }
           }
-        } catch {
-          if (!cancelled) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: openAiError('Internal server error.', 'api_error', null, null) })}\n\n`))
-            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+        } catch (error) {
+          if (cancelled || requestSignal.aborted || upstreamAbort.signal.aborted) {
+            // Client disconnect or request abort: nothing can be reported.
+          } else {
+            console.warn(`OpenAI streaming Cortex completion failed: ${errorMessage(error)}`)
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: openAiError('Internal server error.', 'api_error', null, null) })}\n\n`))
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+            } catch {
+              // The stream is already torn down; the failure is logged above.
+            }
           }
         } finally {
           requestSignal.removeEventListener('abort', abortUpstream)
           if (!cancelled) {
-            controller.close()
+            try {
+              controller.close()
+            } catch {
+              // Closing an already-errored stream is a no-op for the client.
+            }
           }
         }
       },
@@ -910,6 +952,14 @@ function bearerAuthorizationMatches(authorization: string, token: string): boole
   const actualBytes = Buffer.from(authorization)
   const expectedBytes = Buffer.from(`Bearer ${token}`)
   return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function isLoopbackHostname(hostname: string): boolean {

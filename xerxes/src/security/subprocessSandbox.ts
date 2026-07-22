@@ -10,6 +10,12 @@ import type { SandboxBackend, SandboxExecutionRequest } from './sandbox.js'
 
 const DEFAULT_MAX_OUTPUT_CHARS = 20_000
 const DEFAULT_MAX_TIMEOUT_MS = 30_000
+/**
+ * Largest delay `setTimeout` accepts: 2**31 - 1. Larger delays overflow the
+ * engine's signed 32-bit timer and fire after ~1ms, which would instantly
+ * "time out" and kill every child process, so `maxTimeoutMs` is clamped here.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 const MAX_ARGUMENT_BYTES = 64 * 1024
 const MAX_OUTPUT_CHARS = 1_000_000
 const SAFE_PARENT_ENVIRONMENT_NAMES = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM'] as const
@@ -28,7 +34,10 @@ export interface SubprocessSandboxBackendOptions {
   readonly memoryLimitMb?: number
   /** Maximum response characters retained across each stdout/stderr stream. */
   readonly maxOutputChars?: number
-  /** Hard wall-clock cap for every child process, in milliseconds. */
+  /**
+   * Hard wall-clock cap for every child process, in milliseconds. Values above
+   * 2_147_483_647 are clamped because `setTimeout` overflows larger delays to ~1ms.
+   */
   readonly maxTimeoutMs?: number
   /** Metadata only: a subprocess backend cannot enforce network isolation by itself. */
   readonly networkAccessRequested?: boolean
@@ -123,10 +132,13 @@ export class SubprocessSandboxBackend implements SandboxBackend {
       'maxOutputChars',
       MAX_OUTPUT_CHARS,
     )
-    this.maxTimeoutMs = normalizePositiveInteger(
-      options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS,
-      'maxTimeoutMs',
-      Number.MAX_SAFE_INTEGER,
+    this.maxTimeoutMs = Math.min(
+      normalizePositiveInteger(
+        options.maxTimeoutMs ?? DEFAULT_MAX_TIMEOUT_MS,
+        'maxTimeoutMs',
+        Number.MAX_SAFE_INTEGER,
+      ),
+      MAX_TIMER_DELAY_MS,
     )
     this.memoryLimitMb = normalizeOptionalPositiveInteger(options.memoryLimitMb, 'memoryLimitMb')
     this.networkAccessRequested = options.networkAccessRequested ?? false
@@ -232,6 +244,12 @@ export class SubprocessSandboxBackend implements SandboxBackend {
     let timedOut = false
     const abort = () => controller.abort(request.signal?.reason)
     request.signal?.addEventListener('abort', abort, { once: true })
+    // The signal may have fired between the pre-flight check in execute() and the
+    // listener registration above (resolveCwd awaits in between); re-check so the
+    // abort is never lost and the child does not run to the full timeout.
+    if (request.signal?.aborted) {
+      abort()
+    }
     const timer = setTimeout(() => {
       timedOut = true
       controller.abort(new Error(`Sandbox timeout after ${invocation.timeoutMs}ms`))

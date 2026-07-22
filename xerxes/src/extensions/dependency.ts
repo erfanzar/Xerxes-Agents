@@ -23,7 +23,7 @@ export class CircularDependencyError extends Error {
 
 /** Small semver-like constraint evaluator used for plugin compatibility checks. */
 export class VersionConstraint {
-  private readonly constraints: Array<{ readonly operator: string; readonly parts: number; readonly target: readonly number[] }> = []
+  private readonly constraints: Array<{ readonly operator: string; readonly parts: number; readonly target: readonly number[] | undefined }> = []
 
   constructor(readonly raw: string) {
     for (const rawPart of raw.split(',')) {
@@ -32,17 +32,26 @@ export class VersionConstraint {
       const matched = /^(~=|==|!=|>=|<=|>|<)\s*(.+)$/.exec(part)
       const operator = matched?.[1] ?? '=='
       const version = matched?.[2] ?? part
-      const unpadded = parseVersion(version, false)
-      this.constraints.push({ operator, target: padVersion(unpadded), parts: unpadded.length })
+      const unpadded = parseVersion(version)
+      this.constraints.push({
+        operator,
+        target: unpadded === undefined ? undefined : padVersion(unpadded),
+        parts: unpadded?.length ?? 0,
+      })
     }
   }
 
   satisfies(version: string): boolean {
-    const actual = padVersion(parseVersion(version, false))
+    const parsed = parseVersion(version)
+    const actual = parsed === undefined ? undefined : padVersion(parsed)
     return this.constraints.every(constraint => this.check(constraint.operator, actual, constraint.target, constraint.parts))
   }
 
-  private check(operator: string, actual: readonly number[], target: readonly number[], rawParts: number): boolean {
+  private check(operator: string, actual: readonly number[] | undefined, target: readonly number[] | undefined, rawParts: number): boolean {
+    if (actual === undefined || target === undefined) {
+      // Non-semver input is rejected instead of truncated: only an inequality can hold for it.
+      return operator === '!='
+    }
     const comparison = compareVersions(actual, target)
     switch (operator) {
       case '==': return comparison === 0
@@ -125,11 +134,9 @@ function padVersion(parts: readonly number[]): number[] {
   return [...parts, ...Array(Math.max(0, 3 - parts.length)).fill(0)]
 }
 
-function parseVersion(value: string, pad: boolean): number[] {
-  const parts: number[] = []
-  for (const raw of value.trim().split('.')) {
-    if (!/^\d+$/.test(raw)) break
-    parts.push(Number(raw))
-  }
-  return pad ? padVersion(parts) : parts
+/** Parse a strict numeric dotted version; reject prerelease/build or otherwise non-semver strings. */
+function parseVersion(value: string): number[] | undefined {
+  const trimmed = value.trim()
+  if (!/^\d+(?:\.\d+)*$/.test(trimmed)) return undefined
+  return trimmed.split('.').map(Number)
 }

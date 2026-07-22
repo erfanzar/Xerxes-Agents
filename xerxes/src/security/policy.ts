@@ -14,11 +14,14 @@ export const PolicyAction = {
 export type PolicyAction = (typeof PolicyAction)[keyof typeof PolicyAction]
 
 export interface ToolPolicyOptions {
-  /** Explicit allow-list. A non-empty list denies every omitted tool. */
+  /** Explicit allow-list. A non-empty list denies every omitted tool. Deny entries always win over allow entries. */
   readonly allow?: Iterable<string>
-  /** Tools denied when no explicit allow-list is active. */
+  /** Tools denied unconditionally: deny wins regardless of allow-list state. */
   readonly deny?: Iterable<string>
-  /** Existing tools which remain unavailable until explicitly allow-listed. */
+  /**
+   * Existing tools which remain unavailable until explicitly allow-listed.
+   * An explicit allow entry re-enables an optional tool; a deny entry still wins.
+   */
   readonly optionalTools?: Iterable<string>
 }
 
@@ -34,13 +37,16 @@ export class ToolPolicy {
     this.optionalTools = normalizeNames(options.optionalTools)
   }
 
-  /** Evaluate a tool name against this policy. */
+  /** Evaluate a tool name against this policy. Deny is evaluated first and always wins. */
   evaluate(toolName: string): PolicyAction {
     const normalized = normalizeName(toolName)
+    if (this.deny.has(normalized)) {
+      return PolicyAction.DENY
+    }
     if (this.allow.size > 0) {
       return this.allow.has(normalized) ? PolicyAction.ALLOW : PolicyAction.DENY
     }
-    if (this.deny.has(normalized) || this.optionalTools.has(normalized)) {
+    if (this.optionalTools.has(normalized)) {
       return PolicyAction.DENY
     }
     return PolicyAction.ALLOW

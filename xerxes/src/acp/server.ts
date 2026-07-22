@@ -71,6 +71,7 @@ export class AcpServer {
 
   private readonly modelListProvider: () => readonly AcpModelInfo[]
   private readonly onSessionClose: ((sessionId: string) => void) | undefined
+  private readonly promptChains = new Map<string, Promise<unknown>>()
   private readonly releasedSessions = new Set<string>()
   private readonly promptHandler: AcpPromptHandler
   private readonly runner: AcpPromptRunner | undefined
@@ -133,7 +134,8 @@ export class AcpServer {
     const cancelled = this.sessions.cancel(sessionId)
     if (cancelled) {
       this.runner?.cancel(sessionId)
-      this.releaseSession(sessionId)
+      // Cancellation does not close the session: it stays in the store and
+      // remains promptable, so onSessionClose must not fire here.
     }
     return { ok: cancelled }
   }
@@ -159,9 +161,20 @@ export class AcpServer {
     if (!session) {
       return { error: `unknown session: ${sessionId}` }
     }
-    return emit === undefined
+    // Serialize prompts per session: a bare promptHandler has no active-turn
+    // guard of its own, so concurrent prompts for one session must queue.
+    const previous = this.promptChains.get(sessionId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(() => emit === undefined
       ? this.promptHandler({ session, text })
-      : this.promptHandler({ session, text, emit })
+      : this.promptHandler({ session, text, emit }))
+    this.promptChains.set(sessionId, run)
+    try {
+      return await run
+    } finally {
+      if (this.promptChains.get(sessionId) === run) {
+        this.promptChains.delete(sessionId)
+      }
+    }
   }
 
   streamEvent(event: StreamEvent | unknown): AcpWireEvent {

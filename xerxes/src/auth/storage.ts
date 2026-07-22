@@ -32,6 +32,24 @@ interface EncryptedCredential {
 }
 
 /**
+ * Raised when an encrypted credential cannot be authenticated or decrypted.
+ *
+ * A GCM auth-tag failure means the on-disk record was tampered with or the
+ * configured key changed. This must never be collapsed into "not logged in",
+ * because that would silently destroy the evidence of a modified credential.
+ */
+export class CredentialTamperedError extends Error {
+  constructor(
+    readonly provider: string,
+    message: string,
+    options?: { readonly cause?: unknown },
+  ) {
+    super(message, options)
+    this.name = 'CredentialTamperedError'
+  }
+}
+
+/**
  * Encrypted filesystem-backed OAuth token store.
  *
  * Each credential is encrypted with AES-256-GCM and atomically replaced from a
@@ -83,17 +101,43 @@ export class CredentialStorage {
       throw error
     }
 
+    // Structurally unparseable records mean "no usable credential", nothing more.
+    let parsed: unknown
     try {
-      const parsed = JSON.parse(raw) as unknown
-      if (!isEncryptedCredential(parsed)) {
-        // Read legacy plaintext records so users can upgrade without losing tokens.
-        return OAuthToken.fromRecord(parsed)
-      }
-      const key = await this.encryptionKey()
-      const plain = decrypt(normalizedProvider, parsed, key)
-      return OAuthToken.fromRecord(JSON.parse(plain.toString('utf8')) as unknown)
+      parsed = JSON.parse(raw)
     } catch {
       return undefined
+    }
+    if (!isEncryptedCredential(parsed)) {
+      // A record carrying any envelope marker but failing validation is a damaged
+      // encrypted credential, not a legacy plaintext one.
+      if (isRecord(parsed) && ('algorithm' in parsed || 'ciphertext' in parsed || 'iv' in parsed || 'tag' in parsed)) {
+        throw new CredentialTamperedError(
+          normalizedProvider,
+          `Credential for provider "${normalizedProvider}" is a structurally invalid encrypted record; refusing to trust it`,
+        )
+      }
+      let legacy: OAuthToken
+      try {
+        legacy = OAuthToken.fromRecord(parsed)
+      } catch {
+        return undefined
+      }
+      // Migrate-on-read: immediately re-encrypt through the normal save path so a
+      // plaintext record is never trusted (or left readable) beyond a single load.
+      await this.save(normalizedProvider, legacy)
+      return legacy
+    }
+    const key = await this.encryptionKey()
+    try {
+      const plain = decrypt(normalizedProvider, parsed, key)
+      return OAuthToken.fromRecord(JSON.parse(plain.toString('utf8')) as unknown)
+    } catch (error) {
+      throw new CredentialTamperedError(
+        normalizedProvider,
+        `Credential for provider "${normalizedProvider}" failed authentication/decryption; the record may be tampered with or the encryption key changed`,
+        { cause: error },
+      )
     }
   }
 

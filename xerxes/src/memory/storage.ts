@@ -3,8 +3,17 @@
 
 import { Database } from 'bun:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 
 import { cosineSimilarity, getDefaultEmbedder, type Embedder } from './embedders.js'
 
@@ -130,31 +139,40 @@ export class NamespacedStorage implements MemoryStorage {
 
 /** JSON-file key/value backend whose hashed filenames prevent key-path traversal. */
 export class FileStorage implements MemoryStorage {
+  readonly directory: string
   private readonly indexFile: string
   private index: Record<string, string>
+  /** Keys this instance removed since it last read the on-disk index. */
+  private readonly removed = new Set<string>()
 
-  constructor(readonly directory = '.xerxes_memory') {
-    mkdirSync(directory, { recursive: true })
-    this.indexFile = join(directory, '_index.json')
+  constructor(directory = '.xerxes_memory') {
+    // Normalize once so every later join/slice operates on the same canonical
+    // prefix; a raw './mem' or 'mem/' would desynchronize index paths.
+    this.directory = resolve(directory)
+    mkdirSync(this.directory, { recursive: true })
+    this.indexFile = join(this.directory, '_index.json')
     this.index = this.readIndex()
   }
 
   clear(): number {
-    const keys = Object.keys(this.index)
-    for (const key of keys) {
-      const file = this.pathForKey(key)
+    const entries = Object.entries(this.index)
+    for (const [key, filename] of entries) {
+      const file = join(this.directory, filename)
       if (existsSync(file)) unlinkSync(file)
+      this.removed.add(key)
     }
     this.index = {}
     this.writeIndex()
-    return keys.length
+    return entries.length
   }
 
   delete(key: string): boolean {
-    if (!(key in this.index)) return false
-    const file = this.pathForKey(key)
+    const filename = this.index[key]
+    if (!filename) return false
+    const file = join(this.directory, filename)
     if (existsSync(file)) unlinkSync(file)
     delete this.index[key]
+    this.removed.add(key)
     this.writeIndex()
     return true
   }
@@ -182,12 +200,20 @@ export class FileStorage implements MemoryStorage {
   }
 
   save(key: string, data: unknown): boolean {
-    const path = this.pathForKey(key)
+    // Store the plain basename (`<md5>.json`) rather than slicing the joined
+    // path by the raw directory length, which corrupted filenames whenever
+    // the constructor received a non-normalized directory. Indexes written
+    // before this fix already hold basenames for healthy directories, so the
+    // on-disk format is unchanged; mangled legacy entries simply miss on
+    // load exactly as they did before.
+    const filename = this.fileNameForKey(key)
+    const path = join(this.directory, filename)
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
     try {
       writeFileSync(temporary, JSON.stringify(data), 'utf8')
       renameSync(temporary, path)
-      this.index[key] = path.slice(this.directory.length + 1)
+      this.index[key] = filename
+      this.removed.delete(key)
       this.writeIndex()
       return true
     } catch {
@@ -204,28 +230,65 @@ export class FileStorage implements MemoryStorage {
     return false
   }
 
-  private pathForKey(key: string): string {
+  private fileNameForKey(key: string): string {
     const hash = createHash('md5').update(key).digest('hex')
-    return join(this.directory, `${hash}.json`)
+    return `${hash}.json`
   }
 
   private readIndex(): Record<string, string> {
     if (!existsSync(this.indexFile)) return {}
+    const parsed = this.readIndexFile()
+    if (parsed) return parsed
+    // The index is corrupt or wrong-shaped. Back it up instead of silently
+    // discarding it, then rebuild by scanning data files. Original keys are
+    // unrecoverable (filenames are one-way md5 hashes), so recovered records
+    // are exposed under their hash stem: they stay loadable, listable, and
+    // deletable by clear() instead of being orphaned.
+    const backup = `${this.indexFile}.corrupt-${Date.now()}`
+    try {
+      renameSync(this.indexFile, backup)
+      console.warn(`Backed up corrupt memory index to ${backup}; rebuilding from data files.`)
+    } catch (error) {
+      console.warn('Could not back up corrupt memory index:', error)
+    }
+    return this.rebuildIndex()
+  }
+
+  private readIndexFile(): Record<string, string> | undefined {
     try {
       const parsed = JSON.parse(readFileSync(this.indexFile, 'utf8')) as unknown
       return isRecord(parsed) && Object.values(parsed).every(value => typeof value === 'string')
         ? parsed as Record<string, string>
-        : {}
+        : undefined
     } catch {
-      return {}
+      return undefined
     }
   }
 
+  private rebuildIndex(): Record<string, string> {
+    const rebuilt: Record<string, string> = {}
+    for (const entry of readdirSync(this.directory)) {
+      if (!/^[0-9a-f]{32}\.json$/.test(entry)) continue
+      rebuilt[entry.slice(0, -'.json'.length)] = entry
+    }
+    return rebuilt
+  }
+
   private writeIndex(): void {
+    // Re-read and merge the on-disk index so two FileStorage instances
+    // sharing one directory do not orphan each other's data files: the disk
+    // copy contributes keys this instance never saw, this instance's entries
+    // win for keys it wrote, and keys it deleted stay deleted.
+    const disk = existsSync(this.indexFile) ? this.readIndexFile() : undefined
+    const merged: Record<string, string> = { ...disk, ...this.index }
+    for (const key of this.removed) delete merged[key]
     const temporary = `${this.indexFile}.${process.pid}.${randomUUID()}.tmp`
     try {
-      writeFileSync(temporary, JSON.stringify(this.index), 'utf8')
+      writeFileSync(temporary, JSON.stringify(merged), 'utf8')
       renameSync(temporary, this.indexFile)
+      // Deletions are durable now; drop the tombstones so a key legitimately
+      // rewritten by another instance is not suppressed forever.
+      this.removed.clear()
     } catch (error) {
       rmSync(temporary, { force: true })
       throw error
@@ -237,6 +300,33 @@ export interface SQLiteStorageOptions {
   readonly dbPath?: string
   readonly writeEnabled?: boolean
 }
+
+interface SQLiteMigration {
+  readonly version: number
+  readonly apply: (database: Database) => void
+}
+
+/**
+ * Ordered additive schema migrations tracked through `PRAGMA user_version`.
+ * v1 is the original memory-table schema; append new migrations with higher
+ * versions instead of editing shipped ones.
+ */
+const SQLITE_MIGRATIONS: readonly SQLiteMigration[] = [
+  {
+    version: 1,
+    apply: database => {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS memory (
+          key TEXT PRIMARY KEY,
+          data TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+      `)
+      database.run('CREATE INDEX IF NOT EXISTS idx_memory_created_at ON memory(created_at)')
+    },
+  },
+]
 
 /** Bun SQLite backend retaining Xerxes' optional WRITE_MEMORY persistence switch. */
 export class SQLiteStorage implements MemoryStorage {
@@ -251,15 +341,7 @@ export class SQLiteStorage implements MemoryStorage {
     if (!this.writeEnabled) return
     mkdirSync(dirname(this.dbPath), { recursive: true })
     this.database = new Database(this.dbPath)
-    this.database.run(`
-      CREATE TABLE IF NOT EXISTS memory (
-        key TEXT PRIMARY KEY,
-        data TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `)
-    this.database.run('CREATE INDEX IF NOT EXISTS idx_memory_created_at ON memory(created_at)')
+    migrateSQLiteSchema(this.database)
   }
 
   clear(): number {
@@ -295,7 +377,12 @@ export class SQLiteStorage implements MemoryStorage {
     if (!this.database) return this.fallback.load(key)
     const row = this.database.query('SELECT data FROM memory WHERE key = ?').get(key) as { data?: unknown } | null
     if (!row || typeof row.data !== 'string') return undefined
-    return JSON.parse(row.data) as unknown
+    try {
+      return JSON.parse(row.data) as unknown
+    } catch (error) {
+      console.warn(`Skipping corrupt memory record ${key}:`, error)
+      return undefined
+    }
   }
 
   save(key: string, data: unknown): boolean {
@@ -399,6 +486,18 @@ export class RAGStorage implements MemoryStorage {
       if (!Array.isArray(vector) || !vector.every(value => typeof value === 'number')) continue
       this.embeddings.set(key.slice(RAGStorage.embeddingKeyPrefix.length), [...vector])
     }
+  }
+}
+
+function migrateSQLiteSchema(database: Database): void {
+  const row = database.query('PRAGMA user_version').get() as { user_version?: unknown } | null
+  const current = typeof row?.user_version === 'number' ? row.user_version : 0
+  for (const migration of [...SQLITE_MIGRATIONS].sort((left, right) => left.version - right.version)) {
+    if (migration.version <= current) continue
+    migration.apply(database)
+    // PRAGMA statements do not accept bind parameters; versions are integer
+    // literals defined in this module, so interpolation is safe.
+    database.run(`PRAGMA user_version = ${migration.version}`)
   }
 }
 

@@ -2,10 +2,14 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, writeFile } from 'node:fs/promises'
+import { type FileHandle, mkdir, open, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import { ContextCompressor, type ContextMessage } from '../context/compressor.js'
+import { redactPayload } from '../security/redact.js'
+
+/** Output trajectories contain full message/tool content; keep them owner-only. */
+const TRAJECTORY_FILE_MODE = 0o600
 
 export interface Trajectory {
   readonly id?: string
@@ -77,36 +81,65 @@ export class TrajectoryCompressor {
     }
   }
 
+  /**
+   * Stream trajectories through a bounded worker pool.
+   *
+   * Input is consumed lazily and each compressed trajectory is appended (owner-only
+   * file, fsync per record) as soon as it finishes, so memory stays bounded and a
+   * late failure cannot discard already-processed work. Messages are redacted
+   * before they reach the training corpus.
+   */
   async run(trajectories: Iterable<Trajectory> | AsyncIterable<Trajectory>, options: TrajectoryRunOptions = {}): Promise<CompressionRun> {
     const done = new Set(options.alreadyDone ?? [])
-    const pending: Array<{ readonly id: string; readonly trajectory: Trajectory }> = []
-    let skipped = 0
-    for await (const trajectory of trajectories) {
-      const id = trajectory.id ?? trajectoryHash(trajectory)
-      if (done.has(id)) {
-        skipped += 1
-        continue
-      }
-      pending.push({ id, trajectory })
-    }
-    const results = await mapConcurrent(pending, this.workers, async item => {
-      try {
-        return { id: item.id, value: this.compressOne(item.trajectory) }
-      } catch (error) {
-        return { id: item.id, error: error instanceof Error ? error.message : String(error) }
-      }
-    })
     const metrics: TrajectoryMetrics[] = []
-    const outputs: Record<string, unknown>[] = []
     const errors: Array<{ trajectoryId: string; error: string }> = []
-    for (const result of results) {
-      if ('error' in result) errors.push({ trajectoryId: result.id, error: result.error })
-      else {
-        metrics.push(result.value.metrics)
-        outputs.push(result.value.trajectory)
-      }
+    let skipped = 0
+    let handle: FileHandle | undefined
+    if (options.outPath) {
+      await mkdir(dirname(options.outPath), { recursive: true })
+      handle = await open(options.outPath, 'a', TRAJECTORY_FILE_MODE)
     }
-    if (options.outPath && outputs.length) await appendFile(options.outPath, outputs.map(output => `${JSON.stringify(output)}\n`).join(''), 'utf8')
+    let writeChain: Promise<unknown> = Promise.resolve()
+    const appendOutput = (line: string): void => {
+      if (handle === undefined) return
+      const target = handle
+      writeChain = writeChain.then(async () => {
+        await target.write(line)
+        await target.sync()
+      })
+    }
+    try {
+      const iterator = toAsyncIterator(trajectories)
+      let pullChain: Promise<unknown> = Promise.resolve()
+      const pull = (): Promise<IteratorResult<Trajectory>> => {
+        const result = pullChain.then(() => iterator.next())
+        pullChain = result.catch(() => undefined)
+        return result
+      }
+      const worker = async (): Promise<void> => {
+        while (true) {
+          const next = await pull()
+          if (next.done === true) return
+          const trajectory = next.value
+          const id = trajectory.id ?? trajectoryHash(trajectory)
+          if (done.has(id)) {
+            skipped += 1
+            continue
+          }
+          try {
+            const value = this.compressOne(trajectory)
+            metrics.push(value.metrics)
+            appendOutput(`${JSON.stringify({ ...value.trajectory, messages: redactPayload(value.trajectory.messages) })}\n`)
+          } catch (error) {
+            errors.push({ trajectoryId: id, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.max(1, this.workers) }, () => worker()))
+    } finally {
+      await writeChain
+      await handle?.close()
+    }
     if (options.metricsPath) {
       await mkdir(dirname(options.metricsPath), { recursive: true })
       await writeFile(options.metricsPath, `${JSON.stringify(metrics, null, 2)}\n`, 'utf8')
@@ -116,20 +149,13 @@ export class TrajectoryCompressor {
 }
 
 export function trajectoryHash(trajectory: Pick<Trajectory, 'messages'>): string {
-  return createHash('sha1').update(JSON.stringify(trajectory.messages)).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify(trajectory.messages)).digest('hex')
 }
 
-async function mapConcurrent<T, R>(items: readonly T[], workers: number, work: (item: T) => Promise<R>): Promise<R[]> {
-  const results = Array<R>(items.length)
-  let next = 0
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, workers), items.length) }, async () => {
-    while (true) {
-      const index = next
-      next += 1
-      const item = items[index]
-      if (item === undefined) return
-      results[index] = await work(item)
-    }
-  }))
-  return results
+function toAsyncIterator<T>(source: Iterable<T> | AsyncIterable<T>): AsyncIterator<T> {
+  if (Symbol.asyncIterator in source) {
+    return (source as AsyncIterable<T>)[Symbol.asyncIterator]()
+  }
+  const iterator = (source as Iterable<T>)[Symbol.iterator]()
+  return { next: () => Promise.resolve(iterator.next()) }
 }

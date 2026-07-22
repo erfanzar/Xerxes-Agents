@@ -82,6 +82,28 @@ test('Mistral preserves provider IDs and raw parser calls normalize to runtime T
   ])
 })
 
+test('identical raw-text calls in one batch get unique suffixed fallback IDs', () => {
+  const normalized = normalizeParsedToolCalls([
+    { name: 'List', arguments: { path: '.' }, rawId: '' },
+    { name: 'List', arguments: { path: '.' }, rawId: '' },
+    { name: 'List', arguments: { path: '.' }, rawId: '' },
+    { name: 'Read', arguments: { path: 'a.txt' }, rawId: 'provider-1' },
+  ])
+  const baseId = deterministicToolCallId('List', { path: '.' })
+
+  expect(normalized.map(call => call.id)).toEqual([
+    baseId,
+    `${baseId}#2`,
+    `${baseId}#3`,
+    'provider-1',
+  ])
+  expect(new Set(normalized.map(call => call.id)).size).toBe(4)
+
+  // Occurrence suffixing is scoped to one batch, keeping replays stable.
+  expect(normalizeParsedToolCalls([{ name: 'List', arguments: { path: '.' }, rawId: '' }])[0]?.id)
+    .toBe(baseId)
+})
+
 test('partial model output stays inert while invalid normalized calls fail explicitly', () => {
   expect(parseMistralToolCalls('[TOOL_CALLS][{"name":"unfinished"')).toEqual([])
   expect(() => parseToolCallBlocks(null as unknown as string, '<tool_call>', '</tool_call>'))

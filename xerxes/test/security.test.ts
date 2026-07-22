@@ -22,13 +22,14 @@ async function inTemporaryDirectory(run: (directory: string) => Promise<void>): 
   }
 }
 
-test('tool policy uses case-insensitive allow-list precedence and agent overrides', () => {
+test('tool policy uses case-insensitive deny-wins precedence and agent overrides', () => {
   const policy = new ToolPolicy({
     allow: ['Search', 'dangerous_tool'],
     deny: ['search'],
     optionalTools: ['dangerous_tool'],
   })
-  expect(policy.evaluate('search')).toBe(PolicyAction.ALLOW)
+  expect(policy.evaluate('search')).toBe(PolicyAction.DENY)
+  expect(policy.evaluate('dangerous_tool')).toBe(PolicyAction.ALLOW)
   expect(policy.evaluate('unlisted')).toBe(PolicyAction.DENY)
   expect(new ToolPolicy({ optionalTools: ['dangerous_tool'] }).evaluate('dangerous_tool')).toBe(PolicyAction.DENY)
 

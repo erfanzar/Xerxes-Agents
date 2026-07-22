@@ -10,6 +10,7 @@ import {
   type Skill,
 } from '../extensions/skills.js'
 import { RepoMapper } from '../context/repoMap.js'
+import { scanContextContent } from '../security/promptScanner.js'
 import { SandboxMode, type SandboxConfig } from '../security/sandbox.js'
 import {
   PromptProfile,
@@ -301,7 +302,7 @@ export class PromptContextBuilder {
       )
       const lines = snippets
         .slice(0, profile.maxMemoriesInjected)
-        .map((snippet) => snippet.trim().replaceAll(/\s*\n\s*/g, ' '))
+        .map((snippet) => sanitizeStoredContext(snippet, 'relevant memory', true))
         .filter(Boolean)
         .map((snippet) => '  - ' + snippet)
       return lines.length
@@ -331,7 +332,11 @@ export class PromptContextBuilder {
   ): Promise<string> {
     if (!this.userProfileProvider) return ''
     try {
-      const text = (await this.userProfileProvider(agentId)).trim()
+      const text = sanitizeStoredContext(
+        await this.userProfileProvider(agentId),
+        'user profile',
+        false,
+      )
       return text ? '[User Profile]\n' + text + '\n' : ''
     } catch {
       return ''
@@ -662,6 +667,28 @@ function flattenHookStrings(value: unknown): string[] {
 
 function trimSection(value: string): string {
   return value.trim()
+}
+
+/**
+ * Character ceiling for each untrusted stored snippet (memory hit, user
+ * profile) injected into the system prompt. `maxMemoriesInjected` bounds the
+ * count; this bounds each entry so stored content cannot grow the prompt
+ * without limit.
+ */
+const MAX_STORED_SNIPPET_LENGTH = 1_000
+
+/**
+ * Neutralize untrusted stored text before it enters the system prompt:
+ * hostile instruction spans become inert scanner markers and every snippet is
+ * length-capped. Newlines are collapsed only where the section renders one
+ * line per entry (memories); the user profile keeps its line structure.
+ */
+function sanitizeStoredContext(value: string, label: string, singleLine: boolean): string {
+  const scanned = scanContextContent(value, label)
+  const normalized = singleLine
+    ? scanned.trim().replaceAll(/\s*\n\s*/g, ' ')
+    : scanned.trim()
+  return truncate(normalized, MAX_STORED_SNIPPET_LENGTH)
 }
 
 function truncate(value: string, maximum: number | undefined): string {

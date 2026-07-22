@@ -204,7 +204,7 @@ export class UniversalAgent implements CortexAgent {
       ...(this.permissionBroker === undefined ? {} : { permissionBroker: this.permissionBroker }),
       ...(this.policy === undefined ? {} : { policy: this.policy }),
       ...(this.toolExecutor === undefined ? {} : { toolExecutor: this.toolExecutor }),
-    })) {
+    }, context.signal)) {
       if (event.type === 'text') {
         output.push(event.text)
       } else if (event.type === 'provider_retry' && event.final) {
@@ -232,17 +232,21 @@ export class UniversalAgent implements CortexAgent {
       toolFailures,
       deniedToolCalls,
     }
-    this.memory?.saveTaskResult({
-      taskDescription: context.task.description,
-      result: text,
-      agentRole: this.role,
-      ...(context.task.importance === undefined ? {} : { importance: context.task.importance }),
-      metadata: {
-        task_id: context.task.id,
-        expected_output: context.task.expectedOutput,
-        ...metadata,
-      },
-    })
+    try {
+      this.memory?.saveTaskResult({
+        taskDescription: context.task.description,
+        result: text,
+        agentRole: this.role,
+        ...(context.task.importance === undefined ? {} : { importance: context.task.importance }),
+        metadata: {
+          task_id: context.task.id,
+          expected_output: context.task.expectedOutput,
+          ...metadata,
+        },
+      })
+    } catch {
+      // Memory persistence is non-critical; a throwing tier must not fail an otherwise successful task.
+    }
     return { output: text, metadata: { ...metadata } }
   }
 

@@ -165,3 +165,34 @@ Missing dependencies.`, '/workspace/skills/dependent/SKILL.md'))
   } satisfies Partial<RuntimeExtensionDependencyError>)
   expect(hooks.hasHooks('on_turn_start')).toBeFalse()
 })
+
+test('per-agent policy overrides cannot re-enable high-power operator tools when power tools are disabled', async () => {
+  const disabled = await composeRuntimeFeatures({
+    discoverConventionalExtensions: false,
+    operator: createOperatorRuntimeConfig({ enabled: true, powerToolsEnabled: false }),
+    agentOverrides: {
+      worker: { policy: new ToolPolicy({}) },
+    },
+  })
+  try {
+    expect(disabled.policyEngine.check('exec_command')).toBe(PolicyAction.DENY)
+    expect(disabled.policyEngine.check('exec_command', 'worker')).toBe(PolicyAction.DENY)
+    expect(disabled.policyEngine.check('apply_patch', 'worker')).toBe(PolicyAction.DENY)
+  } finally {
+    await disabled.close()
+  }
+
+  const enabled = await composeRuntimeFeatures({
+    discoverConventionalExtensions: false,
+    operator: createOperatorRuntimeConfig({ enabled: true, powerToolsEnabled: true }),
+    agentOverrides: {
+      worker: { policy: new ToolPolicy({}) },
+    },
+  })
+  try {
+    expect(enabled.policyEngine.check('exec_command')).toBe(PolicyAction.ALLOW)
+    expect(enabled.policyEngine.check('exec_command', 'worker')).toBe(PolicyAction.ALLOW)
+  } finally {
+    await enabled.close()
+  }
+})

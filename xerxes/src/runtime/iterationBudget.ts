@@ -97,6 +97,15 @@ function normalizeMaximum(value: number | null | undefined): number | undefined 
   return value
 }
 
+/**
+ * Parse a configured iteration ceiling.
+ *
+ * Absent values (undefined/null/empty string) mean "not configured" and fall
+ * back to the environment or an unbounded budget. A present-but-invalid value
+ * (non-numeric text, zero, negative, non-integer) is a configuration error:
+ * silently treating a typo as unbounded would disable the budget the operator
+ * asked for, so it throws instead.
+ */
 function parsePositiveMaximum(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined
   const parsed = typeof value === 'number'
@@ -104,7 +113,11 @@ function parsePositiveMaximum(value: unknown): number | undefined {
     : typeof value === 'string' && /^[-+]?\d+$/.test(value.trim())
       ? Number(value)
       : Number.NaN
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new RangeError(
+      'iteration budget maximum must be a positive safe integer; got ' + JSON.stringify(value),
+    )
+  }
   return parsed
 }
 

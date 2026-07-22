@@ -150,6 +150,7 @@ class FakeCdpConnection implements CdpConnection {
       case 'Target.attachToTarget':
         return { sessionId: 'session-1' }
       case 'Target.detachFromTarget':
+      case 'Target.closeTarget':
         return {}
       case 'Page.navigate':
         this.url = String(params?.url)
@@ -176,7 +177,7 @@ class FakeCdpConnection implements CdpConnection {
         },
       }
     }
-    if (expression.includes('matchAll')) {
+    if (expression.includes('new RegExp')) {
       return { result: { value: { ok: true, matchCount: 2, matches: ['Example', 'example'] } } }
     }
     return { result: { value: { ok: true } } }

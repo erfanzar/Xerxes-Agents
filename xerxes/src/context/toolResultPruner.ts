@@ -77,7 +77,10 @@ function truncateText(content: string, headLines: number, tailLines: number, max
   const lines = content.split(/\r?\n/)
   if (lines.length > headLines + tailLines) {
     const omitted = lines.length - headLines - tailLines
-    return `${lines.slice(0, headLines).join('\n')}\n\n[... ${omitted} lines omitted by pre-pruning ...]\n\n${lines.slice(-tailLines).join('\n')}`
+    const head = headLines > 0 ? lines.slice(0, headLines).join('\n') : ''
+    // slice(-0) === slice(0), so guard explicitly: a zero tail must not re-append every line.
+    const tail = tailLines > 0 ? lines.slice(-tailLines).join('\n') : ''
+    return [head, `[... ${omitted} lines omitted by pre-pruning ...]`, tail].filter(part => part.length > 0).join('\n\n')
   }
   const headCharacters = Math.max(1, Math.floor(maxChars / 2))
   const tailCharacters = Math.max(1, maxChars - headCharacters)

@@ -35,9 +35,9 @@ export interface TelegramChannelOptions {
   /** Enforce a fail-closed Telegram sender allowlist. */
   readonly requireAllowedSender?: boolean | string
   readonly token: string
-  /** Register this public callback URL when the channel starts in webhook mode. */
+  /** Register this public callback URL when the channel starts in webhook mode. Requires webhookSecretToken. */
   readonly webhookUrl?: string
-  /** Telegram's secret-token header required for webhook delivery when configured. */
+  /** Telegram's secret-token header; mandatory whenever webhookUrl is configured. */
   readonly webhookSecretToken?: string
 }
 
@@ -79,6 +79,11 @@ export class TelegramChannel extends WebhookChannel {
     this.requireAllowedSender = asBoolean(options.requireAllowedSender, false)
     this.webhookSecretToken = options.webhookSecretToken?.trim() ?? ''
     this.webhookUrl = options.webhookUrl?.trim() ?? ''
+    if (this.webhookUrl && !this.webhookSecretToken) {
+      throw new TypeError(
+        'Telegram webhookUrl requires webhookSecretToken so forged updates cannot reach agent sessions',
+      )
+    }
   }
 
   override async start(onInbound: import('./base.js').InboundHandler): Promise<void> {

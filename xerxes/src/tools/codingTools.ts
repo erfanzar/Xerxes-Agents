@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { cp, lstat, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises'
-import { basename, dirname, extname, relative, resolve, sep } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { ToolRegistry } from '../executors/toolRegistry.js'
@@ -26,6 +26,7 @@ const MAX_READ_FILE_BYTES = 10_000_000
 const MAX_DIFF_LINES = 1_000
 const MAX_DIFF_BYTES = 500_000
 const MAX_REGEX_SUBJECT_BYTES = 1_000_000
+const MAX_REGEX_PATTERN_CHARS = 256
 
 export const CODING_READ_FILE_DEFINITION = codingDefinition(
   'read_file',
@@ -176,7 +177,12 @@ export const FIND_AND_REPLACE_DEFINITION = codingDefinition(
     file_path: { type: 'string' },
     search: { type: 'string' },
     replace: { type: 'string' },
-    regex: { type: 'boolean', default: false },
+    regex: {
+      type: 'boolean',
+      default: false,
+      description: 'Treat search as a JavaScript regex. Nested or adjacent unbounded quantifiers '
+        + '(catastrophic-backtracking risk) and patterns over 256 characters are rejected.',
+    },
     case_sensitive: { type: 'boolean', default: true },
     backup: { type: 'boolean', default: true },
   },
@@ -312,7 +318,10 @@ export async function writeFile(inputs: JsonObject, paths: WorkspacePathResolver
   }
 
   const previous = exists ? await Bun.file(target).text() : ''
-  await Bun.write(target, content)
+  // Re-validate containment immediately before mutating; resolve() ran earlier
+  // and a swapped symlink could redirect the write (best-effort; see recheck).
+  const checkedTarget = await paths.recheck(target)
+  await Bun.write(checkedTarget, content)
   const relativePath = await paths.relative(target)
   const lineCount = content.length === 0 ? 0 : content.split('\n').length
   const summary = 'Successfully wrote ' + content.length + ' characters (' + lineCount + ' lines) to ' + relativePath
@@ -439,20 +448,23 @@ export async function moveFile(inputs: JsonObject, paths: WorkspacePathResolver)
     await rm(destinationPath, { force: true, recursive: true })
   }
   await mkdir(dirname(destinationPath), { recursive: true })
+  // Re-validate both endpoints immediately before the move (see recheck).
+  const checkedSource = await paths.recheck(sourcePath)
+  const checkedDestination = await paths.recheck(destinationPath)
   try {
-    await rename(sourcePath, destinationPath)
+    await rename(checkedSource, checkedDestination)
   } catch (error) {
     if (!isCrossDevice(error)) {
       throw error
     }
-    await cp(sourcePath, destinationPath, {
+    await cp(checkedSource, checkedDestination, {
       dereference: false,
       errorOnExist: true,
       force: false,
       preserveTimestamps: true,
       recursive: sourceInfo.isDirectory(),
     })
-    await rm(sourcePath, { force: true, recursive: sourceInfo.isDirectory() })
+    await rm(checkedSource, { force: true, recursive: sourceInfo.isDirectory() })
   }
   return 'Successfully moved ' + (await paths.relative(sourcePath)) + ' to ' + (await paths.relative(destinationPath))
 }
@@ -477,11 +489,13 @@ export async function deleteFile(inputs: JsonObject, paths: WorkspacePathResolve
       )
     }
   }
+  // Re-validate containment immediately before the destructive operation (see recheck).
+  const checkedTarget = await paths.recheck(target)
   if (targetInfo.isDirectory()) {
-    await rm(target, { force: false, recursive: true })
+    await rm(checkedTarget, { force: false, recursive: true })
     return 'Successfully deleted directory: ' + relativePath
   }
-  await unlink(target)
+  await unlink(checkedTarget)
   return 'Successfully deleted file: ' + relativePath
 }
 
@@ -528,12 +542,59 @@ export async function gitApplyPatch(inputs: JsonObject, paths: WorkspacePathReso
   const patch = requiredText(inputs, 'patch_content')
   const repo = await resolveRepository(inputs, paths)
   const checkOnly = optionalBoolean(inputs, 'check_only', false)
+  // The repo only passed a lexical resolve; a patch path beneath an in-repo
+  // symlink could write outside the workspace. Enumerate every file the patch
+  // touches and validate each through the symlink-aware workspace resolver
+  // before Git sees the patch.
+  for (const patchPath of extractPatchFilePaths(patch)) {
+    await paths.resolve(join(repo, patchPath))
+  }
   const arguments_ = ['apply']
   if (checkOnly) {
     arguments_.push('--check')
   }
   await runGit(repo, arguments_, patch)
   return checkOnly ? 'Patch can be applied cleanly' : 'Patch applied successfully'
+}
+
+/**
+ * Enumerate the file paths a unified patch touches, from its `---`/`+++`
+ * header pairs. A `---` line only counts as a header when the next line starts
+ * with `+++`, which can misread contrived hunk content as a header; that false
+ * positive only adds an extra containment check, never a bypass. C-quoted
+ * paths (special characters) are rejected because they cannot be validated
+ * unambiguously.
+ */
+function extractPatchFilePaths(patch: string): string[] {
+  const lines = patch.split('\n')
+  const result: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    const next = lines[index + 1] ?? ''
+    if (!line.startsWith('--- ') || !next.startsWith('+++ ')) {
+      continue
+    }
+    for (const raw of [line.slice(4), next.slice(4)]) {
+      // Strip a trailing timestamp tab, then the default a/ b/ prefix.
+      const withoutTimestamp = raw.split('\t')[0] ?? raw
+      if (withoutTimestamp.startsWith('"')) {
+        throw new ValidationError(
+          'patch_content',
+          'contains a quoted file path that cannot be containment-checked; apply it manually',
+          withoutTimestamp,
+        )
+      }
+      const name = withoutTimestamp.startsWith('a/') || withoutTimestamp.startsWith('b/')
+        ? withoutTimestamp.slice(2)
+        : withoutTimestamp
+      if (name === '/dev/null') {
+        continue
+      }
+      result.push(name)
+    }
+    index += 1
+  }
+  return result
 }
 
 /** Return bounded Git history from a workspace-contained repository. */
@@ -1051,6 +1112,7 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
         search,
       )
     }
+    assertSafeRegexPattern(search)
   }
 
   const content = await Bun.file(target).text()
@@ -1093,6 +1155,142 @@ export async function findAndReplace(inputs: JsonObject, paths: WorkspacePathRes
   }
   const backupMessage = backupPath === undefined ? '' : ' (backup saved as ' + basename(backupPath) + ')'
   return 'Replaced ' + count + ' occurrence(s) in ' + (await paths.relative(target)) + backupMessage
+}
+
+/**
+ * Best-effort rejection of catastrophic-backtracking regex shapes before the
+ * pattern runs synchronously on the daemon thread. A synchronous RegExp cannot
+ * be timed out, so this documented heuristic rejects:
+ *   1. patterns longer than MAX_REGEX_PATTERN_CHARS;
+ *   2. an unbounded quantifier (*, +, {n,}) applied to a group that already
+ *      contains a quantifier, e.g. (a+)+, (\w*)*, or (a?)+ (nested
+ *      quantifiers); bounded outer quantifiers such as (https?://)? stay legal; and
+ *   3. two adjacent unbounded wildcard quantifiers, e.g. .*.* or .+.* — the
+ *      dot matches anything, so the atoms always overlap.
+ * The heuristic is intentionally conservative and incomplete: overlapping
+ * character classes such as [a-z]+[a-z]+$ are not detected. Rejected patterns
+ * can be rewritten as a literal search or a more specific regex.
+ */
+function assertSafeRegexPattern(pattern: string): void {
+  if (pattern.length > MAX_REGEX_PATTERN_CHARS) {
+    throw new ValidationError(
+      'search',
+      'must be at most ' + MAX_REGEX_PATTERN_CHARS + ' characters in regex mode',
+      pattern,
+    )
+  }
+  const groupStack: boolean[] = []
+  let previousAtomDotUnbounded = false
+  let index = 0
+  const noteQuantifier = (): void => {
+    if (groupStack.length > 0) {
+      groupStack[groupStack.length - 1] = true
+    }
+  }
+  while (index < pattern.length) {
+    const char = pattern[index] ?? ''
+    if (char === '\\') {
+      index += 2
+      previousAtomDotUnbounded = false
+      const quantifier = readRegexQuantifier(pattern, index)
+      if (quantifier !== undefined) {
+        noteQuantifier()
+        index = quantifier.next
+      }
+      continue
+    }
+    if (char === '[') {
+      index = skipRegexCharacterClass(pattern, index)
+      previousAtomDotUnbounded = false
+      const quantifier = readRegexQuantifier(pattern, index)
+      if (quantifier !== undefined) {
+        noteQuantifier()
+        index = quantifier.next
+      }
+      continue
+    }
+    if (char === '(') {
+      groupStack.push(false)
+      previousAtomDotUnbounded = false
+      index += 1
+      continue
+    }
+    if (char === ')') {
+      const hadInnerQuantifier = groupStack.pop() ?? false
+      index += 1
+      const quantifier = readRegexQuantifier(pattern, index)
+      if (quantifier !== undefined) {
+        if (hadInnerQuantifier && quantifier.unbounded) {
+          throw new ValidationError(
+            'search',
+            'must not apply an unbounded quantifier to a group that already contains a quantifier'
+              + ' (catastrophic-backtracking risk)',
+            pattern,
+          )
+        }
+        noteQuantifier()
+        index = quantifier.next
+      }
+      previousAtomDotUnbounded = false
+      continue
+    }
+    const isDot = char === '.'
+    index += 1
+    const quantifier = readRegexQuantifier(pattern, index)
+    if (quantifier !== undefined) {
+      noteQuantifier()
+      if (isDot && quantifier.unbounded) {
+        if (previousAtomDotUnbounded) {
+          throw new ValidationError(
+            'search',
+            'must not place adjacent unbounded wildcard quantifiers (catastrophic-backtracking risk)',
+            pattern,
+          )
+        }
+        previousAtomDotUnbounded = true
+      } else {
+        previousAtomDotUnbounded = false
+      }
+      index = quantifier.next
+    } else {
+      previousAtomDotUnbounded = false
+    }
+  }
+}
+
+/** Read a `*`, `+`, `?`, or `{m,n}` quantifier at index, skipping a lazy `?` suffix. */
+function readRegexQuantifier(
+  pattern: string,
+  index: number,
+): { readonly next: number; readonly unbounded: boolean } | undefined {
+  const char = pattern[index]
+  if (char === '*' || char === '+') {
+    return { next: index + 1 + (pattern[index + 1] === '?' ? 1 : 0), unbounded: true }
+  }
+  if (char === '?') {
+    return { next: index + 1 + (pattern[index + 1] === '?' ? 1 : 0), unbounded: false }
+  }
+  if (char === '{') {
+    const match = /^\{(\d+)(?:,(\d*))?\}/.exec(pattern.slice(index))
+    if (match === null) {
+      return undefined
+    }
+    // {n} and {n,m} are bounded; {n,} is unbounded.
+    const unbounded = match[0].includes(',') && match[2] === ''
+    return { next: index + match[0].length + (pattern[index + match[0].length] === '?' ? 1 : 0), unbounded }
+  }
+  return undefined
+}
+
+/** Return the index just past the character class that opens at start. */
+function skipRegexCharacterClass(pattern: string, start: number): number {
+  let index = start + 1
+  if (pattern[index] === '^') index += 1
+  if (pattern[index] === ']') index += 1
+  while (index < pattern.length && pattern[index] !== ']') {
+    index += pattern[index] === '\\' ? 2 : 1
+  }
+  return Math.min(index + 1, pattern.length)
 }
 
 /** Analyze basic structural features of Python, JavaScript/TypeScript, Java, and common source files. */

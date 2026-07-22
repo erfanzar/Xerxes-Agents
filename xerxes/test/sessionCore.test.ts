@@ -19,6 +19,7 @@ import {
   SessionRecord,
   SessionSummarizer,
   SnapshotManager,
+  SQLITE_SESSION_SCHEMA_VERSION,
   SQLiteSessionStore,
   ToolCallRecord,
   TurnRecord,
@@ -101,7 +102,7 @@ test('SQLite store migrates old records once and preserves migration fields', ()
   }
 })
 
-test('SQLite session store persists, indexes turns, branches, and replays', () => {
+test('SQLite session store persists, indexes turns, branches, and replays', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-'))
   const database = join(directory, 'sessions.db')
   let store: SQLiteSessionStore | undefined
@@ -110,8 +111,8 @@ test('SQLite session store persists, indexes turns, branches, and replays', () =
     store = new SQLiteSessionStore({ dbPath: database })
     const manager = new SessionManager(store)
     const session = manager.startSession({ sessionId: 'root', workspaceId: 'workspace', agentId: 'coder' })
-    manager.recordTurn(session.sessionId, turn())
-    manager.recordAgentTransition(session.sessionId, new AgentTransitionRecord({
+    await manager.recordTurn(session.sessionId, turn())
+    await manager.recordAgentTransition(session.sessionId, new AgentTransitionRecord({
       fromAgent: 'coder',
       toAgent: 'reviewer',
       turnId: 'turn-1',
@@ -188,7 +189,7 @@ test('cloneSessionRecord deep-copies nested metadata, arguments, and results', (
   expect((source.turns[0]!.toolCalls[0]!.result as { data: { ids: number[] } }).data.ids).toEqual([1, 2])
 })
 
-test('SQLite store saves rows and turn index on one connection and indexes appended turns incrementally', () => {
+test('SQLite store saves rows and turn index on one connection and indexes appended turns incrementally', async () => {
   let embeddings = 0
   const embedder: Embedder = {
     dimension: 4,
@@ -206,9 +207,9 @@ test('SQLite store saves rows and turn index on one connection and indexes appen
     store = new SQLiteSessionStore({ dbPath: database, embedder })
     const manager = new SessionManager(store)
     const session = manager.startSession({ sessionId: 'incremental' })
-    manager.recordTurn(session.sessionId, turn('turn-1'))
+    await manager.recordTurn(session.sessionId, turn('turn-1'))
     expect(embeddings).toBe(1)
-    manager.recordTurn(session.sessionId, turn('turn-2', 'Second prompt'))
+    await manager.recordTurn(session.sessionId, turn('turn-2', 'Second prompt'))
     // Appending one turn embeds only that turn instead of re-embedding both.
     expect(embeddings).toBe(2)
     // Re-saving unchanged content indexes nothing new.
@@ -228,6 +229,126 @@ test('SQLite store saves rows and turn index on one connection and indexes appen
     }
   } finally {
     store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('SessionManager serializes concurrent mutations so no turn or transition is lost', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-race-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  try {
+    store = new SQLiteSessionStore({ dbPath: database })
+    const manager = new SessionManager(store)
+    const session = manager.startSession({ sessionId: 'race', workspaceId: 'workspace' })
+    // Deliberately unsequenced: every writer must observe the others' saves.
+    await Promise.all([
+      manager.recordTurn(session.sessionId, turn('turn-a')),
+      manager.recordTurn(session.sessionId, turn('turn-b')),
+      manager.recordAgentTransition(session.sessionId, new AgentTransitionRecord({
+        fromAgent: 'coder',
+        toAgent: 'reviewer',
+        turnId: 'turn-a',
+        timestamp: '2026-01-01T00:00:02.000Z',
+      })),
+      manager.endSession(session.sessionId),
+    ])
+    const saved = store.loadSession('race')!
+    expect(saved.turns.map(entry => entry.turnId).sort()).toEqual(['turn-a', 'turn-b'])
+    expect(saved.agentTransitions.map(entry => entry.toAgent)).toEqual(['reviewer'])
+    expect(saved.metadata.ended).toBe(true)
+  } finally {
+    store?.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('SessionManager drains the per-session lock map after mutations settle, including failures', async () => {
+  const store = new InMemorySessionStore()
+  const manager = new SessionManager(store)
+  const locks = (manager as unknown as { sessionLocks: Map<string, Promise<void>> }).sessionLocks
+
+  const session = manager.startSession({ sessionId: 'drain' })
+  const pending = Promise.all([
+    manager.recordTurn(session.sessionId, turn('one')),
+    manager.recordTurn(session.sessionId, turn('two')),
+    manager.endSession(session.sessionId),
+  ])
+  // The lock chain exists while writers are queued...
+  expect(locks.size).toBeGreaterThan(0)
+  await pending
+  // ...and is drained once the tail settles with no queued successor.
+  expect(locks.size).toBe(0)
+
+  // A failed mutation rejects but releases the chain instead of poisoning it.
+  await expect(manager.recordTurn('missing', turn('missing'))).rejects.toThrow('Session not found')
+  expect(locks.size).toBe(0)
+  await manager.recordTurn(session.sessionId, turn('three'))
+  expect(manager.getSession('drain')?.turns.map(entry => entry.turnId)).toEqual(['one', 'two', 'three'])
+  expect(locks.size).toBe(0)
+})
+
+test('SQLite session store applies user_version migrations once and idempotently', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'xerxes-session-userversion-'))
+  const database = join(directory, 'sessions.db')
+  let store: SQLiteSessionStore | undefined
+  let reopened: SQLiteSessionStore | undefined
+  try {
+    // Simulate a pre-migration database: the v1 table exists but no
+    // user_version was ever recorded.
+    const legacy = new Database(database)
+    try {
+      legacy.run(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          session_id TEXT PRIMARY KEY,
+          workspace_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          agent_id TEXT,
+          parent_session_id TEXT,
+          schema_version INTEGER NOT NULL,
+          metadata TEXT NOT NULL,
+          record TEXT NOT NULL
+        )
+      `)
+      legacy.query(`
+        INSERT INTO sessions
+          (session_id, workspace_id, created_at, updated_at, agent_id, parent_session_id, schema_version, metadata, record)
+        VALUES ('legacy-row', NULL, 'now', 'now', NULL, NULL, 1, '{}', '{"session_id":"legacy-row"}')
+      `).run()
+      expect((legacy.query('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(0)
+    } finally {
+      legacy.close()
+    }
+
+    // Opening upgrades the legacy database exactly once, preserving rows.
+    store = new SQLiteSessionStore({ dbPath: database })
+    const raw = new Database(database, { readonly: true })
+    try {
+      expect((raw.query('PRAGMA user_version').get() as { user_version: number }).user_version)
+        .toBe(SQLITE_SESSION_SCHEMA_VERSION)
+    } finally {
+      raw.close()
+    }
+    expect(store.loadSession('legacy-row')?.sessionId).toBe('legacy-row')
+    store.saveSession(new SessionRecord({ sessionId: 'fresh', turns: [turn()] }))
+    store.close()
+    store = undefined
+
+    // Reopening is idempotent: the version stays put and no data is touched.
+    reopened = new SQLiteSessionStore({ dbPath: database })
+    const check = new Database(database, { readonly: true })
+    try {
+      expect((check.query('PRAGMA user_version').get() as { user_version: number }).user_version)
+        .toBe(SQLITE_SESSION_SCHEMA_VERSION)
+    } finally {
+      check.close()
+    }
+    expect(reopened.loadSession('legacy-row')?.sessionId).toBe('legacy-row')
+    expect(reopened.loadSession('fresh')?.turns).toHaveLength(1)
+  } finally {
+    store?.close()
+    reopened?.close()
     rmSync(directory, { recursive: true, force: true })
   }
 })

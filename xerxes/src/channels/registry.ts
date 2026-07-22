@@ -6,6 +6,9 @@ import type { ChannelMessage } from './types.js'
 
 export type ChannelLifecycleOperation = 'start' | 'stop'
 
+/** Bound on retained lifecycle failures so long-lived daemons keep only recent diagnostics. */
+export const CHANNEL_LIFECYCLE_FAILURE_LIMIT = 100
+
 /** A contained channel lifecycle failure available to daemon diagnostics. */
 export interface ChannelLifecycleFailure {
   readonly channel: string
@@ -54,10 +57,21 @@ export class ChannelRegistry {
     this.channels.set(name, channel)
   }
 
-  /** Remove a channel without stopping it; callers control teardown explicitly. */
-  unregister(name: string): void {
+  /**
+   * Remove a channel, stopping it first when it is running.
+   *
+   * Teardown is enqueued behind in-flight lifecycle operations so a racing
+   * start cannot re-populate `started` after the removal leaks past stopAll.
+   */
+  async unregister(name: string): Promise<void> {
     this.channels.delete(name)
-    this.started.delete(name)
+    await this.enqueue(async () => {
+      const running = this.started.get(name)
+      if (!running) {
+        return
+      }
+      await this.stopOne(name, running, false)
+    })
   }
 
   get(name: string): Channel | undefined {
@@ -229,6 +243,9 @@ export class ChannelRegistry {
 
   private report(failure: ChannelLifecycleFailure): void {
     this.failures.push(failure)
+    if (this.failures.length > CHANNEL_LIFECYCLE_FAILURE_LIMIT) {
+      this.failures.splice(0, this.failures.length - CHANNEL_LIFECYCLE_FAILURE_LIMIT)
+    }
     if (!this.onFailure) {
       return
     }

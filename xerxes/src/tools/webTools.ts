@@ -70,9 +70,16 @@ export class PublicWebClient {
     const timeoutMs = boundedInteger(options.timeoutMs ?? this.timeoutMs, 'timeoutMs', 1, MAX_TIMEOUT_MS)
     const method = (requestBase.method ?? 'GET').toUpperCase()
     let redirectCount = 0
+    let currentOrigin = new URL(currentUrl).origin
+    // Once a redirect crosses an origin, caller-supplied headers (authorization,
+    // cookies, and any other custom values) and the request body are never
+    // forwarded again — even if a later hop returns to the original origin.
+    let crossOrigin = false
 
     while (true) {
-      const requestInit: RequestInit = { ...requestBase, redirect: 'manual' }
+      const requestInit: RequestInit = crossOrigin
+        ? { method, redirect: 'manual' }
+        : { ...requestBase, redirect: 'manual' }
       const response = await runWithTimeout(
         requestSignal => this.fetcher(currentUrl, withSignal(requestInit, requestSignal)),
         timeoutMs,
@@ -89,7 +96,16 @@ export class PublicWebClient {
       if (redirectCount >= this.maxRedirects) {
         throw new ClientError('web', `redirect limit of ${this.maxRedirects} exceeded`)
       }
+      const previousProtocol = new URL(currentUrl).protocol
       currentUrl = await assertPublicHttpUrl(new URL(location, currentUrl).toString(), this.urlSafety)
+      if (previousProtocol === 'https:' && new URL(currentUrl).protocol === 'http:') {
+        throw new ClientError('web', 'refusing to follow an HTTPS to HTTP redirect downgrade')
+      }
+      const nextOrigin = new URL(currentUrl).origin
+      if (nextOrigin !== currentOrigin) {
+        crossOrigin = true
+        currentOrigin = nextOrigin
+      }
       redirectCount += 1
     }
   }

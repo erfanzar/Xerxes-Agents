@@ -33,6 +33,10 @@ export interface OTelCollectorOptions {
   readonly serviceName?: string
   /** An OpenTelemetry tracer supplied by the application, if OpenTelemetry is installed. */
   readonly tracer?: OTelTracer
+  /** Maximum turn spans held open at once; the oldest is ended and evicted beyond this. */
+  readonly maxOpenTurns?: number
+  /** Maximum retained no-op fallback entries; the oldest are dropped beyond this. */
+  readonly maxFallbackEntries?: number
 }
 
 /** A recorded no-op span/event used when no tracer has been injected. */
@@ -48,8 +52,15 @@ export interface OTelFallbackEntry {
  * their configured tracer, while Bun-only deployments retain an inspectable no-op log.
  */
 export class OTelCollector implements AuditCollector {
+  static readonly DEFAULT_MAX_OPEN_TURNS = 1_000
+  static readonly DEFAULT_MAX_FALLBACK_ENTRIES = 10_000
+
   private readonly noopLog: OTelFallbackEntry[] = []
   private readonly openTurnSpans = new Map<string, OTelSpan>()
+  private readonly maxOpenTurns: number
+  private readonly maxFallbackEntries: number
+  private evictedTurns = 0
+  private evictedFallbacks = 0
   readonly serviceName: string
   readonly tracer: OTelTracer | undefined
 
@@ -59,10 +70,14 @@ export class OTelCollector implements AuditCollector {
     if (typeof optionsOrServiceName === 'string') {
       this.serviceName = optionsOrServiceName
       this.tracer = tracer
+      this.maxOpenTurns = OTelCollector.DEFAULT_MAX_OPEN_TURNS
+      this.maxFallbackEntries = OTelCollector.DEFAULT_MAX_FALLBACK_ENTRIES
       return
     }
     this.serviceName = optionsOrServiceName.serviceName ?? 'xerxes'
     this.tracer = optionsOrServiceName.tracer
+    this.maxOpenTurns = boundedSize(optionsOrServiceName.maxOpenTurns, OTelCollector.DEFAULT_MAX_OPEN_TURNS, 'maxOpenTurns')
+    this.maxFallbackEntries = boundedSize(optionsOrServiceName.maxFallbackEntries, OTelCollector.DEFAULT_MAX_FALLBACK_ENTRIES, 'maxFallbackEntries')
   }
 
   emit(event: AuditEvent): void {
@@ -126,6 +141,16 @@ export class OTelCollector implements AuditCollector {
     return this.openTurnSpans.size
   }
 
+  /** Turn spans evicted because cancelled turns never produced a TurnEnd event. */
+  get evictedTurnCount(): number {
+    return this.evictedTurns
+  }
+
+  /** No-op fallback entries dropped to keep the diagnostic log bounded. */
+  get evictedFallbackCount(): number {
+    return this.evictedFallbacks
+  }
+
   private onTurnStart(event: TurnStartEvent): void {
     const attributes = cleanOtelAttributes({
       'xerxes.turn_id': event.turnId,
@@ -137,6 +162,20 @@ export class OTelCollector implements AuditCollector {
     if (this.tracer === undefined || event.turnId === undefined) {
       this.recordFallback('turn', attributes)
       return
+    }
+    // Refresh recency so long-lived turns are not evicted ahead of stale ones.
+    this.openTurnSpans.delete(event.turnId)
+    while (this.openTurnSpans.size >= this.maxOpenTurns) {
+      const oldest = this.openTurnSpans.keys().next().value
+      if (oldest === undefined) break
+      const stale = this.openTurnSpans.get(oldest)
+      this.openTurnSpans.delete(oldest)
+      this.evictedTurns += 1
+      try {
+        stale?.end()
+      } catch {
+        // Ending an evicted span is best effort.
+      }
     }
     this.openTurnSpans.set(event.turnId, this.tracer.startSpan('xerxes.turn', { attributes }))
   }
@@ -176,7 +215,20 @@ export class OTelCollector implements AuditCollector {
 
   private recordFallback(name: string, attributes: OTelAttributes): void {
     this.noopLog.push({ name, attributes: { ...attributes } })
+    const overflow = this.noopLog.length - this.maxFallbackEntries
+    if (overflow > 0) {
+      this.noopLog.splice(0, overflow)
+      this.evictedFallbacks += overflow
+    }
   }
+}
+
+function boundedSize(value: number | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`OTelCollector ${name} must be a positive integer`)
+  }
+  return value
 }
 
 /** Coerce a JSON record into OTel-safe scalar attributes and remove absent values. */

@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test'
 import {
   AuxiliaryClient,
   DEFAULT_AUXILIARY_MAX_TOKENS,
+  MAX_RENDERED_TRANSCRIPT_CHARS,
   type AuxiliaryBackendRequest,
   type AuxiliaryMessage,
 } from '../src/runtime/index.js'
@@ -125,6 +126,49 @@ test('title strips display delimiters and extract preserves the caller instructi
       { role: 'user', content: 'body text' },
     ],
   })
+})
+
+test('summarize caps oversized transcripts with an explicit head+tail truncation marker', async () => {
+  let captured: AuxiliaryBackendRequest | undefined
+  const client = new AuxiliaryClient({
+    backend: request => {
+      captured = request
+      return 'S'
+    },
+  })
+
+  const head = { role: 'user', content: 'H'.repeat(10_000) }
+  const middle = Array.from({ length: 200 }, (_, index) => ({
+    role: 'assistant',
+    content: `turn ${index} ` + 'x'.repeat(2_000),
+  }))
+  const tail = { role: 'user', content: 'T'.repeat(10_000) }
+  await client.summarize([head, ...middle, tail])
+
+  const rendered = captured?.messages[1]?.content
+  expect(typeof rendered).toBe('string')
+  const text = rendered as string
+  expect(text.length).toBeLessThanOrEqual(MAX_RENDERED_TRANSCRIPT_CHARS)
+  expect(text.length).toBeGreaterThan(MAX_RENDERED_TRANSCRIPT_CHARS / 2)
+  expect(text).toContain('transcript truncated')
+  expect(text.startsWith('[user] ' + 'H'.repeat(100))).toBe(true)
+  expect(text.endsWith('T'.repeat(100))).toBe(true)
+  // The middle turns are what get omitted.
+  expect(text).not.toContain('turn 100')
+})
+
+test('short transcripts pass through to the auxiliary model unclipped', async () => {
+  let captured: AuxiliaryBackendRequest | undefined
+  const client = new AuxiliaryClient({
+    backend: request => {
+      captured = request
+      return 'S'
+    },
+  })
+
+  await client.summarize([{ role: 'user', content: 'small' }])
+
+  expect(captured?.messages[1]).toMatchObject({ role: 'user', content: '[user] small' })
 })
 
 test('backend failures propagate without a fallback response', async () => {

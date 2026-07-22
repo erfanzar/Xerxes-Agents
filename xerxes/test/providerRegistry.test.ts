@@ -3,6 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
+import { ConfigurationError } from '../src/core/errors.js'
 import {
   calcCost,
   detectProvider,
@@ -18,6 +19,18 @@ test('provider routing preserves explicit prefixes and Kimi Code overrides', () 
   expect(resolveProvider('kimi/kimi-for-coding')).toBe('kimi-code')
   expect(resolveProvider('gpt-4o', { base_url: 'https://api.kimi.com/coding/v1' })).toBe('kimi-code')
   expect(providerModel('openrouter/anthropic/claude-sonnet-4.5', 'openrouter')).toBe('anthropic/claude-sonnet-4.5')
+})
+
+test('unrecognized explicit prefixes are rejected instead of silently routed to OpenAI', () => {
+  expect(() => detectProvider('missing-provider/gpt-4o')).toThrow(ConfigurationError)
+  expect(() => detectProvider('missing-provider/gpt-4o')).toThrow("unknown provider prefix 'missing-provider'")
+  expect(() => resolveProvider('missing-provider/gpt-4o')).toThrow(ConfigurationError)
+  expect(() => getContextLimit('missing-provider/gpt-4o')).toThrow(ConfigurationError)
+  // A recognized explicit provider override still routes before prefix checks.
+  expect(resolveProvider('missing-provider/gpt-4o', { provider: 'openrouter' })).toBe('openrouter')
+  // Aliased and bare models keep their existing behavior.
+  expect(detectProvider('claude_code/sonnet')).toBe('claude-code')
+  expect(detectProvider('unprefixed-model')).toBe('openai')
 })
 
 test('explicit provider overrides win over model-prefix routing for every known provider', () => {

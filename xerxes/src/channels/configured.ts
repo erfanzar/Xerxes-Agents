@@ -356,6 +356,7 @@ function discordOptions(settings: ChannelSettings): Omit<ConstructorParameters<t
   copySetting(options, settings, 'deviceName', 'device_name', 'deviceName')
   copySetting(options, settings, 'instanceName', 'instance_name', 'instanceName')
   copySetting(options, settings, 'maxMessageChars', 'max_message_chars', 'maxMessageChars')
+  copySetting(options, settings, 'publicKey', 'public_key', 'publicKey')
   copySetting(options, settings, 'transport', 'transport')
   copyStringList(options, settings, 'addressNames', 'address_names', 'addressNames')
   copyStringList(options, settings, 'allowedChannelIds', 'allowed_channel_ids', 'allowedChannelIds')

@@ -168,6 +168,9 @@ interface ExecutionRun {
   readonly timedOut: () => boolean
 }
 
+/** Upper bound for retained per-execution timing samples; lifetime totals are tracked separately. */
+const MAX_EXECUTION_TIME_SAMPLES = 100
+
 interface TurnAttemptResult {
   readonly deniedToolCalls: number
   readonly inputTokens: number
@@ -220,6 +223,9 @@ export class CortexAgent implements CortexTaskAgent {
 
   private activeDelegations = 0
   private conversationHistory: ChatMessage[] = []
+  private delegationSequence = 0
+  private executionQueue: Promise<void> = Promise.resolve()
+  private totalExecutionTimeMs = 0
   private readonly autoCompaction: AutoCompactAgent | undefined
   private readonly delay: CortexAgentDelay
   private readonly delegation: CortexAgentDelegationPort | undefined
@@ -325,8 +331,10 @@ export class CortexAgent implements CortexTaskAgent {
     const inputs = { ...context.inputs, ...(options.inputs ?? {}) }
     const combinedContext = joinContexts(context.context, options.context)
     const outputSchema = options.outputSchema ?? outputSchemaFromMetadata(context.task.metadata)
+    const signal = options.signal ?? context.signal
     const result = await this.executeDescription(context.task.description, {
       ...options,
+      ...(signal === undefined ? {} : { signal }),
       expectedOutput: options.expectedOutput ?? context.task.expectedOutput,
       inputs,
       ...(combinedContext === undefined ? {} : { context: combinedContext }),
@@ -361,7 +369,9 @@ export class CortexAgent implements CortexTaskAgent {
     throwIfAborted(signal, this.id)
     const delegatedTask = typeof task === 'string'
       ? {
-          id: `${this.id}-delegation-${this.activeDelegations + 1}`,
+          // Monotonic per-agent sequence: activeDelegations is decremented in
+          // finally, so reusing it would collide task ids across delegations.
+          id: `${this.id}-delegation-${(this.delegationSequence += 1)}`,
           description: requiredText(task, 'taskDescription'),
           expectedOutput: options.expectedOutput?.trim() || 'Complete the delegated task',
         }
@@ -415,12 +425,17 @@ export class CortexAgent implements CortexTaskAgent {
     return this.autoCompaction?.checkUsage()
   }
 
+  /**
+   * Lifetime execution statistics. Totals and averages cover every execution;
+   * min/max/recent samples cover the bounded retained window of the last
+   * MAX_EXECUTION_TIME_SAMPLES executions.
+   */
   getExecutionStats(): CortexAgentExecutionStats {
-    const totalExecutionTimeMs = this.executionTimes.reduce((total, value) => total + value, 0)
+    const totalExecutionTimeMs = this.totalExecutionTimeMs
     return Object.freeze({
       timesExecuted: this.timesExecuted,
       totalExecutionTimeMs,
-      averageExecutionTimeMs: this.executionTimes.length ? totalExecutionTimeMs / this.executionTimes.length : 0,
+      averageExecutionTimeMs: this.timesExecuted ? totalExecutionTimeMs / this.timesExecuted : 0,
       minExecutionTimeMs: this.executionTimes.length ? Math.min(...this.executionTimes) : 0,
       maxExecutionTimeMs: this.executionTimes.length ? Math.max(...this.executionTimes) : 0,
       recentExecutionTimesMs: Object.freeze(this.executionTimes.slice(-5)),
@@ -430,6 +445,7 @@ export class CortexAgent implements CortexTaskAgent {
   resetStats(): void {
     this.timesExecuted = 0
     this.executionTimes.splice(0)
+    this.totalExecutionTimeMs = 0
     this.rpmRequests.splice(0)
     this.activeDelegations = 0
   }
@@ -480,6 +496,10 @@ export class CortexAgent implements CortexTaskAgent {
     task: CortexTask | undefined = undefined,
   ): Promise<{ readonly metadata: CortexAgentExecutionMetadata; readonly output: string }> {
     const description = requiredText(taskDescription, 'taskDescription')
+    // Serialize executions of this agent instance: conversation history and
+    // auto-compaction are shared mutable state, so concurrent executions must
+    // not interleave their reads, writes, and compaction passes.
+    const releaseExecution = await this.acquireExecutionSlot()
     const run = executionRun(options.signal, this.maxExecutionTime, this.id)
     let startedAt: number | undefined
     try {
@@ -515,7 +535,7 @@ export class CortexAgent implements CortexTaskAgent {
             deniedToolCalls: result.deniedToolCalls,
           }
           this.conversationHistory = result.messages.filter(message => message.role !== 'system')
-          this.executionTimes.push(executionTimeMs)
+          this.recordExecutionTime(executionTimeMs)
           this.persistResult(description, result.output, metadata, task)
           await this.emitStep({
             agent: this.role,
@@ -549,7 +569,7 @@ export class CortexAgent implements CortexTaskAgent {
       throw new AgentError(this.id, 'failed to get a response after maximum iterations')
     } catch (error) {
       const executionTimeMs = startedAt === undefined ? 0 : elapsed(this.now(), startedAt)
-      if (startedAt !== undefined) this.executionTimes.push(executionTimeMs)
+      if (startedAt !== undefined) this.recordExecutionTime(executionTimeMs)
       await this.emitStep({
         agent: this.role,
         error: errorMessage(error),
@@ -561,6 +581,7 @@ export class CortexAgent implements CortexTaskAgent {
       throw error
     } finally {
       run.cleanup()
+      releaseExecution()
     }
   }
 
@@ -734,6 +755,27 @@ export class CortexAgent implements CortexTaskAgent {
     while (this.rpmRequests.length > 0 && (this.rpmRequests[0] ?? Number.POSITIVE_INFINITY) <= threshold) {
       this.rpmRequests.shift()
     }
+  }
+
+  /**
+   * FIFO async mutex serializing executeTask/execute calls on this instance.
+   * Waiting callers queue in arrival order; the release callback frees the
+   * next execution exactly once.
+   */
+  private acquireExecutionSlot(): Promise<() => void> {
+    const previous = this.executionQueue
+    let release: () => void = () => undefined
+    this.executionQueue = new Promise<void>(resolve => {
+      release = resolve
+    })
+    return previous.then(() => release)
+  }
+
+  /** Retain only a bounded window of per-execution timings while keeping lifetime totals. */
+  private recordExecutionTime(executionTimeMs: number): void {
+    this.executionTimes.push(executionTimeMs)
+    if (this.executionTimes.length > MAX_EXECUTION_TIME_SAMPLES) this.executionTimes.shift()
+    this.totalExecutionTimeMs += executionTimeMs
   }
 
   private async emitStep(step: CortexAgentStep): Promise<void> {

@@ -104,12 +104,12 @@ export function projectAgentSkillsDir(projectRoot: string): string {
  * Each candidate file is defended independently before it enters the prompt:
  * its real path must stay contained inside the project-owned `.agents`
  * directory (a symlinked runbook must not inject arbitrary host content),
- * and its body passes the prompt-injection scanner; content flagged as
- * blocked is dropped rather than quoted into the system prompt.
+ * and its body passes the prompt-injection scanner, which neutralizes
+ * hostile spans in place so the rest of the file remains available.
  *
- * Missing, unreadable, scanned, or containment-escaping files are skipped
- * rather than failing the load: workspace context is best-effort enrichment,
- * never a reason to refuse session bootstrap.
+ * Missing, unreadable, or containment-escaping files are skipped rather
+ * than failing the load: workspace context is best-effort enrichment, never
+ * a reason to refuse session bootstrap.
  */
 export async function loadProjectAgentWorkspace(
   projectRoot: string,
@@ -139,8 +139,11 @@ export async function loadProjectAgentWorkspace(
     const content = await loadContextFile(root, canonicalAgentsDir, candidate, maximum)
     if (content === undefined) continue
     if (!content.trim()) continue
+    // Inject the scanner-neutralized body rather than dropping the whole
+    // file: hostile spans are replaced with inert [BLOCKED: ...] markers, so
+    // the remaining safe content stays available and the scan stays
+    // observable in the prompt itself.
     const scanned = scanContextContent(content, `Project agent workspace: ${candidate}`)
-    if (scanned.includes('[BLOCKED:')) continue
     loadedFiles.push(candidate)
     parts.push('', `## .agents/${relativePath}`, scanned.trim())
   }
@@ -260,8 +263,8 @@ async function containedDirectory(root: string, candidate: string): Promise<stri
  * defeat symlink escapes (a checked-in runbook must never smuggle in host
  * files such as ~/.ssh or /etc). Anything failing a check, missing, or
  * unreadable returns undefined so the caller skips it. Prompt-injection
- * scanning happens at the call site, which owns the decision to drop
- * flagged content. Bodies are clipped to the per-file byte ceiling so one
+ * scanning happens at the call site, which owns the decision to neutralize
+ * flagged spans. Bodies are clipped to the per-file byte ceiling so one
  * oversized document cannot crowd out the rest of the workspace.
  */
 async function loadContextFile(

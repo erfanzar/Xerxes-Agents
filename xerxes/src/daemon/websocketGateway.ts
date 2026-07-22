@@ -9,6 +9,8 @@ import type { DaemonTransportConnection } from './transport.js'
 
 const DEFAULT_MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 const DEFAULT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024
+const DEFAULT_MAX_INBOUND_QUEUE_BYTES = 32 * 1024 * 1024
+const MAX_INBOUND_QUEUE_BYTES = 256 * 1024 * 1024
 const DEFAULT_IDLE_TIMEOUT = 120
 const SERVER_STOP_GRACE = 50
 const WEBSOCKET_OPEN = 1
@@ -20,6 +22,12 @@ export interface DaemonWebSocketGatewayOptions {
   readonly host?: string
   /** Max queued outbound bytes allowed per client before it is disconnected. */
   readonly maxBufferedBytes?: number
+  /**
+   * Max inbound bytes queued per client while the serialized daemon handler
+   * is still draining earlier frames. Past this cap the client is closed
+   * with 1013 so a fast sender cannot pile unbounded frames in memory.
+   */
+  readonly maxInboundQueueBytes?: number
   /** Max inbound or outbound JSON frame size. */
   readonly maxMessageBytes?: number
   /** WebSocket endpoint path. */
@@ -54,6 +62,7 @@ export class DaemonWebSocketGateway {
   private readonly host: string
   private readonly idleTimeout: number
   private readonly maxBufferedBytes: number
+  private readonly maxInboundQueueBytes: number
   private readonly maxMessageBytes: number
   private readonly onDisconnect: DaemonWebSocketDisconnectHandler
   private readonly path: string
@@ -83,6 +92,13 @@ export class DaemonWebSocketGateway {
       1024,
       DEFAULT_MAX_MESSAGE_BYTES,
     )
+    this.maxInboundQueueBytes = boundedInteger(
+      options.maxInboundQueueBytes,
+      DEFAULT_MAX_INBOUND_QUEUE_BYTES,
+      'maxInboundQueueBytes',
+      this.maxMessageBytes,
+      MAX_INBOUND_QUEUE_BYTES,
+    )
     this.onDisconnect = onDisconnect
     this.path = endpointPath(options.path)
     this.port = boundedInteger(options.port, 0, 'port', 0, 65_535)
@@ -108,6 +124,11 @@ export class DaemonWebSocketGateway {
   /** Number of successfully upgraded, live clients. */
   get clientCount(): number {
     return this.clients.size
+  }
+
+  /** Configured per-client inbound queue cap enforced by each connection. */
+  get inboundQueueByteLimit(): number {
+    return this.maxInboundQueueBytes
   }
 
   start(): void {
@@ -204,13 +225,16 @@ export class DaemonWebSocketGateway {
       return
     }
     const connection = websocket.data
-    connection.enqueue(async () => {
+    const accepted = connection.enqueue(utf8Length(message), async () => {
       try {
         await this.handler(connection, message)
       } catch {
         this.send(connection, jsonRpcFailure(null, -32000, 'Internal daemon error'))
       }
     })
+    if (!accepted) {
+      websocket.close(1013, 'inbound queue limit reached')
+    }
   }
 
   private close(websocket: ServerWebSocket<GatewayConnection>): void {
@@ -300,6 +324,7 @@ export function websocketOriginAllowed(request: Request): boolean {
 class GatewayConnection implements DaemonTransportConnection {
   activeSessionKey = `ws:${connectionKey()}`
   private pending = Promise.resolve()
+  private queuedBytes = 0
   websocket: ServerWebSocket<GatewayConnection> | undefined
 
   constructor(private readonly gateway: DaemonWebSocketGateway) {}
@@ -312,8 +337,27 @@ class GatewayConnection implements DaemonTransportConnection {
     this.websocket = undefined
   }
 
-  enqueue(task: () => Promise<void>): void {
-    this.pending = this.pending.then(task, task)
+  /**
+   * Serialize one inbound frame behind the frames that arrived before it.
+   * Returns false once the undrained queue exceeds the configured cap so the
+   * caller can stop the sender instead of growing memory without bound.
+   */
+  enqueue(byteLength: number, task: () => Promise<void>): boolean {
+    if (this.queuedBytes + byteLength > this.gateway.inboundQueueByteLimit) {
+      return false
+    }
+    this.queuedBytes += byteLength
+    const run = this.pending.then(task, task)
+    this.pending = run
+    void run.then(
+      () => {
+        this.queuedBytes -= byteLength
+      },
+      () => {
+        this.queuedBytes -= byteLength
+      },
+    )
+    return true
   }
 
   send(frame: object): void {

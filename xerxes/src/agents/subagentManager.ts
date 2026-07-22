@@ -53,6 +53,10 @@ const FILE_PATH_KEYS = ['file_path', 'path', 'notebook_path'] as const
 const TERMINAL_STATUSES = new Set<SubAgentStatus>(['cancelled', 'completed', 'failed'])
 const DEFAULT_THINKING_FLUSH_INTERVAL_MS = 250
 const MAX_THINKING_PREVIEW_CHARS = 400
+/** Hard ceiling on simultaneously tracked subagent tasks; bounds recursive fan-out. */
+export const DEFAULT_MAX_SPAWNED_AGENTS = 100
+/** Terminal tasks retained for inspection before the oldest are evicted. */
+export const DEFAULT_MAX_RETAINED_TERMINAL_TASKS = 128
 
 export type SubAgentStatus = 'cancelled' | 'completed' | 'failed' | 'pending' | 'running'
 
@@ -297,6 +301,10 @@ export interface SubAgentManagerOptions {
   readonly idFactory?: () => string
   readonly maxConcurrent?: number
   readonly maxDepth?: number
+  /** Hard global cap on tracked subagent tasks; defaults to DEFAULT_MAX_SPAWNED_AGENTS. */
+  readonly maxSpawnedAgents?: number
+  /** Terminal tasks retained before the oldest are evicted; defaults to DEFAULT_MAX_RETAINED_TERMINAL_TASKS. */
+  readonly maxRetainedTerminalTasks?: number
   readonly now?: () => Date
   readonly onEvent?: (event: SubAgentEvent) => void
   readonly pathResolver?: (rawPath: string) => string | undefined
@@ -358,6 +366,8 @@ interface TaskRuntime {
   cleanup: Promise<void> | undefined
   emittedSpawn: boolean
   monitor: Promise<void> | undefined
+  /** In-flight runner turn; cancellation is cooperative so monitors await it before terminal bookkeeping. */
+  run: Promise<string> | undefined
 }
 
 interface ThinkingBurst {
@@ -375,16 +385,17 @@ interface ThinkingBurst {
  */
 export class SubAgentManager {
   readonly maxDepth: number
+  readonly maxSpawnedAgents: number
   maxConcurrent: number
   private readonly eventSink: (event: SubAgentEvent) => void
   private readonly gate: ConcurrencyGate
   private readonly handleManager: SpawnedAgentManager
   private readonly idFactory: () => string
   private readonly mailbox: SubAgentEvent[] = []
+  private readonly maxRetainedTerminalTasks: number
   private sequence = 0
   private readonly now: () => Date
   private readonly pathResolver: (rawPath: string) => string | undefined
-  private readonly recentText = new Map<string, string[]>()
   private runner: SubagentTaskRunner
   private readonly runtimes = new Map<string, TaskRuntime>()
   private readonly tasksByName = new Map<string, string>()
@@ -400,6 +411,11 @@ export class SubAgentManager {
     this.runner = options.runner
     this.maxConcurrent = positiveIntegerOrInfinity(options.maxConcurrent ?? Number.POSITIVE_INFINITY, 'maxConcurrent')
     this.maxDepth = positiveIntegerOrInfinity(options.maxDepth ?? Number.POSITIVE_INFINITY, 'maxDepth')
+    this.maxSpawnedAgents = positiveIntegerOrInfinity(options.maxSpawnedAgents ?? DEFAULT_MAX_SPAWNED_AGENTS, 'maxSpawnedAgents')
+    this.maxRetainedTerminalTasks = positiveInteger(
+      options.maxRetainedTerminalTasks ?? DEFAULT_MAX_RETAINED_TERMINAL_TASKS,
+      'maxRetainedTerminalTasks',
+    )
     this.gate = new ConcurrencyGate(this.maxConcurrent)
     this.now = options.now ?? (() => new Date())
     this.idFactory = options.idFactory ?? (() => `subagent_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`)
@@ -434,7 +450,16 @@ export class SubAgentManager {
 
   /** Spawn one delegated task. The returned task is registered before execution begins. */
   async spawn(options: SpawnSubAgentOptions): Promise<SubAgentTask> {
-    const depth = options.depth ?? 0
+    this.compactTerminalTasks()
+    if (this.tasks.size >= this.maxSpawnedAgents) {
+      throw new Error(
+        `Spawned-agent budget (${this.maxSpawnedAgents}) reached: cannot spawn another subagent until existing tasks are evicted`,
+      )
+    }
+    // Depth is derived server-side from the tracked parent task so a nested spawn
+    // path that forgets to thread depth cannot reset the chain and bypass maxDepth.
+    const parentTask = this.resolveTask(options.parentId ?? options.creatorId ?? '')
+    const depth = parentTask !== undefined ? parentTask.depth + 1 : (options.depth ?? 0)
     const depthLimit = effectiveMaxDepth(options.agentDefinition, this.maxDepth)
     const taskId = this.nextTaskId()
     const isolation = options.isolation?.trim() || options.agentDefinition?.isolation || ''
@@ -496,6 +521,7 @@ export class SubAgentManager {
       cleanup: undefined,
       emittedSpawn: false,
       monitor: undefined,
+      run: undefined,
     })
 
     try {
@@ -580,7 +606,14 @@ export class SubAgentManager {
     task.result ??= '[Sub-agent was cancelled.]'
     task.lastActivityAt = this.now().valueOf()
     this.postEvent(task, 'cancelled', { reason: 'explicit_cancel' })
-    void this.cleanupWorktree(task)
+    // Abort is cooperative: keep the worktree alive until the runner turn has
+    // actually settled so a still-running agent never loses its checkout.
+    const inFlight = this.runtimes.get(task.id)?.run
+    if (inFlight !== undefined) {
+      void inFlight.then(() => this.cleanupWorktree(task), () => this.cleanupWorktree(task))
+    } else {
+      void this.cleanupWorktree(task)
+    }
     return true
   }
 
@@ -779,7 +812,20 @@ export class SubAgentManager {
     return lines.join('\n')
   }
 
-  private async runTaskInput(handleId: string, input: string, signal: AbortSignal): Promise<string> {
+  private runTaskInput(handleId: string, input: string, signal: AbortSignal): Promise<string> {
+    const runtime = this.runtimes.get(handleId)
+    const promise = this.executeTaskInput(handleId, input, signal)
+    if (runtime !== undefined) {
+      runtime.run = promise
+      const clear = (): void => {
+        if (runtime.run === promise) runtime.run = undefined
+      }
+      void promise.then(clear, clear)
+    }
+    return promise
+  }
+
+  private async executeTaskInput(handleId: string, input: string, signal: AbortSignal): Promise<string> {
     const task = this.tasks.get(handleId)
     const runtime = this.runtimes.get(handleId)
     if (task === undefined || runtime === undefined) throw new Error(`Unknown subagent task '${handleId}'`)
@@ -844,6 +890,12 @@ export class SubAgentManager {
       const snapshot = result.completed[0] ?? result.pending[0]
       if (snapshot !== undefined) this.synchronize(task, snapshot)
     }
+    // Cancellation is cooperative: never post `done` or clean up while the
+    // runner turn is still settling, so late report events precede `done`.
+    const inFlight = this.runtimes.get(task.id)?.run
+    if (inFlight !== undefined) {
+      await inFlight.then(() => undefined, () => undefined)
+    }
     this.flushThinkingBurst(task)
     this.flushTextBurst(task)
     this.postEvent(task, 'done', {
@@ -859,6 +911,7 @@ export class SubAgentManager {
       filesWritten: [...task.writtenFiles].sort(),
     })
     await this.cleanupWorktree(task)
+    this.compactTerminalTasks()
   }
 
   private synchronize(task: SubAgentTask, snapshot: SpawnedAgentSnapshot): void {
@@ -895,6 +948,30 @@ export class SubAgentManager {
     task.lastActivityAt = this.now().valueOf()
     this.postEvent(task, 'error', { error })
     this.postEvent(task, 'done', { status: task.status, error, resultPreview: error, toolCalls: 0 })
+    this.compactTerminalTasks()
+  }
+
+  /** Evict the oldest terminal tasks beyond the retention bound so maps never grow forever. */
+  private compactTerminalTasks(): void {
+    let terminal = 0
+    for (const task of this.tasks.values()) {
+      if (TERMINAL_STATUSES.has(task.status)) terminal += 1
+    }
+    if (terminal <= this.maxRetainedTerminalTasks) return
+    for (const [id, task] of this.tasks) {
+      if (terminal <= this.maxRetainedTerminalTasks) return
+      if (!TERMINAL_STATUSES.has(task.status)) continue
+      const burst = this.thinkingBurst.get(id)
+      if (burst !== undefined) clearTimeout(burst.timer)
+      this.thinkingBurst.delete(id)
+      this.textBurst.delete(id)
+      this.runtimes.delete(id)
+      for (const [name, taskId] of this.tasksByName) {
+        if (taskId === id) this.tasksByName.delete(name)
+      }
+      this.tasks.delete(id)
+      terminal -= 1
+    }
   }
 
   private reportText(task: SubAgentTask, text: string): void {
@@ -1071,45 +1148,68 @@ export class SubAgentManager {
 export function filterSubagentTools<T extends Record<string, unknown>>(
   options: FilterSubagentToolsOptions<T>,
 ): FilteredSubagentTools<T> {
-  if (options.toolSchemas === undefined) {
-    return Object.freeze({ toolSchemas: Object.freeze([]), execute: options.toolExecutor })
-  }
-  const schemas = options.toolSchemas
-  const allNames = new Set(schemas.flatMap(schema => typeof schema.name === 'string' && schema.name ? [schema.name] : []))
   const config = options.config ?? {}
   const whitelist = stringList(config._toolsWhitelist)
   const allowedTools = stringList(config._toolsAllowed)
   const excluded = new Set(stringList(config._toolsExcluded))
+  const delegationBlocked = options.isSubagent && config._allowSubagentDelegation !== true
+  const denied = (toolName: string): string => `Error: tool '${toolName}' is not allowed for this agent.`
+  if (options.toolSchemas === undefined) {
+    // Without schemas the full allow-set is unknown, so fail closed: enforce every
+    // configured restriction and the recursive-delegation guard on the executor.
+    const execute = options.toolExecutor === undefined
+      ? undefined
+      : (toolName: string, inputs: Readonly<Record<string, unknown>>) => {
+        if (delegationBlocked && SUBAGENT_BLOCKED_TOOLS.has(toolName)) return denied(toolName)
+        if (whitelist.length && !whitelist.includes(toolName)) return denied(toolName)
+        if (allowedTools.length && !allowedTools.includes(toolName)) return denied(toolName)
+        if (excluded.has(toolName)) return denied(toolName)
+        return options.toolExecutor!(toolName, inputs)
+      }
+    return Object.freeze({ toolSchemas: Object.freeze([]), execute })
+  }
+  const schemas = options.toolSchemas
+  const allNames = new Set(schemas.flatMap(schema => typeof schema.name === 'string' && schema.name ? [schema.name] : []))
   const allowed = new Set(whitelist.length ? whitelist : allNames)
   if (allowedTools.length) {
     for (const name of [...allowed]) if (!allowedTools.includes(name)) allowed.delete(name)
   }
   for (const name of excluded) allowed.delete(name)
-  if (options.isSubagent && config._allowSubagentDelegation !== true) {
+  if (delegationBlocked) {
     for (const name of SUBAGENT_BLOCKED_TOOLS) allowed.delete(name)
   }
   const toolSchemas = Object.freeze(schemas.filter(schema => typeof schema.name === 'string' && allowed.has(schema.name)))
   const execute = options.toolExecutor === undefined
     ? undefined
     : (toolName: string, inputs: Readonly<Record<string, unknown>>) => {
-      if (!allowed.has(toolName)) return `Error: tool '${toolName}' is not allowed for this agent.`
+      if (!allowed.has(toolName)) return denied(toolName)
       return options.toolExecutor!(toolName, inputs)
     }
   return Object.freeze({ toolSchemas, execute })
 }
 
-/** Resolve the spawn depth ceiling: a definition's own maxDepth wins over the manager default. */
+/**
+ * Resolve the spawn depth ceiling. An unset (Infinity) definition maxDepth is
+ * absent and falls back to the manager default; a finite definition value may
+ * tighten but never widen the manager ceiling.
+ */
 function effectiveMaxDepth(
   definition: AgentDefinition | undefined,
   managerDefault: number,
 ): { readonly limit: number; readonly source: string } {
   const value: unknown = definition?.maxDepth
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= managerDefault) {
     return { limit: value, source: `agent definition '${definition?.name ?? 'unknown'}'` }
   }
   return { limit: managerDefault, source: 'manager default' }
 }
 
+/**
+ * Layer definition tool policy over the caller's config. Definition
+ * restrictions intersect with caller-supplied allow-lists so a tool-restricted
+ * parent can never grant a definition-based child more tools than it holds
+ * itself; exclusions union.
+ */
 function effectiveConfig(
   config: Readonly<Record<string, unknown>>,
   definition: AgentDefinition | undefined,
@@ -1117,10 +1217,28 @@ function effectiveConfig(
   const effective: Record<string, unknown> = { ...config }
   if (definition === undefined) return Object.freeze(effective)
   if (definition.model) effective.model = definition.model
-  if (definition.allowedTools !== null) effective._toolsAllowed = [...definition.allowedTools]
-  if (definition.excludeTools.length) effective._toolsExcluded = [...definition.excludeTools]
-  if (definition.tools.length) effective._toolsWhitelist = [...definition.tools]
+  const allowed = intersectToolLists(stringList(config._toolsAllowed), definition.allowedTools)
+  if (allowed !== undefined) effective._toolsAllowed = allowed
+  const whitelist = intersectToolLists(
+    stringList(config._toolsWhitelist),
+    definition.tools.length ? definition.tools : null,
+  )
+  if (whitelist !== undefined) effective._toolsWhitelist = whitelist
+  const excluded = [...new Set([...stringList(config._toolsExcluded), ...definition.excludeTools])]
+  if (excluded.length) effective._toolsExcluded = excluded
   return Object.freeze(effective)
+}
+
+/**
+ * Intersect caller and definition allow-lists; an absent list contributes no
+ * restriction. Disjoint non-empty lists fail closed through a sentinel that
+ * matches no registered tool (an empty list would read as "unrestricted").
+ */
+function intersectToolLists(caller: readonly string[], definition: readonly string[] | null): string[] | undefined {
+  if (definition === null) return caller.length ? [...caller] : undefined
+  if (!caller.length) return [...definition]
+  const intersection = caller.filter(name => definition.includes(name))
+  return intersection.length ? intersection : ['\0']
 }
 
 function titleFromPrompt(prompt: string, name?: string): string {

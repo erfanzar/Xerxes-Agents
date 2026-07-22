@@ -149,7 +149,11 @@ export async function scanSkill(skillPath: string, options: ScanSkillOptions = {
     try {
       const currentHash = await hashSkillFile(skill.path)
       const expected = options.trustedHashes[skill.trustedHashKey] ?? options.trustedHashes[skill.path]
-      if (expected !== undefined && currentHash !== expected) {
+      if (expected === undefined) {
+        // A supplied trusted-hash map must fail closed: no recorded hash means the content is unverified.
+        hashMismatch = true
+        reasons.push('No trusted hash recorded for SKILL.md')
+      } else if (currentHash !== expected) {
         hashMismatch = true
         reasons.push('Content hash mismatch')
       }

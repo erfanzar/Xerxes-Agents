@@ -181,6 +181,35 @@ export interface SQLiteSessionStoreOptions {
 }
 
 /**
+ * Ordered, additive SQLite schema migrations for the sessions database.
+ * Entry `i` upgrades the database from user_version `i` to `i + 1`; entry 0
+ * therefore creates the v1 baseline schema. Never edit an applied entry —
+ * append a new migration instead so existing databases upgrade in place.
+ */
+const SQLITE_SESSION_SCHEMA_MIGRATIONS: ReadonlyArray<(database: Database) => void> = [
+  database => {
+    database.run(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        workspace_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        agent_id TEXT,
+        parent_session_id TEXT,
+        schema_version INTEGER NOT NULL,
+        metadata TEXT NOT NULL,
+        record TEXT NOT NULL
+      )
+    `)
+    database.run('CREATE INDEX IF NOT EXISTS sessions_workspace_updated ON sessions(workspace_id, updated_at DESC)')
+    database.run('CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC)')
+  },
+]
+
+/** Latest SQLite `user_version` applied to the sessions database on open. */
+export const SQLITE_SESSION_SCHEMA_VERSION = SQLITE_SESSION_SCHEMA_MIGRATIONS.length
+
+/**
  * Bun-native durable session store backed by SQLite and a coupled FTS index.
  *
  * Every row retains the full JSON-compatible session record so unknown fields
@@ -200,21 +229,7 @@ export class SQLiteSessionStore implements SessionStore {
     this.database = new Database(this.dbPath)
     try {
       this.database.run('PRAGMA journal_mode = WAL')
-      this.database.run(`
-        CREATE TABLE IF NOT EXISTS sessions (
-          session_id TEXT PRIMARY KEY,
-          workspace_id TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          agent_id TEXT,
-          parent_session_id TEXT,
-          schema_version INTEGER NOT NULL,
-          metadata TEXT NOT NULL,
-          record TEXT NOT NULL
-        )
-      `)
-      this.database.run('CREATE INDEX IF NOT EXISTS sessions_workspace_updated ON sessions(workspace_id, updated_at DESC)')
-      this.database.run('CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at DESC)')
+      this.applySchemaMigrations()
       // The index shares this connection so session row writes and turn
       // re-indexing commit inside one transaction.
       this.index = new SessionIndex({
@@ -325,17 +340,45 @@ export class SQLiteSessionStore implements SessionStore {
     if (version >= this.schemaVersion) return record
     return migrateSessionRecord(record, this.schemaVersion)
   }
+
+  /**
+   * Bring the database up to {@link SQLITE_SESSION_SCHEMA_VERSION} by running
+   * every migration newer than the stored `PRAGMA user_version`. Each applied
+   * step is recorded so reopening the store is idempotent.
+   */
+  private applySchemaMigrations(): void {
+    const row = this.database.query('PRAGMA user_version').get() as { user_version?: unknown } | null
+    const current = typeof row?.user_version === 'number' && Number.isInteger(row.user_version) ? row.user_version : 0
+    for (let version = current + 1; version <= SQLITE_SESSION_SCHEMA_MIGRATIONS.length; version += 1) {
+      const migrate = SQLITE_SESSION_SCHEMA_MIGRATIONS[version - 1]
+      if (migrate === undefined) continue
+      this.database.transaction(() => migrate(this.database))()
+      // PRAGMA assignments cannot be parameterized; the version is an
+      // internal loop counter, never external input.
+      this.database.run(`PRAGMA user_version = ${version}`)
+    }
+  }
 }
 
 /** Lifecycle helper that owns timestamps, identifiers, and durable mutations. */
 export class SessionManager {
+  /**
+   * Per-session async mutex serializing load→mutate→save cycles. Without it,
+   * two in-process writers racing one session (for example a daemon client
+   * and a CLI sharing a store) each load a stale snapshot and the last save
+   * silently drops the other's appended turns or transitions. Entries are
+   * removed as soon as the chain tail settles without a queued successor, so
+   * the map cannot grow unboundedly.
+   */
+  private readonly sessionLocks = new Map<string, Promise<void>>()
+
   constructor(readonly store: SessionStore) {}
 
-  endSession(sessionId: string): void {
-    const session = this.requiredSession(sessionId)
-    session.updatedAt = timestamp()
-    session.metadata.ended = true
-    this.store.saveSession(session)
+  endSession(sessionId: string): Promise<void> {
+    return this.mutateSession(sessionId, session => {
+      session.updatedAt = timestamp()
+      session.metadata.ended = true
+    })
   }
 
   getSession(sessionId: string): SessionRecord | undefined {
@@ -346,18 +389,18 @@ export class SessionManager {
     return this.store.listSessions(workspaceId)
   }
 
-  recordAgentTransition(sessionId: string, transition: AgentTransitionRecord): void {
-    const session = this.requiredSession(sessionId)
-    session.agentTransitions.push(transition)
-    session.updatedAt = timestamp()
-    this.store.saveSession(session)
+  recordAgentTransition(sessionId: string, transition: AgentTransitionRecord): Promise<void> {
+    return this.mutateSession(sessionId, session => {
+      session.agentTransitions.push(transition)
+      session.updatedAt = timestamp()
+    })
   }
 
-  recordTurn(sessionId: string, turn: TurnRecord): void {
-    const session = this.requiredSession(sessionId)
-    session.turns.push(turn)
-    session.updatedAt = timestamp()
-    this.store.saveSession(session)
+  recordTurn(sessionId: string, turn: TurnRecord): Promise<void> {
+    return this.mutateSession(sessionId, session => {
+      session.turns.push(turn)
+      session.updatedAt = timestamp()
+    })
   }
 
   startSession(options: StartSessionOptions = {}): SessionRecord {
@@ -378,6 +421,33 @@ export class SessionManager {
     const session = this.store.loadSession(sessionId)
     if (!session) throw new Error(`Session not found: ${sessionId}`)
     return session
+  }
+
+  /**
+   * Run one load→mutate→save cycle after every previously queued mutation
+   * for the same session settles. The returned promise rejects when the
+   * mutation fails, but the lock chain itself always releases so one failure
+   * cannot block later writers.
+   */
+  private mutateSession(sessionId: string, mutate: (session: SessionRecord) => void): Promise<void> {
+    const previous = this.sessionLocks.get(sessionId) ?? Promise.resolve()
+    let release = (): void => {}
+    const current = new Promise<void>(resolve => {
+      release = resolve
+    })
+    this.sessionLocks.set(sessionId, current)
+    return previous.then(() => {
+      try {
+        const session = this.requiredSession(sessionId)
+        mutate(session)
+        this.store.saveSession(session)
+      } finally {
+        // Drain: only the chain tail removes the entry; a queued successor
+        // that already replaced it keeps the lock alive.
+        if (this.sessionLocks.get(sessionId) === current) this.sessionLocks.delete(sessionId)
+        release()
+      }
+    })
   }
 }
 

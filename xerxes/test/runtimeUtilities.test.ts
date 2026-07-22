@@ -55,7 +55,8 @@ test('iteration budgets enforce bounded charges, refund safely, and honor inject
   expect(iterationBudgetFromConfig({}, {
     environment: { XERXES_MAX_TOOL_TURNS: '4' },
   }).maxIterations).toBe(4)
-  expect(iterationBudgetFromConfig({ max_tool_turns: 'bad' }).maxIterations).toBeUndefined()
+  expect(iterationBudgetFromConfig({}, { environment: {} }).maxIterations).toBeUndefined()
+  expect(() => iterationBudgetFromConfig({ max_tool_turns: 'bad' })).toThrow(RangeError)
 })
 
 test('objective guard accepts verified outcomes or evidenced blockers and rejects premature objective final answers', () => {

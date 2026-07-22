@@ -105,6 +105,7 @@ export {
 } from './auth/oauth.js'
 export {
   CredentialStorage,
+  CredentialTamperedError,
   defaultCredentialStorage,
   listProviders as listCredentialProviders,
   load as loadCredential,

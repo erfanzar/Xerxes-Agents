@@ -1,7 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export interface CronJobOptions {
@@ -89,7 +89,12 @@ export class CronJob {
   }
 }
 
-/** Threadless, JSON-backed job persistence suitable for a single Bun daemon process. */
+/**
+ * Threadless, JSON-backed job persistence suitable for a single Bun daemon process.
+ * Writes are atomic (temporary file + rename) so a crash mid-write cannot corrupt the
+ * store; concurrent writers from multiple processes are still unsupported — the last
+ * process to rename wins.
+ */
 export class JobStore {
   constructor(readonly path: string) {
     mkdirSync(dirname(path), { recursive: true })
@@ -158,38 +163,79 @@ export class JobStore {
   }
 
   private save(records: readonly Record<string, unknown>[]): void {
-    writeFileSync(this.path, `${JSON.stringify(records, null, 2)}\n`, 'utf8')
+    const temporary = `${this.path}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`, 'utf8')
+      renameSync(temporary, this.path)
+    } catch (error) {
+      rmSync(temporary, { force: true })
+      throw error
+    }
   }
 }
 
-/** Calculate the first UTC minute strictly after `now` matching a five-field cron expression. */
+/** Longest forward search window: one full leap cycle plus a margin day. */
+const MAX_SEARCH_DAYS = 366 * 4 + 1
+
+/**
+ * Calculate the first UTC minute strictly after `now` matching a five-field cron
+ * expression. Iterates days (not minutes) so sparse schedules such as Feb-29 are
+ * found across non-leap years. Follows POSIX day-of-month/day-of-week semantics:
+ * when both fields are restricted, a match in either is sufficient.
+ */
 export function nextFireAt(schedule: string, now = new Date()): Date {
   const parts = schedule.trim().split(/\s+/)
   if (parts.length !== 5)
     throw new Error(
       `expected 5-field cron expression, got ${JSON.stringify(schedule)}`,
     )
-  const minute = parseCronField(parts[0] ?? '', 0, 59)
-  const hour = parseCronField(parts[1] ?? '', 0, 23)
-  const day = parseCronField(parts[2] ?? '', 1, 31)
+  const daySpec = parts[2] ?? ''
+  const weekDaySpec = parts[4] ?? ''
+  const minutes = [...parseCronField(parts[0] ?? '', 0, 59)].sort(
+    (left, right) => left - right,
+  )
+  const hours = [...parseCronField(parts[1] ?? '', 0, 23)].sort(
+    (left, right) => left - right,
+  )
+  const day = parseCronField(daySpec, 1, 31)
   const month = parseCronField(parts[3] ?? '', 1, 12)
-  const weekDay = parseCronField(parts[4] ?? '', 0, 6)
-  const candidate = new Date(now)
-  candidate.setUTCSeconds(0, 0)
-  candidate.setUTCMinutes(candidate.getUTCMinutes() + 1)
-  for (let count = 0; count < 60 * 24 * 366; count += 1) {
-    if (
-      minute.has(candidate.getUTCMinutes()) &&
-      hour.has(candidate.getUTCHours()) &&
-      day.has(candidate.getUTCDate()) &&
-      month.has(candidate.getUTCMonth() + 1) &&
-      weekDay.has(candidate.getUTCDay())
-    )
-      return candidate
-    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1)
+  // Day-of-week accepts 0-7 with 7 as a Sunday alias for 0.
+  const weekDay = new Set(
+    [...parseCronField(weekDaySpec, 0, 7)].map((value) =>
+      value === 7 ? 0 : value,
+    ),
+  )
+  const bothDaysRestricted = daySpec !== '*' && weekDaySpec !== '*'
+  const dayMatches = (date: Date): boolean => {
+    const domMatch = day.has(date.getUTCDate())
+    const dowMatch = weekDay.has(date.getUTCDay())
+    return bothDaysRestricted ? domMatch || dowMatch : domMatch && dowMatch
+  }
+
+  const earliest = new Date(now)
+  earliest.setUTCSeconds(0, 0)
+  earliest.setUTCMinutes(earliest.getUTCMinutes() + 1)
+  const cursor = new Date(
+    Date.UTC(
+      earliest.getUTCFullYear(),
+      earliest.getUTCMonth(),
+      earliest.getUTCDate(),
+    ),
+  )
+  for (let offset = 0; offset <= MAX_SEARCH_DAYS; offset += 1) {
+    if (month.has(cursor.getUTCMonth() + 1) && dayMatches(cursor)) {
+      for (const hour of hours) {
+        for (const minute of minutes) {
+          const candidate = new Date(cursor)
+          candidate.setUTCHours(hour, minute, 0, 0)
+          if (candidate >= earliest) return candidate
+        }
+      }
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1)
   }
   throw new Error(
-    `no fire time found within a year for ${JSON.stringify(schedule)}`,
+    `no fire time found within four years for ${JSON.stringify(schedule)}`,
   )
 }
 

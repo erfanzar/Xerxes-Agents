@@ -30,6 +30,15 @@ export type WebhookHandler = (
 
 export type WebhookFailureSource = 'dispatcher' | 'inbound_handler' | 'parse'
 
+/** Bound on retained dispatcher failures so long-lived processes keep only recent diagnostics. */
+export const WEBHOOK_FAILURE_LIMIT = 100
+
+/**
+ * Bound on recently delivered platform message ids retained to deduplicate
+ * provider retries (Slack 500-retry, Telegram update re-send, and similar).
+ */
+export const WEBHOOK_DELIVERY_DEDUP_LIMIT = 1_000
+
 /** A webhook error that was converted into a safe HTTP response. */
 export interface WebhookFailure {
   readonly channel: string
@@ -100,6 +109,9 @@ export class WebhookDispatcher {
 
   private report(failure: WebhookFailure): void {
     this.failures.push(failure)
+    if (this.failures.length > WEBHOOK_FAILURE_LIMIT) {
+      this.failures.splice(0, this.failures.length - WEBHOOK_FAILURE_LIMIT)
+    }
     if (!this.onFailure) {
       return
     }
@@ -124,6 +136,7 @@ export interface WebhookChannelOptions {
 export abstract class WebhookChannel implements WebhookCapableChannel {
   abstract readonly name: string
 
+  private readonly deliveredPlatformIds = new Map<string, true>()
   private handler: InboundHandler | undefined
   private readonly onFailure: ((failure: WebhookFailure) => void) | undefined
 
@@ -161,9 +174,43 @@ export abstract class WebhookChannel implements WebhookCapableChannel {
 
     let failed = false
     for (const message of messages) {
-      if (!await this.dispatchInbound(message)) failed = true
+      // Provider retries repeat the same platform message id; acknowledge the
+      // duplicate without routing a second agent turn. A failed dispatch is
+      // deliberately not remembered so a later retry can still be delivered.
+      if (this.isDuplicateDelivery(message)) continue
+      if (!await this.dispatchInbound(message)) {
+        failed = true
+        continue
+      }
+      this.rememberDelivery(message)
     }
     return { status: failed ? 500 : 200, body: 'ok' }
+  }
+
+  private deliveryKey(message: ChannelMessage): string | undefined {
+    const platformMessageId = message.platformMessageId
+    if (!platformMessageId) {
+      return undefined
+    }
+    return `${message.roomId ?? ''} ${platformMessageId}`
+  }
+
+  private isDuplicateDelivery(message: ChannelMessage): boolean {
+    const key = this.deliveryKey(message)
+    return key !== undefined && this.deliveredPlatformIds.has(key)
+  }
+
+  private rememberDelivery(message: ChannelMessage): void {
+    const key = this.deliveryKey(message)
+    if (key === undefined) {
+      return
+    }
+    this.deliveredPlatformIds.set(key, true)
+    while (this.deliveredPlatformIds.size > WEBHOOK_DELIVERY_DEDUP_LIMIT) {
+      const oldest = this.deliveredPlatformIds.keys().next()
+      if (oldest.done === true) break
+      this.deliveredPlatformIds.delete(oldest.value)
+    }
   }
 
   /** Deliver one already-normalized inbound message while preserving error containment. */

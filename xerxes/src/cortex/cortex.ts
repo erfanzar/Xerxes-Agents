@@ -6,6 +6,7 @@ import { PromptTemplate } from './core/templates.js'
 import {
   CortexOrchestrator,
   CortexProcess,
+  DEFAULT_MAX_PARALLEL,
 } from './orchestrator.js'
 import {
   CortexPlanner,
@@ -114,7 +115,10 @@ export type CortexConsensusSynthesizer = (
 ) => string | TaskExecutionResult | Promise<string | TaskExecutionResult>
 
 export interface CortexConsensusOptions {
-  /** Maximum concurrent candidate executions for one task. */
+  /**
+   * Maximum concurrent candidate executions for one task. Defaults to a
+   * finite cap; pass Number.POSITIVE_INFINITY to opt into unbounded fan-out.
+   */
   readonly maxCandidatesParallel?: number
   readonly synthesizer?: CortexConsensusSynthesizer
 }
@@ -291,7 +295,7 @@ export class Cortex {
       context => this.executeTask(context, signal),
       this.process === ProcessType.PARALLEL ? CortexProcess.PARALLEL : CortexProcess.SEQUENTIAL,
     )
-    return runner.run({ inputs })
+    return runner.run({ inputs, ...(signal === undefined ? {} : { signal }) })
   }
 
   private async runHierarchical(
@@ -305,7 +309,7 @@ export class Cortex {
       context => this.executeHierarchicalTask(context, signal),
       CortexProcess.SEQUENTIAL,
     )
-    const result = await runner.run({ inputs })
+    const result = await runner.run({ inputs, ...(signal === undefined ? {} : { signal }) })
     if (!this.hierarchy.summarize) return result
     const summary = normalizeResult(await this.hierarchy.summarize({
       taskOutputs: result.taskOutputs,
@@ -326,7 +330,7 @@ export class Cortex {
       context => this.executeConsensusTask(context, inputs, signal, diagnostics),
       CortexProcess.SEQUENTIAL,
     )
-    return runner.run({ inputs })
+    return runner.run({ inputs, ...(signal === undefined ? {} : { signal }) })
   }
 
   private async runPlanned(
@@ -535,7 +539,7 @@ export class Cortex {
     }
     const candidates: Array<CortexConsensusCandidate | undefined> = new Array(this.agents.length)
     const errors: Array<{ readonly agentId: string; readonly message: string }> = []
-    const maximum = this.consensus.maxCandidatesParallel ?? this.agents.length
+    const maximum = this.consensus.maxCandidatesParallel ?? DEFAULT_MAX_PARALLEL
     await mapConcurrent(this.agents, maximum, async (agent, index) => {
       try {
         const result = normalizeResult(await this.executeTask({ ...context, agent }, signal))
@@ -626,9 +630,9 @@ export class Cortex {
     const result = this.taskRunner
       ? await this.taskRunner(request)
       : this.executor
-        ? await this.executor(context)
+        ? await this.executor(request)
         : context.agent?.execute
-          ? await context.agent.execute(context)
+          ? await context.agent.execute(request)
           : (() => { throw new Error(`No executor is configured for task ${context.task.id}`) })()
     throwIfCancelled(signal)
     return result
@@ -937,7 +941,8 @@ function validateMaxParallel(value: number | undefined): number | undefined {
 }
 
 function validateMaxCandidates(value: number | undefined): void {
-  if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+  if (value === undefined || value === Number.POSITIVE_INFINITY) return
+  if (!Number.isInteger(value) || value < 1) {
     throw new Error('maxCandidatesParallel must be a positive integer')
   }
 }
@@ -955,6 +960,9 @@ function throwIfCancelled(signal: AbortSignal | undefined): void {
 async function awaitWithCancellation<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return work
   throwIfCancelled(signal)
+  // The topology may settle after cancellation wins the race; observe that late
+  // settlement so a detached rejection never surfaces as an unhandled rejection.
+  void work.catch(() => undefined)
   return new Promise<T>((resolve, reject) => {
     const cancel = (): void => reject(new CortexCancellationError(signal.reason))
     signal.addEventListener('abort', cancel, { once: true })

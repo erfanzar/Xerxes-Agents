@@ -10,6 +10,16 @@ import { optionalString, requiredString } from '../inputs.js'
 
 const MAX_REMOTE_RESPONSE_CHARS = 8_000
 
+/**
+ * Cap on a model-supplied cron prompt. The prompt is persisted and
+ * re-executed on every schedule tick, so an unbounded body would bloat the
+ * durable job store; 4k characters is generous for a scheduled instruction.
+ */
+const MAX_CRON_PROMPT_CHARS = 4_000
+
+/** Attempts to mint a collision-free server-side cron job id before failing. */
+const CRON_ID_GENERATION_ATTEMPTS = 3
+
 export interface RemoteTriggerEndpoint {
   readonly headers?: Readonly<Record<string, string>>
   readonly method?: 'POST' | 'PUT'
@@ -94,10 +104,10 @@ export const CLAUDE_REMOTE_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     trigger_name: stringSchema('Configured remote trigger name.'),
     payload: stringSchema('Payload sent to the endpoint.'),
   }, ['trigger_name']),
-  definition('ScheduleCronTool', 'Persist a cron-triggered agent prompt in the attached scheduler store.', {
+  definition('ScheduleCronTool', 'Persist a cron-triggered agent prompt in the attached scheduler store. Requires explicit user approval; job ids are generated server-side.', {
     schedule: stringSchema('Five-field UTC cron schedule.'),
-    prompt: stringSchema('Agent prompt to run on each occurrence.'),
-    name: stringSchema('Optional stable cron job id.'),
+    prompt: stringSchema(`Agent prompt to run on each occurrence (at most ${MAX_CRON_PROMPT_CHARS} characters).`),
+    name: stringSchema('Optional human-readable label stored as job metadata; the durable job id is always generated server-side.'),
   }, ['schedule', 'prompt']),
 ]
 
@@ -146,12 +156,27 @@ export class ClaudeRemoteTools {
     }
     const schedule = requiredString(inputs, 'schedule')
     const prompt = requiredString(inputs, 'prompt')
-    const name = optionalString(inputs, 'name')?.trim()
+    if (prompt.length > MAX_CRON_PROMPT_CHARS) {
+      throw new ValidationError('prompt', `must be at most ${MAX_CRON_PROMPT_CHARS} characters`, prompt.slice(0, 80))
+    }
+    // The caller-supplied `name` is only a human-readable label. The durable
+    // job id is always minted server-side and checked against the store, so a
+    // model can never overwrite (or squat on) an existing job by choosing its
+    // id. This tool also sits in the ALWAYS_APPROVAL_TOOLS permission tier,
+    // so persisting a re-executing prompt requires explicit user approval.
+    const label = optionalString(inputs, 'name')?.trim()
     const nextRunAt = nextFireAt(schedule).toISOString()
-    const job = new CronJob({ id: name || store.newId(), prompt, schedule, nextRunAt })
+    const job = new CronJob({
+      id: mintJobId(store),
+      prompt,
+      schedule,
+      nextRunAt,
+      ...(label === undefined ? {} : { metadata: { name: label } }),
+    })
     store.add(job)
     return {
       id: job.id,
+      name: label ?? null,
       schedule: job.schedule,
       prompt: job.prompt,
       next_run_at: job.nextRunAt ?? null,
@@ -178,6 +203,15 @@ function definition(
 
 function stringSchema(description: string): Record<string, unknown> {
   return { type: 'string', description }
+}
+
+/** Mint a server-side job id that does not collide with any persisted job. */
+function mintJobId(store: JobStore): string {
+  for (let attempt = 0; attempt < CRON_ID_GENERATION_ATTEMPTS; attempt += 1) {
+    const id = store.newId()
+    if (store.get(id) === undefined) return id
+  }
+  throw new ValidationError('ScheduleCronTool', 'could not mint a collision-free cron job id')
 }
 
 async function nativeFetch(url: string, init: RequestInit): Promise<RemoteTriggerResponse> {

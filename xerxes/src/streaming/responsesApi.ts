@@ -33,6 +33,9 @@ export class ResponsesEventTranslator {
 
   private readonly pendingCalls = new Map<string, PendingFunctionCall>()
 
+  /** Maps every observed item_id/call_id onto its pending entry's map key. */
+  private readonly pendingAliases = new Map<string, string>()
+
   /** Translate one decoded Responses API event into zero or more neutral deltas. */
   translate(event: Readonly<Record<string, unknown>>): LlmDelta[] {
     const type = stringValue(event.type)
@@ -49,11 +52,13 @@ export class ResponsesEventTranslator {
       return []
     }
     if (type === 'response.function_call_arguments.delta') {
-      const id = stringValue(event.item_id) || stringValue(event.call_id)
-      if (!id) return []
+      const rawId = stringValue(event.item_id) || stringValue(event.call_id)
+      if (!rawId) return []
+      const id = this.pendingAliases.get(rawId) ?? rawId
       const pending = this.pendingCalls.get(id) ?? this.createPendingCall(id)
       pending.argumentsText += stringValue(event.delta)
       this.pendingCalls.set(id, pending)
+      this.pendingAliases.set(rawId, id)
       return []
     }
     if (type === 'response.output_item.done') {
@@ -92,28 +97,55 @@ export class ResponsesEventTranslator {
   }
 
   private addFunctionCall(item: Readonly<Record<string, unknown>>): void {
-    if (!isFunctionCallItem(item)) return
-    const id = stringValue(item.id) || stringValue(item.call_id)
-    if (!id) return
-    const pending = this.pendingCalls.get(id) ?? this.createPendingCall(id)
+    this.upsertPendingCall(item)
+  }
+
+  private completeFunctionCall(item: Readonly<Record<string, unknown>>): void {
+    const upserted = this.upsertPendingCall(item)
+    if (!upserted) return
+    this.pendingCalls.delete(upserted.id)
+    this.recordToolCall(upserted.pending)
+  }
+
+  /**
+   * Merge an output item into its pending entry, aliasing item_id and call_id.
+   *
+   * Argument deltas may carry only one of the two identifiers, so both forms
+   * must resolve to the same pending entry; otherwise a delta-only stub would
+   * flush as a duplicate, nameless tool call at the end of the stream.
+   */
+  private upsertPendingCall(
+    item: Readonly<Record<string, unknown>>,
+  ): { id: string; pending: PendingFunctionCall } | undefined {
+    if (!isFunctionCallItem(item)) return undefined
+    const itemId = stringValue(item.id)
+    const callId = stringValue(item.call_id)
+    let id = this.findPendingKey(itemId, callId) ?? (itemId || callId)
+    if (!id) return undefined
+    let pending = this.pendingCalls.get(id) ?? this.createPendingCall(id)
+    if (itemId && pending.id !== itemId) {
+      this.pendingCalls.delete(id)
+      pending = { ...pending, id: itemId }
+      id = itemId
+    }
     const name = stringValue(item.name)
     const argumentValue = argumentsText(item.arguments)
     if (name) pending.name = name
     if (argumentValue) pending.argumentsText = argumentValue
     this.pendingCalls.set(id, pending)
+    for (const alias of [itemId, callId]) {
+      if (alias) this.pendingAliases.set(alias, id)
+    }
+    return { id, pending }
   }
 
-  private completeFunctionCall(item: Readonly<Record<string, unknown>>): void {
-    if (!isFunctionCallItem(item)) return
-    const id = stringValue(item.id) || stringValue(item.call_id)
-    if (!id) return
-    const pending = this.pendingCalls.get(id) ?? this.createPendingCall(id)
-    const name = stringValue(item.name)
-    const argumentValue = argumentsText(item.arguments)
-    if (name) pending.name = name
-    if (argumentValue) pending.argumentsText = argumentValue
-    this.pendingCalls.delete(id)
-    this.recordToolCall(pending)
+  private findPendingKey(...ids: string[]): string | undefined {
+    for (const id of ids) {
+      if (!id) continue
+      const resolved = this.pendingAliases.get(id) ?? id
+      if (this.pendingCalls.has(resolved)) return resolved
+    }
+    return undefined
   }
 
   private completeUsage(response: Readonly<Record<string, unknown>>): void {
@@ -130,7 +162,7 @@ export class ResponsesEventTranslator {
       inputTokens: finiteNumber(usage.input_tokens) ?? 0,
       outputTokens: finiteNumber(usage.output_tokens) ?? 0,
       toolCalls: this.usage.toolCalls,
-      finishReason: stringValue(response.status) || 'stop',
+      finishReason: completedFinishReason(stringValue(response.status), this.usage.toolCalls.length > 0),
       ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
       ...(cacheCreationTokens === undefined ? {} : { cacheCreationTokens }),
       ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
@@ -142,6 +174,7 @@ export class ResponsesEventTranslator {
       this.pendingCalls.delete(id)
       this.recordToolCall(pending)
     }
+    this.pendingAliases.clear()
   }
 
   private recordToolCall(pending: PendingFunctionCall): void {
@@ -173,6 +206,17 @@ export class ResponsesEventTranslator {
 function isFunctionCallItem(item: Readonly<Record<string, unknown>>): boolean {
   const type = stringValue(item.type)
   return type === 'function_call' || type === 'tool_call'
+}
+
+/**
+ * Map a completed response status onto the neutral finish vocabulary.
+ *
+ * The raw provider status 'completed' is not a valid loop finish reason; it
+ * becomes 'tool_calls' when calls were recorded and 'stop' otherwise.
+ */
+function completedFinishReason(status: string, hasToolCalls: boolean): string {
+  if (hasToolCalls) return 'tool_calls'
+  return !status || status === 'completed' ? 'stop' : status
 }
 
 /** Map an incomplete response's reason onto the neutral finish vocabulary. */

@@ -169,6 +169,89 @@ test('CLI --resume submits a supplied prompt to the persisted native session wit
   }
 })
 
+test('CLI --resume rejects a flag in place of the session ID', async () => {
+  const child = Bun.spawn([process.execPath, CLI, '--resume', '--help'], {
+    stderr: 'pipe',
+    stdout: 'pipe',
+  })
+  const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited])
+
+  expect(exitCode).not.toBe(0)
+  expect(stderr).toContain('The --resume option requires a session ID, not the flag --help')
+})
+
+test('CLI --resume exits non-zero when the resumed turn fails at the provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'xerxes-bun-cli-resume-fail-'))
+  const home = join(root, 'home')
+  const project = join(root, 'project')
+  const sessions = join(home, 'sessions')
+  const sessionId = 'bad0f00d'
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch() {
+      return new Response(JSON.stringify({ error: { message: 'invalid api key' } }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 401,
+      })
+    },
+  })
+  try {
+    await Promise.all([
+      mkdir(join(home, 'daemon'), { recursive: true }),
+      mkdir(project, { recursive: true }),
+      mkdir(sessions, { recursive: true }),
+    ])
+    await writeFile(
+      join(home, 'daemon', 'config.json'),
+      JSON.stringify({
+        runtime: {
+          model: 'gpt-4o',
+          provider: 'openai',
+          base_url: `${server.url}v1`,
+          api_key: 'test-key',
+          permission_mode: 'accept-all',
+        },
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(sessions, `${sessionId}.json`),
+      JSON.stringify({
+        session_id: sessionId,
+        key: sessionId,
+        cwd: project,
+        agent_id: 'default',
+        updated_at: '2026-07-14T00:00:00.000Z',
+        turn_count: 1,
+        messages: [
+          { role: 'user', content: 'persisted context' },
+          { role: 'assistant', content: 'acknowledged' },
+        ],
+      }),
+      'utf8',
+    )
+
+    const child = Bun.spawn([process.execPath, CLI, '--resume', sessionId, 'continue'], {
+      cwd: project,
+      env: { ...process.env, XERXES_HOME: home },
+      stderr: 'pipe',
+      stdout: 'pipe',
+    })
+    const [stderr, exitCode] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+
+    // The error-level notification must become a failing exit code.
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain('Provider error:')
+  } finally {
+    server.stop(true)
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 function sseResponse(events: readonly Record<string, unknown>[]): Response {
   const body = events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') + 'data: [DONE]\n\n'
   return new Response(body, {

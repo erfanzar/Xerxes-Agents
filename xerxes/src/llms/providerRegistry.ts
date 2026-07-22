@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { ConfigurationError } from '../core/errors.js'
+
 export type ProviderTransport = 'anthropic' | 'claude-code' | 'openai'
 
 export interface ProviderConfig {
@@ -228,7 +230,18 @@ export function detectProvider(model: string): ProviderName {
     if (alias) {
       return alias
     }
-    return isProviderName(explicit) ? explicit : 'openai'
+    if (isProviderName(explicit)) {
+      return explicit
+    }
+    // An explicit `prefix/model` is a routing decision, not a guess: silently
+    // retargeting an unrecognized prefix to OpenAI would send the request to
+    // the wrong provider. Plugin provider prefixes are resolved by the client
+    // factory before this registry path runs.
+    throw new ConfigurationError(
+      'model',
+      `unknown provider prefix '${explicit}' in '${model}'; use a registered provider prefix, ` +
+      'a plugin provider selected through the client factory, or a bare model id',
+    )
   }
   const lower = model.toLowerCase()
   return PREFIX_MAP.find(([prefix]) => lower.startsWith(prefix))?.[1] ?? 'openai'

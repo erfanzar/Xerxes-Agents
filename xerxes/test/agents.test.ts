@@ -213,7 +213,12 @@ agent:
       allowedTools: ['ReadFile'],
       source: 'project',
     })
-    expect(definitions.get('audit')).toMatchObject({
+    // Referenced-only profiles never claim the plain alias: audit is reachable
+    // exclusively through its creator-bound catalog key.
+    expect(definitions.get('audit')).toBeUndefined()
+    const auditKey = definitions.get('parent')?.subagents?.audit?.resolvedProfile ?? ''
+    expect(auditKey).toStartWith('@catalog:audit:')
+    expect(definitions.get(auditKey)).toMatchObject({
       name: 'audit',
       source: 'project',
       systemPrompt: 'nested reviewer prompt',

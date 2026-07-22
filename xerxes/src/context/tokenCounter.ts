@@ -9,7 +9,7 @@ export class ProviderTokenCounter {
     const text = typeof input === 'string' ? input : this.messagesToText(input)
     const resolved = provider ?? (model ? this.detectProvider(model) : undefined)
     const fallback = estimateTokens(text)
-    return resolved === 'google' ? Math.floor(fallback * 1.1) : fallback
+    return resolved === 'google' ? Math.ceil(fallback * 1.1) : fallback
   }
 
   static detectProvider(model: string): string | undefined {
@@ -23,7 +23,22 @@ export class ProviderTokenCounter {
   }
 
   static messagesToText(messages: readonly Record<string, unknown>[]): string {
-    return messages.map(message => `${typeof message.role === 'string' ? message.role : ''}: ${contentToText(message.content)}`).join('\n')
+    return messages.map(message => {
+      const role = typeof message.role === 'string' ? message.role : ''
+      const parts = [`${role}: ${contentToText(message.content)}`]
+      // tool_calls arguments are often the largest payload in a window; count every
+      // additional token-bearing field instead of silently treating it as free.
+      for (const [key, value] of Object.entries(message)) {
+        if (key === 'role' || key === 'content' || value === undefined || value === null) {
+          continue
+        }
+        const serialized = contentToText(value)
+        if (serialized) {
+          parts.push(`${key}=${serialized}`)
+        }
+      }
+      return parts.join(' ')
+    }).join('\n')
   }
 }
 
@@ -64,7 +79,9 @@ function contentToText(value: unknown): string {
 
 function estimateTokens(text: string): number {
   if (!text) return 0
-  // Whitespace-aware words plus punctuation approximates modern BPE more closely than pure len/4.
-  const lexical = text.match(/\p{L}+[\p{L}\p{N}_-]*|\p{N}+|[^\s]/gu)?.length ?? 0
+  // Words and numbers count individually while a run of punctuation/symbols counts once
+  // per run. One token per non-space character over-counted punctuation-dense content
+  // (code, JSON, diffs) by roughly 2x versus BPE merge behavior.
+  const lexical = text.match(/\p{L}+[\p{L}\p{N}_-]*|\p{N}+|[^\s\p{L}\p{N}]+/gu)?.length ?? 0
   return Math.max(1, lexical, Math.ceil(text.length / 4))
 }

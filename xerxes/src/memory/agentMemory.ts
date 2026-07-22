@@ -2,11 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { ValidationError } from '../core/errors.js'
 import { xerxesHome } from '../daemon/paths.js'
+import { scanContextContent } from '../security/promptScanner.js'
+import { buildMemoryContextBlock } from './contextFencing.js'
 
 export const AgentMemoryScope = {
   GLOBAL: 'global',
@@ -141,14 +143,18 @@ export class AgentMemory {
     if (options.timestamp ?? true) addition = '<!-- ' + new Date().toISOString() + ' -->\n' + addition
 
     return this.withAppendLock(target, async () => {
-      let existing = ''
-      try {
-        existing = await this.read(scope, path)
-      } catch (error) {
-        if (!(error instanceof ValidationError)) throw error
-      }
-      const next = existing ? existing.replace(/\n?$/, '\n') + '\n' + addition + '\n' : addition + '\n'
-      await this.write(scope, path, next)
+      // Append-only write through O_APPEND instead of read-modify-write: the
+      // per-instance promise lock cannot serialize two AgentMemory instances
+      // (daemon + CLI, parallel agents) sharing one directory, and their
+      // interleaved read-modify-write cycles silently lost journal entries.
+      // Kernel-level append positioning keeps every entry durable; at worst
+      // concurrent writers interleave separator blank lines.
+      await mkdir(dirname(target), { recursive: true })
+      const tail = await readTail(target)
+      const chunk = tail === undefined || tail.length === 0
+        ? addition + '\n'
+        : (tail.endsWith('\n') ? '\n' : '\n\n') + addition + '\n'
+      await appendFile(target, chunk, 'utf8')
       return {
         scope: normalizeScope(scope),
         path: this.relativePath(scope, target),
@@ -256,7 +262,12 @@ export class AgentMemory {
         const shortened = tail ? body.slice(-maxBytesPerFile) : body.slice(0, maxBytesPerFile)
         body = shortened + '\n\n[Memory file truncated; use agent_memory_read for full text.]'
       }
-      sections.push('### [' + entry.scope + '] ' + entry.path + '\n\n' + body)
+      // Memory file bodies are agent-written data derived from untrusted
+      // tool and web output. They flow straight into the system prompt
+      // (cli.ts, daemon/turnRunner.ts), so neutralise embedded hostile
+      // instructions and fence them as data, never as instructions.
+      const fenced = buildMemoryContextBlock(scanContextContent(body, `agent memory: ${entry.path}`))
+      sections.push('### [' + entry.scope + '] ' + entry.path + '\n\n' + fenced)
     }
     sections.push(
       '## Before ending the turn',
@@ -431,6 +442,30 @@ function isWithin(root: string, target: string): boolean {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+/**
+ * Read the trailing bytes of a file to pick an append separator without
+ * loading the whole file. Returns undefined when the file does not exist.
+ * A single byte suffices to detect a trailing newline: 0x0A never appears
+ * as a UTF-8 continuation byte.
+ */
+async function readTail(path: string, bytes = 1): Promise<string | undefined> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    handle = await open(path, 'r')
+    const info = await handle.stat()
+    if (!info.isFile() || info.size === 0) return ''
+    const length = Math.min(bytes, info.size)
+    const buffer = Buffer.alloc(length)
+    await handle.read(buffer, 0, length, info.size - length)
+    return buffer.toString('utf8')
+  } catch (error) {
+    if (isMissing(error)) return undefined
+    throw error
+  } finally {
+    await handle?.close()
+  }
 }
 
 function validateLimit(limit: number): number {

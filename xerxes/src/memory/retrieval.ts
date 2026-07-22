@@ -40,6 +40,14 @@ export interface RetrievalResult {
 /** Batch-local hybrid ranking that blends hash semantic, BM25, and recency signals. */
 export class HybridRetriever {
   readonly weights: RetrievalWeights
+  /**
+   * Per-item embedding cache keyed by object identity. Ranking used to
+   * re-embed every candidate's content on every query — O(n) hashing per
+   * search. Content is mutable, so entries are validated against the exact
+   * content string they were computed from. The WeakMap lets collected
+   * items drop their cached vectors.
+   */
+  private readonly embeddingCache = new WeakMap<MemoryItem, { readonly content: string; readonly embedding: number[] }>()
 
   constructor(
     readonly embedder: Embedder = getDefaultEmbedder(),
@@ -57,7 +65,7 @@ export class HybridRetriever {
     const rawBm25 = this.bm25(query, items)
     const maxBm25 = Math.max(0, ...rawBm25)
     const results = items.map((item, index) => {
-      const itemEmbedding = item.embedding ?? this.embedder.embed(item.content)
+      const itemEmbedding = item.embedding ?? this.embeddingFor(item)
       const semanticScore = Math.max(0, cosineSimilarity(queryEmbedding, itemEmbedding))
       const bm25Score = maxBm25 === 0 ? 0 : (rawBm25[index] ?? 0) / maxBm25
       const recencyScore = this.recency(item.timestamp, now)
@@ -67,6 +75,15 @@ export class HybridRetriever {
       return { item, score, semanticScore, bm25Score, recencyScore }
     })
     return results.sort((left, right) => right.score - left.score).slice(0, limit)
+  }
+
+  /** Embed one item's content once per distinct content value. */
+  private embeddingFor(item: MemoryItem): number[] {
+    const cached = this.embeddingCache.get(item)
+    if (cached && cached.content === item.content) return cached.embedding
+    const embedding = this.embedder.embed(item.content)
+    this.embeddingCache.set(item, { content: item.content, embedding })
+    return embedding
   }
 
   private bm25(query: string, items: readonly MemoryItem[]): number[] {

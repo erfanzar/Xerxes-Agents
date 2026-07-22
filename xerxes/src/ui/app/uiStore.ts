@@ -12,7 +12,7 @@ import { DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
 const buildUiState = (): UiState => ({
   bgTasks: new Set(),
   busy: false,
-  busyInputMode: 'queue',
+  busyInputMode: 'steer',
   compact: false,
   detailsMode: 'collapsed',
   detailsModeCommandOverride: false,

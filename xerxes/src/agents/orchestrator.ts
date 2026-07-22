@@ -62,6 +62,7 @@ export class AgentOrchestrator {
   private currentId: string | undefined
   private readonly history: AgentSwitchRecord[] = []
   private readonly maxAgents: number
+  private nextAutoId = 0
   private readonly now: () => Date
   private readonly triggerError: (trigger: AgentSwitchTrigger, error: unknown) => void
   private readonly triggers = new Map<AgentSwitchTrigger, AgentSwitchHandler>()
@@ -81,7 +82,7 @@ export class AgentOrchestrator {
   }
 
   get executionHistory(): readonly AgentSwitchRecord[] {
-    return this.history
+    return Object.freeze(this.history.slice())
   }
 
   get switchTriggers(): ReadonlyMap<AgentSwitchTrigger, AgentSwitchHandler> {
@@ -89,17 +90,21 @@ export class AgentOrchestrator {
   }
 
   registerAgent(agent: OrchestratedAgent): string {
-    const id = agent.id || `agent_${this.agentMap.size}`
+    let id = agent.id
+    if (!id) {
+      // Monotonic auto-ids never collide with explicit ids registered later.
+      do {
+        id = `agent_${this.nextAutoId++}`
+      } while (this.agentMap.has(id))
+    }
     if (this.agentMap.has(id)) {
       throw new Error(`Agent ${id} is already registered`)
     }
     if (this.agentMap.size >= this.maxAgents) {
       throw new Error(`Maximum number of agents (${this.maxAgents}) reached`)
     }
-    if (!agent.id) {
-      agent.id = id
-    }
-    this.agentMap.set(id, agent)
+    // Store a frozen copy instead of mutating the caller's object.
+    this.agentMap.set(id, Object.freeze({ ...agent, id }))
     this.currentId ??= id
     return id
   }
@@ -133,14 +138,14 @@ export class AgentOrchestrator {
     }
     const from = this.currentId
     this.currentId = targetAgentId
-    this.history.push({
+    this.history.push(Object.freeze({
       action: 'agent_switch',
       type: 'agent_switch',
       from,
       to: targetAgentId,
       reason,
       timestamp: this.now().toISOString(),
-    })
+    }))
   }
 
   getCurrentAgent(): OrchestratedAgent {

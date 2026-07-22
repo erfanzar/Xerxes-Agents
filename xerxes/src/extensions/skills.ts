@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { existsSync, readdirSync, realpathSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,6 +40,10 @@ export interface SkillDependencyLookup {
 const activeSkills = new Set<string>();
 export const MAX_SKILL_INDEX_BYTES = 16 * 1024;
 export const MAX_SKILL_INDEX_ENTRIES = 128;
+/** One SKILL.md document may never exceed 1 MiB; larger files are rejected before reading. */
+export const MAX_SKILL_FILE_BYTES = 1024 * 1024;
+/** Total bytes one discovery pass will read across all candidate SKILL.md files. */
+export const MAX_SKILL_DISCOVERY_TOTAL_BYTES = 32 * 1024 * 1024;
 const PLATFORM_MAP: Readonly<Record<string, NodeJS.Platform>> = {
   macos: "darwin",
   linux: "linux",
@@ -138,10 +142,19 @@ export function parseSkillMarkdown(content: string, sourcePath: string): Skill {
   };
 }
 
+/** Whether an instruction body survives the prompt-injection scan without blocked spans. */
+export function skillInstructionsAreSafe(skill: Skill): boolean {
+  return !scanContextContent(skill.instructions, skill.sourcePath).includes(
+    "[BLOCKED:",
+  );
+}
+
 export function skillPromptSection(skill: Skill): string {
   const manifestPath = resolve(skill.sourcePath);
   const skillRoot = dirname(manifestPath);
   const resourcePaths = installedSkillResourcePaths(skill, skillRoot);
+  // Instruction bodies are untrusted content: neutralize hostile spans instead of injecting them verbatim.
+  const instructions = scanContextContent(skill.instructions, manifestPath);
   const header = `## Skill: ${skill.metadata.name}${skill.metadata.description ? `\n${skill.metadata.description}` : ""}`;
   return [
     header,
@@ -157,7 +170,7 @@ export function skillPromptSection(skill: Skill): string {
           ]
         : []),
     ].join("\n"),
-    skill.instructions,
+    instructions,
   ].join("\n\n");
 }
 
@@ -255,9 +268,18 @@ export class SkillRegistry {
     });
   }
 
-  register(skill: Skill): void {
-    this.registeredSkills.set(skill.metadata.name, skill);
-    this.skills.set(skill.metadata.name, skill);
+  register(skill: Skill, options: { readonly force?: boolean } = {}): void {
+    const name = skill.metadata.name;
+    if (
+      !options.force &&
+      (this.registeredSkills.has(name) || this.skills.has(name))
+    ) {
+      console.warn(
+        `Skill '${name}' is already registered; re-registration replaces it. Pass { force: true } to silence this warning.`,
+      );
+    }
+    this.registeredSkills.set(name, skill);
+    this.skills.set(name, skill);
   }
 
   get(name: string): Skill | undefined {
@@ -389,13 +411,27 @@ async function discoverInto(
   directories: readonly string[],
 ): Promise<string[]> {
   const discovered: string[] = [];
+  let totalBytes = 0;
   for (const directory of directories) {
     for await (const skillPath of skillFiles(directory)) {
+      if (totalBytes >= MAX_SKILL_DISCOVERY_TOTAL_BYTES) {
+        // A hostile tree of large files must not exhaust memory through unbounded discovery reads.
+        break;
+      }
       try {
+        const metadata = await stat(skillPath);
+        if (!metadata.isFile() || metadata.size > MAX_SKILL_FILE_BYTES) {
+          continue;
+        }
+        totalBytes += metadata.size;
         const skill = parseSkillMarkdown(
           await readFile(skillPath, "utf8"),
           skillPath,
         );
+        if (!skillInstructionsAreSafe(skill)) {
+          // A hostile instruction body must never reach discovery or prompt activation.
+          continue;
+        }
         if (!skills.has(skill.metadata.name)) {
           skills.set(skill.metadata.name, skill);
           discovered.push(skill.metadata.name);
@@ -509,8 +545,16 @@ function detectedSubcommands(sourceDirectory: string): string[] {
 
 type FrontmatterValue = string | string[];
 
+/** Frontmatter keys that must never be written to a parsed record, even on a null-prototype object. */
+const FORBIDDEN_FRONTMATTER_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
 function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
-  const fields: Record<string, FrontmatterValue> = {};
+  // Null-prototype record: untrusted YAML keys must not reach Object.prototype.
+  const fields: Record<string, FrontmatterValue> = Object.create(null);
   let listKey: string | undefined;
   for (const rawLine of content.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -530,6 +574,10 @@ function parseFrontmatter(content: string): Record<string, FrontmatterValue> {
       continue;
     }
     const key = line.slice(0, separator).trim();
+    if (FORBIDDEN_FRONTMATTER_KEYS.has(key)) {
+      listKey = undefined;
+      continue;
+    }
     const value = line.slice(separator + 1).trim();
     listKey = value ? undefined : key;
     fields[key] =

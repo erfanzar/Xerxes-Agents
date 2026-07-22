@@ -208,6 +208,24 @@ function isInternalIpv6(host: string): boolean {
     return isInternalIpv4([seventh >> 8, seventh & 0xff, eighth >> 8, eighth & 0xff].join('.'))
   }
 
+  // 6to4 (2002::/16) embeds a plain IPv4 in the next 32 bits; Teredo
+  // (2001:0000::/32) embeds the client IPv4 XOR-obfuscated in the final 32
+  // bits. Either can hide a private or loopback address, so classify the
+  // embedded IPv4 rather than trusting the public-looking prefix.
+  if (first === 0x2002) {
+    return isInternalIpv4([second >> 8, second & 0xff, third >> 8, third & 0xff].join('.'))
+  }
+  if (first === 0x2001 && second === 0) {
+    const seventh = groups[6]
+    const eighth = groups[7]
+    if (seventh === undefined || eighth === undefined) {
+      return true
+    }
+    const unmasked7 = seventh ^ 0xffff
+    const unmasked8 = eighth ^ 0xffff
+    return isInternalIpv4([unmasked7 >> 8, unmasked7 & 0xff, unmasked8 >> 8, unmasked8 & 0xff].join('.'))
+  }
+
   return allZero
     || loopback
     || (first & 0xff00) === 0xff00

@@ -33,7 +33,9 @@ export const CONTEXT_THREAT_PATTERNS: readonly ThreatPattern[] = [
   },
   { id: 'html_comment_injection', pattern: /<!--[^>]*(?:ignore|override|system|secret|hidden)[^>]*-->/gi },
   { id: 'hidden_div', pattern: /<\s*div\s+style\s*=\s*["'][\s\S]*?display\s*:\s*none/gi },
-  { id: 'translate_execute', pattern: /translate\s+.*\s+into\s+.*\s+and\s+(execute|run|eval)/gi },
+  // Wildcards are bounded: stacked unbounded `.*\s+` quantifiers backtrack
+  // quadratically (ReDoS) on long attacker-controlled single lines.
+  { id: 'translate_execute', pattern: /translate\s+[^\n]{0,200}?\s+into\s+[^\n]{0,200}?\s+and\s+(execute|run|eval)/gi },
   { id: 'exfil_curl', pattern: /curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)/gi },
   { id: 'read_secrets', pattern: /cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)/gi },
 ]
@@ -47,6 +49,7 @@ export const CONTEXT_INVISIBLE_CHARS: ReadonlySet<string> = new Set([
  * Neutralise detected prompt-injection spans while keeping surrounding context intact.
  */
 export function scanContextContent(content: string, filename = 'unknown'): string {
+  const displayName = sanitizeDisplayName(filename)
   const spans: ThreatSpan[] = []
 
   for (let index = 0; index < content.length; index += 1) {
@@ -74,7 +77,7 @@ export function scanContextContent(content: string, filename = 'unknown'): strin
   let cursor = 0
   for (const span of merged) {
     parts.push(content.slice(cursor, span.start))
-    parts.push(`[BLOCKED: ${filename} ${span.ids.join(', ')}]`)
+    parts.push(`[BLOCKED: ${displayName} ${span.ids.join(', ')}]`)
     cursor = span.end
   }
   parts.push(content.slice(cursor))
@@ -83,12 +86,21 @@ export function scanContextContent(content: string, filename = 'unknown'): strin
 
 /** Read UTF-8 context and neutralise it; failed reads are represented as a safe placeholder. */
 export async function scanContextFile(path: string, filename?: string): Promise<string> {
-  const name = filename ?? basename(path)
+  const name = sanitizeDisplayName(filename ?? basename(path))
   try {
     return scanContextContent(await readFile(path, 'utf8'), name)
   } catch (error) {
     return `[BLOCKED: ${name} unreadable (${errorMessage(error)})]`
   }
+}
+
+/**
+ * Keep attacker-controlled filenames from breaking out of the `[BLOCKED: ...]`
+ * placeholder or injecting instruction-like text into model context: strip the
+ * placeholder's bracket delimiters and control/format characters.
+ */
+function sanitizeDisplayName(name: string): string {
+  return name.replace(/[[\]]/g, '').replace(/[\p{Cc}\p{Cf}]/gu, '') || 'unknown'
 }
 
 function mergeThreatSpans(spans: readonly ThreatSpan[]): MergedThreatSpan[] {

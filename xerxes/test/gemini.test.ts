@@ -3,6 +3,7 @@
 
 import { expect, test } from 'bun:test'
 
+import { ProviderError } from '../src/core/errors.js'
 import { GeminiClient, messagesToGemini } from '../src/llms/gemini.js'
 import { createLlmClient, type CompletionRequest } from '../src/llms/client.js'
 
@@ -238,6 +239,32 @@ test('Gemini client exposes HTTP failures and malformed SSE JSON as provider err
     fetchImplementation: async () => textSseResponse('data: {not JSON}\n\n'),
   })
   await expect(collect(malformed.stream(simpleRequest()))).rejects.toThrow('invalid Gemini SSE JSON: {not JSON}')
+})
+
+test('Gemini fetch aborts surface unchanged instead of being wrapped as provider errors', async () => {
+  const abort = new DOMException('The operation was aborted', 'AbortError')
+  const client = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async () => {
+      throw abort
+    },
+  })
+
+  await expect(client.complete(simpleRequest())).rejects.toBe(abort)
+  await expect(collect(client.stream(simpleRequest()))).rejects.toBe(abort)
+
+  const failure = new TypeError('fetch failed')
+  const failing = new GeminiClient({
+    apiKey: 'test-key',
+    baseUrl: 'https://gemini.test/v1beta',
+    fetchImplementation: async () => {
+      throw failure
+    },
+  })
+  const wrapped = await failing.complete(simpleRequest()).catch((error: unknown) => error)
+  expect(wrapped).toBeInstanceOf(ProviderError)
+  expect((wrapped as ProviderError).cause).toBe(failure)
 })
 
 test('Gemini conversion rejects tool replies with no resolvable function name', () => {

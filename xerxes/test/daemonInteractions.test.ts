@@ -54,6 +54,39 @@ test('daemon interaction board validates choice-only questions and emits a v35 r
   }
 })
 
+test('a stale connection unbind leaves the replacement binding turn untouched', async () => {
+  const board = new DaemonInteractionBoard()
+  const staleRelease = board.bind('session-stale', () => undefined)
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = []
+  const activeRelease = board.bind('session-stale', event => events.push(event))
+
+  const request: PermissionRequest = {
+    requestId: 'stale-permission',
+    description: 'write a file',
+    inputs: {},
+    toolCall: { id: 'call-stale', type: 'function', function: { name: 'WriteFile', arguments: {} } },
+  }
+  const pendingDecision = board.permissionBroker('session-stale').request(request)
+  const pendingQuestion = board.ask('session-stale', { question: 'Continue?' })
+
+  // The replaced connection's cleanup must not reject the new turn's waits.
+  staleRelease()
+
+  expect(board.pendingPermissionIds()).toEqual(['stale-permission'])
+  expect(board.pendingQuestionIds()).toHaveLength(1)
+  expect(board.respondPermission('stale-permission', 'approve')).toBe(true)
+  await expect(pendingDecision).resolves.toBe('approve')
+  const questionId = String(events.find(event => event.type === 'question_request')?.payload.id)
+  expect(board.respondQuestion(questionId, { answer: 'yes' })).toBe(true)
+  await expect(pendingQuestion).resolves.toBe('yes')
+
+  // The current binding's own release still ends its turn.
+  const followUp = board.permissionBroker('session-stale').request({ ...request, requestId: 'stale-permission-2' })
+  activeRelease()
+  await expect(followUp).resolves.toBe('reject')
+  expect(board.pendingPermissionIds()).toEqual([])
+})
+
 test('daemon interaction board can use an explicit persistent approval store without exposing call arguments', async () => {
   const store = new ApprovalStore()
   const board = new DaemonInteractionBoard({ approvalStore: store })

@@ -2,7 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { createHash } from 'node:crypto'
-import { appendFile, readFile } from 'node:fs/promises'
+import { type FileHandle, mkdir, open, readFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+
+/** Batch results may contain prompts and responses with sensitive content. */
+const BATCH_OUTPUT_FILE_MODE = 0o600
 
 export interface BatchRecord {
   readonly id: string
@@ -46,34 +50,74 @@ export class BatchRunner {
     if (!Number.isInteger(workers) || workers < 1) throw new Error('workers must be a positive integer')
   }
 
+  /**
+   * Stream records through a bounded worker pool.
+   *
+   * Input is consumed lazily and each result is appended (owner-only file, fsync
+   * per record) as soon as it finishes, so memory stays bounded and an
+   * interruption cannot discard already-finished work.
+   */
   async run(records: Iterable<BatchRecord> | AsyncIterable<BatchRecord>, options: BatchRunOptions = {}): Promise<BatchSummary> {
     const seen = new Set(options.resumeIds ?? [])
-    const pending: BatchRecord[] = []
     let total = 0
     let skipped = 0
-    for await (const record of records) {
-      total += 1
-      const key = options.dedupBy === 'content' ? contentHash(record) : record.id
-      if (seen.has(key)) {
-        skipped += 1
-        continue
-      }
-      seen.add(key)
-      pending.push(record)
-    }
-    const results = await mapConcurrent(pending, this.workers, record => this.safeRun(record))
+    let failed = 0
+    let succeeded = 0
+    let totalInputTokens = 0
+    let totalOutputTokens = 0
+    let totalCostUsd = 0
+    let handle: FileHandle | undefined
     if (options.outPath) {
-      await appendFile(options.outPath, results.map(result => `${JSON.stringify(resultToRecord(result))}\n`).join(''), 'utf8')
+      await mkdir(dirname(options.outPath), { recursive: true })
+      handle = await open(options.outPath, 'a', BATCH_OUTPUT_FILE_MODE)
     }
-    return results.reduce<BatchSummary>((summary, result) => ({
-      total,
-      skipped,
-      failed: summary.failed + (result.error ? 1 : 0),
-      succeeded: summary.succeeded + (result.error ? 0 : 1),
-      totalInputTokens: summary.totalInputTokens + (result.error ? 0 : result.inputTokens ?? 0),
-      totalOutputTokens: summary.totalOutputTokens + (result.error ? 0 : result.outputTokens ?? 0),
-      totalCostUsd: summary.totalCostUsd + (result.error ? 0 : result.costUsd ?? 0),
-    }), { total, skipped, failed: 0, succeeded: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCostUsd: 0 })
+    let writeChain: Promise<unknown> = Promise.resolve()
+    const appendResult = (line: string): void => {
+      if (handle === undefined) return
+      const target = handle
+      writeChain = writeChain.then(async () => {
+        await target.write(line)
+        await target.sync()
+      })
+    }
+    try {
+      const iterator = toAsyncIterator(records)
+      let pullChain: Promise<unknown> = Promise.resolve()
+      const pull = (): Promise<IteratorResult<BatchRecord>> => {
+        const result = pullChain.then(() => iterator.next())
+        pullChain = result.catch(() => undefined)
+        return result
+      }
+      const worker = async (): Promise<void> => {
+        while (true) {
+          const next = await pull()
+          if (next.done === true) return
+          const record = next.value
+          total += 1
+          const key = options.dedupBy === 'content' ? contentHash(record) : record.id
+          if (seen.has(key)) {
+            skipped += 1
+            continue
+          }
+          seen.add(key)
+          const result = await this.safeRun(record)
+          if (result.error) {
+            failed += 1
+          } else {
+            succeeded += 1
+            totalInputTokens += result.inputTokens ?? 0
+            totalOutputTokens += result.outputTokens ?? 0
+            totalCostUsd += result.costUsd ?? 0
+          }
+          appendResult(`${JSON.stringify(resultToRecord(result))}\n`)
+        }
+      }
+      await Promise.all(Array.from({ length: this.workers }, () => worker()))
+    } finally {
+      await writeChain
+      await handle?.close()
+    }
+    return { total, skipped, failed, succeeded, totalInputTokens, totalOutputTokens, totalCostUsd }
   }
 
   private async safeRun(record: BatchRecord): Promise<BatchResult> {
@@ -87,7 +131,7 @@ export class BatchRunner {
 
 export function contentHash(record: BatchRecord): string {
   const metadata = JSON.stringify(record.metadata ?? {}, Object.keys(record.metadata ?? {}).sort())
-  return createHash('sha1').update(`${record.prompt}|${metadata}`).digest('hex').slice(0, 16)
+  return createHash('sha256').update(`${record.prompt}|${metadata}`).digest('hex')
 }
 
 export async function loadCompletedIds(path: string, dedupField = 'id'): Promise<Set<string>> {
@@ -140,20 +184,12 @@ export function resultToRecord(result: BatchResult): Record<string, unknown> {
   }
 }
 
-async function mapConcurrent<T, R>(items: readonly T[], workers: number, work: (item: T) => Promise<R>): Promise<R[]> {
-  const results = Array<R>(items.length)
-  let next = 0
-  const worker = async (): Promise<void> => {
-    while (true) {
-      const index = next
-      next += 1
-      const item = items[index]
-      if (item === undefined) return
-      results[index] = await work(item)
-    }
+function toAsyncIterator<T>(source: Iterable<T> | AsyncIterable<T>): AsyncIterator<T> {
+  if (Symbol.asyncIterator in source) {
+    return (source as AsyncIterable<T>)[Symbol.asyncIterator]()
   }
-  await Promise.all(Array.from({ length: Math.min(workers, items.length) }, worker))
-  return results
+  const iterator = (source as Iterable<T>)[Symbol.iterator]()
+  return { next: () => Promise.resolve(iterator.next()) }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

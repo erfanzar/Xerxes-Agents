@@ -44,7 +44,14 @@ const PATTERNS: ReadonlyArray<readonly [ErrorKind, readonly RegExp[]]> = [
   [ErrorKind.RATE_LIMIT, [/rate.?limit/i, /too many requests/i, /\b429\b/]],
   [
     ErrorKind.CONTEXT_OVERFLOW,
-    [/context.{0,8}length/i, /maximum.{0,8}context/i, /context window/i, /too many tokens/i, /reduce.{0,8}messages/i],
+    [
+      /context.{0,8}length/i,
+      /maximum.{0,8}context/i,
+      /context window/i,
+      /too many tokens/i,
+      /reduce.{0,8}messages/i,
+      /prompt is too long/i,
+    ],
   ],
   [ErrorKind.AUTH, [/unauthorized/i, /invalid.{0,4}api.{0,4}key/i, /\b40[13]\b/, /forbidden/i]],
   [ErrorKind.QUOTA_EXCEEDED, [/quota/i, /insufficient.{0,8}credit/i, /billing/i]],
@@ -91,10 +98,19 @@ export class ErrorClassifier {
     }
 
     const statusKind = kindForStatus(details.status)
-    if (statusKind !== undefined) return classified(statusKind, error, details.message, retryAfter)
+    if (statusKind !== undefined) {
+      // Providers signal context overflow as HTTP 400 (OpenAI
+      // context_length_exceeded, Anthropic "prompt is too long"); let the
+      // message patterns win so compaction/recovery can engage instead of a
+      // hard bad-request failure.
+      if (details.status === 400 && matchesPatterns(ErrorKind.CONTEXT_OVERFLOW, details.message)) {
+        return classified(ErrorKind.CONTEXT_OVERFLOW, error, details.message, retryAfter)
+      }
+      return classified(statusKind, error, details.message, retryAfter)
+    }
 
-    for (const [kind, patterns] of PATTERNS) {
-      if (patterns.some(pattern => pattern.test(details.message))) {
+    for (const [kind] of PATTERNS) {
+      if (matchesPatterns(kind, details.message)) {
         return classified(kind, error, details.message, retryAfter)
       }
     }
@@ -160,6 +176,11 @@ function describeError(error: unknown): ErrorDetails {
     }
   }
   return { name: typeof error, message: String(error) }
+}
+
+function matchesPatterns(kind: ErrorKind, message: string): boolean {
+  const entry = PATTERNS.find(([patternKind]) => patternKind === kind)
+  return entry !== undefined && entry[1].some(pattern => pattern.test(message))
 }
 
 function kindForStatus(status: number | undefined): ErrorKind | undefined {

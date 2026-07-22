@@ -23,6 +23,27 @@ const DEFAULT_TASK_LIST_PAGE_SIZE = 50
 const MAX_TASK_LIST_PAGE_SIZE = 50
 const POLL_INTERVAL_MS = 25
 
+/**
+ * Hard cap on one SpawnAgents batch. Without it a single tool call could spawn
+ * an unbounded number of concurrent subagents, each consuming provider API
+ * budget and process memory (API-cost/memory denial of service).
+ */
+const MAX_SPAWN_BATCH_SIZE = 32
+/**
+ * Maximum concurrent spawn registrations inside one batch. Spawning is a
+ * provider-adjacent, memory-heavy operation, so batches run through this
+ * bounded pool instead of fully in parallel. Configurable per installation
+ * via `ClaudeAgentToolsOptions.spawnConcurrency`.
+ */
+const DEFAULT_SPAWN_CONCURRENCY = 8
+/**
+ * Cap on subagent output/error text embedded in mailbox events and wire
+ * payloads. MAILBOX_EVENT_LIMIT bounds event count, not bytes, so a runaway
+ * child's full lastOutput would otherwise blow up the parent transcript and
+ * context window.
+ */
+const MAX_WIRE_OUTPUT_CHARS = 8_000
+
 const TERMINAL_STATUSES = new Set(['cancelled', 'closed', 'completed', 'error', 'interrupted'])
 
 export interface ClaudeAgentSpec {
@@ -106,7 +127,14 @@ export class AgentEventMailbox {
   }
 
   record(event: Omit<ClaudeAgentEvent, 'seq'>): ClaudeAgentEvent {
-    const recorded = Object.freeze({ ...event, seq: ++this.sequence })
+    // Bound large free-text payloads per event; the event-count limit alone
+    // cannot stop one runaway child output from flooding the parent context.
+    const bounded = {
+      ...event,
+      ...(event.output === undefined ? {} : { output: boundedOutput(event.output) }),
+      ...(event.completionSummary === undefined ? {} : { completionSummary: boundedOutput(event.completionSummary) }),
+    }
+    const recorded = Object.freeze({ ...bounded, seq: ++this.sequence })
     this.events.push(recorded)
     if (this.events.length > MAILBOX_EVENT_LIMIT) {
       this.events.splice(0, this.events.length - MAILBOX_EVENT_LIMIT)
@@ -151,6 +179,12 @@ export interface ClaudeAgentToolsOptions {
   readonly mailbox?: AgentEventMailbox
   readonly manager: SpawnedAgentManagerPort
   readonly now?: () => number
+  /**
+   * Maximum concurrent spawn registrations inside one SpawnAgents batch.
+   * Defaults to 8; must be a positive integer. Batches themselves are always
+   * capped at 32 agents regardless of this setting.
+   */
+  readonly spawnConcurrency?: number
   /** Associates explicitly detached work with the active parent turn. */
   readonly backgroundAgents?: {
     consume(snapshots: readonly SpawnedAgentSnapshot[]): void
@@ -181,11 +215,12 @@ export const CLAUDE_AGENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     name: stringSchema('Stable subagent name.'),
     subagent_type: stringSchema('Agent definition to run.'),
   }, ['prompt', 'title']),
-  definition('SpawnAgents', 'Spawn any number of subagents as one batch and optionally wait for all of them.', {
+  definition('SpawnAgents', 'Spawn a bounded batch of subagents and optionally wait for all of them.', {
     agents: {
-      description: 'JSON array of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title. The whole batch is spawned without an artificial ceiling.',
+      description: `JSON array of {title, prompt, name?, subagent_type?, model?}. Every agent needs a short title. One batch accepts at most ${MAX_SPAWN_BATCH_SIZE} agents; spawn registrations run through a bounded concurrency pool.`,
       type: 'array',
       minItems: 1,
+      maxItems: MAX_SPAWN_BATCH_SIZE,
       items: {
         type: 'object',
         additionalProperties: false,
@@ -265,10 +300,16 @@ export function registerClaudeAgentTools(
 export class ClaudeAgentTools {
   private readonly mailbox: AgentEventMailbox
   private readonly now: () => number
+  private readonly spawnConcurrency: number
 
   constructor(private readonly options: ClaudeAgentToolsOptions) {
     this.mailbox = options.mailbox ?? new AgentEventMailbox()
     this.now = options.now ?? (() => Date.now())
+    const concurrency = options.spawnConcurrency ?? DEFAULT_SPAWN_CONCURRENCY
+    if (!Number.isInteger(concurrency) || concurrency < 1) {
+      throw new ValidationError('spawnConcurrency', 'must be a positive integer', concurrency)
+    }
+    this.spawnConcurrency = concurrency
   }
 
   async execute(
@@ -369,9 +410,16 @@ export class ClaudeAgentTools {
   ): Promise<readonly Record<string, unknown>[] | Record<string, unknown>> {
     const specs = parseAgentSpecs(inputs.agents)
     if (!specs.length) throw new ValidationError('agents', 'must contain at least one agent specification', inputs.agents)
+    if (specs.length > MAX_SPAWN_BATCH_SIZE) {
+      throw new ValidationError(
+        'agents',
+        `must contain at most ${MAX_SPAWN_BATCH_SIZE} agent specifications per batch; split larger cohorts into multiple SpawnAgents calls`,
+        specs.length,
+      )
+    }
     const registration = await settleWithConcurrency(
       specs,
-      specs.length,
+      this.spawnConcurrency,
       spec => this.spawnSpec(spec, context),
       signal,
     )
@@ -446,7 +494,7 @@ export class ClaudeAgentTools {
     const snapshot = this.requireSnapshot(target, context, inputField)
     if (snapshot.lastOutput !== undefined) {
       this.options.backgroundAgents?.consume([snapshot])
-      return snapshot.lastOutput
+      return boundedOutput(snapshot.lastOutput)
     }
     return `No output for task '${target}' (may still be running).`
   }
@@ -598,7 +646,7 @@ export class ClaudeAgentTools {
       const settled = await this.waitFor([snapshot.id], timeoutMilliseconds(inputs, 'timeout', DEFAULT_WAIT_SECONDS), signal)
       const final = settled[0] ?? snapshot
       this.observeBackgroundState([final])
-      return final.lastOutput ?? agentSnapshotWire(final)
+      return final.lastOutput === undefined ? agentSnapshotWire(final) : boundedOutput(final.lastOutput)
     } catch (error) {
       if (signal?.aborted) this.closeAfterAbort([snapshot.id], error)
       throw error
@@ -1011,6 +1059,15 @@ function boundedWireText(value: string, limit: number): string {
   return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`
 }
 
+/**
+ * Truncate subagent output/error text crossing the parent boundary with an
+ * explicit marker. Unbounded lastOutput bodies would otherwise let a runaway
+ * child flood the parent transcript and context window.
+ */
+function boundedOutput(value: string, limit = MAX_WIRE_OUTPUT_CHARS): string {
+  return value.length <= limit ? value : `${value.slice(0, limit)}… [truncated ${value.length - limit} chars]`
+}
+
 function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unknown> {
   return {
     id: snapshot.id,
@@ -1029,7 +1086,7 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
     ...(snapshot.reasoningTokens === undefined ? {} : { reasoning_tokens: snapshot.reasoningTokens }),
     ...(snapshot.filesRead === undefined ? {} : { files_read: snapshot.filesRead }),
     ...(snapshot.filesWritten === undefined ? {} : { files_written: snapshot.filesWritten }),
-    summary: snapshot.completionSummary ?? null,
+    summary: snapshot.completionSummary === undefined ? null : boundedOutput(snapshot.completionSummary),
     status: snapshot.status,
     history_session_id: snapshot.historySessionId ?? null,
     created_at: snapshot.createdAt,
@@ -1037,8 +1094,8 @@ function agentSnapshotWire(snapshot: SpawnedAgentSnapshot): Record<string, unkno
     prompt_profile: snapshot.promptProfile,
     source_agent_id: snapshot.sourceAgentId ?? null,
     last_input: snapshot.lastInput ?? null,
-    last_output: snapshot.lastOutput ?? null,
-    error: snapshot.error ?? null,
+    last_output: snapshot.lastOutput === undefined ? null : boundedOutput(snapshot.lastOutput),
+    error: snapshot.error === undefined ? null : boundedOutput(snapshot.error),
     queue_size: snapshot.queueSize,
     queued_preview: snapshot.queuedPreview ?? null,
     closed: snapshot.closed,

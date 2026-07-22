@@ -66,6 +66,7 @@ test('MCPClient uses Streamable HTTP JSON and SSE responses with negotiated sess
   })
 
   const client = new MCPClient({
+    allowPrivateNetwork: true,
     headers: { Authorization: 'Bearer fixture-token' },
     name: 'streamable',
     timeoutMs: 5_000,
@@ -142,6 +143,7 @@ test('MCPClient completes the legacy SSE endpoint handshake and receives split m
     },
   })
   const client = new MCPClient({
+    allowPrivateNetwork: true,
     headers: { 'X-Fixture': 'legacy' },
     name: 'legacy',
     timeoutMs: 5_000,
@@ -198,6 +200,7 @@ test('MCP HTTP configuration rejects unsafe protocol header overrides and malfor
     },
   })
   const client = new MCPClient({
+    allowPrivateNetwork: true,
     name: 'cross-origin',
     transport: 'sse',
     url: serverUrl(crossOriginServer, '/sse'),

@@ -59,8 +59,8 @@ function normalizeOptions(options: ToolCallIdOptions): Required<ToolCallIdOption
     throw new ValidationError('prefix', 'must be a string', prefix)
   }
   const length = options.length ?? DEFAULT_TOOL_CALL_ID_LENGTH
-  if (!Number.isSafeInteger(length) || length < 0 || length > SHA256_HEX_LENGTH) {
-    throw new ValidationError('length', `must be an integer from 0 to ${SHA256_HEX_LENGTH}`, length)
+  if (!Number.isSafeInteger(length) || length < 1 || length > SHA256_HEX_LENGTH) {
+    throw new ValidationError('length', `must be an integer from 1 to ${SHA256_HEX_LENGTH}`, length)
   }
   return { length, prefix }
 }

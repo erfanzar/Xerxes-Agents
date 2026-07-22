@@ -27,6 +27,13 @@ export type ToolCacheFileStat = (path: string) => ToolCacheFileMetadata | undefi
 export interface ToolOutputCacheOptions {
   /** Injectable file metadata source, useful for virtual filesystems and deterministic tests. */
   readonly fileStat?: ToolCacheFileStat
+  /**
+   * Maximum UTF-8 byte size of one cached result. Oversized results are
+   * executed but never stored, so a single unbounded ReadFile/GrepTool output
+   * cannot pin hundreds of megabytes in the cache (200 entries × unbounded
+   * results would otherwise grow the heap without limit).
+   */
+  readonly maxEntryBytes?: number
   readonly maxEntries?: number
   /** Injected monotonic seconds clock; wall time is deliberately never used. */
   readonly monotonicNow?: () => number
@@ -62,6 +69,7 @@ interface CacheEntry {
 
 const CACHEABLE_TOOLS = new Set<string>(CACHEABLE_TOOL_NAMES)
 const DEFAULT_MAX_ENTRIES = 200
+const DEFAULT_MAX_ENTRY_BYTES = 256 * 1_024
 const DEFAULT_TTL_SECONDS = 300
 
 /**
@@ -70,11 +78,17 @@ const DEFAULT_TTL_SECONDS = 300
  * Keys combine a stable content digest with mtime/size signatures for path
  * arguments. The cache does not configure logging, inspect environment, or
  * make writes; callers control invalidation after mutations.
+ *
+ * Known freshness caveat: invalidation relies solely on mtime + size. A
+ * rewrite that preserves both values (e.g. via `utimes` after a same-length
+ * edit) is served stale until the entry's TTL expires or it is explicitly
+ * invalidated. Callers that mutate files must invalidate affected paths.
  */
 export class ToolOutputCache {
   private readonly entries = new Map<string, CacheEntry>()
   private readonly fileStat: ToolCacheFileStat
   private readonly maxEntries: number
+  private readonly maxEntryBytes: number
   private readonly monotonicNow: () => number
   private readonly ttlSeconds: number
   private hits = 0
@@ -82,6 +96,7 @@ export class ToolOutputCache {
 
   constructor(options: ToolOutputCacheOptions = {}) {
     this.maxEntries = requirePositiveInteger(options.maxEntries ?? DEFAULT_MAX_ENTRIES, 'maxEntries')
+    this.maxEntryBytes = requirePositiveInteger(options.maxEntryBytes ?? DEFAULT_MAX_ENTRY_BYTES, 'maxEntryBytes')
     this.ttlSeconds = requireNonNegativeFinite(options.ttlSeconds ?? DEFAULT_TTL_SECONDS, 'ttlSeconds')
     this.monotonicNow = options.monotonicNow ?? (() => performance.now() / 1_000)
     this.fileStat = options.fileStat ?? defaultFileStat
@@ -125,10 +140,15 @@ export class ToolOutputCache {
     return entry.result
   }
 
-  /** Store one read-only output and evict least-recently-used entries over capacity. */
+  /**
+   * Store one read-only output and evict least-recently-used entries over
+   * capacity. Results larger than `maxEntryBytes` are deliberately skipped
+   * rather than truncated so the cache never serves partial tool output.
+   */
   put(toolName: string, toolInput: ToolCacheInput, result: string): void {
     if (!isCacheableTool(toolName)) return
     if (typeof result !== 'string') throw new ToolOutputCacheError('tool cache result must be a string')
+    if (Buffer.byteLength(result, 'utf8') > this.maxEntryBytes) return
     const cacheKey = this.makeKey(toolName, toolInput)
     this.entries.delete(cacheKey.key)
     this.entries.set(cacheKey.key, {

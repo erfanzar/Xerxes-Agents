@@ -40,6 +40,12 @@ export const DEFAULT_RETRY_DELAYS = [1_000, 2_000] as const
 export const DEFAULT_STREAM_INACTIVITY_TIMEOUT_MS = 120_000
 /** Cap provider-suggested Retry-After waits so a bad hint cannot park a turn for hours. */
 export const MAX_SUGGESTED_RETRY_DELAY_MS = 60_000
+/**
+ * Consecutive rounds in which the model requests only unconfigured tools
+ * before the turn stops with an explicit error. Without a cap that pattern
+ * loops one provider call per round forever (maxToolTurns is unbounded).
+ */
+export const MAX_UNCONFIGURED_ONLY_ROUNDS = 3
 
 export interface TurnRequest {
   readonly agentId?: string
@@ -175,347 +181,404 @@ export async function* runTurn(
     return recorded
   }
 
-  for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
-    appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
-    for (const steer of dependencies.drainSteer?.() ?? []) {
-      const content = steer.trim()
-      if (content) {
-        state.messages.push({
-          role: 'user',
-          content: `[steer from user]\n${content}`,
-        })
-      }
-    }
-    // Per-attempt accumulators sit at round scope so the surviving attempt is
-    // readable after the retry loop, but every attempt starts from a clean
-    // slate: partial text, thinking, usage, and tool calls from a failed
-    // attempt must never leak into the persisted assistant message.
-    let parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
-    let textParts: string[] = []
-    let thinkingParts: string[] = []
-    let thinkingSignature: string | undefined
-    let roundToolCalls: readonly ToolCall[] = []
-    let lastUsage: TokenUsage | undefined
-    let streamCompleted = false
-    let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
-
-    for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
-      parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
-      textParts = []
-      thinkingParts = []
-      thinkingSignature = undefined
-      roundToolCalls = []
-      lastUsage = undefined
-      textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
-      const attemptSignal = linkAttemptSignal(signal)
-      try {
-        apiCallsCount += 1
-        for await (const delta of watchProviderStream(
-          dependencies.llm.stream(
-            completionRequest(
-              request,
-              state.messages,
-              forceToolFreeSummary ? [] : request.tools,
-            ),
-            attemptSignal.controller.signal,
-          ),
-          streamInactivityTimeoutMs,
-          attemptSignal,
-        )) {
-          const parts = processDelta(delta, parser, textParts, thinkingParts)
-          for (const part of parts) {
-            for (const visible of textDeduper.push(part)) yield visible
-          }
-          if (delta.toolCalls) {
-            roundToolCalls = delta.toolCalls
-          }
-          if (delta.thinkingSignature) {
-            thinkingSignature = delta.thinkingSignature
-          }
-          if (delta.usage) {
-            lastUsage = mergeUsage(lastUsage, delta.usage)
-          }
-        }
-        for (const flushed of parser.process('')) {
-          if (flushed.type === 'text') {
-            textParts.push(flushed.text)
-            for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield visible
-          } else {
-            thinkingParts.push(flushed.text)
-            yield { type: 'thinking', text: flushed.text }
-          }
-        }
-        streamCompleted = true
-        break
-      } catch (error) {
-        // A failed provider attempt may have consumed tokens without returning
-        // usage. Keep the exact API-call count, but do not present later
-        // successful-round usage as a complete total for the turn.
-        usageComplete = false
-        reasoningUsageComplete = false
-        const classified = classifyError(error)
-        await dispatchHook(hookRunner, 'on_error', {
-          ...(request.agentId ? { agentId: request.agentId } : {}),
-          attempt: attempt + 1,
-          error: errorMessage(error),
-          kind: classified.kind,
-          ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-        })
-        // Only transient failures earn another attempt. Auth, validation,
-        // configuration, and other terminal errors fail the round at once.
-        const final = attempt === retryDelays.length
-          || !classified.retryable
-          || signal?.aborted === true
-        const suggestedDelay = classified.suggestedBackoffSeconds === undefined
-          ? 0
-          : Math.min(MAX_SUGGESTED_RETRY_DELAY_MS, classified.suggestedBackoffSeconds * 1_000)
-        const delay = final ? 0 : Math.max(retryDelays[attempt] ?? 0, suggestedDelay)
-        yield {
-          type: 'provider_retry',
-          error: errorMessage(error),
-          attempt: attempt + 1,
-          maxAttempts: retryDelays.length + 1,
-          delay,
-          final,
-        }
-        if (final) {
-          const errorText = `[Error: ${errorMessage(error)}]`
-          textParts.push(errorText)
-          yield { type: 'text', text: errorText }
-          streamCompleted = true
-          break
-        }
-        await (dependencies.delay ?? defaultDelay)(delay, signal)
-      } finally {
-        attemptSignal.release()
-      }
-    }
-
-    if (!streamCompleted) {
-      throw new Error('LLM stream exited without completion or error')
-    }
-
-    if (lastUsage === undefined) {
-      usageComplete = false
-      reasoningUsageComplete = false
-    } else if (lastUsage.reasoningTokens === undefined) {
-      reasoningUsageComplete = false
-    }
-    accumulateUsage(lastUsage, state, (usage) => {
-      inputTokens += usage.inputTokens
-      outputTokens += usage.outputTokens
-      cacheReadTokens += usage.cacheReadTokens ?? 0
-      cacheCreationTokens += usage.cacheCreationTokens ?? 0
-      reasoningTokens += usage.reasoningTokens ?? 0
-    })
-
-    const rawAssistantText = textParts.join('')
-    const deduplication = textDeduper.finish()
-    for (const visible of deduplication.events) yield visible
-    const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
-    const providerToolCalls = roundToolCalls
-    const visibleTools = forceToolFreeSummary ? [] : request.tools
-    const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, visibleTools)
-    roundToolCalls = exposed
-    const assistant: ChatMessage = {
-      role: 'assistant',
-      content: assistantText,
-      ...(thinkingParts.length ? { thinking: thinkingParts.join('') } : {}),
-      ...(thinkingSignature ? { thinking_signature: thinkingSignature } : {}),
-      ...(providerToolCalls.length ? { tool_calls: providerToolCalls } : {}),
-    }
-    state.messages.push(assistant)
-    if (providerToolCalls.length && assistantText) {
-      latestToolRoundText = assistantText
-    }
-    if (thinkingParts.length) {
-      state.thinkingContent.push(thinkingParts.join(''))
-    } else {
-      state.thinkingContent.push('')
-    }
-
-    if (unconfigured.length) {
-      toolCallsCount += unconfigured.length
-      for (const call of unconfigured) {
-        const result = await recordToolResult(unconfiguredToolResult(call), call)
-        yield { type: 'tool_end', result }
-      }
-      if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
-        break
-      }
-      if (forceToolFreeSummary) {
-        break
-      }
-      if (!roundToolCalls.length) {
-        continue
-      }
-    }
-
-    if (!roundToolCalls.length) {
-      const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
-      const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
-      // A coordinator can acknowledge returned snapshots before cancellation
-      // becomes observable here. Persist the delivered results first so an
-      // interrupted parent either synthesizes them now or receives them from
-      // its durable history on the next turn.
-      if (signal?.aborted) break
-      if (appendedAgentEvents) {
-        if (toolTurn + 1 >= turnLimit) turnLimit += 1
-        continue
-      }
+  let consecutiveUnconfiguredOnlyRounds = 0
+  let terminalProviderFailure = false
+  try {
+    for (let toolTurn = 0; toolTurn < turnLimit; toolTurn += 1) {
+      appendAgentEventMessage(state, dependencies.drainAgentEvents?.())
       for (const steer of dependencies.drainSteer?.() ?? []) {
         const content = steer.trim()
-        if (!content) continue
-        state.messages.push({
-          role: 'user',
-          content: `[steer from user saved for next turn]\n${content}`,
-        })
-        yield {
-          type: 'text',
-          text: `\n[Steer saved for next turn: ${content}]`,
+        if (content) {
+          state.messages.push({
+            role: 'user',
+            content: `[steer from user]\n${content}`,
+          })
         }
       }
-      const objectiveDecision = inspectObjectiveResponse(assistantText, {
-        evidence: { toolExecutions: objectiveToolExecutions },
-        mode: currentInteractionMode(state, request.interactionMode),
-      })
-      if (!objectiveDecision.shouldContinue) {
+      // Per-attempt accumulators sit at round scope so the surviving attempt is
+      // readable after the retry loop, but every attempt starts from a clean
+      // slate: partial text, thinking, usage, and tool calls from a failed
+      // attempt must never leak into the persisted assistant message.
+      let parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
+      let textParts: string[] = []
+      let thinkingParts: string[] = []
+      let thinkingSignature: string | undefined
+      let roundToolCalls: readonly ToolCall[] = []
+      let lastUsage: TokenUsage | undefined
+      let streamCompleted = false
+      let textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+
+      for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+        parser = dependencies.thinkingParserFactory?.() ?? new ThinkingParser()
+        textParts = []
+        thinkingParts = []
+        thinkingSignature = undefined
+        roundToolCalls = []
+        lastUsage = undefined
+        textDeduper = new ToolRoundTextDeduper(latestToolRoundText)
+        const attemptSignal = linkAttemptSignal(signal)
+        try {
+          apiCallsCount += 1
+          for await (const delta of watchProviderStream(
+            dependencies.llm.stream(
+              completionRequest(
+                request,
+                state.messages,
+                forceToolFreeSummary ? [] : request.tools,
+              ),
+              attemptSignal.controller.signal,
+            ),
+            streamInactivityTimeoutMs,
+            attemptSignal,
+          )) {
+            const parts = processDelta(delta, parser, textParts, thinkingParts)
+            for (const part of parts) {
+              for (const visible of textDeduper.push(part)) yield visible
+            }
+            if (delta.toolCalls) {
+              roundToolCalls = delta.toolCalls
+            }
+            if (delta.thinkingSignature) {
+              thinkingSignature = delta.thinkingSignature
+            }
+            if (delta.usage) {
+              lastUsage = mergeUsage(lastUsage, delta.usage)
+            }
+          }
+          for (const flushed of parser.process('')) {
+            if (flushed.type === 'text') {
+              textParts.push(flushed.text)
+              for (const visible of textDeduper.push({ type: 'text', text: flushed.text })) yield visible
+            } else {
+              thinkingParts.push(flushed.text)
+              for (const visible of textDeduper.push({ type: 'thinking', text: flushed.text })) yield visible
+            }
+          }
+          streamCompleted = true
+          break
+        } catch (error) {
+          // A failed provider attempt may have consumed tokens without returning
+          // usage. Keep the exact API-call count, but do not present later
+          // successful-round usage as a complete total for the turn.
+          usageComplete = false
+          reasoningUsageComplete = false
+          const classified = classifyError(error)
+          await dispatchHook(hookRunner, 'on_error', {
+            ...(request.agentId ? { agentId: request.agentId } : {}),
+            attempt: attempt + 1,
+            error: errorMessage(error),
+            kind: classified.kind,
+            ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+          })
+          // Only transient failures earn another attempt. Auth, validation,
+          // configuration, and other terminal errors fail the round at once.
+          const final = attempt === retryDelays.length
+            || !classified.retryable
+            || signal?.aborted === true
+          const suggestedDelay = classified.suggestedBackoffSeconds === undefined
+            ? 0
+            : Math.min(MAX_SUGGESTED_RETRY_DELAY_MS, classified.suggestedBackoffSeconds * 1_000)
+          const delay = final ? 0 : Math.max(retryDelays[attempt] ?? 0, suggestedDelay)
+          yield {
+            type: 'provider_retry',
+            error: errorMessage(error),
+            attempt: attempt + 1,
+            maxAttempts: retryDelays.length + 1,
+            delay,
+            final,
+          }
+          if (final) {
+            // Terminal provider failure: surface the error as an explicit event
+            // and stop the turn. Persisting it as ordinary assistant text
+            // polluted durable history with `[Error: ...]` messages, and the
+            // objective guard could then re-call a terminally failed provider
+            // (auth/config) until its retry limit.
+            yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
+            terminalProviderFailure = true
+            break
+          }
+          await (dependencies.delay ?? defaultDelay)(delay, signal)
+        } finally {
+          attemptSignal.release()
+        }
+      }
+
+      if (terminalProviderFailure) {
         break
       }
-      objectiveGuardRetries += 1
-      if (objectiveGuardRetries > objectiveGuardLimit) {
+      if (!streamCompleted) {
+        throw new Error('LLM stream exited without completion or error')
+      }
+
+      if (lastUsage === undefined) {
+        usageComplete = false
+        reasoningUsageComplete = false
+      } else if (lastUsage.reasoningTokens === undefined) {
+        reasoningUsageComplete = false
+      }
+      accumulateUsage(lastUsage, state, (usage) => {
+        inputTokens += usage.inputTokens
+        outputTokens += usage.outputTokens
+        cacheReadTokens += usage.cacheReadTokens ?? 0
+        cacheCreationTokens += usage.cacheCreationTokens ?? 0
+        reasoningTokens += usage.reasoningTokens ?? 0
+      })
+
+      const rawAssistantText = textParts.join('')
+      const deduplication = textDeduper.finish()
+      for (const visible of deduplication.events) yield visible
+      const assistantText = rawAssistantText.slice(deduplication.suppressedPrefix)
+      const providerToolCalls = roundToolCalls
+      const visibleTools = forceToolFreeSummary ? [] : request.tools
+      const { exposed, unconfigured } = partitionToolCalls(providerToolCalls, visibleTools)
+      roundToolCalls = exposed
+      const assistant: ChatMessage = {
+        role: 'assistant',
+        content: assistantText,
+        ...(thinkingParts.length ? { thinking: thinkingParts.join('') } : {}),
+        ...(thinkingSignature ? { thinking_signature: thinkingSignature } : {}),
+        ...(providerToolCalls.length ? { tool_calls: providerToolCalls } : {}),
+      }
+      // Several providers reject an assistant message with no content at all.
+      // A round that produced no text, no thinking, and no tool calls leaves
+      // nothing worth persisting, so skip the empty assistant message and its
+      // placeholder thinking entry.
+      const hasAssistantContent =
+        assistantText !== '' || thinkingParts.length > 0 || providerToolCalls.length > 0
+      if (hasAssistantContent) {
+        state.messages.push(assistant)
+        if (thinkingParts.length) {
+          state.thinkingContent.push(thinkingParts.join(''))
+        } else {
+          state.thinkingContent.push('')
+        }
+      }
+      if (providerToolCalls.length && assistantText) {
+        latestToolRoundText = assistantText
+      }
+
+      if (unconfigured.length) {
+        toolCallsCount += unconfigured.length
+        for (const call of unconfigured) {
+          const result = await recordToolResult(unconfiguredToolResult(call), call)
+          yield { type: 'tool_end', result }
+        }
+        if (dependencies.onUnconfiguredToolCalls?.(unconfigured) === 'stop') {
+          break
+        }
+        if (forceToolFreeSummary) {
+          break
+        }
+        if (!roundToolCalls.length) {
+          consecutiveUnconfiguredOnlyRounds += 1
+          if (consecutiveUnconfiguredOnlyRounds >= MAX_UNCONFIGURED_ONLY_ROUNDS) {
+            // The model keeps requesting tools outside the configured surface
+            // and no stop hook intervened. Without a cap this loops one
+            // provider call per round forever (maxToolTurns is unbounded).
+            yield {
+              type: 'text',
+              text:
+                `\n[Stopped: the model requested only unconfigured tools in ` +
+                `${consecutiveUnconfiguredOnlyRounds} consecutive rounds; ending the turn ` +
+                `instead of looping on provider calls.]`,
+            }
+            break
+          }
+          continue
+        }
+      }
+      if (roundToolCalls.length > 0 || unconfigured.length === 0) {
+        consecutiveUnconfiguredOnlyRounds = 0
+      }
+
+      if (!roundToolCalls.length) {
+        const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+        const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
+        // A coordinator can acknowledge returned snapshots before cancellation
+        // becomes observable here. Persist the delivered results first so an
+        // interrupted parent either synthesizes them now or receives them from
+        // its durable history on the next turn.
+        if (signal?.aborted) break
+        if (appendedAgentEvents) {
+          if (toolTurn + 1 >= turnLimit) turnLimit += 1
+          continue
+        }
+        for (const steer of dependencies.drainSteer?.() ?? []) {
+          const content = steer.trim()
+          if (!content) continue
+          state.messages.push({
+            role: 'user',
+            content: `[steer from user saved for next turn]\n${content}`,
+          })
+          yield {
+            type: 'text',
+            text: `\n[Steer saved for next turn: ${content}]`,
+          }
+        }
+        const objectiveDecision = inspectObjectiveResponse(assistantText, {
+          evidence: { toolExecutions: objectiveToolExecutions },
+          mode: currentInteractionMode(state, request.interactionMode),
+        })
+        if (!objectiveDecision.shouldContinue) {
+          break
+        }
+        objectiveGuardRetries += 1
+        if (objectiveGuardRetries > objectiveGuardLimit) {
+          yield {
+            type: 'text',
+            text:
+              '\n[Stopped: objective guard could not get a verified completion or concrete blocker after ' +
+              objectiveGuardLimit +
+              ' retries. The last issue was: ' +
+              objectiveDecision.reason +
+              '.]',
+          }
+          break
+        }
+        state.messages.push({ role: 'user', content: objectiveDecision.reminder })
         yield {
           type: 'text',
           text:
-            '\n[Stopped: objective guard could not get a verified completion or concrete blocker after ' +
-            objectiveGuardLimit +
-            ' retries. The last issue was: ' +
-            objectiveDecision.reason +
-            '.]',
+            '\n[Objective gate: ' + objectiveDecision.reason + '. Continuing.]',
         }
-        break
+        continue
       }
-      state.messages.push({ role: 'user', content: objectiveDecision.reminder })
-      yield {
-        type: 'text',
-        text:
-          '\n[Objective gate: ' + objectiveDecision.reason + '. Continuing.]',
-      }
-      continue
-    }
 
-    toolCallsCount += roundToolCalls.length
-    for (let index = 0; index < roundToolCalls.length; index += 1) {
-      const call = roundToolCalls[index]
-      if (!call) {
-        continue
-      }
-      if (signal?.aborted) {
-        for (const cancelled of roundToolCalls.slice(index)) {
-          const result = await recordToolResult(cancelledToolResult(cancelled), cancelled)
-          yield { type: 'tool_end', result }
-        }
-        break
-      }
-      const permission = permissionDisposition(
-        call,
-        permissionMode,
-        dependencies.policy,
-        request.agentId,
-      )
-      if (permission === 'deny') {
-        const result = await recordToolResult(deniedToolResult(call), call)
-        yield { type: 'tool_end', result }
-        continue
-      }
-      if (permission === 'prompt') {
-        const permissionRequest = createPermissionRequest(call)
-        yield { type: 'permission_request', request: permissionRequest }
-        const decision =
-          (await dependencies.permissionBroker?.request(
-            permissionRequest,
-            signal,
-          )) ?? 'reject'
-        // Injected brokers are allowed to resolve asynchronously. Cancellation
-        // may land while a prompt is open, so an approval that races the abort
-        // must not start a privileged tool with an already-aborted signal.
-        if (signal?.aborted) {
-          const result = await recordToolResult(cancelledToolResult(call), call)
-          yield { type: 'tool_end', result }
+      toolCallsCount += roundToolCalls.length
+      for (let index = 0; index < roundToolCalls.length; index += 1) {
+        const call = roundToolCalls[index]
+        if (!call) {
           continue
         }
-        if (decision === 'reject') {
+        if (signal?.aborted) {
+          for (const cancelled of roundToolCalls.slice(index)) {
+            const result = await recordToolResult(cancelledToolResult(cancelled), cancelled)
+            yield { type: 'tool_end', result }
+          }
+          break
+        }
+        const permission = permissionDisposition(
+          call,
+          permissionMode,
+          dependencies.policy,
+          request.agentId,
+        )
+        if (permission === 'deny') {
           const result = await recordToolResult(deniedToolResult(call), call)
           yield { type: 'tool_end', result }
           continue
         }
-      }
-
-      const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
-        ...(request.agentId ? { agentId: request.agentId } : {}),
-        arguments: call.function.arguments,
-        name: call.function.name,
-        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-        toolCallId: call.id,
-      })
-      const effectiveCall = applyToolArgumentsMutation(
-        call,
-        hookMutation(beforeResult, call.function.arguments),
-      )
-
-      yield { type: 'tool_start', call: effectiveCall }
-      const startedAt = performance.now()
-      try {
-        const output = dependencies.toolExecutor
-          ? await dependencies.toolExecutor.execute(effectiveCall, toolContext, signal)
-          : `Tool ${effectiveCall.function.name} is unavailable.`
-        let result: ToolResult = {
-          name: effectiveCall.function.name,
-          result: output,
-          permitted: true,
-          toolCallId: effectiveCall.id,
-          durationMs: performance.now() - startedAt,
+        if (permission === 'prompt') {
+          const permissionRequest = createPermissionRequest(call)
+          yield { type: 'permission_request', request: permissionRequest }
+          const decision =
+            (await dependencies.permissionBroker?.request(
+              permissionRequest,
+              signal,
+            )) ?? 'reject'
+          // Injected brokers are allowed to resolve asynchronously. Cancellation
+          // may land while a prompt is open, so an approval that races the abort
+          // must not start a privileged tool with an already-aborted signal.
+          if (signal?.aborted) {
+            const result = await recordToolResult(cancelledToolResult(call), call)
+            yield { type: 'tool_end', result }
+            continue
+          }
+          if (decision === 'reject') {
+            const result = await recordToolResult(deniedToolResult(call), call)
+            yield { type: 'tool_end', result }
+            continue
+          }
         }
-        const afterResult = await dispatchHook(hookRunner, 'after_tool_call', {
+
+        const beforeResult = await dispatchHook(hookRunner, 'before_tool_call', {
           ...(request.agentId ? { agentId: request.agentId } : {}),
-          arguments: effectiveCall.function.arguments,
-          name: effectiveCall.function.name,
-          result: result.result,
+          arguments: call.function.arguments,
+          name: call.function.name,
           ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-          toolCallId: effectiveCall.id,
+          toolCallId: call.id,
         })
-        const mutatedOutput = hookMutation(afterResult, result.result)
-        if (typeof mutatedOutput === 'string' && mutatedOutput !== result.result) {
-          result = { ...result, result: mutatedOutput }
-        }
-        const recorded = await recordToolResult(result, effectiveCall)
-        yield { type: 'tool_end', result: recorded }
-      } catch (error) {
-        const result = await recordToolResult(
-          failedToolResult(effectiveCall, error, performance.now() - startedAt),
-          effectiveCall,
+        const effectiveCall = applyToolArgumentsMutation(
+          call,
+          hookMutation(beforeResult, call.function.arguments),
         )
-        yield { type: 'tool_end', result }
-      }
-    }
-    if (signal?.aborted) {
-      break
-    }
-    let needsFinalization = false
-    if (toolTurn + 1 >= turnLimit) {
-      const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
-      const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
-      if (signal?.aborted) break
-      if (appendedAgentEvents) {
-        forceToolFreeSummary = true
-        needsFinalization = true
-      }
-      if (needsFinalization) turnLimit += 1
-    }
-  }
 
-  state.totalApiCalls += apiCallsCount
-  state.usageComplete &&= usageComplete
+        yield { type: 'tool_start', call: effectiveCall }
+        const startedAt = performance.now()
+        try {
+          const output = dependencies.toolExecutor
+            ? await dependencies.toolExecutor.execute(effectiveCall, toolContext, signal)
+            : `Tool ${effectiveCall.function.name} is unavailable.`
+          let result: ToolResult = {
+            name: effectiveCall.function.name,
+            result: output,
+            permitted: true,
+            toolCallId: effectiveCall.id,
+            durationMs: performance.now() - startedAt,
+          }
+          const afterResult = await dispatchHook(hookRunner, 'after_tool_call', {
+            ...(request.agentId ? { agentId: request.agentId } : {}),
+            arguments: effectiveCall.function.arguments,
+            name: effectiveCall.function.name,
+            result: result.result,
+            ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+            toolCallId: effectiveCall.id,
+          })
+          const mutatedOutput = hookMutation(afterResult, result.result)
+          if (typeof mutatedOutput === 'string' && mutatedOutput !== result.result) {
+            result = { ...result, result: mutatedOutput }
+          }
+          const recorded = await recordToolResult(result, effectiveCall)
+          yield { type: 'tool_end', result: recorded }
+        } catch (error) {
+          const result = await recordToolResult(
+            failedToolResult(effectiveCall, error, performance.now() - startedAt),
+            effectiveCall,
+          )
+          yield { type: 'tool_end', result }
+        }
+      }
+      if (signal?.aborted) {
+        break
+      }
+      let needsFinalization = false
+      if (toolTurn + 1 >= turnLimit) {
+        const agentEvents = await dependencies.awaitAgentEvents?.(signal) ?? []
+        const appendedAgentEvents = appendAgentEventMessage(state, agentEvents)
+        if (signal?.aborted) break
+        if (appendedAgentEvents) {
+          forceToolFreeSummary = true
+          needsFinalization = true
+        }
+        if (needsFinalization) turnLimit += 1
+      }
+    }
+  } catch (error) {
+    // Rejections outside the provider-attempt handler — an abort during
+    // retry backoff, a permission broker failure, a subagent join failure —
+    // must not skip the turn epilogue. Surface the failure as an explicit
+    // final error event so the turn still ends with exactly one turn_done.
+    const classified = classifyError(error)
+    await dispatchHook(hookRunner, 'on_error', {
+      ...(request.agentId ? { agentId: request.agentId } : {}),
+      attempt: retryDelays.length + 1,
+      error: errorMessage(error),
+      kind: classified.kind,
+      ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+    })
+    yield {
+      type: 'provider_retry',
+      error: errorMessage(error),
+      attempt: retryDelays.length + 1,
+      maxAttempts: retryDelays.length + 1,
+      delay: 0,
+      final: true,
+    }
+    yield { type: 'text', text: `[Error: ${errorMessage(error)}]` }
+  } finally {
+    state.totalApiCalls += apiCallsCount
+    state.usageComplete &&= usageComplete
+  }
   await dispatchHook(hookRunner, 'on_turn_end', {
     ...(request.agentId ? { agentId: request.agentId } : {}),
     apiCallsCount,
@@ -557,61 +620,112 @@ type IncrementalTextEvent = Extract<StreamEvent, { readonly type: 'text' | 'thin
 class ToolRoundTextDeduper {
   private candidate = ''
   private diverged = false
-  private readonly overlapLengths: readonly number[]
   private readonly pending: IncrementalTextEvent[] = []
   private suppressedPrefix = 0
+  /** Tail of the previous tool-round text, capped to the overlap window. */
+  private readonly tail: string
+  /** True when the previous text is shorter than the partial-overlap floor. */
+  private readonly shortPrevious: boolean
 
   constructor(private readonly previous: string | undefined) {
-    this.overlapLengths = previous === undefined ? [] : eligibleTextOverlapLengths(previous)
+    this.tail = previous === undefined ? '' : previous.slice(-MAX_TEXT_OVERLAP_WINDOW)
+    this.shortPrevious = previous !== undefined && previous.length < MIN_PARTIAL_TEXT_OVERLAP
   }
 
   push(event: IncrementalTextEvent): readonly IncrementalTextEvent[] {
-    if (event.type === 'thinking' || this.previous === undefined || this.diverged) {
+    if (this.previous === undefined || this.diverged) {
       return [event]
     }
-    this.candidate += event.text
+    // Thinking shares the pending buffer with text so thinking that arrives
+    // after held-back text is never emitted before it.
     this.pending.push(event)
-    const viable = this.overlapLengths.filter(length => {
-      const suffix = this.previous?.slice(-length) ?? ''
-      const compared = Math.min(length, this.candidate.length)
-      return this.candidate.slice(0, compared) === suffix.slice(0, compared)
-    })
-    if (viable.some(length => length >= this.candidate.length)) return []
-
-    const overlap = Math.max(0, ...viable.filter(length => this.candidate.startsWith(this.previous?.slice(-length) ?? '')))
+    if (event.type === 'text') {
+      this.candidate += event.text
+    }
+    if (this.isPossibleReplay()) {
+      return []
+    }
     this.diverged = true
-    this.suppressedPrefix = overlap
-    return stripTextEventPrefix(this.pending.splice(0), overlap)
+    this.suppressedPrefix = this.computeOverlap()
+    return stripTextEventPrefix(this.pending.splice(0), this.suppressedPrefix)
   }
 
   finish(): { readonly events: readonly IncrementalTextEvent[]; readonly suppressedPrefix: number } {
     if (!this.diverged && this.previous !== undefined) {
-      this.suppressedPrefix = Math.max(
-        0,
-        ...this.overlapLengths.filter(length => (
-          length <= this.candidate.length
-          && this.candidate.startsWith(this.previous?.slice(-length) ?? '')
-        )),
-      )
+      this.suppressedPrefix = this.computeOverlap()
     }
     return {
       events: stripTextEventPrefix(this.pending.splice(0), this.suppressedPrefix),
       suppressedPrefix: this.suppressedPrefix,
     }
   }
+
+  /** True while the streamed text can still be an exact replay of an eligible previous-text suffix. */
+  private isPossibleReplay(): boolean {
+    if (this.candidate.length === 0) {
+      return true
+    }
+    if (this.shortPrevious) {
+      // Only the full previous text is eligible below the partial-overlap floor.
+      return this.candidate.length <= this.tail.length && this.tail.startsWith(this.candidate)
+    }
+    // The candidate must be a prefix of some previous-text suffix whose length
+    // is at least max(MIN_PARTIAL_TEXT_OVERLAP, candidate.length). In tail
+    // coordinates that is an occurrence starting at or before
+    // tail.length - max(MIN_PARTIAL_TEXT_OVERLAP, candidate.length).
+    const start = this.tail.indexOf(this.candidate)
+    return start !== -1
+      && start + Math.max(MIN_PARTIAL_TEXT_OVERLAP, this.candidate.length) <= this.tail.length
+  }
+
+  /** Longest eligible previous-text suffix that prefixes the streamed candidate. */
+  private computeOverlap(): number {
+    if (this.candidate.length === 0) {
+      return 0
+    }
+    if (this.shortPrevious) {
+      return this.candidate.startsWith(this.tail) ? this.tail.length : 0
+    }
+    const match = longestPrefixSuffixMatch(this.candidate, this.tail)
+    return match >= MIN_PARTIAL_TEXT_OVERLAP ? match : 0
+  }
 }
 
 const MIN_PARTIAL_TEXT_OVERLAP = 12
+/**
+ * Upper bound on the cross-round overlap window. The deduper inspects only
+ * the tail of the previous tool-round text, so a push is a bounded suffix
+ * check and the final longest-suffix-prefix scan is a single KMP failure
+ * computation over this window — never per-character overlap entries or
+ * variadic Math.max over huge arrays.
+ */
+const MAX_TEXT_OVERLAP_WINDOW = 16_384
 
-function eligibleTextOverlapLengths(previous: string): number[] {
-  const lengths: number[] = []
-  for (let length = MIN_PARTIAL_TEXT_OVERLAP; length <= previous.length; length += 1) {
-    lengths.push(length)
+/**
+ * Longest prefix of `prefix` that is also a suffix of `text`, computed with a
+ * KMP failure function in O(prefix.length + text.length) without per-length
+ * slicing.
+ */
+function longestPrefixSuffixMatch(prefix: string, text: string): number {
+  if (prefix.length === 0 || text.length === 0) {
+    return 0
   }
-  if (previous.length > 0 && previous.length < MIN_PARTIAL_TEXT_OVERLAP) {
-    lengths.push(previous.length)
+  // Only the last prefix.length characters of text can participate in a
+  // suffix match, so the scan window stays bounded by the candidate length.
+  const window = text.length > prefix.length ? text.slice(-prefix.length) : text
+  const combined = `${prefix}\u0000${window}`
+  const failure = new Int32Array(combined.length)
+  for (let index = 1; index < combined.length; index += 1) {
+    let length = failure[index - 1] ?? 0
+    while (length > 0 && combined[index] !== combined[length]) {
+      length = failure[length - 1] ?? 0
+    }
+    if (combined[index] === combined[length]) {
+      length += 1
+    }
+    failure[index] = length
   }
-  return lengths
+  return Math.min(failure[combined.length - 1] ?? 0, prefix.length, window.length)
 }
 
 function stripTextEventPrefix(
@@ -759,23 +873,17 @@ function mergeUsage(
   if (!existing) {
     return incoming
   }
+  // Nullish coalescing, not `||`: a legitimate 0 reading (for example a fully
+  // cached round) must not be masked by the earlier reading.
+  const cacheReadTokens = incoming.cacheReadTokens ?? existing.cacheReadTokens
+  const cacheCreationTokens = incoming.cacheCreationTokens ?? existing.cacheCreationTokens
+  const reasoningTokens = incoming.reasoningTokens ?? existing.reasoningTokens
   return {
-    inputTokens: incoming.inputTokens || existing.inputTokens,
-    outputTokens: incoming.outputTokens || existing.outputTokens,
-    ...((incoming.cacheReadTokens ?? existing.cacheReadTokens)
-      ? {
-          cacheReadTokens: incoming.cacheReadTokens ?? existing.cacheReadTokens,
-        }
-      : {}),
-    ...((incoming.cacheCreationTokens ?? existing.cacheCreationTokens)
-      ? {
-          cacheCreationTokens:
-            incoming.cacheCreationTokens ?? existing.cacheCreationTokens,
-        }
-      : {}),
-    ...((incoming.reasoningTokens ?? existing.reasoningTokens) !== undefined
-      ? { reasoningTokens: incoming.reasoningTokens ?? existing.reasoningTokens }
-      : {}),
+    inputTokens: incoming.inputTokens ?? existing.inputTokens,
+    outputTokens: incoming.outputTokens ?? existing.outputTokens,
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
   }
 }
 

@@ -27,9 +27,27 @@ interface RegisteredTool {
   readonly handler: ToolHandler
 }
 
+export interface ToolRegistryOptions {
+  /**
+   * Called when register() repeats an existing (name, agentId) pair. The first
+   * handler wins lookup, so a duplicate silently shadows the new handler; the
+   * warning keeps that observable. Use replace() for intentional overrides.
+   */
+  readonly onDuplicateRegistration?: (name: string, agentId: string) => void
+}
+
 /** Function registry that preserves Xerxes' current-agent-first lookup semantics. */
 export class ToolRegistry implements ToolExecutor {
   private readonly entries = new Map<string, RegisteredTool[]>()
+  private readonly onDuplicateRegistration: (name: string, agentId: string) => void
+
+  constructor(options: ToolRegistryOptions = {}) {
+    this.onDuplicateRegistration = options.onDuplicateRegistration ?? ((name, agentId) => {
+      console.warn(
+        `ToolRegistry: duplicate registration of "${name}" for agent "${agentId}" is shadowed by the first handler; use replace() for intentional overrides`,
+      )
+    })
+  }
 
   register(definition: ToolDefinition, handler: ToolHandler, agentId = 'default'): void {
     const name = definition.function.name
@@ -37,6 +55,9 @@ export class ToolRegistry implements ToolExecutor {
       throw new ValidationError('tool.name', 'must not be empty')
     }
     const tools = this.entries.get(name) ?? []
+    if (tools.some(entry => entry.agentId === agentId)) {
+      this.onDuplicateRegistration(name, agentId)
+    }
     tools.push({ definition, handler, agentId })
     this.entries.set(name, tools)
   }

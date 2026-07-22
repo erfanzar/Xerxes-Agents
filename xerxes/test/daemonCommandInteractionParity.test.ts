@@ -204,6 +204,16 @@ test('slash compact rewrites and persists the active native session without subm
     sessionDirectory,
   })
   const server = new DaemonServer({ socketPath, runtime })
+  const nativeFetch = globalThis.fetch
+  const providerRequests: unknown[] = []
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    providerRequests.push(typeof init?.body === 'string' ? JSON.parse(init.body) : undefined)
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: 'durable parity summary' } }],
+      }),
+    )
+  }) as typeof globalThis.fetch
   await server.start()
   const client = await DaemonParityClient.connect(socketPath)
   try {
@@ -222,19 +232,25 @@ test('slash compact rewrites and persists the active native session without subm
     expect(compacted.result).toMatchObject({ ok: true, compacted: true, tokens_before: expect.any(Number), tokens_after: expect.any(Number) })
     expect((await client.next(eventFrame('notification'))).params?.payload).toMatchObject({
       category: 'slash',
-      body: expect.stringContaining('Compacted 3 message(s)'),
+      body: expect.stringContaining('Compacted'),
     })
     expect((await client.next(eventFrame('status_update'))).params?.payload).toMatchObject({
       context_tokens: expect.any(Number),
       max_context: 128_000,
     })
 
-    expect(session.messages).toHaveLength(10)
-    expect(session.messages[3]).toMatchObject({
-      role: 'user',
-      content: expect.stringContaining(COMPACTION_REFERENCE_PREFIX),
+    // Model-backed compaction: the provider was invoked with the transcript
+    // and its summary replaced the compactable middle (no model turn ran).
+    expect(providerRequests.length).toBeGreaterThan(0)
+    expect(session.messages.length).toBeLessThan(12)
+    const summary = session.messages.find(message =>
+      typeof message.content === 'string' && message.content.includes(COMPACTION_REFERENCE_PREFIX),
+    )
+    expect(summary?.content).toEqual(expect.stringContaining('durable parity summary'))
+    expect(session.metadata.last_compaction).toMatchObject({
+      tokens_before: expect.any(Number),
+      tokens_after: expect.any(Number),
     })
-    expect(session.metadata.last_compaction).toMatchObject({ strategy: 'first-pass' })
 
     const persisted = JSON.parse(await readFile(join(sessionDirectory, `${session.id}.json`), 'utf8')) as {
       readonly messages: unknown[]
@@ -243,6 +259,7 @@ test('slash compact rewrites and persists the active native session without subm
     expect(persisted.messages).toEqual(session.messages)
     expect(persisted.metadata.last_compaction).toEqual(session.metadata.last_compaction)
   } finally {
+    globalThis.fetch = nativeFetch
     client.close()
     await server.stop()
     await rm(directory, { recursive: true, force: true })

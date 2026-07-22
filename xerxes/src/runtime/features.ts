@@ -163,7 +163,7 @@ export async function composeRuntimeFeatures(
   const effectivePolicy = policyWithOperatorAccess(config.policy, config.operator)
   const policyEngine = new PolicyEngine({
     globalPolicy: effectivePolicy,
-    agentPolicies: agentPolicies(config.agentOverrides),
+    agentPolicies: agentPolicies(config.agentOverrides, config.operator),
   })
   const operatorState = config.operator?.enabled === true
     ? options.operatorState ?? new OperatorState({ config: config.operator })
@@ -380,10 +380,16 @@ function policyWithOperatorAccess(
 
 function agentPolicies(
   overrides: RuntimeFeaturesConfig['agentOverrides'],
+  operator: OperatorRuntimeConfig | undefined,
 ): ReadonlyMap<string, ToolPolicy> {
   const policies = new Map<string, ToolPolicy>()
   for (const [agentId, override] of normalizeOverrides(overrides)) {
-    if (override.policy !== undefined) policies.set(agentId, override.policy)
+    // Per-agent overrides receive the same operator gating as the global
+    // policy: an agent policy must not silently re-enable high-power operator
+    // tools when operator.powerToolsEnabled is false.
+    if (override.policy !== undefined) {
+      policies.set(agentId, policyWithOperatorAccess(override.policy, operator))
+    }
   }
   return policies
 }

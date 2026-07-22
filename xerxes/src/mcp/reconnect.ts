@@ -1,6 +1,8 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import type { MCPServerConfig } from './types.js'
+
 /** Parameters for the MCP connection retry schedule. Delays are measured in seconds. */
 export interface ReconnectPolicyOptions {
   readonly baseSeconds?: number
@@ -83,14 +85,41 @@ export async function reconnectWithBackoff<T>(
   throw new MCPReconnectError(errorMessage(lastError), policy.maxAttempts)
 }
 
-/** Replace common API key, bearer token, and password fragments with a safe marker. */
-export function scrubCredentials(text: string): string {
-  return text
+/**
+ * Replace common API key, bearer token, and password fragments with a safe
+ * marker. Callers can also pass literal secret values (for example configured
+ * env or header values) that are redacted verbatim wherever they appear.
+ */
+export function scrubCredentials(text: string, secrets: readonly string[] = []): string {
+  let scrubbed = text
     .replace(/\b(password)\b\s*(?::|=|\s)\s*['"]?([^\s'";,]+)/gi, '$1=[redacted]')
     .replace(/\b(api[_-]?key)\b\s*(?::|=|\s)\s*['"]?([A-Za-z0-9._-]{8,})/gi, '$1=[redacted]')
     .replace(/\b(token)\b\s*(?::|=|\s)\s*['"]?([A-Za-z0-9._-]{16,})/gi, '$1=[redacted]')
     .replace(/\b(authorization\s*:\s*bearer)\s+([A-Za-z0-9._-]+)/gi, '$1=[redacted]')
     .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[redacted]')
+  for (const secret of secrets) {
+    if (secret) {
+      scrubbed = scrubbed.replaceAll(secret, '[redacted]')
+    }
+  }
+  return scrubbed
+}
+
+/**
+ * Collect configured env and header values so lifecycle and subprocess
+ * diagnostics can redact them verbatim. Values shorter than four characters
+ * are skipped because they are too likely to collide with ordinary text.
+ */
+export function mcpConfigSecrets(config: MCPServerConfig): readonly string[] {
+  const secrets: string[] = []
+  for (const record of [config.env, config.headers]) {
+    for (const value of Object.values(record ?? {})) {
+      if (value.length >= 4 && !secrets.includes(value)) {
+        secrets.push(value)
+      }
+    }
+  }
+  return secrets
 }
 
 function errorMessage(error: unknown): string {

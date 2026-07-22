@@ -30,8 +30,10 @@ test('full prompt profile enables the complete native context surface', () => {
     includeGitInfo: true,
     maxMemoriesInjected: 5,
   })
-  expect(config.maxSkillInstructionsLength).toBeUndefined()
-  expect(config.maxToolsListed).toBeUndefined()
+  // FULL keeps generous-but-finite caps so one oversized skill body or an
+  // unbounded tool list cannot grow every turn's prompt without limit.
+  expect(config.maxSkillInstructionsLength).toBe(8_000)
+  expect(config.maxToolsListed).toBe(100)
   expect(Object.isFrozen(config)).toBe(true)
 })
 
@@ -116,4 +118,46 @@ test('prompt-profile rendering preserves full defaults and exact instruction and
   expect(exactSkillLimit).not.toContain('abcdefghij...')
   expect(cappedTools).toContain('  ... and 1 more')
   expect(cappedTools).not.toContain('  - three')
+})
+
+test('full profile caps oversized skill bodies and long tool lists at finite bounds', async () => {
+  const oversizedSkill = parseSkillMarkdown([
+    '---',
+    'name: oversized',
+    'description: Oversized skill',
+    '---',
+    's'.repeat(20_000),
+  ].join('\n'), '/workspace/skills/oversized/SKILL.md')
+  const host = {
+    captureRuntimeInfo: () => ({
+      platform: 'test',
+      runtimeVersion: 'Bun test',
+      timestamp: '2026-07-13T12:00:00.000Z',
+      timezone: 'UTC',
+      workingDirectory: '/workspace',
+      workspaceName: 'workspace',
+      xerxesVersion: '0.3.0',
+    }),
+  }
+  const builder = new PromptContextBuilder({ host })
+  const toolNames = Array.from({ length: 150 }, (_, index) => 'tool-' + index)
+  const context = await builder.build({
+    profile: PromptProfile.FULL,
+    enabledSkills: [oversizedSkill],
+    toolNames,
+  })
+
+  const config = getPromptProfileConfig(PromptProfile.FULL)
+  expect(config.maxSkillInstructionsLength).toBe(8_000)
+  expect(config.maxToolsListed).toBe(100)
+  // The 20k skill body is clipped at the FULL cap with an explicit marker.
+  const skillSection = skillPromptSection(oversizedSkill)
+  expect(skillSection.length).toBeGreaterThan(8_000)
+  expect(context.enabledSkillsSection).toBe(
+    '[Enabled Skill Instructions]\n' + skillSection.slice(0, 8_000) + '...\n',
+  )
+  // Only the first 100 tools render; the rest collapse into a summary line.
+  expect(context.toolsSection).toContain('  - tool-99')
+  expect(context.toolsSection).not.toContain('  - tool-100')
+  expect(context.toolsSection).toContain('  ... and 50 more')
 })

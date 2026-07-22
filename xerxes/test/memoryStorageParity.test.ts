@@ -106,10 +106,12 @@ test('file storage writes atomically and treats corrupt records as missing', () 
     expect(storage.exists('good')).toBeTrue()
     expect(storage.load('good')).toBeUndefined()
 
-    // A corrupt index file starts empty instead of throwing.
+    // A corrupt index file is backed up and rebuilt from scanned data files
+    // (recovered under their hash stems) instead of orphaning every record.
     writeFileSync(join(root, '_index.json'), 'not json', 'utf8')
     const restored = new FileStorage(root)
-    expect(restored.listKeys()).toEqual([])
+    expect(restored.listKeys()).toEqual([hash])
+    expect(readdirSync(root).some(entry => entry.startsWith('_index.json.corrupt-'))).toBeTrue()
   } finally {
     rmSync(directory, { force: true, recursive: true })
   }
@@ -132,7 +134,8 @@ test('RAG storage skips a corrupt embedding entry during restore', () => {
       .run(`${RAGStorage.embeddingKeyPrefix}broken`, 'not json', 'now', 'now')
     database.close()
 
-    // The corrupt row throws inside backend.load; restore must skip it, not brick startup.
+    // The corrupt row warns and returns undefined from backend.load; restore
+    // must skip it, not brick startup.
     const rag = new RAGStorage(new SQLiteStorage({ dbPath: path, writeEnabled: true }), new HashEmbedder(16))
     expect(rag.semanticSearch('anything')).toEqual([])
     expect(rag.save('healthy', 'a clean record')).toBeTrue()

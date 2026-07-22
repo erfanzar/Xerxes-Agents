@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { repairToolMessageSequence } from './toolPairRepair.js'
 import { pruneToolMessages } from './toolResultPruner.js'
 import { SmartTokenCounter } from './tokenCounter.js'
 
@@ -66,7 +67,12 @@ export class ContextCompressor {
     if (messages.length === 0) return unchanged([], tokensBefore)
     const pruned = pruneToolMessages(messages, { protectLast: this.protectLast })
     const afterPrune = this.count(pruned.messages)
-    if (afterPrune < this.thresholdTokens() && pruned.prunedCount > 0) {
+    if (afterPrune < this.thresholdTokens()) {
+      if (pruned.prunedCount === 0) {
+        // Already under threshold with nothing pruned: a scheduled compaction must not
+        // lossily summarize a context that still fits the window.
+        return unchanged([...pruned.messages], afterPrune)
+      }
       return {
         messages: pruned.messages,
         compressed: true,
@@ -116,23 +122,28 @@ export class ContextCompressor {
       }
     }
     let prior: string | undefined
+    let priorFromHead = false
     const headLast = head.at(-1)
     if (isPriorSummary(headLast?.content)) {
       prior = headLast?.content as string
       head = head.slice(0, -1)
+      priorFromHead = true
     } else if (isPriorSummary(middle[0]?.content)) {
       prior = middle[0]?.content as string
       middle = middle.slice(1)
     }
     const budget = this.summaryBudget(this.count(middle))
     const wrapped = wrapSummary(prior, this.summarizer(middle, budget))
-    const output = [...head, { role: 'user', content: wrapped }, ...tail]
+    // Cutting the middle can leave the head ending in assistant tool_calls whose results
+    // were summarized away, or the tail beginning with orphan tool results. Repair the
+    // window here so every caller receives a provider-safe sequence.
+    const output = repairToolMessageSequence([...head, { role: 'user', content: wrapped }, ...tail])
     return {
       messages: output,
       compressed: true,
       tokensBefore,
       tokensAfter: this.count(output),
-      protectedFirst: head.length + (prior ? 1 : 0),
+      protectedFirst: head.length + (priorFromHead ? 1 : 0),
       protectedLast: tailCount,
       compressedCount: middle.length,
       prunedToolResults: pruned.prunedCount,

@@ -4,6 +4,7 @@
 import { expect, test } from 'bun:test'
 
 import {
+  ALWAYS_APPROVAL_TOOLS,
   checkPermission,
   isSafeShellCommand,
   permissionDescription,
@@ -149,4 +150,43 @@ test('parallel-agent approvals summarize the batch without object coercion noise
     'Spawn 5 agents in parallel: structure-analyzer, tech-analyzer, quality-analyzer, security-analyzer +1 more',
   )
   expect(description).not.toContain('[object Object]')
+})
+
+test('always-approval tools prompt in every mode including the accept-all YOLO default', () => {
+  expect(ALWAYS_APPROVAL_TOOLS).toEqual(new Set(['send_message', 'RemoteTriggerTool', 'ScheduleCronTool']))
+  // computer_use is a deliberate baseline desktop surface and stays mode-governed.
+  expect(ALWAYS_APPROVAL_TOOLS.has('computer_use')).toBe(false)
+
+  const outbound = [
+    call('send_message', { platform: 'telegram', message: 'hi' }),
+    call('RemoteTriggerTool', { trigger_name: 'notify', payload: 'done' }),
+    call('ScheduleCronTool', { schedule: '0 9 * * *', prompt: 'daily report' }),
+  ]
+  const modes = ['accept-all', 'auto', 'manual', 'plan', undefined] as const
+  for (const tool of outbound) {
+    for (const mode of modes) {
+      expect(permissionDisposition(tool, mode)).toBe('prompt')
+      expect(checkPermission(tool, mode)).toBe(false)
+    }
+  }
+
+  // Baseline surfaces still follow the mode: writes allow under accept-all,
+  // and computer_use is not pulled into the always-approval tier.
+  expect(permissionDisposition(call('WriteFile', { file_path: 'a.txt' }), 'accept-all')).toBe('allow')
+  expect(permissionDisposition(call('computer_use', { action: 'capture' }), 'accept-all')).toBe('allow')
+  expect(permissionDisposition(call('computer_use', { action: 'capture' }), 'auto')).toBe('prompt')
+})
+
+test('always-approval tier respects policy denials and only an explicit host bypass disables it', () => {
+  const cron = call('ScheduleCronTool', { schedule: '0 9 * * *', prompt: 'daily report' })
+
+  // A static policy denial remains final, ahead of the always-approval tier.
+  expect(permissionDisposition(cron, 'accept-all', { check: () => 'deny' })).toBe('deny')
+
+  // The escape hatch is explicit: bypassAlwaysApprove restores mode-only
+  // behavior for hosts that made a deliberate zero-prompt decision.
+  expect(permissionDisposition(cron, 'accept-all', undefined, undefined, { bypassAlwaysApprove: true })).toBe('allow')
+  expect(checkPermission(cron, 'accept-all', undefined, undefined, { bypassAlwaysApprove: true })).toBe(true)
+  // The bypass only skips the always-approval tier; stricter modes still prompt.
+  expect(permissionDisposition(cron, 'manual', undefined, undefined, { bypassAlwaysApprove: true })).toBe('prompt')
 })

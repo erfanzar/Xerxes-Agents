@@ -8,6 +8,14 @@ import type { MCPContent } from '../../mcp/types.js'
 import type { JsonObject, JsonValue, ToolDefinition } from '../../types/toolCalls.js'
 import { optionalString, requiredString } from '../inputs.js'
 
+/**
+ * Bounds on MCP server content mapped into tool results. A malicious or buggy
+ * MCP server could otherwise return arbitrarily large tool/resource bodies or
+ * unbounded resource listings that blow up the parent transcript and context.
+ */
+const MAX_MCP_CONTENT_CHARS = 32_000
+const MAX_MCP_RESOURCE_ENTRIES = 500
+
 /** Named MCP client collection shared by Claude-compatible MCP tool calls. */
 export class MCPClientRegistry {
   private readonly clients = new Map<string, MCPClient>()
@@ -96,7 +104,7 @@ export class ClaudeMcpTools {
       tool_name: toolName,
       content: result.content.map(contentWire),
       is_error: result.isError ?? false,
-      structured_content: result.structuredContent ?? null,
+      structured_content: boundedStructuredContent(result.structuredContent),
     }
   }
 
@@ -104,17 +112,31 @@ export class ClaudeMcpTools {
     const requested = optionalString(inputs, 'server_name')?.trim()
     const entries = requested ? [[requested, this.requireClient(requested)] as const] : this.options.clients.entries()
     const resources: Record<string, unknown>[] = []
+    let omitted = 0
     for (const [serverName, client] of entries) {
       const listed = await abortable(client.listResources(), signal)
       for (const resource of listed) {
+        // Cap the aggregate listing; iterating every server's resources
+        // unbounded would let one chatty server flood the tool result.
+        if (resources.length >= MAX_MCP_RESOURCE_ENTRIES) {
+          omitted += 1
+          continue
+        }
         resources.push({
           server_name: serverName,
           uri: resource.uri,
           name: resource.name,
-          description: resource.description ?? null,
+          description: resource.description === undefined ? null : boundedMcpText(resource.description),
           mime_type: resource.mimeType ?? null,
         })
       }
+    }
+    if (omitted > 0) {
+      resources.push({
+        truncated: true,
+        omitted_count: omitted,
+        note: `resource listing truncated after ${MAX_MCP_RESOURCE_ENTRIES} entries; narrow with server_name`,
+      })
     }
     return resources
   }
@@ -129,7 +151,7 @@ export class ClaudeMcpTools {
       contents: result.contents.map(content => ({
         uri: content.uri,
         mime_type: content.mimeType ?? null,
-        text: content.text ?? null,
+        text: content.text === undefined || content.text === null ? null : boundedMcpText(content.text),
       })),
     }
   }
@@ -184,16 +206,40 @@ function parseArguments(value: JsonValue | undefined): JsonObject {
 
 function contentWire(content: MCPContent): Record<string, unknown> {
   switch (content.type) {
-    case 'text': return { type: content.type, text: content.text }
-    case 'image': return { type: content.type, data: content.data, mime_type: content.mimeType }
+    case 'text': return { type: content.type, text: boundedMcpText(content.text) }
+    case 'image': return { type: content.type, data: boundedMcpText(content.data), mime_type: content.mimeType }
     case 'resource': return {
       type: content.type,
       resource: {
         uri: content.resource.uri,
         mime_type: content.resource.mimeType ?? null,
-        text: content.resource.text ?? null,
+        text: content.resource.text === undefined ? null : boundedMcpText(content.resource.text),
       },
     }
+  }
+}
+
+/** Truncate one MCP text payload with an explicit marker rather than passing it through unbounded. */
+function boundedMcpText(value: string): string {
+  return value.length <= MAX_MCP_CONTENT_CHARS
+    ? value
+    : `${value.slice(0, MAX_MCP_CONTENT_CHARS)}… [truncated ${value.length - MAX_MCP_CONTENT_CHARS} chars]`
+}
+
+/** Bound structured MCP content by its serialized size; over-limit payloads become an explicit marker. */
+function boundedStructuredContent(value: unknown): unknown {
+  if (value === undefined || value === null) return null
+  let serialized: string | undefined
+  try {
+    serialized = JSON.stringify(value)
+  } catch {
+    return { truncated: true, note: 'structured content was not JSON-serializable and was omitted' }
+  }
+  if (serialized === undefined || serialized.length <= MAX_MCP_CONTENT_CHARS) return value
+  return {
+    truncated: true,
+    omitted_chars: serialized.length,
+    note: `structured content exceeded ${MAX_MCP_CONTENT_CHARS} characters and was omitted`,
   }
 }
 

@@ -215,7 +215,11 @@ export async function exchangeCode(
   return OAuthToken.fromResponse(payload, options.now?.())
 }
 
-/** Refresh a token, retaining its old refresh token when the provider omits a replacement. */
+/**
+ * Refresh a token, retaining its old refresh token and scopes when the
+ * provider omits replacements. Providers are allowed to omit `scope` when the
+ * granted scopes are unchanged; dropping them would lose the user's grant.
+ */
 export async function refreshToken(
   config: OAuthConfig,
   token: OAuthToken,
@@ -231,15 +235,17 @@ export async function refreshToken(
     client_id: resolved.clientId,
   }, options)
   const refreshed = OAuthToken.fromResponse(payload, options.now?.())
-  if (refreshed.refreshToken) {
+  const scopes = refreshed.scopes.length > 0 ? refreshed.scopes : token.scopes
+  const refreshTokenValue = refreshed.refreshToken ?? token.refreshToken
+  if (refreshed.refreshToken && refreshed.scopes.length > 0) {
     return refreshed
   }
   return new OAuthToken({
     accessToken: refreshed.accessToken,
-    refreshToken: token.refreshToken,
+    refreshToken: refreshTokenValue,
     tokenType: refreshed.tokenType,
     ...(refreshed.expiresAt === undefined ? {} : { expiresAt: refreshed.expiresAt }),
-    scopes: refreshed.scopes,
+    scopes,
   })
 }
 

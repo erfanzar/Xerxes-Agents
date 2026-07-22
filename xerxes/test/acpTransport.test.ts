@@ -5,7 +5,7 @@ import { expect, test } from 'bun:test'
 
 import { AcpServer } from '../src/acp/server.js'
 import { AcpAgentRunner } from '../src/acp/runner.js'
-import { StdioJsonRpcServer, serveACPStdio } from '../src/acp/transport.js'
+import { MAX_ACP_FRAME_BYTES, StdioJsonRpcServer, serveACPStdio } from '../src/acp/transport.js'
 import type { CompletionRequest, LlmClient, LlmDelta } from '../src/llms/client.js'
 
 test('ACP stdio transport preserves NDJSON framing, aliases, streamed updates, and final result', async () => {
@@ -126,6 +126,30 @@ test('ACP EOF aborts active runner prompts before awaiting transport workers', a
   ])).resolves.toBe('done')
   expect(output.some(line => line.includes('ACP prompt cancelled'))).toBe(true)
 })
+
+test('ACP stdio transport rejects an unterminated oversized frame and stops reading', async () => {
+  const server = new AcpServer({ promptHandler: () => ({ ok: true }) })
+  const output: string[] = []
+  // A peer that never sends `\n` must not grow the read buffer without bound.
+  const input = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(`{"jsonrpc":"2.0","id":1,"padding":"${'x'.repeat(MAX_ACP_FRAME_BYTES)}`))
+      // The stream never closes and never terminates the frame.
+    },
+  })
+
+  await expect(Promise.race([
+    serveACPStdio(server, input, line => {
+      output.push(line)
+    }).then(() => 'done'),
+    Bun.sleep(2_000).then(() => 'timeout'),
+  ])).resolves.toBe('done')
+
+  const frames = output.map(line => JSON.parse(line) as { error?: { code: number; message: string } })
+  expect(frames).toHaveLength(1)
+  expect(frames[0]?.error?.code).toBe(-32600)
+  expect(frames[0]?.error?.message).toContain('maximum size')
+}, 10_000)
 
 function readableChunks(chunks: readonly string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()

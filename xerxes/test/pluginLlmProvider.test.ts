@@ -69,7 +69,7 @@ test('createLlmClient selects a registered plugin provider from the provider ove
   expect(client).toBe(PLUGIN_CLIENT)
 })
 
-test('unregistered and built-in provider names retain native fallback behavior', () => {
+test('unregistered explicit prefixes are rejected and built-in provider names are never shadowed', () => {
   const registry = new PluginRegistry()
   let builtInFactoryCalled = false
   registry.registerProvider('openai', {
@@ -79,10 +79,12 @@ test('unregistered and built-in provider names retain native fallback behavior',
     },
   })
 
-  const unknown = createLlmClient('missing-provider/gpt-4o', {}, { pluginRegistry: registry })
+  // An unrecognized explicit prefix no longer falls back to OpenAI silently:
+  // the factory must surface the misconfiguration once no plugin matches.
+  expect(() => createLlmClient('missing-provider/gpt-4o', {}, { pluginRegistry: registry }))
+    .toThrow(ConfigurationError)
   const builtIn = createLlmClient('openai/gpt-4o', {}, { pluginRegistry: registry })
 
-  expect(unknown).toBeInstanceOf(OpenAiCompatibleClient)
   expect(builtIn).toBeInstanceOf(OpenAiCompatibleClient)
   expect(builtInFactoryCalled).toBe(false)
 })

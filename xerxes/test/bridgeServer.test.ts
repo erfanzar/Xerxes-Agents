@@ -374,7 +374,7 @@ test('provider mutation and interaction replies go through explicit persisted/ru
     data: {
       profile: {
         name: 'staging',
-        api_key: 'staging-key',
+        api_key: '********',
         base_url: 'https://staging.example/v1',
         model: 'gpt-4.1-mini',
         provider: 'custom',
@@ -391,6 +391,30 @@ test('provider mutation and interaction replies go through explicit persisted/ru
   })).toEqual({ accepted: true })
   expect(runtime.permissionResponses).toEqual([{ requestId: 'permission-1', response: 'approve_for_session' }])
   expect(runtime.questionResponses).toEqual([{ requestId: 'question-1', answers: { answer: 'yes' } }])
+})
+
+test('profile payloads mask API keys while selection resolves them server-side', async () => {
+  const profiles = new MemoryProfiles([profile('team', 'gpt-4.1')], 'team')
+  const { server, output } = bridge({ profiles })
+  await server.dispatch({ method: 'init', params: { project_dir: '/workspace' } })
+
+  output.legacy.length = 0
+  expect(await server.dispatch({ method: 'provider_list', params: {} })).toEqual({ accepted: true })
+  const listed = output.legacy.at(-1)
+  expect(listed?.event).toBe('provider_list')
+  expect(JSON.stringify(listed)).not.toContain('secret')
+  expect(listed?.data).toMatchObject({
+    profiles: [expect.objectContaining({ name: 'team', api_key: '********', model: 'gpt-4.1' })],
+  })
+
+  // The store still owns the real key; selection and runtime configuration
+  // resolve it server-side without ever sending it to bridge clients.
+  expect(profiles.active()?.api_key).toBe('secret')
+  expect(server.configuration.api_key).toBe('secret')
+
+  output.legacy.length = 0
+  expect(await server.dispatch({ method: 'provider_select', params: { name: 'team' } })).toEqual({ accepted: true })
+  expect(JSON.stringify(output.legacy.at(-1))).not.toContain('secret')
 })
 
 test('cancel aborts the server-owned signal and NDJSON output remains transport-owned', async () => {

@@ -251,9 +251,10 @@ test('agent turn runner keeps streamed and resumed transcripts aligned when a to
 
     const live = runtime.sessionStatus('tui:sentinel')
     if (!live) throw new Error('expected a live sentinel session')
+    // The fully duplicated round persists no empty assistant message, so the
+    // provider never receives empty assistant content on the next request.
     expect(live.messages.filter(message => message.role === 'assistant').map(message => message.content)).toEqual([
       'Reading now.',
-      '',
     ])
     expect(live).toMatchObject({
       apiCallsComplete: true,
@@ -267,7 +268,6 @@ test('agent turn runner keeps streamed and resumed transcripts aligned when a to
     const resumed = await runtime.openSession(live.id, undefined, { resume: true })
     expect(resumed.messages.filter(message => message.role === 'assistant').map(message => message.content)).toEqual([
       'Reading now.',
-      '',
     ])
     expect(resumed).toMatchObject({ apiCallsComplete: true, totalApiCalls: 2, usageComplete: true })
   } finally {
@@ -613,6 +613,46 @@ test('agent turn runner invalidates its bootstrap cache when the visible tool su
   expect(bootstrapCalls).toBe(2)
   expect(client.requests[0]?.messages[0]?.content).toContain('Tools: ReadFile')
   expect(client.requests[1]?.messages[0]?.content).toContain('Tools: WriteFile')
+})
+
+test('agent turn runner rekeys its bootstrap cache when plan mode or the addendum changes', async () => {
+  const client = new CapturingClient()
+  let bootstrapCalls = 0
+  const runner = new AgentTurnRunner({
+    bootstrapSystemPrompt: ({ session }) => {
+      bootstrapCalls += 1
+      return `Bootstrap plan=${session.planMode === true} addendum=${session.systemPromptAddendum ?? ''}`
+    },
+    llm: client,
+    model: 'gpt-4o',
+  })
+  const session: DaemonSession = {
+    activeTurnId: '', agentId: 'default', cancelRequested: false, cwd: '/workspace/rekey', extra: {},
+    id: 'rekey-session', interactionMode: 'code', sessionKey: 'rekey', lastActive: 0, messages: [],
+    metadata: {}, model: 'gpt-4o', planMode: false, status: 'working', thinkingContent: [], toolExecutions: [],
+    totalInputTokens: 0, totalOutputTokens: 0, turnCount: 0, workspace: '/tmp/agents/default',
+  }
+  for await (const _event of runner.run(session, 'first', new AbortController().signal)) {
+    // The provider requests below are the observable prompt boundary.
+  }
+  for await (const _event of runner.run(session, 'second', new AbortController().signal)) {
+    // An unchanged session keeps reusing the cached bootstrap prompt.
+  }
+  expect(bootstrapCalls).toBe(1)
+
+  session.planMode = true
+  for await (const _event of runner.run(session, 'third', new AbortController().signal)) {
+    // Plan mode is session state the provider sees, so it rekeys the cache.
+  }
+  expect(bootstrapCalls).toBe(2)
+  expect(client.requests[2]?.messages[0]?.content).toContain('plan=true')
+
+  session.systemPromptAddendum = 'Channel workspace notes.'
+  for await (const _event of runner.run(session, 'fourth', new AbortController().signal)) {
+    // The trusted addendum is session state too.
+  }
+  expect(bootstrapCalls).toBe(3)
+  expect(client.requests[3]?.messages[0]?.content).toContain('addendum=Channel workspace notes.')
 })
 
 test('agent turn runner includes a trusted session system-prompt addendum', async () => {

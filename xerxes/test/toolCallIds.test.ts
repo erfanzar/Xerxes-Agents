@@ -74,6 +74,13 @@ test('deterministic tool-call IDs are stable, argument-order independent, and co
     .toBe('tc_4e74834c')
 })
 
+test('deterministic tool-call ID options reject zero-length hashes', () => {
+  expect(() => deterministicToolCallId('ReadFile', {}, { length: 0 })).toThrow('length')
+  expect(() => deterministicToolCallId('ReadFile', {}, { length: -1 })).toThrow('length')
+  expect(() => deterministicToolCallId('ReadFile', {}, { length: 65 })).toThrow('length')
+  expect(deterministicToolCallId('ReadFile', {}, { length: 1 })).toMatch(/^call_[0-9a-f]$/)
+})
+
 test('provider stream fallbacks use deterministic IDs only when the provider omitted one', async () => {
   const openAi = new OpenAiCompatibleClient({
     apiKey: 'test-key',

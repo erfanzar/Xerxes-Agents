@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, resolve, sep } from 'node:path'
 
 import { xerxesHome } from '../daemon/paths.js'
 
@@ -17,7 +17,7 @@ export function xerxesSubdir(...parts: string[]): string {
 
 /** Testable/environment-explicit variant of {@link xerxesSubdir}. */
 export function xerxesSubdirFor(environment: Record<string, string | undefined>, ...parts: string[]): string {
-  return join(xerxesHome(environment), ...parts)
+  return resolveSubdir(xerxesHome(environment), parts)
 }
 
 /** Resolve the shared agents home used by agent skills and specifications. */
@@ -32,5 +32,28 @@ export function agentsSubdir(...parts: string[]): string {
 
 /** Testable/home-explicit variant of {@link agentsSubdir}. */
 export function agentsSubdirFor(home: string, ...parts: string[]): string {
-  return join(agentsHome(home), ...parts)
+  return resolveSubdir(agentsHome(home), parts)
+}
+
+/**
+ * Join free-form segments under a base directory with traversal protection.
+ *
+ * Absolute segments and `..` traversals are rejected up front, and the fully
+ * resolved result must remain inside the resolved base directory.
+ */
+function resolveSubdir(base: string, parts: readonly string[]): string {
+  const resolvedBase = resolve(base)
+  for (const part of parts) {
+    if (typeof part !== 'string' || part.length === 0) {
+      throw new TypeError(`path segments must be non-empty strings, received: ${String(part)}`)
+    }
+    if (isAbsolute(part) || part.split(/[\\/]/).includes('..')) {
+      throw new Error(`unsafe path segment '${part}': segments must stay below ${resolvedBase}`)
+    }
+  }
+  const resolved = resolve(resolvedBase, ...parts)
+  if (resolved !== resolvedBase && !resolved.startsWith(resolvedBase + sep)) {
+    throw new Error(`resolved path '${resolved}' escapes the base directory ${resolvedBase}`)
+  }
+  return resolved
 }

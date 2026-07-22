@@ -1,9 +1,10 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 
+import { MAX_SKILL_FILE_BYTES } from '../skills.js'
 import {
   normalizeSkillSearchLimit,
   requireSkillSearchQuery,
@@ -42,9 +43,9 @@ export class LocalSkillSource implements SkillSource {
     for (const skillPath of await localSkillMarkdownPaths(this.root)) {
       let body: string
       try {
-        body = await readFile(skillPath, 'utf8')
+        body = await readBoundedSkillFile(skillPath)
       } catch {
-        // One unreadable third-party skill must not hide the rest of a local catalogue.
+        // One unreadable or oversized third-party skill must not hide the rest of a local catalogue.
         continue
       }
       const name = basename(dirname(skillPath))
@@ -72,7 +73,7 @@ export class LocalSkillSource implements SkillSource {
 
     let body: string
     try {
-      body = await readFile(skillPath, 'utf8')
+      body = await readBoundedSkillFile(skillPath)
     } catch (error) {
       throw new SkillSourceError(`cannot read local skill ${name}: ${errorMessage(error)}`, { cause: error })
     }
@@ -151,6 +152,15 @@ async function localSkillMarkdownPaths(root: string): Promise<readonly string[]>
     }
   }
   return found.sort((left, right) => left.localeCompare(right))
+}
+
+/** Read one SKILL.md only after confirming it stays below the per-file size ceiling. */
+async function readBoundedSkillFile(path: string): Promise<string> {
+  const metadata = await stat(path)
+  if (!metadata.isFile() || metadata.size > MAX_SKILL_FILE_BYTES) {
+    throw new SkillSourceError(`skill file exceeds the ${MAX_SKILL_FILE_BYTES}-byte limit: ${path}`)
+  }
+  return readFile(path, 'utf8')
 }
 
 function errorMessage(error: unknown): string {

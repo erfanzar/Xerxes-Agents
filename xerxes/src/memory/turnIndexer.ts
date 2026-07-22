@@ -10,6 +10,12 @@ export interface TurnIndexInput {
 
 export interface TurnIndexerOptions {
   readonly importance?: number
+  /**
+   * Maximum indexed characters per turn. Full-length assistant responses
+   * bloat durable memory and make every downstream embedding and search
+   * pass pay for unbounded content. Default: 4000.
+   */
+  readonly maxChars?: number
   readonly memoryType?: string
   readonly minChars?: number
 }
@@ -17,13 +23,15 @@ export interface TurnIndexerOptions {
 /** Build a resilient post-turn hook that indexes useful assistant output into a memory tier. */
 export function makeTurnIndexerHook(memory: Memory, options: TurnIndexerOptions = {}): (input: TurnIndexInput) => void {
   const minimum = options.minChars ?? 32
+  const maximum = options.maxChars ?? 4_000
   const importance = options.importance ?? 0.5
   const memoryType = options.memoryType ?? 'turn'
   return input => {
     const content = coerceText(input.response).trim()
     if (content.length < minimum) return
+    const bounded = content.length > maximum ? content.slice(0, maximum) : content
     try {
-      memory.save(content, { source: 'turn_indexer' }, {
+      memory.save(bounded, { source: 'turn_indexer' }, {
         ...(input.agentId ? { agentId: input.agentId } : {}),
         importance,
         memoryType,
